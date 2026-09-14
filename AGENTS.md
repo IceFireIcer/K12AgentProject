@@ -11,12 +11,13 @@
 
 ## 2. 当前仓库状态（重要）
 
-已完成 **S00 环境与依赖基线**（见 `stages/README.md`）：
+已完成 **S00 环境与依赖基线**、**S01 双端脚手架 + Sidecar 握手（关卡 A ✅ 已过）**（见 `stages/README.md`）：
 
-- `desktop/`：**尚未创建**（S01 建）。
-- `server/`：**已完成 uv 工程初始化与依赖安装**。Python 3.12.7（由 `.python-version` 锁定），依赖见 `server/pyproject.toml` + `server/uv.lock`。
-- 嵌入模型已下载到 `server/resources/models/fastembed/`（90.8MB，512 维），**已纳入 `.gitignore`**（体积大，随包分发）。
-- Git 已有初始提交；`master` 分支。
+- `desktop/`：**已创建**。electron-vite + Vue3 + TS + Pinia；Electron 能拉起 Python sidecar 并显示握手结果；`electron-builder --dir` 整包已验证。
+- `server/`：uv 工程 + **`app/` 应用代码已就绪**（FastAPI 入口、握手协议、token 鉴权、`/health`）。Python 3.12.7（`.python-version` 锁定），依赖见 `server/pyproject.toml` + `server/uv.lock`。
+- 嵌入模型在 `server/resources/models/fastembed/`（90.8MB，512 维），**已纳入 `.gitignore`**（体积大，随包分发）。
+- Git 已有提交；`master` 分支。
+- **尚未有**：`server/app/models.py` 契约（S02）、LangGraph 编排（S04）、RAG（S06）、测试框架（后端侧）、lint 配置、Vue 视图/组件。
 
 **目录结构**（现状）：
 
@@ -25,24 +26,49 @@ K12Agent/
 ├─ AGENTS.md                  # 本文件
 ├─ 项目执行文档.md             # 唯一权威执行文档
 ├─ stages/                    # 任务切片（S00–S13），一次做一个
-├─ docs/                      # 设计依据与报告素材
-└─ server/                    # ★ 已有代码（Python 后端）
-   ├─ pyproject.toml / uv.lock / .python-version
-   ├─ resources/models/fastembed/   # 嵌入模型（git 忽略）
-   └─ scripts/{check_env,download_models,smoke_langgraph,export_openapi}.py
+├─ docs/                      # 设计依据与报告素材（report-material/ 逐日累积）
+├─ desktop/                   # ★ Electron + Vue 桌面壳
+│  ├─ src/main/{index,sidecar,sidecar-logic}.ts   # 窗口 / 进程管理 / 纯逻辑
+│  ├─ src/preload/index.ts                        # contextBridge 白名单
+│  ├─ src/renderer/src/                           # App.vue + stores/
+│  ├─ tests/sidecar-logic.test.ts                 # 单测（node --test）
+│  └─ scripts/verify-ui.mjs                       # CDP 读真实 DOM 做 UI 断言
+└─ server/                    # ★ Python 后端
+   ├─ app/{main,config,encoding}.py + app/api/
+   ├─ packaging/k12-agent-server.spec             # PyInstaller 配置
+   ├─ resources/models/fastembed/                 # 嵌入模型（git 忽略）
+   └─ scripts/{check_env,download_models,smoke_langgraph,export_openapi,build_server}.py
 ```
 
 **可用命令**（真实命令，勿用占位描述）：
 
 ```bash
+# ── 后端 ──
 cd server
 uv run python scripts/check_env.py         # 一屏自检全部后端环境
 uv run python scripts/smoke_langgraph.py   # LangGraph 能力冒烟（条件边/持久化/流转图）
 uv run python scripts/download_models.py   # 下载/校验嵌入模型
 uv sync                                    # 按 uv.lock 还原依赖
+
+uv run python -m app.main --port 0 --token devtoken --data-dir ./_data   # 单跑 sidecar（stdout 会打握手 JSON）
+uv run python scripts/build_server.py      # PyInstaller 打包 + 产物自检（握手/health/401/中文编码）
+uv run python scripts/build_server.py --verify    # 只自检已有产物
+
+# ── 前端 ──
+cd desktop
+npm install
+npm test                                   # 单测 31 条（node 原生跑 TS，无额外构建）
+npm run typecheck                          # tsc + vue-tsc
+npm run dev                                # 开发态（自动拉起 uv run 的 sidecar）
+K12_SIDECAR_MODE=packaged npm run dev      # 用 server/dist 打包产物验「关卡 A 路径」
+K12_DEBUG_PORT=9222 npm run dev            # 开 CDP（默认关闭），配合下面脚本
+node scripts/verify-ui.mjs                 # UI 断言：就绪态
+node scripts/verify-ui.mjs --expect failed  # UI 断言：失败态不白屏
+npm run build:unpack                       # 整包 → dist/win-unpacked/（真正的关卡 A）
 ```
 
-**尚未有**：`desktop/` 前端工程（无 npm 脚本）、测试框架、lint 配置、`server/app/` 应用代码。新增后请在本文件补充真实命令。
+**验证约定**：UI 验收一律用 `scripts/verify-ui.mjs`（CDP 读真实 DOM）而**不要靠截图**——
+本机截图受前台窗口/DPI 影响，常截到别的窗口，无法断言。见 `docs/report-material/pitfalls.md`。
 
 ## 3. 文档权威顺序
 
@@ -101,9 +127,16 @@ uv sync                                    # 按 uv.lock 还原依赖
 ## 7. 已知陷阱
 
 - **Python 环境**：本机裸 `python` 指向损坏的 `D:\Code\PythonEvm\python.exe`；pip 实际来自 `PythonEvm312`。**全程用 `uv` 锁定 Python 3.12**，文档只写 `uv run`。
-- **Windows 中文编码**：必须强制 `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`，所有文件读写显式 `encoding="utf-8"`，否则 GBK 乱码（经典翻车点）。
-- **PyInstaller 打包**：必须 `--onedir`（**不用 `--onefile`**，冷启动可达 10s+）；须 `--collect-all sqlite_vec --collect-all fastembed`，否则运行期找不到 `.dll`/模型文件。每加一个原生或数据依赖就重打一次包验证。
-- **sidecar 生命周期**：Python 绑 `127.0.0.1:0` 由系统分配端口，用 stdout 单行 JSON 握手；Electron 退出时必须杀进程树（Windows `taskkill /PID <pid> /T /F`），否则孤儿进程残留占端口。
+- **Windows 中文编码（S01 实测修正，比原描述更棘手）**：
+  1. 源码运行态：spawn 时传 `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`，所有文件读写显式 `encoding="utf-8"`。
+  2. **打包态：上面两个 env 无效**——PyInstaller 的 bootloader 设置 `Py_IgnoreEnvironmentFlag`，实测打包产物 `sys.flags.utf8_mode=0`、`sys.stdout.encoding='gbk'`，即便 env 已设对。**必须在 Python 层 `reconfigure(encoding="utf-8")`**，见 `server/app/encoding.py` 的 `install_utf8_stdio()`（已在 `main.py` 最早期调用）。`scripts/build_server.py` 里有对应的回归断言。
+  3. 不要试图只靠 env 解决打包态乱码——那是一条死路，会白花半天。
+- **PyInstaller 打包**：必须 `--onedir`（**不用 `--onefile`**，冷启动可达 10s+）；须 `--collect-all sqlite_vec --collect-all fastembed`，否则运行期找不到 `.dll`/模型文件。**统一走 `uv run python scripts/build_server.py`**（它做 collect、自检、清理残留进程），不要手敲 pyinstaller 命令。每加一个原生或数据依赖就重打一次包验证。
+- **PyInstaller spec 的 `collect_all` 返回值**：必须在 `Analysis(...)` 之前收集并作为参数传入（接受 2 元组）；**不能**事后 `a.datas += collect_all(...)`——那时 `a.datas` 已是 3 元组，会 `ValueError: not enough values to unpack`。
+- **sidecar 生命周期**：Python 绑 `127.0.0.1:0` 由系统分配端口，用 **stdout 单行 JSON** 握手（`{"event":"ready","port":…}`，失败回 `{"event":"error","message":…}`）；**stdout 只许输出这行 JSON**，日志全走 stderr。Electron 退出时必须杀进程树（Windows `taskkill /PID <pid> /T /F`），否则孤儿进程残留占端口（开发态 `uv run` 会派生子进程，`/T` 不可省）。
+- **stdio 管道分片**：Node 的 `data` 事件可能把握手 JSON 切成半行，必须缓冲到 `\n` 再 parse（`desktop/src/main/sidecar-logic.ts` 的 `LineBuffer`）；非 JSON 行**只记日志、绝不当错误**。
+- **重打包 `WinError 5`**：上次验证留下的 sidecar 仍持有产物 `.pyd`/`.dll` 时，PyInstaller 清 `dist/` 会失败。`build_server.py` 已自动 taskkill 自愈。
+- **UI 验收不要靠截图**：本机截图受前台窗口/DPI 影响，常截到别的窗口。用 `desktop/scripts/verify-ui.mjs`（CDP 读真实 DOM，可断言、可进 CI）。`K12_DEBUG_PORT` 默认关闭，勿让分发包带调试入口。
 - **LangGraph checkpointer 与「一人一库」冲突**：`compile(checkpointer=...)` 把 checkpointer 绑死在图实例上，而学生库是一人一文件，**不能编译一次全局复用**。按 `student_id` 缓存已编译图（推荐），或切学生时重建 saver + 重新 compile。**不要**改用一个共享 DB + `thread_id` 前缀——会破坏合规叙事。
 - **sqlite-vec 在 Python 中的加载**：需 `conn.enable_load_extension(True)` → `sqlite_vec.load(conn)` → 立刻 `enable_load_extension(False)`；加载失败须回退 FTS5 / numpy 暴力余弦。
 - **动画生成不稳定**：必须保留「模板优先 + 校验 + 重试 3 次 → 降级文字/静态图」链路，不能只生成不兜底。

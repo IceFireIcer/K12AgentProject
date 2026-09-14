@@ -38,3 +38,29 @@
 - **决策**：单人 15 天极限冲刺；核心只做 4 种交互，**砍掉绘本生成与多模态资源推荐**。
 - **理由**：赛题要求"至少三种多模态"，交付 4 种已超标有余量；评委更认可聚焦而非功能堆砌。砍单顺序已写进执行文档第 4 节作为硬性预案。
 - **被否决**：把语音 ASR/TTS 列为核心（降为 P2，因 Python 下 `sherpa-onnx` 有 pip 包，成本大降，保留回捡余地）。
+
+## D-006 · 端口握手用「stdout 单行 JSON」而非 HTTP 回调或固定端口（S01 落地）
+
+- **决策**：sidecar 以 `--port 0` 启动让 OS 分配端口；绑定成功后向 **stdout 打一行 JSON**
+  `{"event":"ready","port":N,"pid":...,"version":...}`，Electron 逐行读取解析。
+  失败也走同一通道回 `{"event":"error","message":"..."}`。
+- **理由**：
+  1. **消除端口竞态**：自己「先扫空闲端口再启动」在并发/杀软场景下会撞车；让 OS 分配是原子的。
+  2. **stdout 是天然的单向控制通道**，无需 sidecar 反向连 Electron（那会引入第二个端口与额外鉴权面）。
+  3. **失败原因可读**：把启动期异常（数据目录不可写、拒绝绑定非回环地址）统一转成一行 JSON，
+     Electron 直接拿到中文原因 —— 这是「不许白屏」这条硬要求的前提。
+- **被否决**：① 固定端口（演示现场端口占用即翻车）；② sidecar 起 HTTP 后回调 Electron
+  （多一个通信方向与鉴权面，复杂度不划算）；③ 写临时文件传端口（有残留与清理问题）。
+- **配套约束**：**stdout 只许输出这行 JSON**，uvicorn 日志全部走 stderr；
+  Electron 侧对非 JSON 行只记日志、绝不当错误（防第三方库直接 print 打死启动流程）。
+
+## D-007 · 开发期用 `K12_SIDECAR_MODE=packaged` 提前验打包路径（S01 落地）
+
+- **决策**：sidecar 的启动模式由 `K12_SIDECAR_MODE` 覆盖 `app.isPackaged`；
+  开发期即可让 Electron 拉起 `server/dist/` 里的真实 exe。
+- **理由**：关卡 A 的实质要求是「Electron 指向**打包产物**也能握手」。
+  若每次都跑完整的 `electron-builder`（数分钟）才能验一次，改一行 sidecar 逻辑都要等；
+  有了这个开关，验证 loop 缩到「打后端（~27s）+ 起 dev」。
+  **注意**：这不能替代最终的整包验收 —— 我们仍然跑了 `electron-builder --dir`
+  并在 `win-unpacked/` 里双击真实 `.exe` 复验通过（`extraResources` 的路径映射只有整包才能验到）。
+- **被否决**：只跑开发态就宣称关卡 A 通过（那样验不到 `extraResources` 与 `resources/server/` 的实际布局）。

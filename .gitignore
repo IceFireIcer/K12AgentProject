@@ -10,6 +10,18 @@ dist/
 build/
 *.egg-info/
 
+# electron-builder 把 desktop/build/ 当作 buildResources（放 icon.ico 等）。
+# 上面的 build/ 规则会把它一起吞掉，这里显式放回来 —— 图标是源资产，必须提交。
+!desktop/build/
+!desktop/build/**
+
+# 本仓库的 PyInstaller spec 放在 server/packaging/（而不是 server/build/），
+# 正是为了不被上面的 build/ 规则误伤 —— spec 是源文件，必须提交。
+
+# === 运行时数据目录（sidecar 的 --data-dir）===
+server/_data/
+server/_data_packaged_check/
+
 # === 运行时数据（含学生隐私数据，绝不入库）===
 *.sqlite
 *.sqlite3

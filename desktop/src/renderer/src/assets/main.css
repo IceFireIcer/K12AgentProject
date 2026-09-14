@@ -1,0 +1,75 @@
+/* 基础样式与设计变量。S01 只需一页状态页，配色克制、以可读性为先。 */
+
+:root {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --border: #e4e6eb;
+  --chip: #f0f1f4;
+  --fg: #1c1e21;
+  --fg-dim: #6b7280;
+  --accent: #2f6fed;
+
+  --ok: #16794c;
+  --ok-soft: #e3f5ec;
+  --ok-border: #b8e0cd;
+  --bad: #b42318;
+  --bad-soft: #fdeceb;
+  --bad-border: #f3c3bf;
+  --warn: #92610a;
+  --warn-soft: #fdf3dd;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --surface: #1e2127;
+    --border: #2e323b;
+    --chip: #262a32;
+    --fg: #e8eaed;
+    --fg-dim: #9aa1ae;
+    --accent: #6b94f5;
+
+    --ok: #6fd3a4;
+    --ok-soft: #172e24;
+    --ok-border: #2b5443;
+    --bad: #f19089;
+    --bad-soft: #33201f;
+    --bad-border: #5a3733;
+    --warn: #e8c07a;
+    --warn-soft: #322a19;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    'Microsoft YaHei',
+    'PingFang SC',
+    sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  /* 桌面应用：禁用文本选择的默认拖拽感，仅在需要处放开 */
+  user-select: none;
+}
+
+code,
+.mono {
+  user-select: text;
+}

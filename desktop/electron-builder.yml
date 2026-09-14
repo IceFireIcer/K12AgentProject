@@ -1,0 +1,33 @@
+appId: com.k12agent.desktop
+productName: K12AI教学助手
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!tests/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+asarUnpack:
+  - resources/**
+# ★ 关卡 A 的关键：把 PyInstaller 产出的 server 目录整包放进 resources/
+# 路径映射到 process.resourcesPath/server（见 src/main/sidecar.ts）
+extraResources:
+  - from: ../server/dist/k12-agent-server
+    to: server
+    filter:
+      - '**/*'
+win:
+  executableName: k12-agent-desktop
+  target:
+    - nsis
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+npmRebuild: false
