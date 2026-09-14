@@ -18,8 +18,10 @@ build/
 *.sqlite-shm
 
 # === 模型与本地资源（体积大，随包分发不入库）===
-resources/models/
-resources/pyodide/
+# 注意：必须用 **/ 前缀。含中间斜杠的模式会被锚定到仓库根目录，
+# 写 "resources/models/" 匹配不到 "server/resources/models/"。
+**/resources/models/
+**/resources/pyodide/
 
 # === 配置与凭据（含 API Key）===
 config.json

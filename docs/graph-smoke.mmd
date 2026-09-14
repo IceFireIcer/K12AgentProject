@@ -1,0 +1,28 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	profile_load(profile_load)
+	intent_route(intent_route)
+	qa_answer(qa_answer)
+	animation_gen(animation_gen)
+	animation_val(animation_val)
+	safety_final(safety_final)
+	profile_upd(profile_upd)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> profile_load;
+	animation_gen --> animation_val;
+	animation_val -. &nbsp;retry&nbsp; .-> animation_gen;
+	animation_val -. &nbsp;degrade&nbsp; .-> safety_final;
+	intent_route -. &nbsp;animation&nbsp; .-> animation_gen;
+	intent_route -. &nbsp;qa&nbsp; .-> qa_answer;
+	profile_load --> intent_route;
+	qa_answer --> safety_final;
+	safety_final --> profile_upd;
+	profile_upd --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

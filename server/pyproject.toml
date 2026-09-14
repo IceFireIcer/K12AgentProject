@@ -1,0 +1,20 @@
+[project]
+name = "server"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "fastembed>=0.8.0",
+    "langchain-openai>=1.6.2",
+    "langgraph>=1.2.11",
+    "langgraph-checkpoint-sqlite>=3.1.1",
+    "numpy>=2.5.3",
+    "pydantic>=2.13.5",
+    "sqlite-vec>=0.1.9",
+    "uvicorn[standard]>=0.52.4",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.22.3",
+]

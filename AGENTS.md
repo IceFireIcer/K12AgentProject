@@ -11,16 +11,45 @@
 
 ## 2. 当前仓库状态（重要）
 
-- **Greenfield**：目前仓库内只有 `docs/` 下 3 份中文设计文档、根目录的 `项目执行文档.md` 与 `AGENTS.md`，**没有代码**。
-- Git 已初始化（默认分支 `master`，尚无提交）。
-- 因此没有可用的构建 / lint / 测试命令。若你新增工程脚手架，请在本文件补充真实命令，不要沿用本节的占位描述。
-- 目录暂无既定结构；新建代码时按执行文档第 7 节的 `desktop/` + `server/` 双目录结构建目录，文档类资产放 `docs/`。
+已完成 **S00 环境与依赖基线**（见 `stages/README.md`）：
+
+- `desktop/`：**尚未创建**（S01 建）。
+- `server/`：**已完成 uv 工程初始化与依赖安装**。Python 3.12.7（由 `.python-version` 锁定），依赖见 `server/pyproject.toml` + `server/uv.lock`。
+- 嵌入模型已下载到 `server/resources/models/fastembed/`（90.8MB，512 维），**已纳入 `.gitignore`**（体积大，随包分发）。
+- Git 已有初始提交；`master` 分支。
+
+**目录结构**（现状）：
+
+```
+K12Agent/
+├─ AGENTS.md                  # 本文件
+├─ 项目执行文档.md             # 唯一权威执行文档
+├─ stages/                    # 任务切片（S00–S13），一次做一个
+├─ docs/                      # 设计依据与报告素材
+└─ server/                    # ★ 已有代码（Python 后端）
+   ├─ pyproject.toml / uv.lock / .python-version
+   ├─ resources/models/fastembed/   # 嵌入模型（git 忽略）
+   └─ scripts/{check_env,download_models,smoke_langgraph,export_openapi}.py
+```
+
+**可用命令**（真实命令，勿用占位描述）：
+
+```bash
+cd server
+uv run python scripts/check_env.py         # 一屏自检全部后端环境
+uv run python scripts/smoke_langgraph.py   # LangGraph 能力冒烟（条件边/持久化/流转图）
+uv run python scripts/download_models.py   # 下载/校验嵌入模型
+uv sync                                    # 按 uv.lock 还原依赖
+```
+
+**尚未有**：`desktop/` 前端工程（无 npm 脚本）、测试框架、lint 配置、`server/app/` 应用代码。新增后请在本文件补充真实命令。
 
 ## 3. 文档权威顺序
 
 | 文件 | 角色 |
 | --- | --- |
 | `项目执行文档.md` | **唯一权威执行文档**（已合并：范围、接口契约、数据层 DDL、15 天排期、验收标准、演示脚本、风险表）。开发时**先查这一份**。 |
+| `stages/README.md` | **任务切片索引**（S00–S13 与关卡 A–E）。**开工前先在这里确认「现在做哪个 Stage、前置是否满足」。** |
 | `docs/研判文档Deepseek.md` | 架构与选型依据。与执行文档冲突时以执行文档为准，差异见其第 13 节。 |
 | `docs/项目简介.md` | 赛题原文与评分标准，需求边界以此为准。 |
 | `docs/研判文档Qwen3.7.md` | 早期研判，**部分结论已被取代**。仅作背景参考，不要照它实现。 |
