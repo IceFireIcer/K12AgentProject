@@ -1,0 +1,43 @@
+# === 依赖 ===
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+
+# === 构建产物 ===
+out/
+dist/
+build/
+*.egg-info/
+
+# === 运行时数据（含学生隐私数据，绝不入库）===
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-wal
+*.sqlite-shm
+
+# === 模型与本地资源（体积大，随包分发不入库）===
+resources/models/
+resources/pyodide/
+
+# === 配置与凭据（含 API Key）===
+config.json
+.env
+.env.local
+*.local.json
+
+# === 日志与临时文件 ===
+logs/
+*.log
+.DS_Store
+Thumbs.db
+
+# === 编辑器 ===
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# === Python ===
+# 注意：uv.lock 与 .python-version 必须提交（锁定依赖与解释器版本）
+uv.lock.bak

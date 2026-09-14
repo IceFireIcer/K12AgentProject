@@ -1,0 +1,35 @@
+# 统一换行符：仓库内一律 LF，检出时 Windows 由 git 自动处理
+* text=auto eol=lf
+
+# 明确文本类型（中文文档保证 LF 存储）
+*.md   text eol=lf
+*.ts   text eol=lf
+*.vue  text eol=lf
+*.py   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.sql  text eol=lf
+
+# 二进制（不做任何转换）
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.svg   text eol=lf
+*.woff  binary
+*.woff2 binary
+*.onnx  binary
+*.dll   binary
+*.node  binary
+*.exe   binary
+*.sqlite binary
+*.wasm  binary
+
+# 锁文件不参与 diff 统计，避免污染 review
+uv.lock    -diff
+package-lock.json -diff
