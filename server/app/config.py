@@ -38,6 +38,19 @@ APP_VERSION = _version()
 #: sidecar 只会绑定本机回环地址。改动此常量等于打开对本机的攻击面，不要改。
 ALLOWED_HOSTS = ("127.0.0.1", "::1", "localhost")
 
+#: 允许跨源访问后端的渲染层来源。
+#:
+#: 为什么需要 CORS：渲染进程是 `file://`（打包）或 `http://localhost:5173`（electron-vite dev），
+#: 而 sidecar 在 `http://127.0.0.1:<随机端口>`——**跨源**。POST + `Content-Type: application/json`
+#: 会先发 `OPTIONS` 预检，而预检请求**不带我们的 `X-Auth-Token`**，若不豁免会被鉴权中间件
+#: 直接 401，前端表现为"所有 /api 调用都失败"（极难定位）。
+#:
+#: `null` 是 Chromium 对 `file://` 页面发出的 Origin 字面量。放行 `null` + 本机任意端口
+#: 的开发服务器；真正的安全边界是**随机 token**（本机其他进程拿不到），CORS 只管"浏览器
+#: 是否允许读响应"。
+ALLOWED_RENDERER_ORIGINS = ("null", "file://")
+ALLOWED_RENDERER_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
 
 def is_frozen() -> bool:
     """是否运行在 PyInstaller 打包产物中。"""

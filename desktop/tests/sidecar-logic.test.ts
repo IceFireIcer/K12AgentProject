@@ -18,11 +18,25 @@ import {
 } from '../src/main/sidecar-logic.ts'
 
 describe('parseHandshakeLine', () => {
-  test('解析 ready 握手', () => {
+  test('解析 ready 握手（含后端自报 pid）', () => {
     const out = parseHandshakeLine(
       '{"event":"ready","port":8756,"pid":1234,"version":"0.1.0","frozen":false}'
     )
-    assert.deepEqual(out, { kind: 'ready', port: 8756, version: '0.1.0', frozen: false })
+    assert.deepEqual(out, {
+      kind: 'ready',
+      port: 8756,
+      pid: 1234,
+      version: '0.1.0',
+      frozen: false
+    })
+  })
+
+  test('★ pid 非法/缺失时给 null（退出清理由此兜底，不能因脏数据抛错）', () => {
+    for (const pid of [undefined, 0, -5, 1.5, '1234', null]) {
+      const out = parseHandshakeLine(JSON.stringify({ event: 'ready', port: 5000, pid }))
+      assert.equal(out.kind, 'ready', `pid=${String(pid)} 不应导致忽略整条握手`)
+      assert.equal((out as { pid: number | null }).pid, null)
+    }
   })
 
   test('解析后端的 error 握手', () => {
@@ -59,7 +73,7 @@ describe('parseHandshakeLine', () => {
 
   test('version 缺失时给 null，不崩', () => {
     const out = parseHandshakeLine('{"event":"ready","port":5000}')
-    assert.deepEqual(out, { kind: 'ready', port: 5000, version: null, frozen: false })
+    assert.deepEqual(out, { kind: 'ready', port: 5000, version: null, frozen: false, pid: null })
   })
 
   test('首尾空白与 \\r（Windows CRLF）不影响解析', () => {

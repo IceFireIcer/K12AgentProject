@@ -17,7 +17,7 @@ export interface HandshakeMessage {
 }
 
 export type HandshakeOutcome =
-  | { kind: 'ready'; port: number; version: string | null; frozen: boolean }
+  | { kind: 'ready'; port: number; version: string | null; frozen: boolean; pid: number | null }
   | { kind: 'error'; message: string }
   | { kind: 'ignore'; reason: string }
 
@@ -61,7 +61,12 @@ export function parseHandshakeLine(line: string): HandshakeOutcome {
     kind: 'ready',
     port: m.port,
     version: typeof m.version === 'string' ? m.version : null,
-    frozen: Boolean(m.frozen)
+    frozen: Boolean(m.frozen),
+    // ★ 后端自报的真实 PID（emit 握手的那条 python 进程）。
+    //   开发态 `spawn` 的直接子进程是 `uv.exe`，真正的 python 是**孙子**进程：
+    //   万一 uv 先退出而 python 被重新挂载（reparent），我们已丢失 `this.child`，
+    //   此时只能靠这个 pid 兜底杀树，否则留下孤儿占端口。
+    pid: typeof m.pid === 'number' && Number.isInteger(m.pid) && m.pid > 0 ? m.pid : null
   }
 }
 

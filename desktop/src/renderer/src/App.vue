@@ -1,313 +1,211 @@
 <script setup lang="ts">
 /**
- * S01 阶段的状态页：把「握手成功 port=xxxxx」摆到界面上。
+ * 应用外壳：导航 + 「后端未就绪时」的统一闸门。
  *
- * 这是关卡 A 的可视证据；S02 起会被真正的对话界面取代。
+ * 设计取舍：S02 阶段先**不引 vue-router**——只有 3 个视图、无深层链接需求，
+ * 一个 `ref` 足够；引入 router 会增加一层与 Electron `file://` 协议配合的坑
+ * （history 模式在 file:// 下不可用）。S03 起视图变多再评估。
+ *
+ * 闸门逻辑：sidecar 未就绪时**不渲染任何视图**，只显示后端状态页——
+ * 否则每个视图都要自己判断"后端能不能用"，错误处理必然重复且不一致。
  */
 import { computed, ref } from 'vue'
 import { useSidecar } from './stores/sidecar'
+import Dashboard from './views/Dashboard.vue'
+import Settings from './views/Settings.vue'
+import SseProbe from './views/SseProbe.vue'
 
 const sidecar = useSidecar()
-const authProbe = ref<string>('未验证')
 
-/** 仅在「技术详情」与可读文案确实不同时才折叠展示，避免重复噪音。 */
-const showDetail = computed(
-  () => !!sidecar.info?.lastErrorDetail && sidecar.info.lastErrorDetail !== sidecar.info?.lastError
-)
+type ViewName = 'dashboard' | 'settings' | 'sse'
+const view = ref<ViewName>('dashboard')
 
-/** 就绪后顺手验证一次受保护接口，证明 token 鉴权链路是通的。 */
-async function probeAuth(): Promise<void> {
-  const info = sidecar.info
-  if (!info?.port || !info.token) return
-  try {
-    const res = await fetch(`http://127.0.0.1:${info.port}/api/ping`, {
-      headers: { 'X-Auth-Token': info.token }
-    })
-    authProbe.value = res.ok ? '通过（/api/ping 200）' : `失败（HTTP ${res.status}）`
-  } catch (err) {
-    authProbe.value = `失败：${err instanceof Error ? err.message : String(err)}`
+const NAV: { name: ViewName; label: string; hint: string }[] = [
+  { name: 'dashboard', label: '状态', hint: '后端与运行环境' },
+  { name: 'settings', label: '设置', hint: '模型供应商与嵌入模式' },
+  { name: 'sse', label: '流式自检', hint: 'SSE 六种事件' }
+]
+
+const activeView = computed(() => {
+  switch (view.value) {
+    case 'settings':
+      return Settings
+    case 'sse':
+      return SseProbe
+    default:
+      return Dashboard
   }
-}
+})
 </script>
 
 <template>
-  <div class="shell">
-    <header class="hd">
-      <div>
-        <h1>K12 AI 通识课教学助手</h1>
-        <p class="sub">Stage 01 · 双端脚手架 + Sidecar 握手</p>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">K12</span>
+        <div>
+          <p class="title">AI 通识课教学助手</p>
+          <p class="sub">Stage 02 · 契约冻结</p>
+        </div>
       </div>
-      <span class="badge" :class="sidecar.phase">{{ sidecar.phaseText }}</span>
-    </header>
 
-    <!-- 就绪：把端口大字摆出来，这是关卡 A 的核心证据 -->
-    <section v-if="sidecar.isReady" class="card ok">
-      <p class="headline">
-        握手成功 <code>port={{ sidecar.portText }}</code>
-      </p>
-      <p class="note">Electron 已拉起 Python sidecar，并通过 <code>/health</code> 探活。</p>
+      <nav class="nav">
+        <button
+          v-for="item in NAV"
+          :key="item.name"
+          class="nav-item"
+          :class="{ active: view === item.name, disabled: !sidecar.isReady }"
+          :disabled="!sidecar.isReady"
+          :title="item.hint"
+          @click="view = item.name"
+        >
+          <span class="nav-label">{{ item.label }}</span>
+          <span class="nav-hint">{{ item.hint }}</span>
+        </button>
+      </nav>
 
-      <dl class="kv">
-        <div><dt>运行模式</dt><dd>{{ sidecar.info?.mode === 'packaged' ? '打包产物' : '开发（uv run）' }}</dd></div>
-        <div><dt>后端版本</dt><dd>{{ sidecar.info?.version ?? '—' }}</dd></div>
-        <div><dt>进程 PID</dt><dd>{{ sidecar.info?.pid ?? '—' }}</dd></div>
-        <div><dt>打包运行</dt><dd>{{ sidecar.info?.frozen ? '是（PyInstaller）' : '否' }}</dd></div>
-        <div><dt>嵌入模型</dt><dd>{{ sidecar.info?.embedderReady ? '文件就绪' : '未检出' }}</dd></div>
-        <div><dt>自动重启</dt><dd>{{ sidecar.info?.restarts ?? 0 }} 次</dd></div>
-        <div class="wide"><dt>数据目录</dt><dd class="mono">{{ sidecar.info?.dataDir }}</dd></div>
-      </dl>
-
-      <div class="row">
-        <button @click="probeAuth">验证 token 鉴权</button>
-        <span class="probe" :class="{ ok: authProbe.includes('通过') }">{{ authProbe }}</span>
+      <div class="side-foot">
+        <span class="dot" :class="sidecar.phase" aria-hidden="true"></span>
+        <span>{{ sidecar.phaseText }}</span>
+        <span v-if="sidecar.isReady" class="mono port">:{{ sidecar.portText }}</span>
       </div>
-    </section>
+    </aside>
 
-    <!-- 进行中 -->
-    <section v-else-if="sidecar.isBusy" class="card busy">
-      <div class="spinner" aria-hidden="true"></div>
-      <p class="headline">{{ sidecar.phaseText }}</p>
-      <p class="note">首次启动需要加载后端依赖，请稍候（最长 30 秒）。</p>
-    </section>
-
-    <!-- 失败：绝不白屏，给可读错误 + 重试 -->
-    <section v-else-if="sidecar.isFailed" class="card bad">
-      <p class="headline">后端服务启动失败</p>
-      <p class="note">{{ sidecar.info?.lastError ?? sidecar.error ?? '未知原因' }}</p>
-      <p v-if="sidecar.info?.restarts" class="note">
-        已自动重启 {{ sidecar.info.restarts }} 次仍未恢复。
-      </p>
-      <details v-if="showDetail" class="detail">
-        <summary>查看技术详情</summary>
-        <pre class="mono">{{ sidecar.info?.lastErrorDetail }}</pre>
-      </details>
-      <div class="row">
-        <button class="primary" @click="sidecar.restart">重试</button>
-        <span class="mono logpath">{{ sidecar.info?.logFile }}</span>
-      </div>
-    </section>
-
-    <section v-else class="card">
-      <p class="headline">{{ sidecar.phaseText }}</p>
-      <p class="note">正在等待主进程上报状态…</p>
-    </section>
-
-    <footer class="ft">
-      <span>本地化运行 · 数据不出端</span>
-      <span class="mono">仅监听 127.0.0.1</span>
-    </footer>
+    <main class="main">
+      <!-- 未就绪：显示 S01 的后端状态页（握手结果 / 可读错误 + 重试），不渲染业务视图 -->
+      <Dashboard v-if="!sidecar.isReady" />
+      <component :is="activeView" v-else />
+    </main>
   </div>
 </template>
 
 <style scoped>
-.shell {
-  max-width: 820px;
-  margin: 0 auto;
-  padding: 48px 24px;
+.app {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  height: 100%;
+}
+
+.side {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-}
-
-.hd {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-h1 {
-  font-size: 22px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  margin: 0 0 4px;
-}
-
-.sub {
-  margin: 0;
-  font-size: 13px;
-  color: var(--fg-dim);
-}
-
-.badge {
-  flex: none;
-  padding: 5px 12px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  background: var(--chip);
-  color: var(--fg-dim);
-  white-space: nowrap;
-}
-.badge.ready {
-  background: var(--ok-soft);
-  color: var(--ok);
-}
-.badge.failed {
-  background: var(--bad-soft);
-  color: var(--bad);
-}
-.badge.starting,
-.badge.handshaking,
-.badge.restarting {
-  background: var(--warn-soft);
-  color: var(--warn);
-}
-
-.card {
+  gap: 20px;
+  padding: 22px 16px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 24px;
-}
-.card.ok {
-  border-color: var(--ok-border);
-}
-.card.bad {
-  border-color: var(--bad-border);
+  border-right: 1px solid var(--border);
 }
 
-.headline {
-  margin: 0 0 6px;
-  font-size: 17px;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 6px;
+}
+
+.logo {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.title {
+  margin: 0;
+  font-size: 13.5px;
   font-weight: 620;
 }
 
-.note {
-  margin: 0 0 4px;
-  font-size: 13px;
+.sub {
+  margin: 2px 0 0;
+  font-size: 11.5px;
   color: var(--fg-dim);
-  line-height: 1.6;
 }
 
-code,
-.mono {
-  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-  font-size: 12.5px;
-}
-
-code {
-  background: var(--chip);
-  padding: 2px 7px;
-  border-radius: 6px;
-}
-
-.kv {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 20px;
-  margin: 20px 0 0;
-}
-.kv > div {
+.nav {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px dashed var(--border);
-}
-.kv .wide {
-  grid-column: 1 / -1;
-}
-.kv dt {
-  font-size: 12.5px;
-  color: var(--fg-dim);
-  flex: none;
-}
-.kv dd {
-  margin: 0;
-  font-size: 12.5px;
-  text-align: right;
-  word-break: break-all;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.row {
+.nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.nav-item:hover:not(:disabled) {
+  background: var(--chip);
+}
+.nav-item.active {
+  background: var(--chip);
+  border-color: var(--border);
+}
+.nav-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.nav-label {
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.nav-hint {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.side-foot {
+  margin-top: auto;
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-top: 20px;
-  flex-wrap: wrap;
-}
-
-button {
-  font: inherit;
-  font-size: 13px;
-  padding: 8px 16px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--chip);
-  color: inherit;
-  cursor: pointer;
-}
-button:hover {
-  border-color: var(--fg-dim);
-}
-button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-.probe {
-  font-size: 12.5px;
-  color: var(--fg-dim);
-}
-.probe.ok {
-  color: var(--ok);
-}
-
-.logpath {
-  color: var(--fg-dim);
-  font-size: 11.5px;
-  word-break: break-all;
-}
-
-.detail {
-  margin-top: 12px;
-  font-size: 12.5px;
-  color: var(--fg-dim);
-}
-.detail summary {
-  cursor: pointer;
-  user-select: none;
-}
-.detail pre {
-  margin: 8px 0 0;
+  gap: 7px;
   padding: 10px 12px;
-  background: var(--chip);
-  border-radius: 8px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  user-select: text;
-}
-
-.spinner {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 2.5px solid var(--border);
-  border-top-color: var(--accent);
-  animation: spin 0.8s linear infinite;
-  margin-bottom: 14px;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .spinner {
-    animation-duration: 2.4s;
-  }
-}
-
-.ft {
-  display: flex;
-  justify-content: space-between;
   font-size: 11.5px;
   color: var(--fg-dim);
-  padding-top: 8px;
   border-top: 1px solid var(--border);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-dim);
+  flex: none;
+}
+.dot.ready {
+  background: var(--ok);
+}
+.dot.failed {
+  background: var(--bad);
+}
+.dot.starting,
+.dot.handshaking,
+.dot.restarting {
+  background: var(--warn);
+}
+
+.port {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.main {
+  overflow-y: auto;
 }
 </style>

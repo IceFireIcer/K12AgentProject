@@ -31,23 +31,31 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 import uvicorn  # noqa: E402
 from fastapi import FastAPI, Request  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 
-from app.api import system_router  # noqa: E402
+from app.api import chat_router, settings_router, system_router  # noqa: E402
 from app.config import (  # noqa: E402
     ALLOWED_HOSTS,
+    ALLOWED_RENDERER_ORIGINS,
+    ALLOWED_RENDERER_ORIGIN_REGEX,
     APP_NAME,
     APP_VERSION,
     RuntimeConfig,
     resolve_data_dir,
 )
 from app.encoding import install_utf8_stdio  # noqa: E402
+from app.redact import install_log_redaction, redact_text  # noqa: E402
+from app.settings import SettingsStore  # noqa: E402
 
 # ⚠️ PyInstaller 的 bootloader 会忽略上面两个 env（机制见 app/encoding.py），
 # 必须在 Python 层面真正把流切到 UTF-8，否则打包后中文按 GBK 输出。
 install_utf8_stdio()
 
 AUTH_HEADER = "X-Auth-Token"
+
+#: 预检请求豁免鉴权的原因见 `config.ALLOWED_RENDERER_ORIGINS` 的注释。
+_PREFLIGHT_METHOD = "OPTIONS"
 
 
 def create_app(cfg: RuntimeConfig) -> FastAPI:
@@ -59,6 +67,8 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
         docs_url="/docs",
     )
     app.state.cfg = cfg
+    # 设置存储挂在 app.state 上：路由通过 request.app.state 取，便于测试注入
+    app.state.settings_store = SettingsStore(cfg.data_dir)
 
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):
@@ -66,8 +76,16 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
 
         `/health` 与 `/docs` 不在 `/api` 前缀下，天然免鉴权——Electron 探活必须能
         在还没有任何凭据认知时打到它。
+
+        `OPTIONS` 预检豁免：预检由浏览器自动发出，**不会带自定义头**，拦掉等于
+        所有跨源 `/api` 调用全废（虽然 CORS 中间件通常已在外层处理了预检，这里
+        保留豁免作为纵深防御）。
         """
-        if request.url.path.startswith("/api") and cfg.auth_enabled:
+        path = request.url.path
+        needs_auth = (
+            path.startswith("/api") and request.method != _PREFLIGHT_METHOD and cfg.auth_enabled
+        )
+        if needs_auth:
             provided = request.headers.get(AUTH_HEADER, "")
             # 常量时间比较，避免 token 被逐字符试探
             if not provided or not secrets.compare_digest(provided, cfg.token):
@@ -77,7 +95,39 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
                 )
         return await call_next(request)
 
+    # ★ CORS 必须在**最后** add，才能成为最外层中间件。
+    #
+    # 原因（S02 端到端验收炸出来的真问题）：Starlette 的中间件是**洋葱模型**，
+    # 后 add 的先执行、且包裹先 add 的。若 CORS 在里面、鉴权在外面，那么鉴权
+    # 提前 return 的 401 响应**不会经过 CORS**，浏览器就拿不到
+    # `Access-Control-Allow-Origin`，于是前端看到的是
+    # `TypeError: Failed to fetch` 而不是 401 —— 鉴权错误被伪装成了网络错误，
+    # 极难排查（"为什么带错 token 一直转圈/报网络错误？"）。
+    #
+    # 放在最外层后：预检由 CORS 直接应答（HIT），401/500 也都带上 CORS 头，
+    # 前端能正确读出状态码并显示「鉴权失败」。
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[*ALLOWED_RENDERER_ORIGINS],
+        allow_origin_regex=ALLOWED_RENDERER_ORIGIN_REGEX,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        # 必须显式放行自定义头，否则预检不通过 → 浏览器根本不发真实请求
+        allow_headers=["Content-Type", AUTH_HEADER],
+        expose_headers=[AUTH_HEADER],
+    )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception(_request: Request, exc: Exception) -> JSONResponse:
+        """兜底：未捕获异常的响应体也要脱敏（异常消息里可能带着带 key 的 URL）。"""
+        return JSONResponse(
+            status_code=500,
+            content={"detail": redact_text(f"{type(exc).__name__}: {exc}")},
+        )
+
     app.include_router(system_router)
+    app.include_router(settings_router)
+    app.include_router(chat_router)
     return app
 
 
@@ -149,7 +199,7 @@ def build_runtime_config(args: argparse.Namespace, *, create: bool = True) -> Ru
 
 
 def _configure_logging() -> None:
-    """日志一律走 stderr，保护 stdout 的握手通道。"""
+    """日志一律走 stderr，保护 stdout 的握手通道；随后装上凭据脱敏过滤器。"""
     import logging
 
     logging.basicConfig(
@@ -157,6 +207,9 @@ def _configure_logging() -> None:
         stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # ★ 必须在 basicConfig 之后：过滤器要挂到 root logger + 已存在的 handler 上，
+    #   才能覆盖第三方库（openai / httpx）冒泡上来的日志。
+    install_log_redaction()
 
 
 def _bound_port(server: uvicorn.Server) -> int:

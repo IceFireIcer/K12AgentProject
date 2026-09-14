@@ -71,8 +71,7 @@ function registerIpc(): void {
   ipcMain.handle('sidecar:get-info', () => sidecar.info)
 
   ipcMain.handle('sidecar:restart', async () => {
-    await sidecar.stop()
-    sidecar.start()
+    await sidecar.restart()
     return sidecar.info
   })
 

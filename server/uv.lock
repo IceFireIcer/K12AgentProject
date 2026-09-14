@@ -1555,6 +1555,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "pyinstaller" },
 ]
 
@@ -1572,7 +1573,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pyinstaller", specifier = ">=6.22.3" }]
+dev = [
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pyinstaller", specifier = ">=6.22.3" },
+]
 
 [[package]]
 name = "setuptools"

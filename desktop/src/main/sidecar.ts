@@ -45,6 +45,15 @@ export class SidecarManager {
   private phase: SidecarPhase = 'idle'
   private port: number | null = null
   private pid: number | null = null
+  /**
+   * 后端自报的真实 python PID（握手 JSON 里的 `pid`）。
+   *
+   * 开发态我们是 `uv run python -m app.main`，spawn 到的直接子进程是 `uv.exe`，
+   * 真正干活的 python 是它的**子进程**。`taskkill /T` 能覆盖正常情况；但若
+   * `uv.exe` 先退出、python 被 reparent，仅凭 `this.child.pid` 就杀不到它了。
+   * 保留这个自报 PID 作为兜底，才能满足「退出后不留孤儿」这条硬要求。
+   */
+  private serverPid: number | null = null
   private version: string | null = null
   private frozen = false
   private embedderReady: boolean | null = null
@@ -112,22 +121,38 @@ export class SidecarManager {
     if (this.child) return
     this.intentionalKill = false
     this.lastErrorDetail = null
+    // ★ 必须清掉 shuttingDown：否则「手动重启一次之后，崩溃自动重启永久失效」
+    //   （stop() 会把它置 true，而它本应只在应用退出时置位）。
+    this.shuttingDown = false
     this.token = randomBytes(32).toString('hex')
     this.log(`[sidecar] 启动（mode=${this.info.mode}）`)
     this.spawnProcess()
   }
 
-  /** 应用退出时调用：杀进程树，防止孤儿进程占端口。 */
+  /**
+   * 应用退出时调用：杀进程树，防止孤儿进程占端口。
+   *
+   * `shuttingDown=true` 是**终止性**状态——之后任何退出都不再自动重启。
+   * 因此「重启」绝不能复用它，见 `restart()`。
+   */
   async stop(): Promise<void> {
     this.shuttingDown = true
-    this.intentionalKill = true
-    this.clearStartupTimer()
-    const pid = this.child?.pid
-    this.child = null
-    await this.killTree(pid)
-    this.pid = null
-    this.port = null
+    await this.teardown()
     this.setPhase('stopped')
+  }
+
+  /**
+   * 手动重启（界面「重试」按钮 / IPC `sidecar:restart`）。
+   *
+   * ⚠️ 不要写成 `await stop(); start()`：`stop()` 会把 `shuttingDown` 置为 true，
+   * 而 `shuttingDown=true` 会让之后**崩溃不再自动重启**（`decideRestart` 直接
+   * 返回不动作）。这个坑 S01 就埋下了，S02 的端到端验收才炸出来——
+   * 手动重启过一次之后，后端再崩就再也不会自愈。
+   */
+  async restart(): Promise<void> {
+    this.intentionalKill = true // 这次退出是我们主动杀的，不该计入自动重启
+    await this.teardown()
+    this.start()
   }
 
   // -------------------------------------------------------------- 进程启动 --
@@ -206,15 +231,32 @@ export class SidecarManager {
     this.pid = child.pid ?? null
 
     child.stdout?.setEncoding('utf-8')
-    child.stdout?.on('data', (chunk: string) => this.onStdout(chunk))
+    child.stdout?.on('data', (chunk: string) => this.onStdout(chunk, child))
 
     child.stderr?.setEncoding('utf-8')
-    child.stderr?.on('data', (chunk: string) => this.onStderr(chunk))
+    child.stderr?.on('data', (chunk: string) => this.onStderr(chunk, child))
 
-    child.on('error', (err) => this.fail(`sidecar 进程启动失败：${err.message}`))
-    child.on('exit', (code, signal) => this.onExit(code, signal))
+    child.on('error', (err) => {
+      if (this.isStale(child)) return
+      this.fail(`sidecar 进程启动失败：${err.message}`)
+    })
+    child.on('exit', (code, signal) => this.onExit(code, signal, child))
 
     this.armStartupTimeout()
+  }
+
+  /**
+   * 该进程是否已被替换（重启后的旧进程）。
+   *
+   * ★ 为什么必须判：`killTree()` 之后旧进程的 `exit` 事件是**异步**到达的，
+   * 很可能晚于 `start()` 已经拉起新进程。若不丢弃，旧进程的退出会：
+   *   1. 把 phase 从新进程的 'starting' 打回 'failed'；
+   *   2. 用「进程已被主动终止」覆盖掉真正的错误，日志失去诊断价值；
+   *   3. 清空新进程刚写好的 port/pid。
+   * 这个竞态在 S02 端到端验收里表现为"点重试后界面卡在等待/直接失败"。
+   */
+  private isStale(child: ChildProcess): boolean {
+    return this.child !== child
   }
 
   // ------------------------------------------------------------ 握手与探活 --
@@ -234,12 +276,19 @@ export class SidecarManager {
     }
   }
 
-  private onStdout(chunk: string): void {
+  private onStdout(chunk: string, child: ChildProcess): void {
+    if (this.isStale(child)) return
     for (const line of this.stdoutBuffer.push(chunk)) {
       const outcome = parseHandshakeLine(line)
       switch (outcome.kind) {
         case 'ready':
-          this.onHandshakeReady(outcome.port, outcome.version, outcome.frozen)
+          this.onHandshakeReady(
+            outcome.port,
+            outcome.version,
+            outcome.frozen,
+            outcome.pid,
+            child
+          )
           break
         case 'error':
           this.fail(outcome.message)
@@ -251,17 +300,28 @@ export class SidecarManager {
     }
   }
 
-  private onHandshakeReady(port: number, version: string | null, frozen: boolean): void {
+  private onHandshakeReady(
+    port: number,
+    version: string | null,
+    frozen: boolean,
+    serverPid: number | null,
+    child: ChildProcess
+  ): void {
+    if (this.isStale(child)) return
     if (this.phase === 'ready' || this.phase === 'handshaking') return // 幂等
     this.port = port
     this.version = version
     this.frozen = frozen
+    this.serverPid = serverPid
+    // 优先展示后端自报的 python PID（真正干活的进程），而不是 uv 包装进程
+    this.pid = serverPid ?? this.pid
     this.log(`[sidecar] 握手成功 port=${port} pid=${this.pid ?? '?'}`)
     this.setPhase('handshaking')
     void this.waitForHealthy()
   }
 
-  private onStderr(chunk: string): void {
+  private onStderr(chunk: string, child: ChildProcess): void {
+    if (this.isStale(child)) return
     for (const line of chunk.split('\n')) {
       if (line.trim()) this.log(`[stderr] ${line.trimEnd()}`)
     }
@@ -274,6 +334,9 @@ export class SidecarManager {
       if (this.shuttingDown || !this.child || this.child.exitCode !== null) return
       const health = await this.fetchHealth()
       if (health) {
+        // 轮询期间可能已经又重启了一轮（本轮的 child 已过期）：丢弃这轮结果，
+        // 否则会用一个死掉的端口把 phase 置成 ready。
+        if (!this.child || this.child.exitCode !== null) return
         this.embedderReady = health.embedder_ready
         this.version = health.version
         this.frozen = health.frozen
@@ -286,6 +349,7 @@ export class SidecarManager {
       }
       await delay(HEALTH_POLL_INTERVAL_MS)
     }
+    if (this.shuttingDown) return
     this.fail('sidecar 端口已就绪，但 /health 一直未通过（可能是模型或依赖加载失败）')
   }
 
@@ -308,13 +372,26 @@ export class SidecarManager {
 
   // ------------------------------------------------------------ 退出与重启 --
 
-  private onExit(code: number | null, signal: NodeJS.Signals | null): void {
+  private onExit(code: number | null, signal: NodeJS.Signals | null, child: ChildProcess): void {
+    // ★ 旧进程（已被 restart 替换）的退出必须整个丢弃，否则会把新进程的状态打乱。
+    if (this.isStale(child)) {
+      this.log(`[sidecar] 旧进程退出（已忽略）code=${code ?? '-'} pid=${child.pid ?? '?'}`)
+      return
+    }
+
     const wasUsable = this.phase === 'ready' || this.phase === 'handshaking'
     this.log(`[sidecar] 进程退出 code=${code ?? '-'} signal=${signal ?? '-'}`)
+
+    // ★ 退出的是 `uv.exe`，但后端 python 可能还活着（reparent 后不再是它的子进程）。
+    //   重启前必须先把这个"残留的孙子"清掉，否则旧进程继续占着端口，
+    //   新进程起来后握手端口/健康检查会指向错误的实例。
+    const leftover = this.serverPid
     this.child = null
     this.pid = null
+    this.serverPid = null
     this.port = null
     this.embedderReady = null
+    if (leftover) void this.killTree(leftover)
 
     const decision = decideRestart({
       wasUsable,
@@ -349,7 +426,35 @@ export class SidecarManager {
     this.setPhase('failed')
     this.log(`[sidecar] 失败：${message}`)
     this.intentionalKill = true // 失败收尾杀进程时不要再触发重启
-    void this.killTree(this.child?.pid)
+    // ★ 必须先取 pid 再清空：`onExit` 会把 `this.child` 置 null 后才调用 fail()，
+    //   若这里再读 `this.child?.pid`，得到的是 undefined → 整棵进程树不被回收 →
+    //   孤儿 python 占住端口（"退出后无孤儿进程"是关卡 A 的硬要求）。
+    void this.teardown()
+  }
+
+  /**
+   * 杀掉当前进程树并清空进程态；不改 `shuttingDown`，语义由调用方决定。
+   *
+   * 杀两路 pid：
+   * - `this.child.pid`：spawn 到的直接子进程（开发态是 `uv.exe`）；`/T` 会带上子孙。
+   * - `this.serverPid`：后端自报的 python PID，兜住"uv 先退出、python 被 reparent"
+   *   这类只靠前者杀不干净的情况。
+   */
+  private async teardown(): Promise<void> {
+    this.clearStartupTimer()
+    const childPid = this.child?.pid
+    const serverPid = this.serverPid
+    this.child = null
+    this.pid = null
+    this.serverPid = null
+    this.port = null
+
+    await this.killTree(childPid)
+    // 若 python 已被 reparent（不再是 childPid 的后代），补一刀；
+    // 同一个 pid 存在时 taskkill 会返回非零，killTree 已吞掉错误，无副作用。
+    if (serverPid && serverPid !== childPid) {
+      await this.killTree(serverPid)
+    }
   }
 
   /**
