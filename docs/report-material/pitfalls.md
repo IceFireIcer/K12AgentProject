@@ -293,3 +293,40 @@
 - **解决**：**不需要为 `engines` 降 Pi，也不要主动降 Electron**；D3 只需确认实际安装的 Electron ≥ 44。只有当有人**主动把 Electron 降到 ≤33**（内置 Node 20.x）时才需要退路 `0.74.2`（`legacy-node20`，要求 Node >= 20.6）。
 - **防呆**：D3 清单第 1 步固定跑 `npm view @earendil-works/pi-coding-agent version engines` + `npm ls electron`，**别在这一步纠结**。
 - **报告用法**：风险表 #16 从「致命」到「已解除」的全过程。可讲的点：**声明式的版本约束与实际运行环境不是一回事**——先用实测把不确定项变成确定项，再决定要不要动手改技术栈。
+
+## P-035 `subprocess(text=True)` 在 UTF-8 模式下**静默**吞掉 GBK 输出
+
+- **现象**：验证脚本里调 `netstat -ano` 解析「哪个进程占着端口」，**命令返回码 0、看起来一切正常，但解析结果永远是空**——`pid_owning_port()` 恒返回 `None`，断言一直失败却看不出哪里错。
+- **根因**：两个约定撞在一起——
+  ① Windows 自带工具（`netstat` / `taskkill`）按**系统代码页**输出（本机 GBK），表头是中文；
+  ② 进程处于 UTF-8 模式（`PYTHONUTF8=1`，本项目全程设着），于是 `text=True` 会拿 **UTF-8 去解 GBK 字节**。
+  `subprocess` 的解码发生在**读取线程**里，线程抛 `UnicodeDecodeError` 后**直接死掉**，
+  而 `communicate()` 拿到的是一个空缓冲区 —— **不报错、不抛异常、返回空字符串**。
+  这是典型的「静默失败」：最坏的一种 bug，因为它伪装成「命令跑成功了，只是没有结果」。
+- **解决**：**不要用 `text=True`**。显式收字节再自己解：
+  `subprocess.run(cmd, capture_output=True)` → `.stdout.decode("utf-8", errors="replace")`。
+  用 `errors="replace"` 而不是硬编码 GBK：非 ASCII 字节变成替换符，而我们真正要解析的
+  **ASCII 字段（端口、pid、LISTENING）位置不受影响**，且不依赖本机代码页。
+- **防呆**：项目里所有对系统工具的调用都收敛到 `smoke_api._run_capturing_bytes()` 一个函数，
+  并在函数 docstring 里写明原因。**新增对 `netstat` / `taskkill` / `wmic` 的调用一律走它。**
+- **报告用法**：报告第 7 章「难题与解决方案」——**静默失败比显式报错危险得多**。
+  这条尤其适合讲「为什么断言要写得足够具体」：正是那条「握手 pid 必须等于占端口的 pid」
+  的断言，把一个看起来通过了的环节暴露了出来。如果当时写的是「能取到 pid 就算过」，这个 bug 会一路带到最后。
+
+## P-036 跨进程边界时，「你 spawn 出来的 pid」往往不是「真正干活的 pid」
+
+- **现象**：要杀掉 sidecar 时，拿 `Popen` / `child.pid` 去杀 —— **杀掉了，但端口没释放**，
+  下一次启动直接绑定失败。
+- **根因**：中间隔着**包装器进程**。本机实测到两层：
+  ① 开发态 Electron spawn 的是 `uv run python -m app.main`：`Popen` 拿到的是 **`uv` 的 pid**，
+  真正监听端口的是它的 **python 孙进程**（实测 `Popen` 报 46964，握手自报 44740）；
+  ② 连 venv 的 `python.exe` 本身也是个 **redirector**：`Popen` 报 37432，进程内 `os.getpid()` 是 39792。
+  杀掉包装器不会级联到子进程，孤儿就继续占着端口。
+- **解决**：**只以被管理进程「自报」的身份为准** —— 即握手里的 `pid`。
+  Electron 侧两条都杀（自报 pid 优先，`child.pid` 兜底），且必须 `taskkill /PID <pid> /T /F`
+  （`/T` 才是杀进程树）。
+- **防呆**：`smoke_api.py` / `build_server.py` 的断言**不是**「握手 pid == Popen 的 pid」（那本身就是错的假设），
+  而是「**握手 pid == 真正监听该端口的进程**」（用 `netstat` 反查）。这个断言在本机抓到了上面的全部现象。
+- **报告用法**：报告第 7 章 + 架构章节。这是「**跨进程边界的身份问题**」的一个干净案例：
+  在单进程思维里 pid 是唯一的，一旦引入包装器/重定向器就不再成立。
+  也正好解释了为什么 sidecar 协议要把 `pid` 放进握手 —— 那不是冗余字段。

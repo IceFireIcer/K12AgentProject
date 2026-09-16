@@ -1,5 +1,5 @@
 /**
- * 架构守卫（票 01）。
+ * 架构守卫（票 01 建立，票 02 扩充）。
  *
  * ★ 一律写成**正向/结构性断言**（「必须经 IPC 与 preload 白名单传递」），
  *   而不是「禁止历史实现」式的反向断言 —— 本项目从零实现，没有 SSE，不需要防守一个不存在的实现。
@@ -10,6 +10,8 @@
  *   G3  渲染进程不得直连 sidecar 的 HTTP 端点（否则 token 与跨源/CORS 问题会全部回来）
  *   G4  6 事件词表严格是 delta/citation/payload/blocked/done/error
  *   G5  `src/main/bridge/client.ts` 是唯一对 sidecar 发 HTTP 请求的文件
+ *   G6  ★ token 不进入任何面向渲染进程的载荷（`SidecarState` 无 token 字段；
+ *       renderer/ 与 preload/ 里不出现 `--token` / `AUTH_HEADER` / `X-Auth-Token`）
  *
  * 跑法：`npm test`。全部用 fs 读源码做静态断言，失败信息里带上具体文件路径。
  */
@@ -22,9 +24,11 @@ import { fileURLToPath } from 'node:url'
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const rendererDir = join(desktopRoot, 'src', 'renderer')
+const preloadDir = join(desktopRoot, 'src', 'preload')
 const mainDir = join(desktopRoot, 'src', 'main')
 const sharedEventsFile = join(desktopRoot, 'src', 'shared', 'ipc-events.ts')
 const bridgeClientFile = join(mainDir, 'bridge', 'client.ts')
+const sidecarProtocolFile = join(mainDir, 'sidecar', 'protocol.ts')
 
 const SCAN_EXTENSIONS = ['.ts', '.tsx', '.mts', '.vue', '.js', '.mjs', '.cjs', '.html', '.css']
 
@@ -246,3 +250,68 @@ test('G5: src/main/bridge/client.ts 是唯一对 sidecar 发 HTTP 请求的文�
     `src/main/bridge/client.ts 里没有 fetch —— 它应当是对 sidecar 发请求的唯一出口`
   )
 })
+
+// ── G6 token 不出主进程 ───────────────────────────────────────────────
+
+/** 抽出 `export interface SidecarState { ... }` 的主体。 */
+function sidecarStateBody(): string {
+  const source = readSource(sidecarProtocolFile)
+  const matched = /export\s+interface\s+SidecarState\s*\{([\s\S]*?)\n\}/.exec(source)
+  assert.ok(matched, `${show(sidecarProtocolFile)} 里找不到 SidecarState 接口定义`)
+  return matched[1]
+}
+
+/** token 出现在渲染进程侧的典型形态（参数名 / 请求头名）。 */
+const TOKEN_LEAK_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
+  { label: '--token 命令行参数', pattern: /--token/ },
+  { label: 'X-Auth-Token 请求头', pattern: /X-Auth-Token/i },
+  { label: 'AUTH_HEADER 常量', pattern: /AUTH_HEADER/ }
+]
+
+test('G6a: SidecarState 结构上就没有 token 字段（状态会经 IPC 推给渲染进程）', () => {
+  const body = sidecarStateBody()
+
+  // 逐行看字段声明，避免把注释里的「不含 token」误判成字段
+  const tokenFields = body
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^(readonly\s+)?token\??\s*:/.test(line))
+
+  assert.deepEqual(
+    tokenFields,
+    [],
+    `SidecarState 里出现了 token 字段：\n  ${tokenFields.join('\n  ')}\n` +
+      `它的副本会被 webContents.send 推给渲染进程，token 绝不能进这个结构（票 02 纪律）。`
+  )
+
+  // 正向断言：这个结构确实承载了「阶段 + 端口 + pid」，不是被清空了
+  const bodyOneLine = body.replace(/\s+/g, ' ')
+  for (const field of ['phase', 'port', 'pid', 'mode', 'restarts', 'lastError']) {
+    assert.ok(
+      new RegExp(`\\b${field}\\??\\s*:`).test(bodyOneLine),
+      `SidecarState 缺少字段 ${field}（渲染进程要靠它渲染状态徽章）`
+    )
+  }
+})
+
+test('G6b: renderer/ 与 preload/ 里不出现 token 相关字面量', () => {
+  const files = [...listFiles(rendererDir), ...listFiles(preloadDir)]
+  assert.ok(files.length > 0, 'src/renderer 或 src/preload 下没有扫到文件，守卫形同虚设')
+
+  const violations: string[] = []
+  for (const file of files) {
+    const source = readSource(file)
+    for (const { label, pattern } of TOKEN_LEAK_PATTERNS) {
+      if (pattern.test(source)) violations.push(`${show(file)} → ${label}`)
+    }
+  }
+
+  assert.deepEqual(
+    violations,
+    [],
+    `渲染进程侧出现 token 相关字面量：\n  ${violations.join('\n  ')}\n` +
+      `token 只在主进程内存里，由 src/main/bridge/client.ts 统一注入 X-Auth-Token；` +
+      `渲染进程只有 window.api（preload 白名单），既拿不到 token 也没有 HTTP 能力。`
+  )
+})
+

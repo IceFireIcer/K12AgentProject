@@ -58,6 +58,11 @@ function createWindow(): BrowserWindow {
     window.show()
   })
 
+  // 关窗后别再留着已销毁窗口的引用（`mainWindow` 只用于取渲染进程/推状态）
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null
+  })
+
   // 外链一律交给系统浏览器，不在应用内开新窗口
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
@@ -75,8 +80,12 @@ function createWindow(): BrowserWindow {
 
 function pushSidecarState(): void {
   if (!sidecar) return
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(IPC.sidecarChanged, sidecar.getState())
+  // 状态对象里**没有 token**（`SidecarState` 结构上就没有这个字段），
+  // 渲染进程只会看到「阶段 / 端口 / 后端 pid / 错误文案」。
+  const state = sidecar.getState()
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue
+    window.webContents.send(IPC.sidecarChanged, state)
   }
 }
 
@@ -117,15 +126,30 @@ app.on('window-all-closed', () => {
 /**
  * 退出清理：必须杀掉 sidecar 的**整棵进程树**（Windows 上 `uv → python` 会留下孤儿进程占端口）。
  * 先 `preventDefault` 把退出推迟到 kill 完成，再 `app.quit()`；`quitting` 保证只跑一次、不会递归。
+ *
+ * ★ 一次性保证：`quitting` 置位后就永远走上面那个 early return，
+ *   所以即使 `app.quit()` 再次触发 `before-quit`，也不会重复杀进程。
  */
 app.on('before-quit', (event) => {
   if (quitting) return
   quitting = true
   event.preventDefault()
 
+  // ★★ 票 06 接线点：Pi 的 `session.dispose()` 必须在这里调用（且只调一次）——
+  //    否则 Pi 的 JSONL 会话可能半写。**票 02 不引入任何 Pi 依赖**，这里只留位置：
+  //
+  //      await session.dispose()
+  //
+  //    顺序：先 dispose（把会话 flush 干净）再停 sidecar，
+  //    因为 Tool 可能是最后一个写 /api 的调用方（dispose 之后不应再有 /api 请求）。
   const current = sidecar
   sidecar = null
-  void (current ? current.stop() : Promise.resolve()).finally(() => {
-    app.quit()
-  })
+  void (current ? current.stop() : Promise.resolve())
+    .catch((error: unknown) => {
+      // 收尾异常不能挡住退出：日志留在 stdout（stderr），进程该走还得走
+      console.error('[main] sidecar 收尾异常：', error)
+    })
+    .finally(() => {
+      app.quit()
+    })
 })
