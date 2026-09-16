@@ -174,3 +174,26 @@
 - **被否决的方案**：① 用**固定端口**（如 8756）—— 端口冲突会变成常态故障，且同一台机器上跑两个实例直接互撞；② 让 uvicorn 绑端口、从 `server.servers[0].sockets[0].getsockname()` 反查 —— 能拿到端口，但**绑定失败仍然无法拦成一行可读错误**；③ 用 stderr 报错 —— Electron 只看得懂 stdout 的握手通道，写 stderr 等于没报。
 - **代价 / 风险**：**握手发出的一瞬间端口尚未进入 LISTENING 状态**（uvicorn 还没开始 accept）。因此上层**必须**在握手后继续轮询 `/health` 直到 200，不能「收到握手就直接发请求」。这不是冗余设计，是协议的一部分。（开发期踩过一次：把「pid 是否等于占端口的进程」的断言放在握手后立刻执行，得到 `None`。）
 - **服务哪条评分**：设计合理性 25% —— 进程生命周期与失败语义的显式设计；也直接支撑「打包后仍能跑」这条验收。
+
+## D-019 Pi 的接入形态：主进程产物改 ESM；原生解包范围按**实测导入图**确定
+
+- **日期**：2026-09-16
+- **决策**：① 主进程构建产物从 CJS 改为 **ESM**（入口 `out/main/index.mjs`）；② `asarUnpack` 覆盖 `esbuild` / `@esbuild` / `@mariozechner/clipboard*` / pi-tui natives 四组；③ 不启用 Plan B（RPC 模式）。
+- **理由**：
+  ① Pi 包**没有 `exports` 映射**，CJS `require()` 直接报 `ERR_PACKAGE_PATH_NOT_EXPORTED` ——
+     **ESM 不是风格偏好，是硬约束**；
+  ② 解包范围不靠推测：`scripts/pi-import-graph.mjs` 实测出**包根导入急切加载的原生文件**
+     是 `@mariozechner/clipboard-win32-x64-msvc` 的 `.node` 与 pi-tui 的
+     `win32-console-mode.node`，而**esbuild 根本不在该路径上**；
+  ③ 三组都解包：前两组满足票的显式要求，esbuild 一行兜住「将来用 chord 打包扩展」的场景。
+- **被否决的方案**：① 让主进程保持 CJS、把 Pi 排除出 externalize 而打成 bundle ——
+  会引入一个体积巨大且难排查的打包层，且 Pi 的动态加载路径未必经得起 bundler；
+  ② 只解包 esbuild（照抄文档）—— 实测表明那**恰恰漏掉了真正会炸的那个包**；
+  ③ **Plan B（`pi --mode rpc` 子进程）**：不启用。SDK 路径在打包产物内实测可用，
+  而 RPC 会形成 `Electron → pi → Python` 三进程，并让 `before_agent_start` 等 hook
+  多一层 IPC —— 用确定的复杂度换取一个已被证明不存在的风险，不划算。
+- **代价 / 风险**：ESM 主进程要求所有 `__dirname` 用法显式改写（本项目用
+  `import.meta.url` 推导，preload 路径已回归验证）；asarUnpack 的多平台 native
+  会让安装包略大（可接受）。
+- **服务哪条评分**：设计合理性 25% —— 「用导入图实测确定打包边界」是可展示的工程方法；
+  同时是「主动讲代价」叙事的核心素材。

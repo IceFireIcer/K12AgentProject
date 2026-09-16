@@ -214,6 +214,32 @@
 - **防呆**：`build:unpack` 冒烟作为 D3 的关卡动作；风险表 #15 的决策截止日就是 D3。
 - **报告用法**：**v2 必记素材第 1 类「Pi 迁移的真实代价与解决过程」**，答辩预设第 1 问的必备补充——**主动讲代价比被问出来更可信**。
 
+### ★★ 实测修正（2026-09-16，票 03）：风险评级下调，但换出一个更真的风险
+
+上面这段是**迁移前的推断**。用 `node scripts/pi-import-graph.mjs` 实测导入图后，结论变了两处：
+
+| 原判断 | 实测结果 |
+| --- | --- |
+| 包根导入会拖入 `esbuild` | **包根导入的路径上没有 esbuild**。esbuild 只被 `@earendil-works/chord/dist/node/bundle.js` 导入，而该文件只能经 `chord/bundler` 或 `chord/node/package.js` 到达 —— **Pi 从不导入这两者**。→ **esbuild 是「保险丝」而不是「真需求」** |
+| （未预料） | **真正被急切加载的原生依赖是另一个包**：`@mariozechner/clipboard-win32-x64-msvc/clipboard.win32-x64-msvc.node`（经 `dist/utils/clipboard.js`），以及 pi-tui 的 `win32-console-mode.node` |
+
+**但仍然必须解包 esbuild**：满足票的显式要求，且兜住「将来用 chord 打包自定义扩展」的场景
+（那时它就从保险丝变成真需求）。所以 `asarUnpack` 覆盖三组：`esbuild` / `@esbuild` /
+`@mariozechner/clipboard*` / pi-tui natives。
+
+**另一处实测修正**：Pi 包**没有 `exports` 映射** —— CJS `require()` 直接
+`ERR_PACKAGE_PATH_NOT_EXPORTED`。因此**主进程产物必须改成 ESM**（`out/main/index.mjs`），
+这不是风格选择而是硬约束。
+
+**最终证据（都在打包产物内，开发模式不算数）**：Pi 从 `app.asar` 内解析成功（151 个导出符号）；
+`esbuild.exe` 是 11,670,528 字节的**实体文件**，`spawn --version` 返回 `0.28.1`，
+`buildSync` **真的产出了打包结果** —— 「能执行」比「文件存在」强得多。
+
+- **★ 报告用法（比原条目更值得讲）**：这是「**风险清单必须用实测校验**」的绝佳案例。
+  文档把 esbuild 列为头号致命风险，一次 30 分钟的导入图实测之后，**风险的形状完全变了**
+  ——真正的原生依赖在一个谁都没提过的 clipboard 包上。答辩时讲这个，
+  传达的是「我们有把假设变成测量数据的习惯」，比背风险表有说服力得多。
+
 ## P-025 Pi 的 `session_end` 事件不存在（写它会静默失效）
 
 - **现象**：`pi.on("session_end", ...)` 写了但**完全不生效**——没有报错、没有回调、没有日志。
