@@ -2,45 +2,38 @@
 
 面向后续 ZCode / 编码代理的工作区说明。只记录本仓库特有、从代码本身看不出来的信息。
 
-> **本文件依据 `项目执行文档.md`（唯一权威）+ `docs/` 现存的 5 份文档重新生成。**
+> **本文件依据 `项目执行文档.md`（唯一权威）+ `docs/` 现存的 5 份文档 +「代码从零重建」决议重写。**
 > 若本文件与执行文档冲突，**以执行文档为准**，并顺手修正本文件。
+> ⚠️ 历史文档（含执行文档的 v1→v2 修订说明）里残留的 `S00–S02`、`D-00x`、`P-00x`、旧文件名、
+> 「SSE → IPC 返工」等说法**均已作废**：文件名映射见第 4 节命名表，决策/踩坑编号在第 10 节重新起算。
 
-## 0. ⚠️ 先读这一条：当前工作区只有文档，没有代码
+## 0. ⚠️ 先读这一条：代码从零重建
 
-**2026-09-16 用户明确要求删除全部代码、仅保留文档**，已提交（`9f966fd`）。当前仓库顶层只有：
+**当前仓库顶层只有文档**：
 
 ```
 K12Agent/
 ├─ AGENTS.md              # 本文件
-├─ 项目执行文档.md         # 唯一权威执行文档 v2.0（Pi Agent 架构版，1146 行）
-├─ docs/                  # 现存 5 份文档，见第 3 节
+├─ 项目执行文档.md         # 唯一权威执行文档 v3.0（从零重建版：混合后端 + IPC-only）
+├─ docs/                  # 5 份设计文档 + tickets/ + agents/ + report-material/，见第 3 节
 └─ .gitignore  .gitattributes
 ```
 
-**`desktop/` 与 `server/` 不存在。** S00/S01/S02 的代码成果（Electron 壳、sidecar 握手、
-pydantic 契约层、SSE 通道、单测与架构守卫）**都不在工作区里**。
+`desktop/` 与 `server/` **正在从零建起**（当前可能还不存在，或只有骨架）。因此：
 
-**恢复方式**：S02 完整代码在附注标签里，没有丢：
+- **不恢复、不参考任何历史实现**。删码前的代码产物（Electron 壳、sidecar 握手、pydantic 契约层、事件通道、单测与守卫）
+  **已移出工作区**；`archive/s02-full-code` 标签**仅作历史留档**——
+  **禁止 `git checkout` 恢复、禁止阅读其实现、禁止照它重写**。「从零重建」是有意决策，不是事故。
+  旧代码踩过的坑已沉淀为第 8 节的设计约束，**不需要（也不允许）回头翻代码**。
+- **后端是刻意的混合架构**（一句话）：**Python 管数据 / RAG / 嵌入 / 判分 / 学习记录，
+  TypeScript（Electron 主进程）管编排 / LLM / Prompt / Tool 注册 / 6 事件映射**，两端只经冻结契约通信。
+  **这不是过渡态**，四条硬边界见第 5 节。
+- **开工前先看两处**：`docs/tickets/`（票与各票 `Blocked by` →「今天做什么」）与 `项目执行文档.md`（规格 →「做成什么样」）。
 
-```bash
-git tag -l 'archive/*'                              # → archive/s02-full-code
-git show archive/s02-full-code --stat | head        # 先看清要带回什么
-git checkout archive/s02-full-code -- desktop server
-```
-
-> **恢复 embedding 模型（约 90MB，从未入 git）**：已备份到仓库外
-> `E:\FolderForVibeCoding\Zcode\K12Agent_backup_resources\resources`，
-> 需手工拷回 `server/resources/models/fastembed/`。**不做这一步，检索跑不起来。**
-
-**因此：开工任何 Stage 之前，先问用户「是否要从标签恢复代码」。**
-不要默认代码存在，也不要绕过用户直接恢复——删码是用户的有意操作。
-
-> **注意一批「已被删除但文档仍引用」的文件**：`docs/report-material/{README,decisions,pitfalls}.md`、
-> `docs/阶段实测记录-S00至S02.md`、`docs/graph-smoke.mmd` **已于提交 `ebfaf13` 从仓库删除**
-> （用户确认保持删除）。执行文档第 16 节与报告素材纪律仍引用它们。
-> **如需取回，从删除前的提交取**：
-> `git checkout 7f158c8 -- docs/report-material "docs/阶段实测记录-S00至S02.md" docs/graph-smoke.mmd`
-> 不要以为是文档笔误。
+> **嵌入模型（约 90MB，从未入 git）**：由**自写脚本** `server/scripts/fetch_embedding_model.py` **联网获取**，
+> 落到 `server/resources/models/fastembed/`。仓库外的本地备份
+> （`E:\FolderForVibeCoding\Zcode\K12Agent_backup_resources\resources`）**仅作断网兜底**，不是主路径。
+> 拿到模型后立刻验证检索链路（票 10 / 票 11），不要攒到收口。
 
 ## 1. 项目是什么
 
@@ -54,62 +47,93 @@ git checkout archive/s02-full-code -- desktop server
 
 ## 2. 当前进度与下一步
 
-| Stage | 内容 | 状态 |
+| 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| S00 | 环境与依赖基线 | ✅ 代码已删除（成果留档） |
-| S01 | 双端脚手架 + Sidecar 握手 | ✅ **关卡 A 已过**（代码已删除，可从标签恢复） |
-| S02 | 契约冻结 + 设置页 + 安全握手 + 事件通道 | ✅ 代码已删除，可从标签恢复；**传输层需局部返工（SSE → IPC）** |
-| **S03 / D3** | **Pi Agent 集成 + LLM 适配** | ⬜ **下一步**，清单见执行文档第 18 节 |
+| S00–S02（历史） | 环境基线 / 双端脚手架 / 契约与事件通道（删码前的旧实现） | ❌ **代码已删除，不再恢复**（经验已沉淀进第 8 节） |
+| **票 01** | **双端脚手架与依赖基线** | ⬜ **当前起点**，15 天排期从这里重新起算 |
+| 票 02–24 | 见下方清单 | ⬜ 按各票 `Blocked by` 顺序推进 |
 
-**S03（D3）是当前风险最高的一天**，同时压着 3 个未验证的致命风险（执行文档第 17 节 #15–#17）：
-Pi 的 `esbuild` 原生依赖能否在 Electron 打包后加载、Electron 内置 Node 是否 >= 22.19、包根导入副作用。
-**按执行文档第 18 节的顺序做，不要跳。关卡 B 不通过不要开始 D4。**
+**关卡（硬性验收线，不过不进下一阶段）**：A = 票 02（sidecar 握手 + 打包不炸）；
+**B₁ = 票 03（Pi 可加载 + esbuild 打包冒烟）**；B = 票 06（流式对话贯通 + 学段 Prompt）；
+C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（完整应用可交付）。
 
-> **任务切片在 `docs/tickets/issues/`**（24 票，一票一文件，按依赖顺序编号，索引见 `docs/tickets/README.md`）：
-> **「今天做什么」看该目录 + 各票 `Blocked by`；「规格是什么」看执行文档；「做完没有」看第 14 节验收。**
+> **★ 票 03 是全程风险最高的一票**：Pi 包根导入会拖入 `esbuild` 原生依赖（Pi issue #9286），
+> 必须**在最早的提交里就在打包产物上冒烟**，不要等收口。失败则启用 Plan B = Pi RPC 模式。
+
+### 24 票清单（一票一文件：`docs/tickets/issues/`；索引：`docs/tickets/README.md`）
+
+- **关卡 B₁ / B（票 01–06）**：01 双端脚手架与依赖基线 · 02 Sidecar 生命周期与端口握手（**关卡 A**） ·
+  03 Pi 可加载性 + esbuild 打包冒烟（**关卡 B₁**） · 04 契约冻结 + OpenAPI→TS 防漂移链 ·
+  05 IPC 事件通道 + preload 白名单 · 06 对话贯通 + 学段 Prompt 注入（**关卡 B**）
+- **配置与 Agent 骨架（票 07–09）**：07 设置页 + 连通性探测 · 08 主 Agent + 6 Extension 骨架 + 轨迹导出 ·
+  09 Pi 会话改道 + 跨学生隔离断言 + 学习记录回流
+- **数据与检索（票 10–13）**：10 教材骨架四学段 + 分块入库 · 11 RAG 四级降级链 + 学段隔离（**关卡 C**） ·
+  12 知识点依赖图双用途 · 13 `rag_search` Tool + `citation` 事件
+- **练习与闯关（票 14–15）**：14 练习 Extension + 客观题批改 · 15 主观题批改 + 闯关闭环（**关卡 D**）
+- **多模态与编程（票 16–19）**：16 动画沙箱 + RPC + nonce 资源托管 · 17 动画模板优先 + 容错降级 ·
+  18 Monaco + Pyodide Worker 隔离 · 19 编程模板 + 报错感知 + 分级求助
+- **闭环、安全与收口（票 20–24）**：20 个性化闭环 · 21 学段自动推断 + 建议条 ·
+  22 内容安全终审 + provider 边界脱敏 · 23 集成回归 + 四学段补齐 + 最终打包（**关卡 E**） ·
+  24 交付物：报告 / PPT / 演示视频
+
+> **「今天做什么」看 `docs/tickets/` + 各票 `Blocked by`；「规格是什么」看执行文档；「做完没有」看执行文档第 14 节验收。**
 > 切片只是执行文档的任务视图，**冲突时以执行文档为准**。
-> 历史任务卡可从 git 取回：`git show 8564e67:stages/S04-主Agent与Extension骨架.md`。
+> ⚠️ 若目录里仍是删码前的旧票（如「01-恢复代码与数据基线」「02-Pi 可加载性…」），**以本清单为准**：
+> 按新清单改写票文件与 `docs/tickets/README.md`，**绝不要执行旧票里的「恢复代码」步骤**。
 
 ## 3. 文档权威顺序（冲突时以此为准）
 
 | 文件 | 角色 |
 | --- | --- |
-| `项目执行文档.md` | **唯一权威执行文档 v2.0**（范围、契约、DDL、15 天排期、执行纪律、验收、演示脚本、风险表）。开发时**先查这一份**。Pi 迁移已在本文件裁决完毕。 |
+| `项目执行文档.md` | **唯一权威执行文档 v3.0（从零重建版：混合后端 + IPC-only）**（范围、契约、DDL、15 天排期、执行纪律、验收、演示脚本、风险表）。开发时**先查这一份**。Pi 迁移与混合后端四条边界已在本文件裁决完毕（§0.2 / §13.3）。 |
 | `docs/业务陷阱清单.md` | 各模块**领域陷阱与业务验收口径**（与编排框架无关）。写代码时**最容易漏掉**，动手前扫一眼。 |
+| `docs/tickets/` | 任务切片（一票一文件 + 索引 README），**只是执行文档的任务视图**，冲突以执行文档为准。 |
+| `docs/agents/` | 工程技能约定：tracker 路径、triage 标签、领域文档消费方式。 |
 | `docs/研判文档PiAgent.md` | Pi 迁移提案（含核实批注）。已归档，**含 6 项未决分叉的原始陈述**；执行文档第 13.3 节已裁决。**不要再照它实现。** |
 | `docs/研判文档Deepseek.md` | 数据层、RAG、教育适配的设计依据。编排部分已被执行文档取代。 |
 | `docs/项目简介.md` | 赛题原文与评分标准，需求边界以此为准。 |
 | `docs/研判文档Qwen3.7.md` | 早期研判，**部分结论已被取代**。仅背景参考，不要照它实现。 |
 
 **执行文档相对研判文档的关键裁剪**（**不要「恢复」这些，是有意为之**）：
-编排改用 **Pi Agent SDK（TypeScript，嵌入 Electron 主进程）**，但 **Python sidecar 保留**为数据/RAG/嵌入服务；
+编排改用 **Pi Agent SDK（TypeScript，嵌入 Electron 主进程）**，但 **Python sidecar 保留**为数据 / RAG / 嵌入 / 判分 / 学习记录服务；
 嵌入维持 **fastembed bge-small-zh-v1.5（移除 Ollama/torch）**；契约维持 **pydantic 唯一来源**；
 动画维持「模板优先 + 生成补充」；检索加 FTS5 + numpy 兜底；语音降为 P2；
 学段改为 **显式选择为主 + 自动推断为辅**。详见执行文档第 0 节与第 13 节。
+**混合后端（Python + TS）是刻意取舍，不是半成品**——不要为「统一语言」把编排挪回 Python 或把数据挪进 TS。
+
+> **决策与踩坑记录在 `docs/report-material/`（README.md / decisions.md / pitfalls.md，已建立）**，编号从 D-001 / P-001 起。
+> 执行文档第 0.4 节引用的 **D-001 / D-002 / D-003 / D-009 / D-010 均已在 `decisions.md` 对号入座**：
+> 需要依据时查该文件，**不要从 git 取旧素材**。
 
 ## 4. 已锁定的技术选型与硬约束
 
 不要擅自替换以下选型，除非用户明确要求：
 
 - 部署形态：**Electron 桌面壳 + Python 后端 sidecar**，全本地化，不做服务器部署。
+- **后端混合架构（刻意的）**：**Python 做数据 / 检索 / 嵌入 / 判分 / 学习记录，TypeScript 做编排 / LLM / Prompt / Tool / 事件映射**，
+  两端只经**冻结契约**通信。四条硬边界见第 5 节开头，**违反任一条即为架构事故**。
 - 进程模型：**双进程 + 主进程内嵌 Agent 运行时**。
-  - **Electron 主进程**：UI 壳 + sidecar 生命周期 + **Pi Agent 编排**（`@earendil-works/pi-coding-agent`）。
-  - **Python sidecar**：数据 / RAG / 嵌入 / 学习记录（**无编排、无 LLM 调用**）。
+  - **Electron 主进程**：UI 壳 + sidecar 生命周期 + **Pi Agent 编排**（`@earendil-works/pi-coding-agent`）+ sidecar 的唯一 HTTP 客户端。
+  - **Python sidecar**：数据 / RAG / 嵌入 / 判分 / 学习记录（**无编排、无 LLM 调用**）。
   - 二者经 `127.0.0.1` HTTP 通信（随机 token 鉴权）。
-  - **渲染进程 ↔ 主进程**：**IPC 事件流**（`ipcRenderer.on` / `webContents.send`），沿用原 6 事件词表。
+  - **渲染进程 ↔ 主进程**：**IPC 事件流**（`ipcMain` / `webContents.send` ↔ `ipcRenderer.on`），6 事件词表冻结。
+  - **渲染进程不直连 sidecar**：渲染进程只走 IPC 白名单，**token 永不进入渲染进程**。
 - 编排：**Pi Agent SDK**（**锁 `^0.85.1`**，0.85.0 在 Electron 里会崩）。主 Agent 由 LLM **自主选 Tool** 路由
   （**不设 `intent` 字段**），能力经 `pi.registerTool()` 暴露，共 6 个 Extension（动画/编程/练习/画像/学段/学习记录）。
   **不用 LangGraph，不用 `langgraph-checkpoint-sqlite`，不用 `SqliteSaver`。**
+  **传输层是 IPC：本项目从零实现，永不写 SSE / `EventSource`。**
 - 前端（`desktop/`）：**Electron 44 + electron-vite 5 + vite 7 + Vue 3 + Pinia 4 + TypeScript 5.9（strict）**，
   对话优先布局，内联卡片 + 展开/全屏。
   **Electron 侧不得引入任何原生数据库模块**（刻意的风险隔离）——**Pi 迁移不影响此约束**。
   ⚠️ **不要升 vite 8**（`electron-vite@5` 的 peer 不收）、**不要升 TS 7**（`openapi-typescript` peer 为 `^5.x`）。
 - 后端（`server/`）：**Python 3.12（uv 锁定）+ FastAPI + uvicorn + pydantic v2**。
-- 契约：**pydantic 模型是唯一契约来源** → FastAPI 自动产出 OpenAPI → `openapi-typescript` 生成前端 TS 类型。
+  契约文件是 **`server/app/contracts.py`**；UTF-8 stdio 强制在 **`server/app/console.py`**。
+- 契约：**pydantic 模型是唯一契约来源**（`server/app/contracts.py`）→ FastAPI 自动产出 OpenAPI →
+  `openapi-typescript` 生成前端 TS 类型。
   **Pi Tool 参数用 TypeBox `TSchema` 声明，必须与 pydantic 模型做一致性断言**（防静默漂移）。
 - 数据（**三处分离**）：
   - `kb.sqlite`（全局只读）：教材 chunk、embedding、依赖图、题库。
-  - `learning.db`（原 `student-<id>.sqlite`，每人一份）：画像、掌握度、学习历史、进度、学段信号与轨迹。
+  - `learning.db`（每人一份）：画像、掌握度、学习历史、进度、学段信号与轨迹。
   - **Pi JSONL 会话树**（每人一份）：对话历史、工具调用记录、分支。
   - **必须显式配置 Pi 的 `agentDir` / `sessionDir` 落到 `students/<id>/pi-agent/`**，
     否则会写进用户全局 `~/.pi/agent/`，造成跨学生数据混放（合规硬伤）。**SQLite 不存对话正文。**
@@ -126,7 +150,37 @@ Pi 的 `esbuild` 原生依赖能否在 Electron 打包后加载、Electron 内�
 - 范围裁剪：核心只做 4 种交互（对话问答、动画讲解、编程环境、游戏化练习）；**绘本生成、多模态教学资源推荐明确砍掉**。
   **不引入 `pi-subagents`**（非官方第三方包；Pi 官方哲学即「No sub-agents」），SubAgent 用自有 Extension 实现。
 
+### ★ 关键重命名表（旧文档 / 旧票里的名字一律以下列新名为准）
+
+| 旧名（历史文档中出现） | 新名（以新名为准） |
+| --- | --- |
+| `server/app/models.py` | **`server/app/contracts.py`**（pydantic 唯一契约来源） |
+| `server/app/encoding.py` | **`server/app/console.py`**（UTF-8 stdio 强制） |
+| `server/app/sse.py` | **删除**（本项目不存在 SSE，不要重建） |
+| `desktop/src/main/sidecar-logic.ts` | **`desktop/src/main/sidecar/protocol.ts`**（纯逻辑，可单测） |
+| `desktop/src/main/sidecar.ts` | **`desktop/src/main/sidecar/manager.ts`**（进程生命周期） |
+| `desktop/src/main/agent/stream.ts` | **`desktop/src/main/agent/events.ts`**（事件映射） |
+| `desktop/src/renderer/src/api/sse-parser.ts` | **`desktop/src/renderer/src/api/events.ts`**（IPC 事件解帧） |
+
+**新增（无旧名）**：`desktop/src/main/bridge/client.ts`（唯一的 sidecar HTTP 客户端）、
+`desktop/src/main/ipc/channels.ts`（IPC 通道名单一来源）、`desktop/src/shared/ipc-events.ts`（6 事件 TS 类型）。
+
+> **Tool 名与 6 事件名不变**——它们是**契约**而非命名，改名会同时打断 Python、Pi 与前端三方。若文档里出现旧文件名，按上表直呼新名。
+
 ## 5. 架构边界与层规则（改动时必须遵守）
+
+**★ 混合后端四条硬边界（动手前先看，违反任一条即为架构事故）**
+
+- **数据域 → 只在 Python**：`kb.sqlite` / `learning.db` 的读写、检索与四级降级链、嵌入与向量索引、判分规则、
+  学习记录落库，全部在 `server/`。**TS 侧不得读写 SQLite、不得自己拼 SQL、不得自己算向量**。
+  降级链必须在 Python **一次调用内**走完，TS 只读结果里的 `degraded: "vector"|"cloud"|"fts"|"outline"` 并原样展示。
+- **编排域 → 只在 TypeScript**：主 Agent 编排、路由、System Prompt、Tool 定义与注册、6 事件映射、Pi 会话管理，
+  全部在 `desktop/src/main/`。**Python 侧不得调用任何 LLM**，**不得安装 langgraph / langchain**（编排类库一概不装）。
+- **契约面 → 只走冻结契约**：跨语言交换一律 pydantic（`server/app/contracts.py`）→ OpenAPI → 生成 TS；
+  **禁止手写 TS 接口兜底、禁止临时加松散字段**。
+- **执行面 → 只在渲染进程**：学生代码只在渲染进程的 **Pyodide Worker** 执行，**绝不在主进程**（也不能落到 Python 进程）。
+
+以下为原有层规则：
 
 1. **学段以显式选择为权威**（前端按钮随请求传入），主 Agent 经 `before_agent_start` 注入；
    **自动推断只写「建议」，不直接改**，须学生确认。SubAgent 不得自行推断学段。
@@ -138,7 +192,7 @@ Pi 的 `esbuild` 原生依赖能否在 Electron 打包后加载、Electron 内�
 4. **RAG 检索严格按学段隔离**，允许向上兼容但必须显式标注 `compat`。
    学段过滤**必须写在 SQL 层**（不能只在应用层筛，否则早被 KNN top-k 截断）。
    **四级降级链（vector → cloud → FTS5 → 依赖图/大纲）必须在 Python 侧一次调用内完成**，
-   不要让编排层感知降级；结果带 `degraded: "vector"|"cloud"|"fts"|"outline"` 供轨迹图展示。
+   不要让编排层感知降级；结果带 `degraded` 字段供轨迹图展示。
 5. **内容安全只做后端审核**，采用「流式输出 + 生成结束后整段终审」，违规则撤回并替换为安全提示（`blocked.safeText`）。
 6. 知识点依赖图**同时**服务于推荐路径规划与检索上下文扩展，两个用途都要保留；导入阶段用 DFS 检测环。
 7. 沙箱隔离是硬要求：动画在 sandboxed iframe（**禁止加 `allow-same-origin`**），Pyodide 在独立 Worker，
@@ -159,20 +213,26 @@ Pi 的 `esbuild` 原生依赖能否在 Electron 打包后加载、Electron 内�
 
 ## 6. 编码约定
 
-- **接口先行**：先冻结 pydantic 契约（含 6 个事件枚举），各模块再并行实现；
+- **接口先行**：先冻结 pydantic 契约（`server/app/contracts.py`，含 6 个事件枚举），各模块再并行实现；
   改了模型必须重跑 OpenAPI → TS 生成（`--check` 做字节比对），并跑 Tool TypeBox 一致性断言。
-- **事件词表固定 6 个**：`delta | citation | payload | blocked | done | error`。
-  **传输层已从 SSE 改为 IPC，但词表一字不改**，前端解析/分发语义可复用。
-  **`EventSource` 断言保留在架构守卫测试里**，防止有人回退到 SSE 时又踩一次鉴权 header 的坑。
-- **事件来源映射（D4 依据）**：`delta`←`message_update`；`citation`←`rag_search` 结果；
+- **事件词表固定 6 个**：`delta | citation | payload | blocked | done | error`，**冻结**。
+  传输层是 **IPC 事件流**（主进程 `webContents.send` → preload 白名单 → 渲染进程 `ipcRenderer.on`）；
+  **本项目从零实现，永不写 SSE / `EventSource`**。
+  **守卫测试写成正向断言**：「聊天事件流必须经 preload 白名单 IPC 通道送达」（通道名取自
+  `desktop/src/main/ipc/channels.ts`，事件名必须是 6 词表之一，payload 结构走生成类型）。
+- **架构守卫（一律正向断言，见票 04 / 09 / 18）**：
+  ① 聊天事件流必须走 preload 白名单 IPC 通道；② 学生代码执行必须经 IPC 落到渲染进程 Pyodide Worker；
+  ③ Pi 会话文件必须落在 `students/<id>/` 内。**不要写成「禁止某历史实现」式断言**。
+- **事件来源映射（票 08 依据）**：`delta`←`message_update`；`citation`←`rag_search` 结果；
   `payload`←`tool_execution_end`（按 Tool 名映射 `kind`）；`blocked`←安全终审；
-  `done`←`agent_end`；`error`←provider/Tool 异常或降级。
+  `done`←`agent_end`；`error`←provider/Tool 异常或降级。映射实现在 `desktop/src/main/agent/events.ts`。
 - **Tool 名 → 事件 `kind` 映射冻结**（新增 Tool 必须同步登记）：
   `generate_animation→animation`；`get_code_template`/`get_coding_hint`/`evaluate_code→coding`；
   `generate_quiz`/`submit_quiz`/`generate_variants→quiz`。
 - SubAgent 输出用统一 pydantic Payload（`AnimationPayload` / `CodeTemplate` / `CodingHint` / `CodeEvaluation` / `QuizPayload` / `QuizResult`），不要用松散 dict。
   **不要引入 `ModuleResult<T>` / `ModuleError` 那套 `{success, error}` 包装**——失败统一走 `error` 事件（带 `degraded`），否则前端要处理两套失败形态。
-- **`QuizQuestion` 发给前端时绝不能带 `answer`**（答案泄漏），判分只走后端。
+- **答案泄漏防护**：`QuizQuestion`（含 `answer`）**只留 Python 侧**，发给前端/TS 的一律是 **`QuizQuestionOut`（无 `answer`）**——
+  **两个模型都要在 `contracts.py` 显式声明**，不要靠 `exclude=True` 临时裁剪（执行文档 §6.3）；判分只走后端 `/api/quiz/grade`。
 - 字段命名：Python `snake_case`，出参统一转 `camelCase`（pydantic alias），前端统一 camelCase。**只做一次约定，不要两边混用。**
 - 检索 chunk 元数据 schema 固定：`chunk_id, text, embedding, grade_level, chapter_title, section_title, knowledge_point, content_type, parent_chunk_id, token_count`；
   节级 chunk 控制 300–600 token，父子 chunk（小子块检索、命中回父块作上下文）。
@@ -183,14 +243,15 @@ Pi 的 `esbuild` 原生依赖能否在 Electron 打包后加载、Electron 内�
 
 ## 7. 开发与打包命令
 
-代码恢复后（第 0 节）才有意义：
+双端骨架建成后（票 01 起）逐步可用；**脚本统一放 `server/scripts/`，不要手敲 pyinstaller、不要在仓库根建脚本**：
 
 ```bash
-# ── 后端（数据/RAG/嵌入）──
+# ── 后端（数据/RAG/嵌入/判分/学习记录）──
 cd server
 uv sync
 uv run uvicorn app.main:app --reload --port 8756     # 开发用固定端口
-uv run python scripts/export_openapi.py              # 导出 OpenAPI → 生成 TS 类型
+uv run python scripts/fetch_embedding_model.py       # 联网获取 bge-small-zh-v1.5（约 90MB）
+uv run python scripts/export_openapi.py              # 导出 OpenAPI → 生成前端 TS 类型
 
 # 后端打包（--onedir，不用 onefile）——统一走脚本，不要手敲 pyinstaller
 uv run python scripts/build_server.py
@@ -200,15 +261,20 @@ cd desktop
 npm run dev            # electron-vite dev（会自动拉起 uv run 的 server）
 npm run typecheck      # vue-tsc --noEmit
 npm run build:win      # 打包 .exe（内嵌 server 产物 + Pi 运行时）
-npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、Pi 能否加载
+npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解包、Pi 能否加载
 ```
 
-**纪律**：关卡不过不进下一阶段；每天结束做一次 git 提交（写清「天次 + 产出」）；
-每完成一步跑一次 `npm run typecheck`（契约漂移的第一道防线，不要攒到最后修）。
+**纪律**：关卡不过不进下一阶段；每天结束做一次 git 提交（写清「票号 + 产出」）；
+每完成一步跑一次 `npm run typecheck`（契约漂移的第一道防线，不要攒到最后修）；
+**每加一个原生/数据依赖就重打一次包验证**（票 03 就是这个纪律的第一道关口）。
 
 ## 8. 已知陷阱
 
-### 8.1 基础设施（S01/S02 实测，仍然有效）
+> **以下均为已实测 / 已核实的结论：从第一个提交起就把它当作设计约束，不是待踩的坑。**
+> 8.1 来自删码前的实测（不因代码重建而失效，重写时照做）；
+> 8.2 来自 Pi 包内 grep 与官方 issue，多数尚未在打包产物里验证——**票 03 是它的总验证关口**。
+
+### 8.1 基础设施（实测结论，代码从零写也照此执行）
 
 - **Python 环境**：本机裸 `python`/`py` 指向已删除的 `D:\Code\PythonEvm`（残留注册项，报 `0x80070003`）；
   真实解释器为 `D:\Code\PythonEvm312\python.exe`(3.12.7)。**全程用 `uv` 锁定 Python 3.12**，文档只写 `uv run`，**不要去改注册表**。
@@ -216,7 +282,7 @@ npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、
   1. 源码运行态：spawn 时传 `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8` + `PYTHONUNBUFFERED=1`，所有文件读写显式 `encoding="utf-8"`。
   2. **打包态：上面这些 env 无效**——PyInstaller bootloader 设了 `Py_IgnoreEnvironmentFlag`，
      实测打包产物 `sys.flags.utf8_mode=0`、`sys.stdout.encoding='gbk'`。
-     **必须在 Python 层 `reconfigure(encoding="utf-8")`**（`server/app/encoding.py` 的 `install_utf8_stdio()`，在 `main.py` 最早期调用）。
+     **必须在 Python 层 `reconfigure(encoding="utf-8")`**（`server/app/console.py` 的 `install_utf8_stdio()`，在 `main.py` 最早期调用）。
   3. 不要试图只靠 env 解决打包态乱码——那条路是死的，会白花半天。
 - **PyInstaller 打包**：必须 `--onedir`（**不用 `--onefile`**，冷启动可达 10s+）；
   须 `--collect-all sqlite_vec --collect-all fastembed` + `--add-data resources`，否则运行期找不到 `.dll`/模型文件。
@@ -226,15 +292,17 @@ npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、
 - **sidecar 生命周期**：Python 绑 `127.0.0.1:0` 由系统分配端口，用 **stdout 单行 JSON** 握手
   （`{"event":"ready","port":…,"pid":…}`）；**stdout 只许输出这行 JSON**，日志全走 stderr。
   Electron 退出时必须杀进程树（Windows `taskkill /PID <pid> /T /F`），否则孤儿进程残留占端口。
-  另：`restart()` **不能复用 `stop()`**（`stop()` 会把 `shuttingDown` 置 true，导致之后崩溃不再自动重启）；
-  `onExit()` 会先把 `this.child` 置 null，**必须在置空前先取 pid**。
+  另两条设计陷阱（重写时避开）：`restart()` **不能复用 `stop()`**（`stop()` 会把 `shuttingDown` 置 true，
+  导致之后崩溃不再自动重启）；`onExit()` 会先把 `this.child` 置 null，**必须在置空前先取 pid**。
 - **stdio 管道分片**：Node 的 `data` 事件可能把握手 JSON 切成半行，必须缓冲到 `\n` 再 parse；
   非 JSON 行**只记日志、绝不当错误**。
 - **重打包 `WinError 5`**：上次验证留下的 sidecar 仍持有产物 `.pyd`/`.dll` 时，PyInstaller 清 `dist/` 会失败——
   打包前先 taskkill 自愈。
 - **UI 验收不要靠截图**：本机截图受前台窗口/DPI 影响，常截到别的窗口。用 CDP 读真实 DOM 做断言
   （`K12_DEBUG_PORT` 默认关闭，勿让分发包带调试入口）。报告用的展示性截图需确认窗口正确前置后当场核对。
-- **Starlette 中间件是洋葱结构**：最后 `add_middleware` 的在最外层。**CORS 必须最后加**，
+- **Starlette 中间件是洋葱结构**：最后 `add_middleware` 的在最外层。
+  **渲染进程不直连 sidecar，浏览器侧跨源那一整类故障在设计上消失**；但执行文档 §6.3 仍保留
+  **一段最小显式来源的 CORS 作纵深防御（禁止 `*`）**，所以顺序纪律照旧：CORS 必须**最后** `add_middleware`，
   否则鉴权提前 return 的 401 不带 `Access-Control-Allow-Origin`，浏览器会把 401 伪装成 `TypeError: Failed to fetch`。
 - **日志脱敏过滤器必须保留 `%s`/`%(name)s` 占位符**：无脑把 `record.msg` 擦成 `***` 会让
   `record.getMessage()` 抛 `TypeError: not all arguments converted during string formatting`。
@@ -255,12 +323,12 @@ npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、
   Monaco 需配 vite worker，**不配会在生产构建报错**；**任何 CDN 引用都会在断网演示时翻车**。
 - **弱网 / API 不可用**：需有 UI 优雅降级（`error.degraded`），不要假设 DeepSeek 一定可用。
 
-### 8.2 Pi Agent（v2 新增，**多数尚未实测，动手前先验**）
+### 8.2 Pi Agent（包内核实结论，**票 03 是总验证关口**）
 
 - **★ `esbuild` 原生依赖是头号打包风险**：Pi 包**没有 `./sdk` 子路径**，只能从包根导入，
   而包根会 evaluate CLI 的 `main.js`，拖入 `@earendil-works/chord` → **`esbuild`（约 10MB 原生二进制）**。
   Pi 官方 issue **#9286** 正是「在 Electron 里嵌入 SDK」时 `Cannot find package 'esbuild'`。
-  **处理**：`asarUnpack` 白名单 + 按架构分发 + 签名；**并在 D3 第一天就做 `build:unpack` 冒烟**。
+  **处理**：`asarUnpack` 白名单 + 按架构分发 + 签名；**票 03 就要做 `build:unpack` 冒烟**。
   **Plan B = 改用 Pi RPC 模式**（`pi --mode rpc` 作子进程，不 import SDK）。
 - **Node 版本（已解除，勿再当作阻塞项）**：Pi `0.85.1` 声明 `engines.node >= 22.19.0`；
   **Electron 44.4.1 内置 Node 24.21.0**（本机实测 `ELECTRON_RUN_AS_NODE=1 electron -v`），直接满足。
@@ -291,44 +359,43 @@ npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、
 - **`/resources/animation/*` 不能走 `X-Auth-Token`**（iframe 带不了自定义 header），
   改用**一次性 nonce**（绑定 student_id + kp_id + 有效期），并设 `Cache-Control: no-store`。
   **不允许做成无鉴权的公开路由。**
-- **工具调用轨迹导出**（D4 产出，服务 25% 设计分）：从 `tool_execution_start`/`tool_execution_end`/`tool_call`
+- **工具调用轨迹导出**（票 08 产出，服务 25% 设计分）：从 `tool_execution_start`/`tool_execution_end`/`tool_call`
   记录 `{turn, toolName, args摘要, ok, latencyMs, degraded}` → `docs/tool-trace.mmd`。
-  **替代原 LangGraph 的 `draw_mermaid()` 状态流转图**。
+  **这是「设计合理性」维度的核心证据**（取代已作废的状态流转图）。
 
 ## 9. Git / 远程仓库工作流
 
 - **origin**：`https://github.com/IceFireIcer/K12AgentProject.git`（**PRIVATE**，`gh` 以 `IceFireIcer` 登录），推送 `master`。
-- **提交信息风格**：`type(Stage): 中文摘要` + 正文分节列要点，例如
-  `feat(S00): 环境与依赖基线完成，新增任务切片文档`、`docs(v2): 编排迁移至 Pi Agent，执行文档重写为 v2.0`。
+- **提交信息风格**：`type(票号): 中文摘要` + 正文分节列要点，例如
+  `feat(票01): 双端脚手架与依赖基线完成`、`feat(票03): Pi 在打包产物中可加载，esbuild 解包验证通过`、
+  `docs(v2): 编排迁移至 Pi Agent，执行文档重写为 v2.0`。
 - **推送前必做**：确认无 `*.sqlite`（含未成年人学习记录隐私）、`resources/models/`（90MB 模型）、`.venv/`、`*.onnx` 被暂存。
   ⚠️ `.gitignore` 的**模式锚定坑**：含中间斜杠的 pattern 会被锚定到仓库根，写 `resources/models/` **匹配不到**
   `server/resources/models/`，必须用 `**/resources/models/`（此坑已实际踩到，90MB 模型险些入库）。
-- **不要提交**：`server/resources/models/`（随安装包分发）、`server/_data*/`、`config.json` / `.env`（含 API Key）、`logs/`。
+- **不要提交**：`server/resources/models/`（随安装包分发）、`server/_data*/`、`**/students/`（Pi 会话 JSONL / 学习记录，
+  若落在仓库内）、`config.json` / `.env`（含 API Key）、`logs/`、`dist/` / `out/`。
   `uv.lock` 与 `.python-version` **必须提交**（锁定依赖与解释器）。
 - **公开前需过一遍**：`AGENTS.md`、`项目执行文档.md` 含完整架构决策与排期（含「砍单」叙事）。
 - **换行符**：`.gitattributes` 统一 LF（`* text=auto eol=lf`），中文文档保证 LF 存储。
 
 ## 10. 报告素材纪律
 
-**每天留 30 分钟**把当天的截图 / 关键决策 / 踩坑与解决写进 `docs/report-material/`：
-`decisions.md`（决策→理由→被否决方案，格式参考已有 D-001~D-009）、
-`pitfalls.md`（现象→根因→解决→报告用法，格式参考已有 P-001~P-008）。
+`docs/report-material/` **已建立**（`README.md` / `decisions.md`（D-001…D-017）/ `pitfalls.md`（P-001…P-034））：
+**决策与踩坑编号从 D-001 / P-001 起**——**不要引用任何已删除的文件、不要从 git 取旧素材**。
+`decisions.md` 是决策正文的唯一去处（执行文档只引用编号，见其 §0.4）。
+
+**每天留 30 分钟**把当天的截图 / 关键决策 / 踩坑与解决写进去：
+`decisions.md`（决策 → 理由 → 被否决方案）、
+`pitfalls.md`（现象 → 根因 → 解决 → 报告用法；可直接引用第 8 节结论，但**必须补上你复现/验证的过程记录**）。
 **素材不攒，第 15 天写不出报告。**
 
-> 该目录已于提交 `ebfaf13` 删除（用户确认保持删除）。**旧素材**用
-> `git checkout 7f158c8 -- docs/report-material` 取回；**新素材**需先建目录，否则本纪律名存实亡。
-> 另：`docs/graph-smoke.mmd` 已不是架构证据（LangGraph 状态图作废），
-> 「设计合理性」维度改由**工具调用轨迹图**（`docs/tool-trace.mmd`，D4 产出）承担，不要贴旧图进报告。
+> 「设计合理性」维度的架构证据是**工具调用轨迹图**（`docs/tool-trace.mmd`，票 08 产出），
+> 不要贴任何历史状态流转图。
 
-> ⚠️ **决策编号目前指向已删除的文件**：`项目执行文档.md` 第 0 节引用了 `D-001` / `D-002` / `D-004`
-> （嵌入模型、契约来源、动画策略的依据），第 18 节第 6 步要求「落 D-008」。
-> 这些决策的**正文在被删除的 `docs/report-material/decisions.md` 里，当前工作区不可读**。
-> **需要依据时先取回**：`git show 7f158c8:docs/report-material/decisions.md`。
-> 恢复报告素材目录后此断链自动消失；若长期不恢复，应把这些决策的结论就地摘入执行文档对应小节。
-
-**v2 期间必记的两类素材**（答辩直接用）：
+**重建期间必记的三类素材**（答辩直接用）：
 1. **Pi 迁移的真实代价与解决过程**（esbuild 打包、Node 版本、导入图）——主动讲代价比被问出来可信。
 2. **为什么保留 Python sidecar 而不是全单进程**——这是主动权衡，不是妥协。
+3. **混合后端的边界如何防止两套实现**——数据/编排各只有一处实现，怎么用契约 + 守卫测试挡住「两边各写一遍」的漂移。
 
 **演示前必做演练**（每条都是现场翻车点）：断网演练、**卸载 Ollama 演练**、
 冷启动演练、重启后数据延续演练、**★ 打包产物冷启动演练**（Pi 的 esbuild 加载是最可能翻车的一步）。
@@ -342,12 +409,15 @@ npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、
 
 ### Issue tracker
 
-工作切片以本地 markdown 存放于 `docs/tickets/issues/`（一票一文件，按依赖顺序编号），不使用外部 tracker。
+工作切片以本地 markdown 存放于 `docs/tickets/issues/`（一票一文件，按依赖顺序编号；当前 24 票清单见第 2 节），
+不使用外部 tracker；约定见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
 
-沿用五个规范角色的默认词表（`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`），记录在各票 `Status:` 行。
+沿用五个规范角色的默认词表（`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`），
+记录在各票 `Status:` 行；约定见 `docs/agents/triage-labels.md`。
 
 ### Domain docs
 
-单上下文（single-context）：领域语言与决策以 `项目执行文档.md` + `docs/` 为准；`CONTEXT.md` 尚未创建，缺失时静默跳过，需要时由 `/domain-modeling` 惰性生成。
+单上下文（single-context）：领域语言与决策以 `项目执行文档.md` + `docs/` 为准（消费方式见 `docs/agents/domain.md`）；
+`CONTEXT.md` 尚未创建，缺失时静默跳过，需要时由 `/domain-modeling` 惰性生成。
