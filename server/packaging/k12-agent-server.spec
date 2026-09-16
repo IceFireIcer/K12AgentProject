@@ -27,6 +27,31 @@ if not (ROOT / "app" / "main.py").exists():
 print(f"[spec] 项目根目录 = {ROOT}")
 
 # ---------------------------------------------------------------------------
+# ⓪ 随包只读知识库：**路径的唯一来源在 app/config.py**
+#
+# 这里刻意 import 配置而不是再写一份 "resources/kb/kb.sqlite"：运行期
+# （app/rag/retriever.default_kb_path）与构建期（本文件）必须指向**同一个常量**，
+# 否则「打包带了库但检索去别处找」这类缺陷会静默复现 —— 就是关卡 E 发现的那个。
+# ---------------------------------------------------------------------------
+import sys as _sys  # noqa: E402
+
+if str(ROOT) not in _sys.path:
+    _sys.path.insert(0, str(ROOT))
+from app.config import BUNDLED_KB_RELATIVE, BUNDLED_KB_STAGING  # noqa: E402
+
+if not BUNDLED_KB_STAGING.exists():
+    # ★ **打包直接失败**，而不是打出一个「没有知识库」的包。
+    #   少了这一条，产物能打成功、能启动、/health 也正常，只是新机器上检索
+    #   一路降级到 outline（0 命中）—— 缺陷会一路漂到交付。
+    raise SystemExit(
+        f"[spec][FATAL] 随包知识库不存在：{BUNDLED_KB_STAGING}\n"
+        "  先跑 uv run python scripts/build_server.py（它会先建库再打包）。"
+    )
+if BUNDLED_KB_STAGING.stat().st_size <= 0:
+    raise SystemExit(f"[spec][FATAL] 随包知识库为空文件：{BUNDLED_KB_STAGING}")
+print(f"[spec] 随包知识库 = {BUNDLED_KB_STAGING} ({BUNDLED_KB_STAGING.stat().st_size / 1048576:.1f} MB)")
+
+# ---------------------------------------------------------------------------
 # ① 先收集第三方包的全部内容（.dll、元数据、ONNX Runtime 供应商库、子模块）
 #
 # ★ 必须在 Analysis 之前做：Analysis 接受 2 元组 (src, dest)，而 a.datas 产出后是
@@ -49,15 +74,29 @@ for _pkg in ("sqlite_vec", "fastembed", "onnxruntime"):
         print(f"[spec][WARN] collect_all('{_pkg}') 失败：{_exc}")
 
 # ---------------------------------------------------------------------------
-# ② 数据文件：随包分发的只读资源（模型、题库、动画模板、敏感词库…）
+# ② 数据文件：随包分发的只读资源（模型、知识库、教材、题库、动画模板、敏感词库…）
+#
+# ★ 新增数据资产时**必须**在这里登记 —— 「漏登记」的表现是「能打包、能启动、
+#   功能静默降级」，不是报错。文件清单见 server/resources/README.md。
 # ---------------------------------------------------------------------------
 datas = [
     # fastembed 模型（约 90MB ONNX）。漏掉这项 → 打包后运行期必然「找不到模型」。
     # 注意：模型文件不入 git，缺失时这里只是把空目录打进去，
     # 表现是 /health 的 embedder_ready=false（降级链仍可用），不会崩。
     (str(ROOT / "resources"), "resources"),
-    *_pkg_datas,
+    # 教材 Markdown（约 200KB）：**同时随包分发**，让用户在没网/没源码时也能重建自己的库。
+    # 它是「重建能力」的载体，不是首跑的前提（首跑用下面那个只读 kb）。
+    (str(ROOT / "knowledge"), "knowledge"),
 ]
+
+# ★ 随包只读知识库：**文件名必须保持 "kb.sqlite" 且落到 resources/kb/**，
+#   因为运行期 app/config.py 的 BUNDLED_KB_RELATIVE 就是这么找它的。
+#   PyInstaller 的 datas 目标是**文件而非目录**（file → (dest_dir, filename)），
+#   这里写成显式目标而不是整个目录，顺带杜绝把 build/ 里别的中间产物带进包。
+datas.append((str(BUNDLED_KB_STAGING), str(BUNDLED_KB_RELATIVE.parent)))
+
+datas += _pkg_datas
+
 
 # ---------------------------------------------------------------------------
 # ③ 隐式导入：只在运行期动态加载、静态分析扫不到的模块

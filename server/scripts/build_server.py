@@ -5,7 +5,7 @@
 用法::
 
     cd server
-    uv run python scripts/build_server.py            # 打包 + 自检
+    uv run python scripts/build_server.py            # 建库 + 打包 + 自检
     uv run python scripts/build_server.py --verify   # 只自检已有产物
 
 产物：``server/dist/k12-agent-server/k12-agent-server.exe``
@@ -17,6 +17,15 @@
 所以这里打完立刻起一次**真进程**，并且是**在「没有 Python 的环境」下起**：
 PATH 只留 ``System32``、清掉 ``PYTHONHOME`` / ``PYTHONPATH``、不带 venv。
 终端用户不需要装 Python —— 这条必须由这个脚本证明，而不是靠相信。
+
+★ **还有第四件翻车的事（关卡 E 复验发现）**：产物**没带 ``kb.sqlite``**。
+  ``resources/models`` 带了、``/health`` 的 ``embedderReady=true`` 也正常，
+  但新机器 ``userData`` 是空的 → 检索一路降级到 ``outline``（**0 命中**），
+  知识库实际上是空的，且**不会报任何错**。所以本脚本现在：
+  ① 打包前**先建库**（产物化，不入 git）；
+  ② ``--verify`` **断言打包产物里真的有一份可用的 kb**（能只读打开、chunk/kp 计数 > 0、
+     写不进、且从空 data-dir 起服务时检索能走通 ``degraded="vector"``）。
+  这一步就是当初能拦住该缺陷的检查。
 """
 
 from __future__ import annotations
@@ -24,6 +33,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -41,6 +51,11 @@ DIST_DIR = ROOT / "dist" / "k12-agent-server"
 EXE = DIST_DIR / "k12-agent-server.exe"
 
 STARTUP_TIMEOUT_S = 60.0
+
+# kb 自检的期望计数下限（**只断言 > 0**：内容会随教材演进增删，写死具体数字必然过几天就红）
+MIN_KP = 1
+MIN_CHUNK = 1
+MIN_VEC = 1
 
 
 def dir_size_mb(path: Path) -> float:
@@ -102,6 +117,7 @@ def run_build() -> None:
         sys.exit(f"[FATAL] 找不到 spec 文件：{SPEC}")
 
     kill_stale_sidecar()
+    build_bundled_kb()
 
     cmd = [
         sys.executable,
@@ -124,11 +140,222 @@ def run_build() -> None:
     print(f"[build] 完成，耗时 {time.time() - started:.1f}s")
 
 
+# --------------------------------------------------------------------------- #
+# 随包只读知识库：建库 → 归一化 → 交给 spec
+# --------------------------------------------------------------------------- #
+def build_bundled_kb() -> Path:
+    """建出随包只读 kb 并落到 :data:`BUNDLED_KB_STAGING`（spec 会把它收进产物）。
+
+    **为什么是「构建产出」而不是「提交二进制」**：``.gitignore`` 里有 ``*.sqlite``，
+    这条**保持不动** —— 提交一个二进制库既不可评审（diff 是二进制）又会随教材漂移，
+    正确做法是打包时**新鲜建一份**。这样「库」永远跟当前 ``knowledge/`` 一致，
+    不存在「教材改了但忘了重建库」的静默错配。
+
+    幂等性由 ``build_kb.build`` 内部的 ``clear_knowledge_tables`` 保证（先清再写），
+    这里额外把暂存位删掉重建，避免上一次的残留被误当成功产物。
+
+    ★ **归一化到 rollback journal（``journal_mode=delete``）**：
+    运行期以 ``mode=ro`` 打开，而安装目录（``Program Files``）对普通用户**不可写**。
+    WAL 库在只读打开时需要在同目录建 ``-shm``/``-wal``，建不出来就
+    ``unable to open database file`` —— 实测过，**换台机器就是「知识库打不开」**。
+    只读资产不需要 WAL，切掉它反而更稳。
+    """
+    sys.path.insert(0, str(ROOT))
+    from app.config import BUNDLED_KB_STAGING  # noqa: PLC0415
+    import build_kb  # noqa: PLC0415  （scripts/build_kb.py）
+
+    print(f"[kb] 建库 → {BUNDLED_KB_STAGING}")
+    BUNDLED_KB_STAGING.parent.mkdir(parents=True, exist_ok=True)
+    # 幂等前提：清掉上一次的产物（含可能的 WAL 边车），避免旧行被当成新结果
+    for stale in BUNDLED_KB_STAGING.parent.glob(BUNDLED_KB_STAGING.name + "*"):
+        stale.unlink()
+
+    started = time.time()
+    # 显式落暂存位：不复制 <data-dir> 的那份，免得把开发期的脏状态带进产物
+    result = build_kb.build(kb_path=BUNDLED_KB_STAGING, print_report=True)
+    stats = result.stats
+    if stats.get("chunk", 0) <= 0 or stats.get("kp", 0) <= 0:
+        sys.exit(f"[FATAL] 建库结果为空：{BUNDLED_KB_STAGING}（chunk={stats.get('chunk')} kp={stats.get('kp')}）")
+    print(
+        f"[kb] 完成：知识点 {stats.get('kp', 0)} / 父块 {stats.get('parent_chunk', 0)} / "
+        f"子块 {stats.get('child_chunk', 0)} / 向量 {stats.get('chunk_vec', 0)} "
+        f"（耗时 {time.time() - started:.1f}s）"
+    )
+    normalize_shipped_kb(BUNDLED_KB_STAGING)
+    return BUNDLED_KB_STAGING
+
+
+def normalize_shipped_kb(kb_path: Path) -> None:
+    """把待分发的库压成单文件 rollback-journal 形态（见 :func:`build_bundled_kb`）。"""
+    conn = sqlite3.connect(str(kb_path))
+    try:
+        # VACUUM：把 WAL 内容并回主库，顺带紧凑文件（只读资产没必要留膨胀空间）
+        conn.execute("VACUUM")
+        mode = conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        conn.commit()
+    finally:
+        conn.close()
+    if str(mode).lower() != "delete":
+        sys.exit(f"[FATAL] 无法把随包库切成 rollback journal：journal_mode={mode}")
+    leftovers = [p.name for p in kb_path.parent.iterdir() if p.name.startswith(kb_path.name + "-")]
+    if leftovers:
+        sys.exit(f"[FATAL] 随包库目录仍有 WAL 边车文件：{leftovers}（只读资产不允许带边车）")
+
+
+def packaged_kb_path() -> Path | None:
+    """定位**打包产物内**的随包 kb（``_internal/resources/kb/kb.sqlite``）。
+
+    不写死 ``_internal``：PyInstaller 的 onedir 布局换版本可能变，按文件名搜更稳。
+    """
+    if not DIST_DIR.exists():
+        return None
+    candidates = [
+        p
+        for p in DIST_DIR.rglob("kb.sqlite")
+        # 排除 _data* 之类的运行期残留（只认产物目录里的那一份）
+        if "_data" not in p.parts
+    ]
+    if not candidates:
+        return None
+    # 优先选 resources/kb/ 下的那份（与运行期解析一致）
+    for p in candidates:
+        if p.parent.name == "kb" and p.parent.parent.name == "resources":
+            return p
+    return candidates[0]
+
+
+def verify_packaged_kb() -> Path | None:
+    """★ **本脚本的核心新断言**：产物里必须真有一份「能用」的 kb。
+
+    「文件存在」是不够的 —— 空库、只有表没数据、维度不对都能通过存在性检查，
+    但学生用起来就是 0 命中。所以这里**真的只读打开并数行**：
+
+    1. 文件存在且非空；
+    2. 能以 ``mode=ro`` 打开（复用运行期同一条路径 ``connect(readonly=True)``）；
+    3. ``kp`` / ``chunk`` / ``chunk_vec`` 计数 **> 0**；
+    4. **写不进去**（``DELETE`` 必须抛 ``readonly``）—— 随包资产不允许被就地改写。
+    """
+    kb = packaged_kb_path()
+    if kb is None:
+        smoke_api.check(
+            "★ 产物内包含随包 kb.sqlite",
+            False,
+            f"在 {DIST_DIR} 下搜不到 kb.sqlite —— 新机器首跑检索会一路降级到 outline（0 命中）",
+        )
+        return None
+
+    size_mb = kb.stat().st_size / 1048576
+    smoke_api.check("★ 产物内包含随包 kb.sqlite", True, f"{kb}（{size_mb:.1f} MB）")
+
+    sys.path.insert(0, str(ROOT))
+    from app.store.connections import connect, load_sqlite_vec, vec_available  # noqa: PLC0415
+
+    try:
+        conn = connect(kb, readonly=True)
+    except Exception as exc:  # noqa: BLE001
+        smoke_api.check("★ 随包 kb 能以只读方式打开", False, f"{type(exc).__name__}: {exc}")
+        return kb
+
+    try:
+        # ★ 数 ``chunk_vec`` 必须先加载 sqlite-vec：``vec0`` 是虚拟表模块，
+        #   不加载的话连 ``SELECT COUNT(*)`` 都会 ``no such module: vec0`` ——
+        #   那种「读不出来」很像「表是空的」，会把人往错方向带。
+        vec_ok = False
+        try:
+            load_sqlite_vec(conn)
+            vec_ok = vec_available(conn)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [warn] 校验进程加载 sqlite-vec 失败：{exc}")
+
+        counts: dict[str, int] = {}
+        for table in ("kp", "chunk", "chunk_vec"):
+            try:
+                counts[table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            except sqlite3.Error as exc:
+                counts[table] = -1
+                print(f"  [warn] 数 {table} 失败：{exc}")
+
+        smoke_api.check("★ 随包 kb 能以只读方式打开", True, f"共 {counts} 行")
+        smoke_api.check("★ 随包 kb 带 sqlite-vec 能力", vec_ok, f"vec_available={vec_ok}")
+        smoke_api.check(
+            f"★ 随包 kb 有内容：kp >= {MIN_KP}", counts.get("kp", 0) >= MIN_KP,
+            f"kp={counts.get('kp')}",
+        )
+        smoke_api.check(
+            f"★ 随包 kb 有内容：chunk >= {MIN_CHUNK}", counts.get("chunk", 0) >= MIN_CHUNK,
+            f"chunk={counts.get('chunk')}",
+        )
+        smoke_api.check(
+            f"★ 随包 kb 带向量：chunk_vec >= {MIN_VEC}", counts.get("chunk_vec", 0) >= MIN_VEC,
+            f"chunk_vec={counts.get('chunk_vec')}",
+        )
+        # 只读语义：随包资产**绝不允许被就地改写**（写不进去才算合格）
+        try:
+            conn.execute("DELETE FROM kp")
+            smoke_api.check("★ 随包 kb 拒绝写入（只读资产）", False, "DELETE 竟然成功了")
+        except sqlite3.Error as exc:
+            smoke_api.check(
+                "★ 随包 kb 拒绝写入（只读资产）", True, f"{type(exc).__name__}: {exc}"
+            )
+    finally:
+        conn.close()
+    return kb
+
+
+def _check_packaged_rag(base: str, token: str) -> None:
+    """对**打包产物**（空 data-dir）打一次真检索，要求落在 ``vector`` 且有命中。
+
+    ★ 这是「关卡 E 缺陷」的**行为级**断言：只看文件存在会漏掉「库是空的 /
+    路径没解析到 / 维度不对 / 模型没随包」这几类，只有真检索一次才覆盖得到。
+    演示现场的关键句也能由它背书：「断网 + 空用户目录，首跑就能检索到教材」。
+    """
+    import httpx  # noqa: PLC0415
+
+    query, grade = "什么是循环", "junior"
+    try:
+        with httpx.Client(base_url=base, timeout=120.0) as client:
+            response = client.post(
+                "/api/rag/search",
+                headers={"X-Auth-Token": token},
+                json={"query": query, "gradeLevel": grade, "topK": 3},
+            )
+    except Exception as exc:  # noqa: BLE001
+        smoke_api.check("★ 空 data-dir 下能真检索（随包 kb）", False, f"请求异常：{exc}")
+        return
+
+    if response.status_code != 200:
+        smoke_api.check(
+            "★ 空 data-dir 下能真检索（随包 kb）", False, f"HTTP {response.status_code}: {response.text[:200]}"
+        )
+        return
+
+    body = response.json()
+    hits = body.get("hits") or []
+    print(
+        f"  [rag] POST /api/rag/search query=\"{query}\" grade={grade} → "
+        f"degraded={body.get('degraded')} hits={len(hits)}"
+    )
+    smoke_api.check(
+        "★ 空 data-dir 下检索命中 > 0（知识库随包分发到位）",
+        len(hits) > 0,
+        f"degraded={body.get('degraded')} hits={len(hits)}",
+    )
+    smoke_api.check(
+        '★ 空 data-dir 下走的是主路径 degraded="vector"',
+        body.get("degraded") == "vector",
+        f"实际 degraded={body.get('degraded')}",
+    )
+
+
 def verify() -> bool:
     """在「没有 Python 的环境」下起一次打包产物，验证握手 / 接口 / 中文编码。"""
     if not EXE.exists():
         print(f"[FAIL] 产物不存在：{EXE}")
         return False
+
+    # ★ 静态检查：产物里必须真有一份可用的只读 kb（关卡 E 缺陷的直接拦截点）。
+    #   放在起进程之前 —— 缺库时应当**立刻**失败，不用等 60s 冷启动。
+    packaged_kb = verify_packaged_kb()
 
     data_dir = ROOT / "_data_packaged_check"
     shutil.rmtree(data_dir, ignore_errors=True)
@@ -138,6 +365,11 @@ def verify() -> bool:
     print(f"[verify] 启动 {EXE.name}")
     print(f"[verify] PATH = {env['PATH']}")
     print("[verify] PYTHONHOME/PYTHONPATH 均已清空（证明不依赖本机 Python）")
+    # 空 data-dir + 不带任何 K12_* 覆盖：这就是「新机器首跑」的等价条件
+    print(f"[verify] data-dir = {data_dir}（已清空：模拟新机器，没有 per-user kb）")
+    if packaged_kb is not None:
+        print(f"[verify] 只读 kb 来源 = {packaged_kb}（随包分发，非 userData）")
+    env.pop("K12_KB_PATH", None)
 
     # 以二进制管道启动，自己按 UTF-8 解码 —— 这样才能拿到**原始字节**，
     # 从而严格判断「打包后是否按 GBK 输出了中文」。
@@ -215,6 +447,12 @@ def verify() -> bool:
         )
 
         smoke_api.run_api_checks(f"http://127.0.0.1:{port}", token)
+
+        # ★ 端到端：**空 data-dir** 的后端必须能用随包 kb 真的检索出东西。
+        #   这一条比「文件在不在」更接近用户体感 —— 它同时证明
+        #   ① 路径解析把 bundled kb 找到了；② 嵌入模型能加载；③ 向量检索通路是通的。
+        #   缺 kb 时这里会得到 degraded="outline" + 0 命中，正是修复前的症状。
+        _check_packaged_rag(f"http://127.0.0.1:{port}", token)
 
         owner = smoke_api.pid_owning_port(port)
         smoke_api.check(

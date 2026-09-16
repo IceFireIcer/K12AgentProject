@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-from app.config import resolve_data_dir
+from app.config import bundled_kb_path, resolve_data_dir
 from app.knowledge.deps import EXPANSION_LIMIT, expansion_kp_ids
 from app.knowledge.library import compatible_grades
 from app.rag import fallback
@@ -134,16 +134,51 @@ def build_context(hits: Sequence, max_chars: int = CONTEXT_MAX_CHARS) -> str:
     return "\n\n".join(blocks)
 
 
-def default_kb_path(data_dir: str | Path | None = None) -> Path:
-    """``<data-dir>/shared/kb.sqlite``（执行文档 §8.2）。
+def per_user_kb_path(data_dir: str | Path | None = None) -> Path:
+    """**每用户**的可写 kb 位置：``<data-dir>/shared/kb.sqlite``（执行文档 §8.2）。
 
-    ``K12_KB_PATH`` 可覆盖（开发/演示时指向别处的库，例如「故意弄坏」的那一份）。
+    这是「重建」落点，**不是首跑的前提** —— 新机器上这个文件不存在是正常的，
+    检索应当先用随包只读库（见 :func:`default_kb_path`）。
     """
-    override = os.environ.get(KB_PATH_ENV)
-    if override:
-        return Path(override)
     base = Path(data_dir) if data_dir else resolve_data_dir(None)
     return base / "shared" / "kb.sqlite"
+
+
+def default_kb_path(data_dir: str | Path | None = None) -> Path:
+    """**kb.sqlite 的唯一解析入口** —— 四级顺序，从「最权威」到「最兜底」：
+
+    ============ ================================================================
+    顺序          含义
+    ============ ================================================================
+    ① 环境变量     ``K12_KB_PATH`` 显式覆盖（开发 / 演示「故意弄坏那一份」用）。
+                    **只要设了就无条件生效**，不再看后面三级 —— 显式覆盖必须能压过一切，
+                    否则「指向坏库复现降级」这个演示手法会失效。
+    ② 随包只读库   ``app.config.bundled_kb_path()``：**随应用一起分发**的版本化内容资产。
+                    这是**新机器首跑走的那一条**（打包态在安装目录 ``_internal/resources/kb/``）。
+                    **必须排在 per-user 之前**：否则用户目录里一旦有一份旧库
+                    （上一次重建留下的），刚装的新版本反倒用不上自带的新内容。
+    ③ 每用户库     ``<data-dir>/shared/kb.sqlite``：开发态默认落点，也是用户**重建**的落点。
+    ④ 缺席        前三级都没有 → 返回③的路径（可能不存在）。**不抛异常**：
+                    调用方（:meth:`RagService.search`）会诚实降级到 ``outline`` 并写日志。
+                    「缺库」是部署问题，不该把编排层拽进来处理。
+    ============ ================================================================
+
+    ★ **只读语义**：②是随安装包分发的资产，**绝不允许写入**（安装目录在 Windows 上
+    普通用户本来就写不了；即便写得动也不许 —— 见 ``app/store/connections.py`` 的
+    ``readonly=True``）。③ 才是可写的那一份。构建期由 ``scripts/build_server.py`` 产出②。
+    """
+    # ① 显式覆盖：最高优先级
+    override = os.environ.get(KB_PATH_ENV)
+    if override:
+        return Path(override).expanduser()
+
+    # ② 随包只读库：新机器首跑的主路径
+    bundled = bundled_kb_path()
+    if bundled.exists():
+        return bundled
+
+    # ③ 每用户库（dev / 重建）→ ④ 缺席时也返回它，由调用方诚实降级
+    return per_user_kb_path(data_dir)
 
 
 class RagService:
@@ -581,6 +616,7 @@ __all__ = [
     "build_context",
     "default_kb_path",
     "get_service",
+    "per_user_kb_path",
     "reset_services",
     "search",
 ]

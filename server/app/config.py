@@ -52,6 +52,41 @@ RESOURCES_DIR = ROOT_DIR / "resources"
 KNOWLEDGE_DIR = ROOT_DIR / "knowledge"
 EMBEDDING_MODEL_DIR = RESOURCES_DIR / "models" / "fastembed"
 
+# ------------------------------------------------- 随包分发的只读知识库 --
+# ★ ``kb.sqlite`` 是**版本化的只读内容资产**，随应用分发（执行文档 §8.1：
+#   「随应用分发，只读」）。它和 ``resources/models/fastembed`` 一样属于「内容」，
+#   不属于「用户数据」—— 用户数据在 ``<data-dir>/shared/`` 里。
+#
+# 历史缺陷（关卡 E 复验发现，本文件是修复的一部分）：打包产物带了模型、带了
+# ``resources/``，却**没带 kb.sqlite**。新机器上 data-dir 是空的，
+# 检索一路降级到 ``outline``（0 命中），而 ``/health`` 的 ``embedderReady`` 仍是 true ——
+# 表现得「一切正常」，实际知识库是空的。所以「随包 kb 落在哪」必须是一个**常量**，
+# 由构建期（spec）与运行期（检索）共用，不允许两边各写一份路径。
+#
+# 布局：源码态 ``server/resources/kb/kb.sqlite``（**通常不存在**：构建产物，不入 git）；
+#       打包态 ``<app>/_internal/resources/kb/kb.sqlite``。
+BUNDLED_KB_FILENAME = "kb.sqlite"
+BUNDLED_KB_RELATIVE = Path("resources") / "kb" / BUNDLED_KB_FILENAME
+
+#: 随包只读 kb 的**运行期**路径（**不保证存在** —— 源码态一般就没有，走 dev 的 per-user 库）。
+BUNDLED_KB_PATH = ROOT_DIR / BUNDLED_KB_RELATIVE
+
+#: 随包 kb 的**构建期**暂存位。由 ``scripts/build_server.py`` 建库、由 PyInstaller spec
+#: 收进产物。刻意**不**放进 ``resources/``：源码态若在 ``resources/kb/`` 留一份，
+#: 开发时新库会被它悄悄顶掉（见 ``retriever.default_kb_path`` 的解析顺序）。
+#: ``build/`` 与 ``*.sqlite`` 都在 .gitignore 里，所以这份产物永远不会被提交。
+BUNDLED_KB_STAGING = ROOT_DIR / "build" / "bundle" / BUNDLED_KB_FILENAME
+
+
+def bundled_kb_path() -> Path:
+    """随包只读 ``kb.sqlite`` 的路径（**只给路径，不判断存在性**）。
+
+    包一层函数而不是让调用方直接用常量，是为了留一个**可替换的接缝**：
+    ``app/rag/retriever.py`` 通过模块级名字调用它，单测可以 patch 这个引用，
+    在不碰真实 ``resources/`` 的前提下验证四级解析顺序。
+    """
+    return BUNDLED_KB_PATH
+
 
 def model_files_present() -> bool:
     """嵌入模型文件是否已就位。
