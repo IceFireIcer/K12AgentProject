@@ -1,0 +1,26 @@
+[project]
+name = "k12-agent-server"
+version = "0.1.0"
+description = "K12 AI 教学助手 · Python sidecar（数据 / RAG / 嵌入服务）"
+requires-python = ">=3.12,<3.13"
+
+# ⚠️ 版本矩阵来自《项目执行文档》§5.2，不要随手升。
+# ⚠️ **禁止加入 langgraph / langchain / 任何 LLM 客户端**：
+#    编排与 LLM 调用全在 desktop（TypeScript / Pi Agent），本进程只做数据、检索、嵌入与判分规则。
+dependencies = [
+    "fastapi>=0.141,<0.142",
+    "uvicorn[standard]>=0.53,<0.54",
+    "pydantic>=2.13,<3",
+    "fastembed>=0.8,<0.9",
+    "sqlite-vec>=0.1.9,<0.2",
+    "numpy>=2.5,<3",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<0.29",
+    "pyinstaller>=6.22,<7",
+]
+
+[tool.uv]
+package = false

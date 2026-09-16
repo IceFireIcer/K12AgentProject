@@ -52,6 +52,9 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 
+# === 本地工具状态（编辑器/代理的会话与计划快照，与项目无关）===
+.zcode/
+
 # === Python ===
 # 注意：uv.lock 与 .python-version 必须提交（锁定依赖与解释器版本）
 uv.lock.bak

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      CSP 暂未启用：票 01 只有本窗口，后续引入动画 iframe 沙箱 / Monaco / Pyodide 时再按沙箱边界统一收紧。
+      唯一允许的来源必须始终是本地（无 CDN），否则断网演示会翻车。
+    -->
+    <title>K12 AI 教学助手</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

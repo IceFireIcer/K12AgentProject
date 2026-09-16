@@ -1,0 +1,31 @@
+appId: com.k12agent.desktop
+productName: K12AI教学助手
+directories:
+  buildResources: build
+  output: dist
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!tests/*'
+  - '!scripts/*'
+asarUnpack:
+  # Pi 的 esbuild 等原生依赖必须解包（票 03 的关卡 B₁ 会实测）
+  - resources/**
+extraResources:
+  # 打包后的 Python sidecar（PyInstaller --onedir 产物）；
+  # 运行期从 process.resourcesPath 解析：<resourcesPath>/server/k12-agent-server.exe
+  - from: ../server/dist/k12-agent-server
+    to: server
+win:
+  executableName: k12-agent-desktop
+  target:
+    - nsis
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+npmRebuild: false
