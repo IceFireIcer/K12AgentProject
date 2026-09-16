@@ -1,0 +1,1738 @@
+{
+  "components": {
+    "schemas": {
+      "AnimationPayload": {
+        "additionalProperties": false,
+        "description": "动画讲解载荷（§11.2：**模板优先**，自由生成只是补充路径）。",
+        "properties": {
+          "concept": {
+            "title": "Concept",
+            "type": "string"
+          },
+          "durationMs": {
+            "title": "Durationms",
+            "type": "integer"
+          },
+          "fallbackImage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fallbackimage"
+          },
+          "fallbackText": {
+            "title": "Fallbacktext",
+            "type": "string"
+          },
+          "html": {
+            "title": "Html",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "template",
+              "generated"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "concept",
+          "html",
+          "durationMs",
+          "fallbackText",
+          "source"
+        ],
+        "title": "AnimationPayload",
+        "type": "object"
+      },
+      "ChatRequest": {
+        "additionalProperties": false,
+        "description": "一轮对话请求（**渲染进程 → 主进程 IPC**，不是 HTTP 端点）。\n\n§6.3 v2 变更：``POST /api/chat/stream`` 已从 Python 侧移除，对话改由主进程的\nPi Agent 处理；这里冻结的是 IPC 入参形状，供票 05/06 的主进程处理器与前端共用。\n``requestId`` 由**主进程**生成并贯穿一轮（§9.4），所以不在请求体里。",
+        "properties": {
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "sessionId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sessionid"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId",
+          "gradeLevel",
+          "text"
+        ],
+        "title": "ChatRequest",
+        "type": "object"
+      },
+      "Citation": {
+        "additionalProperties": false,
+        "description": "检索命中的引用条目（§6.4 的 `citation` 事件载荷，**字段与顺序冻结**）。\n\n``compat``：是否为「向上兼容」取用的更高学段内容 —— 跨学段时必须显式标注，\n前端要据此显示标记（执行文档 §6.3 / 业务陷阱清单 §2）。\n\n⚠️ **只有这 5 个字段**：事件载荷「一字不改」是票 13 的验收口径。\n检索内部还需要父块正文、相关性、知识点 id 等 —— 那些在 :class:`RagHit` 里，\n发射 `citation` 事件时**从 hit 投影出这 5 个字段**，不要把 hit 直接塞进事件。",
+        "properties": {
+          "chapterTitle": {
+            "title": "Chaptertitle",
+            "type": "string"
+          },
+          "chunkId": {
+            "title": "Chunkid",
+            "type": "string"
+          },
+          "compat": {
+            "title": "Compat",
+            "type": "boolean"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "sectionTitle": {
+            "title": "Sectiontitle",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chunkId",
+          "chapterTitle",
+          "sectionTitle",
+          "gradeLevel",
+          "compat"
+        ],
+        "title": "Citation",
+        "type": "object"
+      },
+      "CodeError": {
+        "additionalProperties": false,
+        "description": "归一化后的代码错误（面向学生）。原始 traceback 保留供家长/教师导出与排查。",
+        "properties": {
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Line"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "rawTraceback": {
+            "default": "",
+            "title": "Rawtraceback",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "message"
+        ],
+        "title": "CodeError",
+        "type": "object"
+      },
+      "CodeEvaluation": {
+        "additionalProperties": false,
+        "description": "``POST /api/code/run-hint`` 的响应：运行结果 + 评估 + 下一级提示（§6.3）。",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodeError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "feedback": {
+            "title": "Feedback",
+            "type": "string"
+          },
+          "nextHint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodingHint"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "stdout": {
+            "title": "Stdout",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "stdout",
+          "feedback"
+        ],
+        "title": "CodeEvaluation",
+        "type": "object"
+      },
+      "CodeRunRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/code/run-hint`` 的请求体：把「提交的代码 + 报错」交给后端评估。\n\n⚠️ 学生代码**绝不在主进程（Pi Extension）执行**：它在渲染进程的 Pyodide Worker 里跑，\n这里收到的只是运行结果与 traceback（AGENTS §5.7）。",
+        "properties": {
+          "attempt": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "language": {
+            "const": "python",
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "stderr": {
+            "default": "",
+            "title": "Stderr",
+            "type": "string"
+          },
+          "stdout": {
+            "default": "",
+            "title": "Stdout",
+            "type": "string"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId",
+          "kpId",
+          "code"
+        ],
+        "title": "CodeRunRequest",
+        "type": "object"
+      },
+      "CodeTemplate": {
+        "additionalProperties": false,
+        "description": "编程模板载荷（§11.3 / 票 19）。``scaffold`` 必须含明确的 TODO 标记。",
+        "properties": {
+          "expectedBehavior": {
+            "title": "Expectedbehavior",
+            "type": "string"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "language": {
+            "const": "python",
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "scaffold": {
+            "title": "Scaffold",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kpId",
+          "scaffold",
+          "expectedBehavior"
+        ],
+        "title": "CodeTemplate",
+        "type": "object"
+      },
+      "CodingHint": {
+        "additionalProperties": false,
+        "description": "分级提示（票 19：**不许直接给答案**，level 1 指方向 → level 3 才贴近骨架）。",
+        "properties": {
+          "hint": {
+            "title": "Hint",
+            "type": "string"
+          },
+          "level": {
+            "enum": [
+              1,
+              2,
+              3
+            ],
+            "title": "Level",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "level",
+          "hint"
+        ],
+        "title": "CodingHint",
+        "type": "object"
+      },
+      "Degraded": {
+        "enum": [
+          "vector",
+          "cloud",
+          "fts",
+          "outline"
+        ],
+        "title": "Degraded",
+        "type": "string"
+      },
+      "DepNode": {
+        "additionalProperties": false,
+        "description": "依赖图查询结果条目（``GET /api/graph/deps/{kp_id}``）。\n\n**`from → to` 语义全项目一致：`from` 是前置、`to` 是后继。**\n``direction`` 显式标明这条边相对被查询知识点是哪一侧，双用途据此分流：\n``successor`` 用于推荐路径，``prereq`` 用于检索上下文扩展。",
+        "properties": {
+          "depth": {
+            "default": 1,
+            "title": "Depth",
+            "type": "integer"
+          },
+          "direction": {
+            "enum": [
+              "successor",
+              "prerequisite"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "relation": {
+            "default": "prerequisite",
+            "enum": [
+              "prerequisite",
+              "related"
+            ],
+            "title": "Relation",
+            "type": "string"
+          },
+          "weight": {
+            "default": 1.0,
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "kpId",
+          "name",
+          "gradeLevel",
+          "direction"
+        ],
+        "title": "DepNode",
+        "type": "object"
+      },
+      "EmbeddingConfig": {
+        "additionalProperties": false,
+        "description": "嵌入配置的**出参形态**（§6.2）。``mode=\"none\"`` 表示不用嵌入（检索走 FTS5 兜底）。",
+        "properties": {
+          "apiKey": {
+            "default": "",
+            "title": "Apikey",
+            "type": "string"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseurl"
+          },
+          "hasKey": {
+            "default": false,
+            "title": "Haskey",
+            "type": "boolean"
+          },
+          "mode": {
+            "default": "local_fastembed",
+            "enum": [
+              "local_fastembed",
+              "cloud_api",
+              "none"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "modelId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modelid"
+          }
+        },
+        "title": "EmbeddingConfig",
+        "type": "object"
+      },
+      "EmbeddingConfigIn": {
+        "additionalProperties": false,
+        "description": "嵌入配置的**入参形态**（``mode=\"cloud_api\"`` 时才有 base_url/api_key/model_id）。",
+        "properties": {
+          "apiKey": {
+            "default": "",
+            "title": "Apikey",
+            "type": "string"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseurl"
+          },
+          "clearApiKey": {
+            "default": false,
+            "title": "Clearapikey",
+            "type": "boolean"
+          },
+          "hasKey": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Haskey"
+          },
+          "mode": {
+            "default": "local_fastembed",
+            "enum": [
+              "local_fastembed",
+              "cloud_api",
+              "none"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "modelId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modelid"
+          }
+        },
+        "title": "EmbeddingConfigIn",
+        "type": "object"
+      },
+      "EmbeddingMode": {
+        "enum": [
+          "local_fastembed",
+          "cloud_api",
+          "none"
+        ],
+        "title": "EmbeddingMode",
+        "type": "string"
+      },
+      "GradeLevel": {
+        "enum": [
+          "primary_low",
+          "primary_high",
+          "junior",
+          "senior"
+        ],
+        "title": "GradeLevel",
+        "type": "string"
+      },
+      "GradeSignal": {
+        "additionalProperties": false,
+        "description": "一条学段判定信号（§8.3 `grade_signals`）。",
+        "properties": {
+          "raw": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Raw"
+          },
+          "signalType": {
+            "enum": [
+              "vocab",
+              "depth",
+              "quiz_perf",
+              "meta_cognition"
+            ],
+            "title": "Signaltype",
+            "type": "string"
+          },
+          "ts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Ts"
+          },
+          "value": {
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "required": [
+          "signalType",
+          "value"
+        ],
+        "title": "GradeSignal",
+        "type": "object"
+      },
+      "GradeSignals": {
+        "additionalProperties": false,
+        "description": "``GET /api/grade/signals/{student_id}``：学段信号与推断建议。\n\n⚠️ **自动推断只写「建议」，不直接改**（AGENTS §5.1）：``suggested_level`` 供前端弹\n建议条，学生确认后才写 `grade_history(source=confirmed)`。",
+        "properties": {
+          "confidence": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "currentLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Currentlevel",
+            "type": "string"
+          },
+          "signals": {
+            "items": {
+              "$ref": "#/components/schemas/GradeSignal"
+            },
+            "title": "Signals",
+            "type": "array"
+          },
+          "source": {
+            "default": "explicit",
+            "enum": [
+              "explicit",
+              "inferred",
+              "confirmed"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "suggestedLevel": {
+            "anyOf": [
+              {
+                "enum": [
+                  "primary_low",
+                  "primary_high",
+                  "junior",
+                  "senior"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Suggestedlevel"
+          }
+        },
+        "required": [
+          "studentId",
+          "currentLevel"
+        ],
+        "title": "GradeSignals",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "additionalProperties": false,
+        "description": "``GET /health`` 响应（执行文档 §6.3）。\n\n免鉴权，Electron 启动期轮询它判断 sidecar 是否可用。\n``embedder_ready`` 为假**不代表 sidecar 不健康** —— 模型缺失时应用仍应能起来，\n只是检索会走降级链。",
+        "properties": {
+          "embedderReady": {
+            "title": "Embedderready",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "version",
+          "embedderReady"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "IpcEventName": {
+        "enum": [
+          "delta",
+          "citation",
+          "payload",
+          "blocked",
+          "done",
+          "error"
+        ],
+        "title": "IpcEventName",
+        "type": "string"
+      },
+      "LearningActivity": {
+        "enum": [
+          "qa",
+          "animation",
+          "coding",
+          "quiz"
+        ],
+        "title": "LearningActivity",
+        "type": "string"
+      },
+      "LlmConfig": {
+        "additionalProperties": false,
+        "description": "LLM 配置的**出参形态**（发给渲染进程 / 与磁盘一致的只读视图）。\n\n⚠️ ``api_key`` 在这里**恒为掩码**（``…abcd``）或空串，绝不会是明文；\n需要明文的地方只有存储层，用 {@link LlmConfigIn} 提交。\n**请一律经 :meth:`from_plain` 构造**，别手拼 ``api_key=`` 把明文漏出去。",
+        "properties": {
+          "apiKey": {
+            "default": "",
+            "title": "Apikey",
+            "type": "string"
+          },
+          "baseUrl": {
+            "default": "https://api.deepseek.com/v1",
+            "title": "Baseurl",
+            "type": "string"
+          },
+          "hasKey": {
+            "default": false,
+            "title": "Haskey",
+            "type": "boolean"
+          },
+          "modelId": {
+            "default": "deepseek-chat",
+            "title": "Modelid",
+            "type": "string"
+          },
+          "providerName": {
+            "default": "DeepSeek",
+            "title": "Providername",
+            "type": "string"
+          }
+        },
+        "title": "LlmConfig",
+        "type": "object"
+      },
+      "LlmConfigIn": {
+        "additionalProperties": false,
+        "description": "LLM 配置的**入参形态**（``PUT /api/settings``）。\n\n``api_key`` 语义见模块头的「API Key 掩码语义」：\n空串/掩码/纯符号 = 保留已存值；明文 = 覆盖；``clear_api_key=true`` = 显式删除。",
+        "properties": {
+          "apiKey": {
+            "default": "",
+            "title": "Apikey",
+            "type": "string"
+          },
+          "baseUrl": {
+            "default": "https://api.deepseek.com/v1",
+            "title": "Baseurl",
+            "type": "string"
+          },
+          "clearApiKey": {
+            "default": false,
+            "title": "Clearapikey",
+            "type": "boolean"
+          },
+          "hasKey": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Haskey"
+          },
+          "modelId": {
+            "default": "deepseek-chat",
+            "title": "Modelid",
+            "type": "string"
+          },
+          "providerName": {
+            "default": "DeepSeek",
+            "title": "Providername",
+            "type": "string"
+          }
+        },
+        "title": "LlmConfigIn",
+        "type": "object"
+      },
+      "Mastery": {
+        "additionalProperties": false,
+        "description": "单知识点掌握度（§8.3 `mastery`）。``score`` 0..1。",
+        "properties": {
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "correct": {
+            "default": 0,
+            "title": "Correct",
+            "type": "integer"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "lastSeenAt": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lastseenat"
+          },
+          "score": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "kpId"
+        ],
+        "title": "Mastery",
+        "type": "object"
+      },
+      "PayloadKind": {
+        "enum": [
+          "animation",
+          "coding",
+          "quiz"
+        ],
+        "title": "PayloadKind",
+        "type": "string"
+      },
+      "ProbeRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/settings/probe`` 的请求体（**票 07 实现探测**）。\n\n探测的是**提交的候选配置**而非已存配置，这样「先探测、满意再保存」才成立。\n``api_key`` 允许是占位（== 用已存 Key）——实现方用 :func:`resolve_api_key` 解析。",
+        "properties": {
+          "llm": {
+            "$ref": "#/components/schemas/LlmConfigIn"
+          }
+        },
+        "required": [
+          "llm"
+        ],
+        "title": "ProbeRequest",
+        "type": "object"
+      },
+      "ProbeResult": {
+        "additionalProperties": false,
+        "description": "``POST /api/settings/probe`` 的响应（§6.3）。\n\n``message`` 必须**可读**：401 / 超时 / DNS / 404 要说清是哪一种（票 07）。",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "message"
+        ],
+        "title": "ProbeResult",
+        "type": "object"
+      },
+      "ProgressStage": {
+        "enum": [
+          "locked",
+          "learning",
+          "quizzed",
+          "mastered"
+        ],
+        "title": "ProgressStage",
+        "type": "string"
+      },
+      "QuizGradeRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/quiz/grade`` 的请求体：提交答案并批改（判分只走后端）。",
+        "properties": {
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Answer"
+          },
+          "qid": {
+            "title": "Qid",
+            "type": "string"
+          },
+          "sessionId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sessionid"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId",
+          "qid",
+          "answer"
+        ],
+        "title": "QuizGradeRequest",
+        "type": "object"
+      },
+      "QuizPayload": {
+        "additionalProperties": false,
+        "description": "出题载荷。``questions`` **一律是对外形态**，内部模型塞不进来（会被类型校验挡住）。",
+        "properties": {
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/QuizQuestionOut"
+            },
+            "title": "Questions",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "bank",
+              "generated"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kpId",
+          "source"
+        ],
+        "title": "QuizPayload",
+        "type": "object"
+      },
+      "QuizQuestionOut": {
+        "additionalProperties": false,
+        "description": "★ **对外模型**：没有 ``answer``，发给 TS 与前端（§6.3 答案泄漏防护）。\n\n判分所需的标准答案只留在 Python 侧：``POST /api/quiz/grade`` 按 ``qid`` 查库判分，\n前端与 TS 都不需要答案。",
+        "properties": {
+          "explanation": {
+            "title": "Explanation",
+            "type": "string"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Options"
+          },
+          "qid": {
+            "title": "Qid",
+            "type": "string"
+          },
+          "stem": {
+            "title": "Stem",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "choice",
+              "blank",
+              "code_blank"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "qid",
+          "kpId",
+          "type",
+          "stem",
+          "explanation"
+        ],
+        "title": "QuizQuestionOut",
+        "type": "object"
+      },
+      "QuizQuestionType": {
+        "enum": [
+          "choice",
+          "blank",
+          "code_blank"
+        ],
+        "title": "QuizQuestionType",
+        "type": "string"
+      },
+      "QuizResult": {
+        "additionalProperties": false,
+        "description": "批改结果（§6.5）。``scored_by`` 区分客观题规则判分与主观题 LLM 判分。",
+        "properties": {
+          "correct": {
+            "title": "Correct",
+            "type": "boolean"
+          },
+          "feedback": {
+            "title": "Feedback",
+            "type": "string"
+          },
+          "masteryDelta": {
+            "maximum": 0.2,
+            "minimum": -0.2,
+            "title": "Masterydelta",
+            "type": "number"
+          },
+          "qid": {
+            "title": "Qid",
+            "type": "string"
+          },
+          "scoredBy": {
+            "enum": [
+              "rule",
+              "llm"
+            ],
+            "title": "Scoredby",
+            "type": "string"
+          }
+        },
+        "required": [
+          "qid",
+          "correct",
+          "scoredBy",
+          "feedback",
+          "masteryDelta"
+        ],
+        "title": "QuizResult",
+        "type": "object"
+      },
+      "RagHit": {
+        "additionalProperties": false,
+        "description": "检索命中的**完整记录**（HTTP 层，供 `rag_search` Tool 注入上下文与轨迹图）。\n\n在 :class:`Citation` 的 5 个冻结字段之上补齐内部字段。父块正文在这里\n（父子 chunk：小子块检索、命中回父块作上下文，§8.3），不要塞进 `Citation`。",
+        "properties": {
+          "chapterTitle": {
+            "title": "Chaptertitle",
+            "type": "string"
+          },
+          "chunkId": {
+            "title": "Chunkid",
+            "type": "string"
+          },
+          "compat": {
+            "title": "Compat",
+            "type": "boolean"
+          },
+          "degraded": {
+            "default": "vector",
+            "enum": [
+              "vector",
+              "cloud",
+              "fts",
+              "outline"
+            ],
+            "title": "Degraded",
+            "type": "string"
+          },
+          "expanded": {
+            "default": false,
+            "title": "Expanded",
+            "type": "boolean"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "knowledgePoint": {
+            "default": "",
+            "title": "Knowledgepoint",
+            "type": "string"
+          },
+          "kpId": {
+            "default": "",
+            "title": "Kpid",
+            "type": "string"
+          },
+          "parentChunkId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parentchunkid"
+          },
+          "score": {
+            "default": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "sectionTitle": {
+            "title": "Sectiontitle",
+            "type": "string"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chunkId",
+          "chapterTitle",
+          "sectionTitle",
+          "gradeLevel",
+          "compat"
+        ],
+        "title": "RagHit",
+        "type": "object"
+      },
+      "RagSearchRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/rag/search`` 的请求体（供 Pi 的 `rag_search` Tool 调用）。\n\n``grade_level`` 是**必填**：学段过滤写在 SQL 层，模型改不了 WHERE（AGENTS §5.2）。",
+        "properties": {
+          "allowCompat": {
+            "default": true,
+            "title": "Allowcompat",
+            "type": "boolean"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "includeExpansion": {
+            "default": true,
+            "title": "Includeexpansion",
+            "type": "boolean"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "topK": {
+            "default": 5,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Topk",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query",
+          "gradeLevel"
+        ],
+        "title": "RagSearchRequest",
+        "type": "object"
+      },
+      "RagSearchResult": {
+        "additionalProperties": false,
+        "description": "``POST /api/rag/search`` 的响应。\n\n降级链整条在 Python 侧一次调用内完成（§8.5）：调用方只读 ``degraded``，\n**不要**在编排层再实现一遍降级逻辑。",
+        "properties": {
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "degraded": {
+            "default": "vector",
+            "enum": [
+              "vector",
+              "cloud",
+              "fts",
+              "outline"
+            ],
+            "title": "Degraded",
+            "type": "string"
+          },
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/RagHit"
+            },
+            "title": "Hits",
+            "type": "array"
+          }
+        },
+        "title": "RagSearchResult",
+        "type": "object"
+      },
+      "SettingsResponse": {
+        "additionalProperties": false,
+        "description": "``GET`` / ``PUT /api/settings`` 的响应（§6.3）。**任何情况下都不含明文 Key。**",
+        "properties": {
+          "embedding": {
+            "$ref": "#/components/schemas/EmbeddingConfig"
+          },
+          "llm": {
+            "$ref": "#/components/schemas/LlmConfig"
+          }
+        },
+        "required": [
+          "llm",
+          "embedding"
+        ],
+        "title": "SettingsResponse",
+        "type": "object"
+      },
+      "SettingsUpdateRequest": {
+        "additionalProperties": false,
+        "description": "``PUT /api/settings`` 的请求体。\n\n两栏都可省略（``null`` = 不动那一栏）—— 设置页可以分栏保存；\n但**不能两栏都不给**（那样这次请求没有任何意义）。",
+        "properties": {
+          "embedding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmbeddingConfigIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "llm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LlmConfigIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "SettingsUpdateRequest",
+        "type": "object"
+      },
+      "Student": {
+        "additionalProperties": false,
+        "description": "一名学生。**一人一库**（``students/<student_id>/learning.db``），不跨学生复用连接。",
+        "properties": {
+          "createdAt": {
+            "title": "Createdat",
+            "type": "integer"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "lastActiveAt": {
+            "title": "Lastactiveat",
+            "type": "integer"
+          },
+          "nickname": {
+            "title": "Nickname",
+            "type": "string"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId",
+          "nickname",
+          "gradeLevel",
+          "createdAt",
+          "lastActiveAt"
+        ],
+        "title": "Student",
+        "type": "object"
+      },
+      "StudentCreateRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/students``：新建学生（含学段，学段也可后改）。``student_id`` 由服务端生成。",
+        "properties": {
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "nickname": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Nickname",
+            "type": "string"
+          }
+        },
+        "required": [
+          "nickname",
+          "gradeLevel"
+        ],
+        "title": "StudentCreateRequest",
+        "type": "object"
+      },
+      "StudentProfile": {
+        "additionalProperties": false,
+        "description": "``GET /api/profile/{student_id}``：画像与掌握度（§6.3）。\n\n``recommended_kp_ids`` 由依赖图 + 掌握度算出（§8.6 用途一，票 12/20 填充）——\n**推荐必须来自依赖图**，不是随机取或按顺序取下一个。",
+        "properties": {
+          "mastery": {
+            "items": {
+              "$ref": "#/components/schemas/Mastery"
+            },
+            "title": "Mastery",
+            "type": "array"
+          },
+          "preferences": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Preferences",
+            "type": "object"
+          },
+          "recommendedKpIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Recommendedkpids",
+            "type": "array"
+          },
+          "student": {
+            "$ref": "#/components/schemas/Student"
+          }
+        },
+        "required": [
+          "student"
+        ],
+        "title": "StudentProfile",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "K12 AI 教学助手 · sidecar",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/graph/deps/{kp_id}": {
+      "get": {
+        "description": "查一个知识点的前置/后继。\n\n- 知识点不存在 → **404**（不返回空数组：空数组看起来像「这个点没有邻居」，\n  而实际上可能是 kp_id 拼错了，两者必须区分开）；\n- 深度上限由 :data:`app.knowledge.deps.MAX_DEPTH_LIMIT` 卡死（元数据笔误成环也不会挂）。\n\n★ 返回结构里带 ``depth`` 与 ``direction``：前端画邻域图与排序都要用，\n调用方也就不必自己再走一遍图。",
+        "operationId": "graph_deps_api_graph_deps__kp_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kp_id",
+            "required": true,
+            "schema": {
+              "title": "Kp Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "successor=后继（推荐路径）/ prerequisite=前置（检索扩展）/ both",
+            "in": "query",
+            "name": "direction",
+            "required": false,
+            "schema": {
+              "default": "successor",
+              "description": "successor=后继（推荐路径）/ prerequisite=前置（检索扩展）/ both",
+              "enum": [
+                "successor",
+                "prerequisite",
+                "both"
+              ],
+              "title": "Direction",
+              "type": "string"
+            }
+          },
+          {
+            "description": "递归深度上限（防环死循环）",
+            "in": "query",
+            "name": "max_depth",
+            "required": false,
+            "schema": {
+              "default": 3,
+              "description": "递归深度上限（防环死循环）",
+              "maximum": 10,
+              "minimum": 1,
+              "title": "Max Depth",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DepNode"
+                  },
+                  "title": "Response Graph Deps Api Graph Deps  Kp Id  Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Graph Deps",
+        "tags": [
+          "graph"
+        ]
+      }
+    },
+    "/api/rag/search": {
+      "post": {
+        "description": "按学段检索教材片段。\n\n:param body: ``{query, gradeLevel, topK?, allowCompat?, includeExpansion?}``\n    - ``gradeLevel``：学生当前学段（**显式选择优先**），学段隔离在 SQL 层按它执行；\n    - ``allowCompat``：是否允许取用更低学段的内容（命中标 ``compat=true``）；\n    - ``includeExpansion``：是否把依赖图里的前置知识点补进上下文（有数量上限）。\n\n响应里的 ``hits`` 带父块正文（注入 LLM 的上下文），``context`` 是拼好的可直接投喂文本，\n``degraded`` 说明本次落在降级链的哪一级（vector → cloud → fts → outline）。",
+        "operationId": "rag_search_api_rag_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RagSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RagSearchResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rag Search",
+        "tags": [
+          "rag"
+        ]
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "operationId": "read_settings_api_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "读设置（Key 只回掩码）",
+        "tags": [
+          "settings"
+        ]
+      },
+      "put": {
+        "description": "保存设置。\n\n``apiKey`` 提交空串或掩码（``…abcd``）**不会**抹掉已存 Key —— 用户没动这一栏时\n前端会把读回来的掩码原样提交；只有 ``clearApiKey=true`` 才删除。\n两栏都可省略（= 不动那一栏），但至少要提交一栏。",
+        "operationId": "update_settings_api_settings_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "存设置",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/settings/probe": {
+      "post": {
+        "description": "⚠️ **票 04 不实现探测**：真实连通性探测（``GET /models`` / 1-token 请求 +\n可读失败原因）属票 07。\n\n这里**返回 501 而不是造一个 ``{ok:false}``** —— 假结果会被设置页当成\n「用户填错了」显示，比没实现更糟（执行文档 §6.2 明确要求真实探测）。",
+        "operationId": "probe_settings_api_settings_probe_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProbeRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProbeResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "探测 LLM 连通性（票 07 实现）",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/students": {
+      "get": {
+        "operationId": "list_students_api_students_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Student"
+                  },
+                  "title": "Response List Students Api Students Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "学生列表",
+        "tags": [
+          "students"
+        ]
+      },
+      "post": {
+        "description": "新建学生。请求体校验（含四学段字面量）由契约模型完成，非法学段直接 422。",
+        "operationId": "create_student_api_students_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StudentCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Student"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "新建学生（含学段）",
+        "tags": [
+          "students"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "存活探针。\n\n``embedder_ready`` 为假**不代表 sidecar 不健康** —— 模型缺失时应用仍应能起来，\n只是检索会走降级链（FTS5 → 大纲）。所以这里不因缺模型而报错。",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "system"
+        ]
+      }
+    }
+  }
+}

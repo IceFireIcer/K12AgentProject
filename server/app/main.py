@@ -49,7 +49,11 @@ from app.config import (  # noqa: E402
     RuntimeConfig,
     build_runtime_config,
 )
+from app.routes.graph import router as graph_router  # noqa: E402
 from app.routes.health import router as health_router  # noqa: E402
+from app.routes.rag import router as rag_router  # noqa: E402
+from app.routes.settings import router as settings_router  # noqa: E402
+from app.routes.students import router as students_router  # noqa: E402
 from app.security import (  # noqa: E402
     ALLOWED_ORIGIN_REGEX,
     ALLOWED_ORIGINS,
@@ -121,7 +125,13 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
     # 运行期配置挂在 app.state 上，路由通过 Request 取用（避免全局变量）
     app.state.config = cfg
 
+    # 路由注册：契约冻结在 app/contracts.py，这里只挂载（票 04）
+    # rag / graph 由数据主线（票 11 / 12）实现，供 Pi 的 rag_search Tool 调用
     app.include_router(health_router)
+    app.include_router(settings_router)
+    app.include_router(students_router)
+    app.include_router(rag_router)
+    app.include_router(graph_router)
 
     # ★ 中间件顺序是**有讲究的**，别调换：
     #   Starlette 的洋葱模型里「最后 add 的在最外层」，所以：
