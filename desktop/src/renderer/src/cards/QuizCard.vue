@@ -23,6 +23,7 @@ import { computed, reactive, ref } from 'vue'
 import { QUIZ_TYPE_LABELS, SCORED_BY_LABELS, formatMasteryDelta } from '../labels'
 import { useChatStore } from '../stores/chat'
 import type { InlineCard } from '../api/events'
+import ProgressCard from './ProgressCard.vue'
 import { isBlankAnswer, optionLetter, readQuizCard, type QuizQuestionView } from './quiz'
 
 const props = defineProps<{ card: InlineCard }>()
@@ -61,6 +62,18 @@ const sourceLabel = computed(() => {
 
 /** 本轮回复还没结束：提交按钮先禁用（主进程也有并发守卫）。 */
 const submitting = computed(() => chat.streaming)
+
+/**
+ * 载荷里是否带了闯关进度（票 15）。
+ *
+ * ★ 只判断「有没有 `levels` 数组」，**不在前端推导任何关卡状态** ——
+ *   状态机在后端（`routes/quiz.py` 的 `apply_level_progress`），前端只读。
+ */
+const hasProgress = computed(() => {
+  const payload = props.card.payload
+  if (typeof payload !== 'object' || payload === null) return false
+  return Array.isArray((payload as { levels?: unknown }).levels)
+})
 
 function pick(qid: string, index: number, option: string): void {
   picked[qid] = index
@@ -192,6 +205,10 @@ function submit(question: QuizQuestionView): void {
 
     <p class="quiz__foot">判分由本地题库完成（答案不下发到界面）。批改结果与掌握度变化会显示在题目下面。</p>
     <p v-if="localHint" class="quiz__hint" data-testid="quiz-hint">{{ localHint }}</p>
+
+    <!-- ★ 闯关进度（票 15）：`submit_quiz` 的载荷带 `levels` 时显示进度条 + 徽章。
+         载荷里没有这个键就整块不渲染（不猜、不占位）—— 闯关 UI 不该影响普通练习卡片。 -->
+    <ProgressCard v-if="hasProgress" class="quiz__progress" :payload="card.payload" />
   </article>
 
   <!-- 批改结果：单题的结论卡片 -->
@@ -213,6 +230,11 @@ function submit(question: QuizQuestionView): void {
       <span class="chip tool">{{ view.qid }}</span>
     </header>
     <p class="item__stem" data-testid="quiz-feedback-text">{{ view.feedback }}</p>
+
+    <!-- ★ 闯关进度（票 15）：**批改结果卡片是「进度变了」的那一张** ——
+         题目卡片的载荷是出题时的那一份（那时还没作答），进度要更新只能看结果卡片。
+         载荷里没有 `levels` 就不渲染（不猜、不占位）。 -->
+    <ProgressCard v-if="hasProgress" class="quiz__progress" :payload="card.payload" />
   </article>
 
   <!-- 认不出的载荷：一句说明，绝不猜 -->
@@ -405,5 +427,10 @@ function submit(question: QuizQuestionView): void {
   margin-top: 8px;
   font-size: 13px;
   color: var(--danger);
+}
+
+/* 闯关进度块：与题目列表拉开一点距离，避免看起来像第 N+1 道题 */
+.quiz__progress {
+  margin-top: 14px;
 }
 </style>

@@ -1,19 +1,27 @@
-"""``GET /api/quiz/bank/{kp_id}`` + ``POST /api/quiz/grade``（票 14：练习 Extension 的服务端）。
+"""练习路由（票 14 客观题 + 票 15 主观题/变式/闯关闭环）。
 
-两条端点各自只做一件事，且都守住同一条红线：**标准答案出不了 Python**。
+四条端点，各自只做一件事，且都守住同一条红线：**标准答案出不了 Python**。
 
 | 端点 | 做什么 | 红线 |
 | --- | --- | --- |
-| ``GET /api/quiz/bank/{kp_id}`` | 按知识点 + 学段从题库取题 | 返回的是 :class:`QuizQuestionOut`（**没有** ``answer``）；内部 :class:`QuizQuestion` 一步都不出这个文件 |
-| ``POST /api/quiz/grade`` | 按 ``qid`` 查库 → 规则判分 → 写掌握度与学习记录 | 判分**只在这里**做；请求里的 ``answer`` 是学生的作答，不是标准答案 |
+| ``GET /api/quiz/bank/{kp_id}`` | 按知识点 + 学段从题库取题 | 返回 :class:`QuizQuestionOut`（**没有** ``answer``）；内部 :class:`QuizQuestion` 一步都不出这个文件 |
+| ``POST /api/quiz/grade`` | 按 ``qid`` 查库 → **规则**判分 → 写掌握度与学习记录 | 判分**只在这里**做；请求里的 ``answer`` 是学生的作答，不是标准答案 |
+| ``POST /api/quiz/variants`` | 登记 LLM 生成的变式题（含标准答案），返回**对外**载荷 | 答案只进 ``learning.db``，出参仍走 :class:`QuizQuestionOut` |
+| ``POST /api/quiz/grade-subjective`` | 落库**模型**判分的主观题结论（LLM 调用在 TS 侧） | 只接受**主观题**（有评分细则）的 ``qid``，客观题走这条一律 409 |
 
-**为什么判分必须留在这里**（执行文档 §6.3 的答案泄漏防护）：前端拿到题面就能作答，
+**为什么规则判分必须留在这里**（执行文档 §6.3 的答案泄漏防护）：前端拿到题面就能作答，
 只有「拿学生的作答去和库里的答案比」这一步必须留在后端；一旦把答案下发给前端、
-或者让前端本地判分，答案就等于公开 —— 题目当场作废，`mastery` 也不再可信。
+或者让前端本地判分，答案就等于公开 —— 题目当场作废，``mastery`` 也不再可信。
 
-**题库**：``server/resources/quizbank/<grade_level>.json``（人工编写、随包分发、断网可用）。
-LLM 生成的变式题（``source="generated"``）由票 15 的路径产生，本票只留衔接位：
-生成题在题库里查不到 ``qid`` 时，``/api/quiz/grade`` 返回可读的 404 而不是 500。
+**为什么主观题判分反而是「TS 判、Python 落库」**（票 15 的关键分叉）：编排层在
+Electron 主进程（Pi），LLM 调用归它独占；**Python 侧不许装任何 LLM 客户端**。
+所以主观题的批改结论由 TS 侧用评分细则问出来，再交给本文件的
+``POST /api/quiz/grade-subjective`` 落库。为了让这条路径**不能被用来绕过规则判分**：
+只有「登记过评分细则的生成题」才走得通 —— 拿一道选择题的 ``qid`` 走主观路径直接 409。
+
+**闯关闭环（票 15 / 关卡 D）**：``progress`` 表是**唯一权威**（前端只读、不自持状态机）。
+状态机是纯函数 :func:`advance_stage`，解锁规则是 :func:`unlocked_successor_ids`；
+两者都被 ``server/tests/test_quiz_loop.py`` 端到端跑过。
 
 **判分口径（客观题，``scored_by="rule"``）**：choice / blank / code_blank 三类都走
 :func:`normalize_answer` 归一化后比较 —— 空白、全角、大小写、中英文标点一律等价
@@ -26,25 +34,30 @@ import json
 import logging
 import os
 import re
+import secrets
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import Field, field_validator
 
 from app.config import KNOWLEDGE_DIR, RESOURCES_DIR
 from app.contracts import (
     MASTERY_DELTA_LIMIT,
+    CamelModel,
     GradeLevel,
     QuizGradeRequest,
     QuizPayload,
     QuizQuestion,
     QuizQuestionOut,
+    QuizQuestionType,
     QuizResult,
 )
 from app.knowledge.library import GRADE_LEVELS, compatible_grades, grade_index, load_terminology
-from app.store.learning import LearningStore
+from app.routes.students import DEFAULT_COLD_START_GRADE
+from app.store.learning import GeneratedQuestionRecord, LearningStore, ProgressRecord
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +74,16 @@ BANK_DIR_ENV = "K12_QUIZ_BANK_DIR"
 DEFAULT_QUESTION_COUNT = 3
 MAX_QUESTION_COUNT = 10
 
+#: 冷启动学段（与 ``app/routes/students.py`` 的同名常量同源 —— 从那里 import，
+#: 免得两处各写一个默认值，将来改一个忘一个）。
+COLD_START_GRADE = DEFAULT_COLD_START_GRADE
+
+#: ★ 冷启动的**种子关卡**：依赖图里一个可用知识点都没有时的最后兜底
+#: （人工骨架的四个入口知识点，见 ``knowledge/manifest.json``）。
+#: 没有它的话，「新学生 + 空图」会得到一条空路径 —— 而冷启动必须能开始，
+#: 这是票 15/20 明确列出的验收项（「不报空指针、有默认路径」）。
+COLD_START_LEVEL_SEEDS: tuple[str, ...] = ("pl-ai-around-me", "jr-py-variable")
+
 #: 一次答对/答错的掌握度变化。**绝对值必须 < MASTERY_DELTA_LIMIT**，
 #: 并且 :meth:`app.store.learning.LearningStore.apply_mastery` 还会再限幅一次
 #: （陷阱：不限幅则一次答题就从 0 直接到 1）。
@@ -73,6 +96,196 @@ _OPTION_LETTERS = "ABCDEF"
 #: 学生 id 白名单：它会被拼进文件路径（``students/<id>/learning.db``），
 #: **必须**先卡死字符集，否则 ``../../`` 就能跑到别的目录去建库（本机任意文件写入）。
 STUDENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# ------------------------------------------------------------------ 闯关 --
+#: 关卡状态机（``contracts.py`` 的 ``ProgressStage``，**唯一权威在 learning.db 的 progress 表**）。
+PROGRESS_STAGES: tuple[str, ...] = ("locked", "learning", "quizzed", "mastered")
+
+#: 一道题的分值：一次答对 ``quizzed + 1``。**不是掌握度**（掌握度按题累加、限幅 ±0.2）。
+#: ``progress`` 表没有数值列，所以「答对几道」记在徽章里（见 :func:`award_level`）。
+BADGE_LEVELS: tuple[str, ...] = ("起步", "初通", "熟练", "精通", "大师")
+
+#: ★ 解锁后继关卡的**门槛**（票 15 的验收口径，写在这里以便测试直接引用）：
+#:
+#:     「目标 kp 掌握度 ≥ 阈值 且 当前 kp 已 quizzed」才解锁**后继**
+#:
+#: 注意主语：判定的是**当前这一关**够不够格把**它的后继**放出来，而不是后继自己的掌握度。
+MASTERY_UNLOCK_THRESHOLD = 0.6
+#: 当前关卡进入 ``quizzed`` 所需的答对题数（答错不加，答对才加）。
+QUIZZED_CORRECT_NEEDED = 1
+#: 当前关卡进入 ``mastered`` 所需的答对题数（**且**掌握度还要过阈值）。
+MASTERED_CORRECT_NEEDED = 2
+
+
+@dataclass(frozen=True)
+class LevelOutcome:
+    """一次答题对闯关进度的影响（供出参与日志；**不含答案信息**）。"""
+
+    kp_id: str
+    stage: str
+    badge: str | None
+    correct_count: int
+    #: 本次是否**新解锁**了关卡（题目所属关卡按 ``K12_QUIZ_BANK_DIR``… 不，按依赖图后继算）
+    unlocked: tuple[str, ...] = ()
+
+    @property
+    def badge_level(self) -> int:
+        """徽章档位（1 起步 … 5 大师）；无徽章为 0。"""
+        if not self.badge:
+            return 0
+        try:
+            return BADGE_LEVELS.index(self.badge.split("-", 1)[0]) + 1
+        except ValueError:  # pragma: no cover - 库被人手改过
+            return 0
+
+
+def badge_for(correct_count: int) -> str | None:
+    """答对题数 → 徽章（``0`` = 还没有徽章，**不是**「徽章被撤销」）。
+
+    徽章文本形如 ``熟练-3``：前半是**档位名**，后半是**答对题数**。
+    档位封顶在 :data:`BADGE_LEVELS` 的最后一档（练 20 遍不会变成「大师-20」而是一个
+    稳定的「大师」档），避免徽章变成刷题计数器而与掌握度脱节；
+    但 ``-N`` 里的 N 仍如实记录，以便 :func:`correct_count_from_badge` 还原计数。
+    """
+    if correct_count <= 0:
+        return None
+    index = min(correct_count, len(BADGE_LEVELS)) - 1
+    return f"{BADGE_LEVELS[index]}-{correct_count}"
+
+
+def correct_count_from_badge(badge: str | None) -> int:
+    """从徽章文本还原答对题数（**徽章是唯一的计数载体**，见 :data:`BADGE_LEVELS`）。
+
+    认不出就返回 0（库被人手改过时退回「这一关还没答对」），绝不抛异常 ——
+    它不是判分依据，只用于状态机推进。
+    """
+    if not badge:
+        return 0
+    _, _, tail = badge.partition("-")
+    try:
+        return max(0, int(tail))
+    except ValueError:
+        return 0
+
+
+def advance_stage(
+    *,
+    current_stage: str | None,
+    mastery_score: float,
+    correct_count: int,
+) -> str:
+    """关卡状态机的**唯一实现**（纯函数，可单测）。
+
+    ``locked → learning → quizzed → mastered``，单调不回退：
+
+    | 目标状态 | 条件 |
+    | --- | --- |
+    | ``learning`` | 学生开始做这一关的题（第一次作答即进入） |
+    | ``quizzed`` | 答对 ≥ :data:`QUIZZED_CORRECT_NEEDED` 道 |
+    | ``mastered`` | 答对 ≥ :data:`MASTERED_CORRECT_NEEDED` 道 **且** 掌握度 ≥ 阈值 |
+
+    ★ **答错不改状态**（只让 ``correct_count`` 不增长）：状态**单调**是刻意的 ——
+    如果答错能把 ``quizzed`` 打回 ``learning``，学生看到的是「我的进度条倒着走」，
+    而掌握度那边已经在如实下降了（``mastery`` 才是能力，``progress`` 是走过没走过）。
+    这也让「关卡进度」「掌握度」两个量各自承担意义，不会互相污染。
+    """
+    if correct_count <= 0:
+        return "learning"
+    if current_stage == "mastered":
+        return "mastered"
+    if correct_count >= MASTERED_CORRECT_NEEDED and mastery_score >= MASTERY_UNLOCK_THRESHOLD:
+        return "mastered"
+    if correct_count >= QUIZZED_CORRECT_NEEDED:
+        return "quizzed"
+    return "learning"
+
+
+def unlocked_successor_ids(
+    *,
+    current_kp_id: str,
+    current_stage: str,
+    mastery_score: float,
+    successor_ids: Sequence[str],
+) -> list[str]:
+    """★ 解锁条件（票 15 验收口径）：**「当前 kp 已 quizzed 且 当前 kp 掌握度 ≥ 阈值」才解锁后继**。
+
+    ``successor_ids`` 由调用方从依赖图取（``from → to``，见 ``app/knowledge/deps.py``）——
+    本函数**不做图遍历**，只做规则判定（图的数据来源与本函数的职责分开，
+    这样「图拿错了」和「规则判错了」是两件可分别定位的事）。
+
+    答错时掌握度会掉、``stage`` 也不会到 ``quizzed``，因此**关卡保持锁定**。
+    """
+    if not successor_ids:
+        return []
+    if current_stage not in ("quizzed", "mastered"):
+        return []
+    if mastery_score < MASTERY_UNLOCK_THRESHOLD:
+        return []
+    return [kp for kp in successor_ids if kp and kp != current_kp_id]
+
+
+def level_order_from_graph(
+    conn,
+    *,
+    start_kp_ids: Sequence[str],
+    limit: int = 40,
+    max_depth: int | None = None,
+) -> list[str]:
+    """按**依赖图拓扑序**给出关卡顺序（票 15：「关卡顺序由依赖图拓扑序决定」）。
+
+    从 ``start_kp_ids`` 出发做 BFS（沿 ``from → to`` 的后继边），先去重、再按
+    (跳数, kp_id) 排序。**depth 上限由 ``deps.py`` 的递归 CTE 保证**（防环死循环），
+    本函数只负责把多棵树拼成一条稳定的顺序。
+
+    ★ ``max_depth`` 默认取 :data:`app.knowledge.deps.MAX_DEPTH_LIMIT`（不是 ``DEFAULT_DEPTH``）：
+      关卡路径要覆盖**整条链**，而 ``DEFAULT_DEPTH=3`` 恰好会在第四跳把
+      「变量」（``pl→ph→jr-data-features→jr-py-variable``）截掉 ——
+      实测踩到过：进度里根本没有学生真正要练的那个知识点，
+      表现为「依赖图明明有这条线，关卡列表里却没有」。防环仍然成立
+      （``MAX_DEPTH_LIMIT`` 本身就是硬上限，且 CTE 用 UNION 去重）。
+    """
+    from app.knowledge.deps import MAX_DEPTH_LIMIT, successors
+
+    depth_cap = max(1, min(int(max_depth or MAX_DEPTH_LIMIT), MAX_DEPTH_LIMIT))
+    seen: dict[str, int] = {}
+    for root in start_kp_ids:
+        if not root:
+            continue
+        seen.setdefault(root, 0)
+        for row in successors(conn, root, max_depth=depth_cap):
+            previous = seen.get(row.kp_id)
+            if previous is None or row.depth < previous:
+                seen[row.kp_id] = row.depth
+    ordered = sorted(seen.items(), key=lambda item: (item[1], item[0]))
+    return [kp_id for kp_id, _ in ordered[: max(1, int(limit))]]
+
+
+# ------------------------------------------------------------------ 主观题 --
+#: 无 API Key 时的**可读降级文案**（TS 侧原样展示给学生；不是 error 事件的兜底文案）。
+#: 判分口径不变：宁可**不判**（降级），也不要瞎判 —— 主观题乱判会直接污染掌握度。
+SUBJECTIVE_DEGRADED_TEXT = (
+    "这道题需要老师逐句看你的表达，但当前没有可用的大模型（还没配置 API Key）。"
+    "我先不给你判分，免得判错；你可以先说说思路，或者换一道客观题练手。"
+)
+
+#: 主观题判分结论的反馈长度上限（落库的是**说明**，不是对话正文，§8.1 合规口径）。
+SUBJECTIVE_FEEDBACK_MAX_CHARS = 200
+
+#: 主观题得分占比达到这个值即判「答对」（0.6 = 及格线）。
+#: ★ 判定在**服务端**做（只认 ``score``）：TS 侧送来的只是一个分数，
+#: 「多少分算过」这条规则如果两边各写一份，迟早会漂移成两个答案。
+SUBJECTIVE_PASS_RATIO = 0.6
+
+#: 主观题题干的长度上限（生成的题干不该是一篇文章）。
+STEM_MAX_CHARS = 600
+#: 主观题评分细则的长度上限（细则要能被模型一次读完，也防 Prompt 注入式塞料）。
+RUBRIC_MAX_CHARS = 800
+#: 选项文本长度上限。
+OPTION_MAX_CHARS = 200
+
+#: 客观题 / 主观题两种判分路径（``contracts.py`` 的 ``QuizResult.scored_by``）。
+GRADED_BY_RULE = "rule"
+GRADED_BY_LLM = "llm"
 
 #: 中文标点 → ASCII（NFKC 覆盖不到 ``、`` ``。`` ``“`` 这类 CJK 标点，单独补一张表）
 _PUNCT_TRANSLATION = str.maketrans(
@@ -103,7 +316,67 @@ _PUNCT_TRANSLATION = str.maketrans(
 )
 
 
-# ---------------------------------------------------------------- 归一化 --
+# ---------------------------------------------------------------- 请求/出参 --
+# ⚠️ 这些模型**不放进 `contracts.py`**（并行开发的边界：契约文件由票 04 独占）。
+#    它们是本路由的**入参**，按 `app/routes/profile.py` 的既有先例就地声明；
+#    出参一律用 `contracts.py` 的 `QuizPayload` / `QuizResult`（对外形态的唯一来源）。
+
+
+class VariantQuestionIn(CamelModel):
+    """登记一道 LLM 生成的变式题（**必须带标准答案**，否则后端判不了分）。
+
+    ``reference_answer`` 就是**标准答案**：它进 ``learning.db``，绝不出现在任何出参里。
+    方向与 :class:`app.contracts.QuizGradeRequest.answer`（学生作答）**相反**，别混。
+    """
+
+    qid: str = Field(min_length=1, max_length=64)
+    kp_id: str = Field(default="", max_length=64)
+    type: QuizQuestionType
+    stem: str = Field(min_length=1, max_length=STEM_MAX_CHARS)
+    options: list[str] | None = None
+    reference_answer: str | list[str]
+    explanation: str = Field(default="", max_length=STEM_MAX_CHARS)
+    #: 主观题（开放题）的评分细则。给了就是主观题 → 只能走 ``/api/quiz/grade-subjective``。
+    #: 选择题/填空题给了也**不算主观题**（客观题永远走规则判分，见 :func:`is_subjective`）。
+    rubric: str | None = Field(default=None, max_length=RUBRIC_MAX_CHARS)
+
+    @field_validator("options")
+    @classmethod
+    def _check_options(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        if any(len(item) > OPTION_MAX_CHARS for item in cleaned):
+            raise ValueError(f"选项过长（上限 {OPTION_MAX_CHARS} 字）")
+        return cleaned
+
+
+class RegisterVariantsRequest(CamelModel):
+    """``POST /api/quiz/variants`` 的请求体：把 LLM 生成的题登记到该学生的库里。
+
+    ``student_id`` 在 query 里（与 ``/api/quiz/bank`` 的取题口径一致）；
+    这里只放题目本身。**至少要有一道题**（空数组等于一次毫无意义的写入）。
+    """
+
+    questions: list[VariantQuestionIn] = Field(min_length=1, max_length=MAX_QUESTION_COUNT)
+    #: 学段（生成时用的那一个；校验层复查，防模型给出超纲的题）。
+    grade_level: GradeLevel
+
+
+class SubjectiveGradeRequest(CamelModel):
+    """``POST /api/quiz/grade-subjective`` 的请求体：**TS 侧判完分，交服务端落库**。
+
+    ★ LLM 调用在 TS 侧（Pi 独占），Python 不装任何 LLM 客户端。本端点只做三件事：
+    校验（这道题真的是主观题吗）→ 按 ``score`` 定对错（**规则在服务端**）→ 写掌握度与进度。
+    """
+
+    student_id: str
+    qid: str = Field(min_length=1, max_length=64)
+    #: 模型给的得分占比 0..1（缺 ``score`` 一律 422，不允许「没判就落库」）。
+    score: float = Field(ge=0.0, le=1.0)
+    #: 模型给的中文反馈（会被压成单行并截断 —— 它是说明，不是正文容器）。
+    feedback: str = Field(default="", max_length=SUBJECTIVE_FEEDBACK_MAX_CHARS)
+    session_id: str | None = Field(default=None, max_length=128)
 def normalize_answer(value: str) -> str:
     """把一段答案归一化成**只保留语义**的形式（比较用，不落库、不回显）。
 
@@ -180,6 +453,31 @@ def feedback_for(question: QuizQuestion, correct: bool) -> str:
     if correct:
         return f"答对了！{question.explanation}"
     return f"这次还差一点，先看看思路：{question.explanation} 想一想再选一次吧。"
+
+
+def is_subjective(record: GeneratedQuestionRecord) -> bool:
+    """这道生成题是不是**主观题**（有评分细则）。
+
+    ★ 判据只看「``rubric`` 非空」，与题型**无关**：prompt 里能让模型输出一段文本
+    作为开放题（``type`` 仍是个合法题型，``reference_answer`` 是参考答案而非唯一解）。
+    判据放在服务端，TS 侧无法自己声明「我是主观题」—— 否则随便一道选择题的 ``qid``
+    都能走主观路径，`scored_by` 就失去了意义。
+    """
+    return bool(record.rubric and record.rubric.strip())
+
+
+def subjective_feedback(*, score: float, correct: bool, raw_feedback: str) -> str:
+    """主观题的最终中文反馈：**模型的话在前，规则判定在后**。
+
+    为什么还要把「答对/答错」显式写进去：模型给的分与它自己的措辞经常不一致
+    （比如 score=0.3 却说「回答得不错」）。学生需要知道系统最终怎么判 ——
+    措辞可以温和，但结论必须是确定的。
+    """
+    flat = " ".join(str(raw_feedback or "").split())
+    if len(flat) > SUBJECTIVE_FEEDBACK_MAX_CHARS:
+        flat = f"{flat[:SUBJECTIVE_FEEDBACK_MAX_CHARS]}…"
+    verdict = "思路到位，这题算过了。" if correct else "方向还差一点，我们再对着要点捋一遍。"
+    return f"{flat}（得分 {round(score * 100)}%，{verdict}）" if flat else verdict
 
 
 # ---------------------------------------------------------------- 超纲自检 --
@@ -353,6 +651,118 @@ def select_questions(
     return ordered[: max(1, min(int(count), MAX_QUESTION_COUNT))]
 
 
+# ---------------------------------------------------------------- 闯关推进 --
+def successor_ids_for(conn, kp_id: str) -> list[str]:
+    """依赖图里的直接后继（``from → to``，``from`` 是前置）。
+
+    **只取一跳**：解锁的语义是「这一关过了，下一关放出来」，不是「整条支线全放开」。
+    深度上限由 ``deps.py`` 的递归 CTE 保证（这里传 1，等于只取直接后继）。
+    """
+    from app.knowledge.deps import successors
+
+    return [row.kp_id for row in successors(conn, kp_id, max_depth=1)]
+
+
+def apply_level_progress(
+    store: LearningStore,
+    *,
+    kp_id: str,
+    correct: bool,
+    mastery_score: float,
+    successor_ids: Sequence[str],
+) -> LevelOutcome:
+    """把一次答题的结果推进到 ``progress`` 表（**闯关状态的唯一写路径**）。
+
+    流程（与 :func:`advance_stage` 的规则一一对应）：
+
+    1. 读这一关已有的 ``stage`` / 徽章（徽章里记着「答对几道」）；
+    2. 答对才 ``correct_count + 1``（答错不动计数 —— 状态单调，见 ``advance_stage``）；
+    3. 算新 ``stage`` 与新徽章（徽章**只在答对时给**，答错保留旧的）；
+    4. 写回；再按：「已 quizzed 且掌握度 ≥ 阈值」判断是否**解锁后继**。
+
+    ★ 解锁的实现是**把后继从 ``locked`` 提到 ``learning``**（插入一行）。
+      这里对每个后继都插一行是**修正一个有意的省略**：不插的话后继在 ``progress`` 表里
+      根本没有行，前端拿到的进度里就没有这一关 —— 学生会以为「后面没有内容了」。
+    """
+    rows = store.progress_map()
+    existing: ProgressRecord | None = rows.get(kp_id)
+    current_stage = existing.stage if existing else None
+    correct_count = correct_count_from_badge(existing.badge if existing else None)
+
+    if correct:
+        correct_count += 1
+    new_stage = advance_stage(
+        current_stage=current_stage,
+        mastery_score=float(mastery_score),
+        correct_count=correct_count,
+    )
+    # ★ 徽章只在**答对**时更新（答错保留旧徽章：那是「曾经通关」的事实，不该被抹掉）
+    new_badge = badge_for(correct_count) if correct else (existing.badge if existing else None)
+    store.upsert_progress(kp_id, stage=new_stage, badge=new_badge)
+
+    unlocked: list[str] = []
+    # ★ 解锁到 `learning` 而不是直接给 `quizzed`：解锁只表示「这一关可以开始做了」，
+    #   做了没有由学生自己的作答决定。把新关直接标成 quizzed 会凭空长出一个进度。
+    newly = unlocked_successor_ids(
+        current_kp_id=kp_id,
+        current_stage=new_stage,
+        mastery_score=float(mastery_score),
+        successor_ids=successor_ids,
+    )
+    for successor in newly:
+        previous = rows.get(successor)
+        if previous is not None and previous.stage != "locked":
+            continue  # 已经在做 / 已经通过：**不回退**（状态单调）
+        store.upsert_progress(
+            successor,
+            stage="learning",
+            badge=previous.badge if previous is not None else None,
+        )
+        unlocked.append(successor)
+    return LevelOutcome(
+        kp_id=kp_id,
+        stage=new_stage,
+        badge=new_badge,
+        correct_count=correct_count,
+        unlocked=tuple(unlocked),
+    )
+
+
+def progress_snapshot(
+    store: LearningStore,
+    *,
+    kp_ids: Sequence[str] | None = None,
+    order: Sequence[str] | None = None,
+) -> list[dict[str, object]]:
+    """给前端/事件载荷用的进度快照（纯数据，**不含答案**）。
+
+    ``stage`` / ``badge`` 原样来自 ``learning.db``（前端只读，不自持状态机）；
+    ``mastery`` 一并带上，免得前端为了画一条进度条再发一次画像请求。
+
+    - ``kp_ids`` 给了就只返回这几关（用于「本次答题影响到的关卡」这种小范围回传）；
+    - ★ ``order`` 是**依赖图拓扑序**（:func:`level_order_from_graph` 的产物）：
+      给了就按它排序（序外的关卡按 kp_id 排到后面）。**不加它的话排序会退化成
+      ``kp_id`` 字典序**，于是「变量」可能排在「循环」后面 —— 进度条会显示成
+      「下一关已经解锁、上一关还没做」的怪样子（这正是票 15 说的
+      「关卡顺序由依赖图拓扑序决定」，不是按 id 排）。
+    """
+    mastery = store.mastery_map()
+    wanted = set(kp_ids) if kp_ids is not None else None
+    rank = {kp_id: index for index, kp_id in enumerate(order or ())}
+    fallback = len(rank)
+    rows = [row for row in store.progress_rows() if wanted is None or row.kp_id in wanted]
+    rows.sort(key=lambda row: (rank.get(row.kp_id, fallback), row.kp_id))
+    return [
+        {
+            "kpId": row.kp_id,
+            "stage": row.stage,
+            "badge": row.badge,
+            "mastery": round(float(mastery.get(row.kp_id, 0.0)), 4),
+        }
+        for row in rows
+    ]
+
+
 # ---------------------------------------------------------------- 学生库 --
 def student_db_path(data_dir: str | Path, student_id: str) -> Path:
     """``<data-dir>/students/<student_id>/learning.db``（执行文档 §8.2，一人一库）。
@@ -455,9 +865,15 @@ def get_quiz_bank(
 def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
     """按 ``qid`` 查库判分，并把结果写进该学生的 ``learning.db``。
 
-    写入两处（都是结构化数据，**不写对话正文**）：
+    写入三处（都是结构化数据，**不写对话正文**）：
       - ``mastery``：``score`` / ``attempts`` / ``correct`` / ``last_seen_at``；
-      - ``learning_history``：一条 ``activity="quiz"`` 记录（票 20 的个性化闭环要吃它）。
+      - ``learning_history``：一条 ``activity="quiz"`` 记录（票 20 的个性化闭环要吃它）；
+      - ``progress``：闯关状态机（**票 15**，见 :func:`apply_level_progress`）。
+
+    题目来源有两处，**按此顺序**查（票 15 起）：
+      ① 该学生库里的 LLM 生成题（``generated_question``）—— 变式题走这条；
+      ② 随包分发的题库。
+    两处都要求「这条库里有这道题」，否则 404（**不猜、不新建**）。
 
     ``mastery_delta`` 回传的是**实际生效**的变化量（``新值 - 旧值``）：已经满分时再答对就是 0，
     而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）。
@@ -468,66 +884,571 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
             detail="studentId 不合法（只允许字母、数字、下划线、连字符）",
         )
 
-    report = load_bank(bank_dir_for(request))
-    question = find_question(report.entries, body.qid)
-    if question is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"题目 {body.qid!r} 不在本地题库里。若这是模型生成的变式题，"
-                "需要由生成路径把答案登记到题库后再批改（票 15）。"
-            ),
-        )
-
-    correct = is_correct_answer(question, body.answer)
-    feedback = feedback_for(question, correct)
-
     config = request.app.state.config
     store = LearningStore(student_db_path(config.data_dir, body.student_id))
     try:
+        found = _locate_question(request, store, body.qid)
+        if found is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"题目 {body.qid!r} 不在本题库、也不在这个学生的生成题里。"
+                    "若是模型生成的变式题，要先经 POST /api/quiz/variants 登记（含标准答案）再批改。"
+                ),
+            )
+        question, generated = found
+
+        # ★ 主观题**不许**走这条规则判分：它的答案不是唯一解，规则比对会把好答案判错。
+        #   409（不是 422）：请求本身合法，只是「这道题不用这条路径判」。
+        if generated is not None and is_subjective(generated):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"题目 {body.qid!r} 是主观题（带评分细则），必须走 "
+                    "POST /api/quiz/grade-subjective（由 TS 侧的模型判分）。"
+                ),
+            )
+
+        correct = is_correct_answer(question, body.answer)
+        feedback = feedback_for(question, correct)
         before, _, _ = store.mastery(question.kp_id)
         delta = MASTERY_GAIN_CORRECT if correct else -MASTERY_LOSS_WRONG
         after = store.apply_mastery(question.kp_id, delta, correct=correct)
         effective = round(after - before, 6)
-        store.add_history(
+        outcome = _record_attempt(
+            request,
+            store,
             kp_id=question.kp_id,
-            activity="quiz",
+            qid=question.qid,
+            question_type=question.type,
+            scored_by=GRADED_BY_RULE,
+            correct=correct,
+            mastery_after=after,
+            effective_delta=effective,
             session_id=body.session_id or "",
-            question=question.stem[:120],
-            is_correct=correct,
-            detail=json.dumps(
-                {
-                    "qid": question.qid,
-                    "type": question.type,
-                    "scoredBy": "rule",
-                    "masteryDelta": effective,
-                    "mastery": after,
-                },
-                ensure_ascii=False,
-            ),
+            stem=question.stem,
         )
     finally:
         store.close()
 
     logger.info(
-        "判分：qid=%s kp=%s 对错=%s 掌握度 %.3f → %.3f（delta=%.3f）",
+        "判分（rule）：qid=%s kp=%s 对错=%s 掌握度 %.3f → %.3f（delta=%.3f）关卡=%s%s",
         question.qid,
         question.kp_id,
         correct,
         before,
         after,
         effective,
+        outcome.stage,
+        f" 解锁 {list(outcome.unlocked)}" if outcome.unlocked else "",
     )
-    result = QuizResult(
+    return QuizResult(
         qid=question.qid,
         correct=correct,
-        scored_by="rule",
+        scored_by=GRADED_BY_RULE,
         feedback=feedback,
         # ★ 限幅：契约模型自身有 ge/le 校验（±MASTERY_DELTA_LIMIT），
         #   store 也限幅一次 —— 两道保险都在，单次答题绝不可能把掌握度从 0 顶到 1。
         mastery_delta=max(-MASTERY_DELTA_LIMIT, min(MASTERY_DELTA_LIMIT, effective)),
     )
-    return result
+
+
+# ---------------------------------------------------------------- 变式题登记 --
+def _validate_variant(
+    item: VariantQuestionIn, *, grade_level: str
+) -> tuple[str, str] | None:
+    """校验一道待登记的生成题；不合格返回 ``(字段, 原因)``，合格返回 ``None``。
+
+    校验层**复查学段的超纲问题**（票 15 明确要求「学段写进 prompt 且校验层复查」）：
+    prompt 里已经写了学段，但模型可能无视 —— 所以这里用与教材自检同一份术语文表
+    再审一遍，超纲的题**直接拒**（不静默收下：超纲题会让学生看到没学过的名词）。
+    """
+    if item.type == "choice":
+        if not item.options or len(item.options) < 2:
+            return ("options", "选择题至少要两个选项（否则学生没法作答）")
+    answers = _as_list(item.reference_answer)
+    if not any(normalize_answer(value) for value in answers):
+        return ("referenceAnswer", "标准答案是空的（后端将无法判分）")
+    text = "\n".join([item.stem, item.explanation or "", *(item.options or [])])
+    offending = out_of_scope_terms(text, grade_level)
+    if offending:
+        return ("stem", f"题干出现高于本学段的术语：{'、'.join(offending)}（超纲）")
+    return None
+
+
+@router.post(
+    "/quiz/variants",
+    response_model=QuizPayload,
+    summary="登记 LLM 生成的变式题（含标准答案；返回体不含答案）",
+)
+def register_variants(
+    request: Request,
+    body: RegisterVariantsRequest,
+    student_id: str = Query(..., description="学生 id（生成题落在这个学生自己的库里）"),
+    studentId: str | None = Query(None, include_in_schema=False),
+) -> QuizPayload:
+    """把 TS 侧生成的变式题**登记到该学生的 ``learning.db``**，并返回对外载荷。
+
+    ★ 两道闸门把「答案泄漏」挡在本端点之外：
+
+    ① **入参方向**：``reference_answer`` 是模型产出的**标准答案**，只进库、绝不回显；
+    ② **出参方向**：返回体是 :class:`QuizPayload`，``questions`` 全是
+       :class:`QuizQuestionOut`（结构上没有 ``answer``）——
+       转换只走 ``QuizPayload.from_internal``，不存在第二条投影路径。
+
+    ★ ``qid`` 由 TS 侧生成（带随机段，见 ``quiz.ts`` 的 ``variantQid``）：
+      Python 侧只做**形状校验**（长度/字符集），不重新编号 ——
+      重新编号会让「学生卡片上的 qid」与「后端登记的 qid」对不上，判分必 404。
+    """
+    student = student_id or studentId
+    if not student or not STUDENT_ID_RE.match(student):
+        raise HTTPException(
+            status_code=422,
+            detail="studentId 不合法（只允许字母、数字、下划线、连字符）",
+        )
+
+    rejected: list[str] = []
+    duplicates: list[str] = []
+    accepted: list[GeneratedQuestionRecord] = []
+    seen: set[str] = set()
+    for item in body.questions:
+        # ★ 同一批里 qid 重复 → **整批拒**（`save_generated_questions` 是 ON CONFLICT 覆盖语义，
+        #   重复的 qid 会让后一道**静默覆盖**前一道的答案 —— 学生做的是题 A、
+        #   判分用的是题 B 的答案，是最难查的那类错）。整批拒而不是「只丢重复的」：
+        #   重复说明生成侧有 bug（qid 不该撞），收下剩下几道只会把问题藏起来。
+        if item.qid in seen:
+            duplicates.append(item.qid)
+            continue
+        seen.add(item.qid)
+        problem = _validate_variant(item, grade_level=body.grade_level)
+        if problem is not None:
+            rejected.append(f"{item.qid}/{problem[0]}: {problem[1]}")
+            continue
+        accepted.append(
+            GeneratedQuestionRecord(
+                qid=item.qid,
+                kp_id=item.kp_id,
+                grade_level=body.grade_level,
+                type=item.type,
+                stem=item.stem,
+                options=tuple(item.options) if item.options else None,
+                reference_answer=item.reference_answer,
+                explanation=item.explanation,
+                rubric=(item.rubric or "").strip() or None,
+                source="generated",
+                created_at=None,
+            )
+        )
+
+    if duplicates:
+        # 更明确的一条：告诉调用方这是「生成侧 qid 撞了」，而不是某道题内容不合格
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "同一批里 qid 重复：" + "、".join(sorted(set(duplicates))) +
+                "。重复的 qid 会让后一道覆盖前一道的标准答案（学生做题 A、判分用题 B 的答案），"
+                "整批已拒绝；请让生成侧给每题一个唯一 qid（`quiz.ts` 的 `variantQid` 会带随机段）。"
+            ),
+        )
+
+    if not accepted:
+        # ★ 全部被拒时**不返回空题**：空载荷会让前端渲染一张空卡片（票 14 的同一口径）。
+        #   理由里有具体是哪道题、哪里不合格，编排层据此重试或退回题库。
+        raise HTTPException(
+            status_code=422,
+            detail="没有一道生成题通过校验：" + "；".join(rejected),
+        )
+
+    config = request.app.state.config
+    store = LearningStore(student_db_path(config.data_dir, student))
+    try:
+        # 冷启动兜底（与 `POST /api/profile/{id}/events` 同一口径）：
+        # 「学生还没登录就先开始做题」不该丢数据，也不该让之后的 `GET /api/profile` 回 404
+        # —— 那样学生会看到「我没有学习记录」，而他明明刚做了题。
+        if store.get_student(student) is None:
+            store.upsert_student(student, nickname="", grade_level=body.grade_level)
+            logger.info("冷启动：为 %s 建立学生行（学段 %s）", student, body.grade_level)
+        store.save_generated_questions(accepted)
+        # 冷启动/首次练习：把进度行补出来（**只插不覆盖**），否则前端拿到的进度里没这几关
+        store.seed_progress([item.kp_id for item in accepted if item.kp_id])
+    finally:
+        store.close()
+
+    logger.info(
+        "登记变式题：学生=%s 学段=%s 通过 %d 道（拒 %d 道：%s）",
+        student,
+        body.grade_level,
+        len(accepted),
+        len(rejected),
+        "；".join(rejected) or "无",
+    )
+
+    # ★ 唯一的「内部 → 对外」转换路径（`QuizQuestionOut.from_internal` 在白名单里丢答案）
+    return QuizPayload.from_internal(
+        kp_id=accepted[0].kp_id,
+        source="generated",
+        questions=[
+            QuizQuestion(
+                qid=item.qid,
+                kp_id=item.kp_id,
+                type=item.type,  # type: ignore[arg-type]
+                stem=item.stem,
+                options=list(item.options) if item.options else None,
+                answer=item.reference_answer,
+                explanation=item.explanation,
+            )
+            for item in accepted
+        ],
+    )
+
+
+# ---------------------------------------------------------------- 主观题判分 --
+@router.post(
+    "/quiz/grade-subjective",
+    response_model=QuizResult,
+    summary="落库主观题判分结论（LLM 调用在 TS 侧，本端点只落库）",
+)
+def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResult:
+    """把 **TS 侧模型判分**的结论落进 ``learning.db``（票 15 的混合批改）。
+
+    ★★ 为什么判分结论要从外面送进来、判分逻辑却仍在服务端：
+
+    - **LLM 调用归 Ts 独占**（Pi 是编排层，Python 不装任何 LLM 客户端）——
+      所以模型给出的 ``score`` / ``feedback`` 只能从 TS 侧来；
+    - **但「多少分算过」必须由服务端定**（:data:`SUBJECTIVE_PASS_RATIO`）：
+      TS 只送分数，不送 ``correct``。若让 TS 送对错，等于把判分规则复制一份到前端进程，
+      两边迟早漂移，而漂移的表现是「同样的答案，有时算对有时算错」；
+    - **只有登记过评分细则的主观题**走得通（客观题一律 **409**），
+      这样 ``scored_by="llm"`` 不会被用来绕开规则判分。
+
+    写库与 ``/quiz/grade`` **共用** :func:`_record_attempt`（同一个事务边界、
+    同一套进度推进），所以两条判分路径在数据侧不可能出现两套语义。
+    """
+    if not STUDENT_ID_RE.match(body.student_id):
+        raise HTTPException(
+            status_code=422,
+            detail="studentId 不合法（只允许字母、数字、下划线、连字符）",
+        )
+
+    config = request.app.state.config
+    store = LearningStore(student_db_path(config.data_dir, body.student_id))
+    try:
+        generated = store.find_generated_question(body.qid)
+        if generated is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"题目 {body.qid!r} 不在这个学生的生成题里。主观题必须先经 "
+                    "POST /api/quiz/variants 登记（带 rubric 评分细则）才能按模型判分。"
+                ),
+            )
+        if not is_subjective(generated):
+            # ★ 客观题走主观路径 = 试图绕开规则判分：明确拒绝并指出正确路径
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"题目 {body.qid!r} 没有评分细则（是客观题），必须走 POST /api/quiz/grade "
+                    "用规则判分；主观题判分路径只服务带 rubric 的开放题。"
+                ),
+            )
+
+        correct = body.score >= SUBJECTIVE_PASS_RATIO
+        feedback = subjective_feedback(
+            score=body.score, correct=correct, raw_feedback=body.feedback
+        )
+        before, _, _ = store.mastery(generated.kp_id)
+        delta = MASTERY_GAIN_CORRECT if correct else -MASTERY_LOSS_WRONG
+        after = store.apply_mastery(generated.kp_id, delta, correct=correct)
+        effective = round(after - before, 6)
+        outcome = _record_attempt(
+            request,
+            store,
+            kp_id=generated.kp_id,
+            qid=generated.qid,
+            question_type=generated.type,
+            scored_by=GRADED_BY_LLM,
+            correct=correct,
+            mastery_after=after,
+            effective_delta=effective,
+            session_id=body.session_id or "",
+            stem=generated.stem,
+            extra={"llmScore": round(float(body.score), 4)},
+        )
+    finally:
+        store.close()
+
+    logger.info(
+        "判分（llm）：qid=%s kp=%s 得分=%.2f 对错=%s 掌握度 %.3f → %.3f 关卡=%s%s",
+        body.qid,
+        generated.kp_id,
+        body.score,
+        correct,
+        before,
+        after,
+        outcome.stage,
+        f" 解锁 {list(outcome.unlocked)}" if outcome.unlocked else "",
+    )
+    return QuizResult(
+        qid=generated.qid,
+        correct=correct,
+        scored_by=GRADED_BY_LLM,
+        feedback=feedback,
+        mastery_delta=max(-MASTERY_DELTA_LIMIT, min(MASTERY_DELTA_LIMIT, effective)),
+    )
+
+
+# ---------------------------------------------------------------- 进度读取 --
+@router.get(
+    "/quiz/progress/{student_id}",
+    summary="读闯关进度（learning.db 的 progress 表是唯一权威）",
+)
+def read_progress(
+    request: Request,
+    student_id: str,
+    kpIds: str | None = Query(None, description="只看这几关，逗号分隔（可选）"),
+) -> dict[str, object]:
+    """读某学生的闯关进度。
+
+    ★ **冷启动兜底**（票 15/20 的验收项）：新学生 ``progress`` 表是空的，
+      这里按**依赖图的拓扑序**自动初始化默认路径（只插不覆盖），
+      再返回 —— 前端不会拿到空数组，也不会因为没数据而报错。
+    ``kpIds`` 用于「本次答题影响到的关卡」这种小范围回读。
+    """
+    if not STUDENT_ID_RE.match(student_id):
+        raise HTTPException(
+            status_code=422,
+            detail="studentId 不合法（只允许字母、数字、下划线、连字符）",
+        )
+
+    config = request.app.state.config
+    store = LearningStore(student_db_path(config.data_dir, student_id))
+    try:
+        # 冷启动：学生一行都没有时先建学生行（缺学段就按默认），否则种子路径无从谈起
+        student = store.get_student(student_id)
+        if student is None:
+            student = store.upsert_student(
+                student_id, nickname="", grade_level=COLD_START_GRADE
+            )
+            logger.info("冷启动：为 %s 建立学生行（学段 %s）", student_id, student.grade_level)
+
+        seeded = _seed_default_path(request, store, grade_level=student.grade_level)
+        wanted = (
+            [item for item in str(kpIds).split(",") if item.strip()] if kpIds else None
+        )
+        # ★ 按依赖图拓扑序输出（不是 kp_id 字典序）：见 `progress_snapshot` 的注释。
+        order = _default_level_order(request, grade_level=student.grade_level)
+        rows = progress_snapshot(store, kp_ids=wanted, order=order)
+    finally:
+        store.close()
+
+    return {
+        "studentId": student_id,
+        "gradeLevel": student.grade_level,
+        "seeded": seeded,
+        "levels": rows,
+    }
+
+
+def _seed_default_path(
+    request: Request, store: LearningStore, *, grade_level: str
+) -> int:
+    """按依赖图拓扑序初始化默认关卡路径（只插不覆盖），返回新插了几关。
+
+    起点 = 该学段**（含更低学段）**里的「根知识点」——即没有前置的那些；
+    路径 = 沿后继边做 BFS（:func:`level_order_from_graph`）。
+    知识库缺失/为空时**不报错**：退化成空路径，前端仍能拿到 `{"levels": []}` 而不是 500。
+
+    ★ **第一关是 ``learning`` 而不是 ``locked``**（冷启动的关键一步）：
+      全 locked 的话学生打开练习看到「一关都进不去」，而「没有前置的第一关」
+      本来就该是可以直接开始的。其余关卡保持 ``locked``，靠
+      :func:`unlocked_successor_ids` 在答对后逐个放出来。
+
+    ★ **依赖图里没有任何知识点**时（kb 为空/未建）退回一个**种子起点**：
+      冷启动必须给出「可开始的第一关」，否则新学生的第一屏是死的（票 20 的冷启动验收）。
+    """
+    order = _default_level_order(request, grade_level=grade_level)
+    if not order:
+        logger.warning(
+            "依赖图里没有可用的知识点（学段 %s），冷启动退回种子起点（练习仍可开始）",
+            grade_level,
+        )
+        order = list(COLD_START_LEVEL_SEEDS)
+
+    inserted = 0
+    existing = store.progress_map()
+    for index, kp_id in enumerate(order):
+        if not kp_id or kp_id in existing:
+            continue
+        # 第一关直接可做（`learning`），其余 `locked`；靠答对后逐个解锁（见 `unlocked_successor_ids`）
+        stage = "learning" if index == 0 else "locked"
+        inserted += store.seed_progress([kp_id], stage=stage)
+        existing[kp_id] = ProgressRecord(
+            kp_id=kp_id, stage=stage, badge=None, updated_at=None
+        )
+    if inserted:
+        logger.info(
+            "冷启动：按依赖图初始化 %d 关默认路径（学段 %s，首关 %s；根 %s）",
+            inserted,
+            grade_level,
+            order[0],
+            "、".join(order[:4]),
+        )
+    return inserted
+
+
+def _default_level_order(request: Request, *, grade_level: str) -> list[str]:
+    """依赖图拓扑序下的关卡路径（读不到图/图为空时返回空列表，由调用方兜底）。"""
+    from app.rag.retriever import default_kb_path
+    from app.store.connections import connect
+
+    kb_path = default_kb_path(request.app.state.config.data_dir)
+    if not kb_path.exists():
+        logger.warning("知识库不存在（%s），跳过默认关卡路径初始化", kb_path)
+        return []
+    try:
+        conn = connect(kb_path, readonly=True)
+    except Exception as exc:  # noqa: BLE001 - 冷启动不该因为库读不到而 500
+        logger.warning("打开知识库失败，跳过默认关卡路径初始化：%s", exc)
+        return []
+    try:
+        allowed = set(compatible_grades(grade_level))
+        rows = conn.execute("SELECT kp_id, grade_level FROM kp ORDER BY kp_id").fetchall()
+        known = {str(r["kp_id"]) for r in rows}
+        roots = [
+            str(r["kp_id"])
+            for r in rows
+            if str(r["grade_level"]) in allowed and not _has_prerequisite(conn, str(r["kp_id"]))
+        ]
+        if not roots:
+            # 全都有前置（各学段的根都在更高学段）：拿该学段全部知识点当起点，
+            # 顺序仍由 BFS 决定，至少保证「有内容可做」。
+            roots = [str(r["kp_id"]) for r in rows if str(r["grade_level"]) in allowed]
+        return [
+            kp_id
+            for kp_id in level_order_from_graph(conn, start_kp_ids=roots)
+            if kp_id in known
+        ]
+    finally:
+        conn.close()
+
+
+def _has_prerequisite(conn, kp_id: str) -> bool:
+    """这个知识点有没有前置（依赖图里的入边）。"""
+    row = conn.execute(
+        "SELECT 1 FROM knowledge_dependencies WHERE to_kp_id = ? LIMIT 1", (kp_id,)
+    ).fetchone()
+    return row is not None
+
+
+def _locate_question(
+    request: Request, store: LearningStore, qid: str
+) -> tuple[QuizQuestion, GeneratedQuestionRecord | None] | None:
+    """按 ``qid`` 找题：**先学生库里的生成题，再随包题库**。
+
+    返回 ``(内部题, 生成题记录或 None)``；找不到返回 ``None``。
+    生成题记录要一起返回，是因为判分路径还要看它的 ``rubric``（判断是不是主观题）。
+    """
+    generated = store.find_generated_question(qid)
+    if generated is not None:
+        return (
+            QuizQuestion(
+                qid=generated.qid,
+                kp_id=generated.kp_id,
+                type=generated.type,  # type: ignore[arg-type]
+                stem=generated.stem,
+                options=list(generated.options) if generated.options else None,
+                answer=generated.reference_answer,
+                explanation=generated.explanation,
+            ),
+            generated,
+        )
+    bank_question = find_question(load_bank(bank_dir_for(request)).entries, qid)
+    if bank_question is None:
+        return None
+    return (bank_question, None)
+
+
+def _record_attempt(
+    request: Request,
+    store: LearningStore,
+    *,
+    kp_id: str,
+    qid: str,
+    question_type: str,
+    scored_by: str,
+    correct: bool,
+    mastery_after: float,
+    effective_delta: float,
+    session_id: str,
+    stem: str,
+    extra: dict[str, object] | None = None,
+) -> LevelOutcome:
+    """一次作答的**统一落库点**（两种判分路径共用，票 15）。
+
+    写三样东西，都在同一个学生库、同一段控制流里：
+      ① ``learning_history``（``activity="quiz"``，供票 20 的画像/推荐消费）；
+      ② ``progress``（闯关状态机 + 徽章 + 解锁后继）；
+      ③ 返回 :class:`LevelOutcome`（供日志与断言）。
+
+    ★ **不写对话正文**：``question`` 列只放题干**前 120 字**（题干是题目本身，
+      不是学生的话）；学生原话与模型回答一律不入库（§8.1 合规红线）。
+    """
+    successor_ids = _safe_successors(request, kp_id)
+    outcome = apply_level_progress(
+        store,
+        kp_id=kp_id,
+        correct=correct,
+        mastery_score=mastery_after,
+        successor_ids=successor_ids,
+    )
+    detail: dict[str, object] = {
+        "qid": qid,
+        "type": question_type,
+        "scoredBy": scored_by,
+        "masteryDelta": effective_delta,
+        "mastery": mastery_after,
+        "stage": outcome.stage,
+        "correctCount": outcome.correct_count,
+    }
+    if outcome.unlocked:
+        detail["unlocked"] = list(outcome.unlocked)
+    if extra:
+        detail.update(extra)
+    store.add_history(
+        kp_id=kp_id,
+        activity="quiz",
+        session_id=session_id,
+        question=stem[:120],
+        is_correct=correct,
+        detail=json.dumps(detail, ensure_ascii=False),
+    )
+    return outcome
+
+
+def _safe_successors(request: Request, kp_id: str) -> list[str]:
+    """取后继知识点（依赖图）；**任何失败都退化成空列表**，绝不让判分 500。
+
+    依赖图读不到时，判分与掌握度照常工作，只是「下一关解锁」这一步不发生 ——
+    这是可接受的降级（比「答对了却报错」好得多），且日志里明说。
+    """
+    from app.rag.retriever import default_kb_path
+    from app.store.connections import connect
+
+    kb_path = default_kb_path(request.app.state.config.data_dir)
+    if not kb_path.exists():
+        return []
+    try:
+        conn = connect(kb_path, readonly=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("解锁判定：打开知识库失败（本次不解锁后继）：%s", exc)
+        return []
+    try:
+        return successor_ids_for(conn, kp_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("解锁判定：查后继失败（本次不解锁）：%s", exc)
+        return []
+    finally:
+        conn.close()
 
 
 __all__ = [

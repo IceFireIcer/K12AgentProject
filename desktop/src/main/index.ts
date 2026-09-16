@@ -26,6 +26,11 @@ const APP_ID = 'com.k12agent.desktop'
  * 本机截图不可靠，`scripts/verify-ui.mjs` 靠 CDP 读真实 DOM 做断言，所以这条必须可用；
  * 但绝不能让它跟着分发包一起发出去。
  */
+// ★★ 票 18：Pyodide 的 setInterruptBuffer 需要 SharedArrayBuffer，
+//    而它在 Electron 的渲染进程与 Worker 里**默认是 undefined**（实测），
+//    不开这个开关，「while True: pass」就只能干等超时、无法真正中断。
+app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer')
+
 const debugPort = process.env.K12_DEBUG_PORT
 if (debugPort) {
   app.commandLine.appendSwitch('remote-debugging-port', debugPort)

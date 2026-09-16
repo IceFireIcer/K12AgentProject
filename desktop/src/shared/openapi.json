@@ -149,7 +149,6 @@
                 "type": "null"
               }
             ],
-            "default": null,
             "title": "Line"
           },
           "message": {
@@ -185,8 +184,7 @@
               {
                 "type": "null"
               }
-            ],
-            "default": null
+            ]
           },
           "feedback": {
             "title": "Feedback",
@@ -200,8 +198,7 @@
               {
                 "type": "null"
               }
-            ],
-            "default": null
+            ]
           },
           "ok": {
             "title": "Ok",
@@ -226,7 +223,7 @@
         "properties": {
           "attempt": {
             "default": 1,
-            "minimum": 1,
+            "minimum": 1.0,
             "title": "Attempt",
             "type": "integer"
           },
@@ -1789,6 +1786,129 @@
         "title": "RagSearchResult",
         "type": "object"
       },
+      "RecommendationItem": {
+        "additionalProperties": false,
+        "description": "一条推荐（**下一步学什么**）。\n\n字段全部是**可展示**的：``kp_id`` 是机器口径，``name`` 是给学生看的名字\n（由依赖图的 ``kp`` 表解析出来）；``reason`` 是一句可直接照念的中文。",
+        "properties": {
+          "depth": {
+            "default": 1,
+            "title": "Depth",
+            "type": "integer"
+          },
+          "gradeLevel": {
+            "anyOf": [
+              {
+                "enum": [
+                  "primary_low",
+                  "primary_high",
+                  "junior",
+                  "senior"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gradelevel"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "mastery": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Mastery",
+            "type": "number"
+          },
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kpId"
+        ],
+        "title": "RecommendationItem",
+        "type": "object"
+      },
+      "RecommendationResponse": {
+        "additionalProperties": false,
+        "description": "``GET /api/profile/{student_id}/recommendation`` 的响应（票 20）。\n\n``source`` 说明这一批推荐是怎么来的 —— 前端据此决定提示语，\n也是验收时「冷启动 / 依赖图 / 待重练」三种形态的**可断言标志**：\n\n| source | 含义 |\n| --- | --- |\n| ``review`` | 优先重练（掌握度不足且练过） |\n| ``graph`` | 依赖图后继（掌握某知识点后往前推） |\n| ``cold_start`` | 全新学生：给图里的入口知识点 |\n| ``empty`` | 依赖图不可用且无任何学习记录（前端按空态展示，**不是错误**） |",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendationItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "review",
+              "graph",
+              "cold_start",
+              "empty"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId",
+          "source"
+        ],
+        "title": "RecommendationResponse",
+        "type": "object"
+      },
+      "RegisterVariantsRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/quiz/variants`` 的请求体：把 LLM 生成的题登记到该学生的库里。\n\n``student_id`` 在 query 里（与 ``/api/quiz/bank`` 的取题口径一致）；\n这里只放题目本身。**至少要有一道题**（空数组等于一次毫无意义的写入）。",
+        "properties": {
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/VariantQuestionIn"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Questions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "questions",
+          "gradeLevel"
+        ],
+        "title": "RegisterVariantsRequest",
+        "type": "object"
+      },
       "SettingsResponse": {
         "additionalProperties": false,
         "description": "``GET`` / ``PUT /api/settings`` 的响应（§6.3）。**任何情况下都不含明文 Key。**",
@@ -1939,6 +2059,53 @@
         "title": "StudentProfile",
         "type": "object"
       },
+      "SubjectiveGradeRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/quiz/grade-subjective`` 的请求体：**TS 侧判完分，交服务端落库**。\n\n★ LLM 调用在 TS 侧（Pi 独占），Python 不装任何 LLM 客户端。本端点只做三件事：\n校验（这道题真的是主观题吗）→ 按 ``score`` 定对错（**规则在服务端**）→ 写掌握度与进度。",
+        "properties": {
+          "feedback": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Feedback",
+            "type": "string"
+          },
+          "qid": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Qid",
+            "type": "string"
+          },
+          "score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "sessionId": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessionid"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId",
+          "qid",
+          "score"
+        ],
+        "title": "SubjectiveGradeRequest",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -1978,6 +2145,93 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "VariantQuestionIn": {
+        "additionalProperties": false,
+        "description": "登记一道 LLM 生成的变式题（**必须带标准答案**，否则后端判不了分）。\n\n``reference_answer`` 就是**标准答案**：它进 ``learning.db``，绝不出现在任何出参里。\n方向与 :class:`app.contracts.QuizGradeRequest.answer`（学生作答）**相反**，别混。",
+        "properties": {
+          "explanation": {
+            "default": "",
+            "maxLength": 600,
+            "title": "Explanation",
+            "type": "string"
+          },
+          "kpId": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Kpid",
+            "type": "string"
+          },
+          "options": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Options"
+          },
+          "qid": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Qid",
+            "type": "string"
+          },
+          "referenceAnswer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "title": "Referenceanswer"
+          },
+          "rubric": {
+            "anyOf": [
+              {
+                "maxLength": 800,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rubric"
+          },
+          "stem": {
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Stem",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "choice",
+              "blank",
+              "code_blank"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "qid",
+          "type",
+          "stem",
+          "referenceAnswer"
+        ],
+        "title": "VariantQuestionIn",
+        "type": "object"
       }
     }
   },
@@ -1987,6 +2241,166 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/code/hint/{kp_id}": {
+      "get": {
+        "description": "取一条提示（供 ``get_coding_hint`` Tool 调用：学生点「求助」时）。\n\n★ **级别由调用方决定、由本端点封顶**：\n  - 调用方（``coding.ts``）维护「该 kp 上已经给过第几级」，据此要**下一级** ——\n    它在有状态的那一侧强制「一次只升一级」，这是「不跳级」的落点；\n  - 本端点只保证**不越界**：``level`` 超过模板实际写了几级时，退到模板的最高级\n    （宁可给最高级的提示，也不要因为越界而让学生的「求助」按钮点了没反应）。\n\n没有该 kp 的模板（= 没有提示素材）→ **404 + 可读中文**，\n由编排层退回「用对话引导」（这是能力受限，不是崩溃）。",
+        "operationId": "get_coding_hint_api_code_hint__kp_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kp_id",
+            "required": true,
+            "schema": {
+              "title": "Kp Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "要第几级提示（1 指方向 / 2 结构 / 3 骨架）",
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "要第几级提示（1 指方向 / 2 结构 / 3 骨架）",
+              "maximum": 3,
+              "minimum": 1,
+              "title": "Level",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodingHint"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "取某知识点的一条分级提示（手动求助按钮用）",
+        "tags": [
+          "code"
+        ]
+      }
+    },
+    "/api/code/run-hint": {
+      "post": {
+        "description": "★ **本端点不执行代码**：它收到的是渲染进程 Pyodide Worker 已经跑完的结果。\n\n入参 :class:`CodeRunRequest` 里的 ``stdout`` / ``stderr`` 就是 Worker 回传的原文\n（``stderr`` 非空 = 运行失败）。本函数只做三件事：\n\n1. **归一化报错** → :class:`CodeError`（中文解释 + 原始 traceback 留档）；\n2. **生成反馈** → ``feedback``（面向学生，不说「改成什么」）；\n3. **挑下一级提示** → ``next_hint``（按 ``attempt`` 递进，**不跳级**，见 :func:`resolve_hint_level`）。\n\n``attempt`` 是「同一知识点下的第几次尝试」（契约里 ``ge=1``），\n由主进程的 ``evaluate_code`` Tool 按学生维度计数后传入 ——\n**服务端不保存这个计数**（它是单轮临时态，放 Extension 内存 Map 里，执行文档 §6.6）。\n\n取不到模板不算失败：没有模板就没有分级提示，此时 ``next_hint=None``，\n反馈本身照给（报错翻译与模板无关）。",
+        "operationId": "run_hint_api_code_run_hint_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodeEvaluation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "提交「代码 + 运行结果」，返回中文反馈与下一级提示（不执行代码）",
+        "tags": [
+          "code"
+        ]
+      }
+    },
+    "/api/code/templates/{kp_id}": {
+      "get": {
+        "description": "取模板（供 ``get_code_template`` Tool 调用）。\n\n- **纯本地文件读取**，不经 LLM、不联网 —— 断网可用（票 19 验收项）；\n- 返回体是 :class:`CodeTemplate`，**结构上没有 ``solution``**（投影而非裁剪）；\n- 取不到 → **404 + 可读中文**（空对象会让前端渲染一张没有脚手架的卡片）；\n- 坏模板只跳过、不抛异常（与题库同口径）。",
+        "operationId": "get_code_template_api_code_templates__kp_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kp_id",
+            "required": true,
+            "schema": {
+              "title": "Kp Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "学生学段（可选；传了就按兼容链卡，不传不过滤）",
+            "in": "query",
+            "name": "grade_level",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "学生学段（可选；传了就按兼容链卡，不传不过滤）",
+              "title": "Grade Level"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodeTemplate"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "按知识点取代码模板（含 TODO 脚手架，剔除 solution）",
+        "tags": [
+          "code"
+        ]
+      }
+    },
     "/api/grade/history/{student_id}": {
       "get": {
         "description": "``grade_history`` 全量轨迹（含冷启动基线那行：``from_level`` 为空）。",
@@ -2249,7 +2663,7 @@
     },
     "/api/profile/{student_id}": {
       "get": {
-        "description": "读某学生的画像：基本身份 + 掌握度 + 偏好（+ 依赖图推荐，票 20 填充）。\n\n- 学生不存在 → **404**（空画像会让学生以为「我没学过任何东西」，两者必须区分）；\n- ``studentId`` 非法 → **422**（它会被拼进文件系统路径）；\n- 库读写失败 → **503**（可读中文；上层 Tool 会把它转成 `error` 事件而不是崩）。",
+        "description": "读某学生的画像：基本身份 + 掌握度 + 偏好 + **依赖图推荐**（票 20 填充）。\n\n- 学生不存在 → **404**（空画像会让学生以为「我没学过任何东西」，两者必须区分）；\n- ``studentId`` 非法 → **422**（它会被拼进文件系统路径）；\n- 库读写失败 → **503**（可读中文；上层 Tool 会把它转成 `error` 事件而不是崩）。\n\n★ ``recommended_kp_ids`` 自票 20 起**不再是空的**：它由 :func:`build_recommendation`\n  算出（依赖图 + 掌握度 + 冷启动兜底）。**不要**在别处再算一份 ——\n  两套推荐算法会给出两个不同的「下一步」，而学生只会看到其中一个。",
         "operationId": "student_profile_api_profile__student_id__get",
         "parameters": [
           {
@@ -2338,6 +2752,67 @@
           }
         },
         "summary": "学习记录写入（答题/代码/动画观看/答疑）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/recommendation": {
+      "get": {
+        "description": "★ 个性化推荐的**专用出口**（票 20 的「可演示数据流」）。\n\n与 ``GET /profile`` 的差别只有一层：这里会返回**为什么这么推荐**\n（``source`` + 每条的 ``reason`` + 掌握度），前端能显示一句可照念的引导语，\n验收时也能一眼断言「是重练、是依赖图、还是冷启动」。\n\n**学生不存在时自动建立**（冷启动兜底）：全新学生 id 直接问「学什么」是正常用法，\n回 404 会让前端显示一个空白页 —— 而冷启动必须能用是票 15/20 的明确验收项。",
+        "operationId": "student_recommendation_api_profile__student_id__recommendation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "覆盖学段（默认用画像里的当前学段）",
+            "in": "query",
+            "name": "grade_level",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "覆盖学段（默认用画像里的当前学段）",
+              "title": "Grade Level"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecommendationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "下一步学什么（依赖图 + 掌握度 + 冷启动）",
         "tags": [
           "profile"
         ]
@@ -2432,7 +2907,7 @@
     },
     "/api/quiz/grade": {
       "post": {
-        "description": "按 ``qid`` 查库判分，并把结果写进该学生的 ``learning.db``。\n\n写入两处（都是结构化数据，**不写对话正文**）：\n  - ``mastery``：``score`` / ``attempts`` / ``correct`` / ``last_seen_at``；\n  - ``learning_history``：一条 ``activity=\"quiz\"`` 记录（票 20 的个性化闭环要吃它）。\n\n``mastery_delta`` 回传的是**实际生效**的变化量（``新值 - 旧值``）：已经满分时再答对就是 0，\n而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）。",
+        "description": "按 ``qid`` 查库判分，并把结果写进该学生的 ``learning.db``。\n\n写入三处（都是结构化数据，**不写对话正文**）：\n  - ``mastery``：``score`` / ``attempts`` / ``correct`` / ``last_seen_at``；\n  - ``learning_history``：一条 ``activity=\"quiz\"`` 记录（票 20 的个性化闭环要吃它）；\n  - ``progress``：闯关状态机（**票 15**，见 :func:`apply_level_progress`）。\n\n题目来源有两处，**按此顺序**查（票 15 起）：\n  ① 该学生库里的 LLM 生成题（``generated_question``）—— 变式题走这条；\n  ② 随包分发的题库。\n两处都要求「这条库里有这道题」，否则 404（**不猜、不新建**）。\n\n``mastery_delta`` 回传的是**实际生效**的变化量（``新值 - 旧值``）：已经满分时再答对就是 0，\n而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）。",
         "operationId": "grade_quiz_api_quiz_grade_post",
         "requestBody": {
           "content": {
@@ -2467,6 +2942,166 @@
           }
         },
         "summary": "提交答案并批改（客观题规则判分）",
+        "tags": [
+          "quiz"
+        ]
+      }
+    },
+    "/api/quiz/grade-subjective": {
+      "post": {
+        "description": "把 **TS 侧模型判分**的结论落进 ``learning.db``（票 15 的混合批改）。\n\n★★ 为什么判分结论要从外面送进来、判分逻辑却仍在服务端：\n\n- **LLM 调用归 Ts 独占**（Pi 是编排层，Python 不装任何 LLM 客户端）——\n  所以模型给出的 ``score`` / ``feedback`` 只能从 TS 侧来；\n- **但「多少分算过」必须由服务端定**（:data:`SUBJECTIVE_PASS_RATIO`）：\n  TS 只送分数，不送 ``correct``。若让 TS 送对错，等于把判分规则复制一份到前端进程，\n  两边迟早漂移，而漂移的表现是「同样的答案，有时算对有时算错」；\n- **只有登记过评分细则的主观题**走得通（客观题一律 **409**），\n  这样 ``scored_by=\"llm\"`` 不会被用来绕开规则判分。\n\n写库与 ``/quiz/grade`` **共用** :func:`_record_attempt`（同一个事务边界、\n同一套进度推进），所以两条判分路径在数据侧不可能出现两套语义。",
+        "operationId": "grade_subjective_api_quiz_grade_subjective_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubjectiveGradeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuizResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "落库主观题判分结论（LLM 调用在 TS 侧，本端点只落库）",
+        "tags": [
+          "quiz"
+        ]
+      }
+    },
+    "/api/quiz/progress/{student_id}": {
+      "get": {
+        "description": "读某学生的闯关进度。\n\n★ **冷启动兜底**（票 15/20 的验收项）：新学生 ``progress`` 表是空的，\n  这里按**依赖图的拓扑序**自动初始化默认路径（只插不覆盖），\n  再返回 —— 前端不会拿到空数组，也不会因为没数据而报错。\n``kpIds`` 用于「本次答题影响到的关卡」这种小范围回读。",
+        "operationId": "read_progress_api_quiz_progress__student_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "只看这几关，逗号分隔（可选）",
+            "in": "query",
+            "name": "kpIds",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "只看这几关，逗号分隔（可选）",
+              "title": "Kpids"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Progress Api Quiz Progress  Student Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "读闯关进度（learning.db 的 progress 表是唯一权威）",
+        "tags": [
+          "quiz"
+        ]
+      }
+    },
+    "/api/quiz/variants": {
+      "post": {
+        "description": "把 TS 侧生成的变式题**登记到该学生的 ``learning.db``**，并返回对外载荷。\n\n★ 两道闸门把「答案泄漏」挡在本端点之外：\n\n① **入参方向**：``reference_answer`` 是模型产出的**标准答案**，只进库、绝不回显；\n② **出参方向**：返回体是 :class:`QuizPayload`，``questions`` 全是\n   :class:`QuizQuestionOut`（结构上没有 ``answer``）——\n   转换只走 ``QuizPayload.from_internal``，不存在第二条投影路径。\n\n★ ``qid`` 由 TS 侧生成（带随机段，见 ``quiz.ts`` 的 ``variantQid``）：\n  Python 侧只做**形状校验**（长度/字符集），不重新编号 ——\n  重新编号会让「学生卡片上的 qid」与「后端登记的 qid」对不上，判分必 404。",
+        "operationId": "register_variants_api_quiz_variants_post",
+        "parameters": [
+          {
+            "description": "学生 id（生成题落在这个学生自己的库里）",
+            "in": "query",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "description": "学生 id（生成题落在这个学生自己的库里）",
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterVariantsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuizPayload"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "登记 LLM 生成的变式题（含标准答案；返回体不含答案）",
         "tags": [
           "quiz"
         ]

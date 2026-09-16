@@ -53,6 +53,8 @@ import {
   registerAgentExtensions,
   type AgentExtensionApi
 } from './extensions/index.ts'
+import animationExtension from './extensions/animation.ts'
+import codingExtension from './extensions/coding.ts'
 import quizExtension from './extensions/quiz.ts'
 // ★ 学段**推断**扩展（票 21）：它独占 `input`（收集本轮证据）与 `before_agent_start`（按推断出的
 //   学段替换整段 prompt），并自兜异常。工厂是「可调用 + `.refresh()/.useJudge()` 诊断入口」的形态。
@@ -361,6 +363,12 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     const report = registerAgentExtensions(extensionApi as unknown as AgentExtensionApi, {
       factories: {
         quiz: quizExtension,
+        // 动画（票 16/17）：模板优先 + 校验 + 重试 ≤3 + 降级文字/静态图。
+        // 重试计数在扩展内部的 Map 里 —— `tool_execution_end` 是**只读通知**，不能靠它回写。
+        animation: animationExtension,
+        // 编程（票 18/19）：模板 / 分级求助 / 报错翻译。
+        // ★ 它**不执行学生代码** —— 执行经 IPC 下发到渲染进程的 Pyodide Worker。
+        coding: codingExtension,
         // ★ 学段推断（票 21）：注册顺序在 `chatFactory` **之后** —— 它的 `before_agent_start`
         //   读 chatFactory 垫好的模板再整段换成推断出的学段（Pi 的返回值链式叠加）。
         grade: gradeExtension

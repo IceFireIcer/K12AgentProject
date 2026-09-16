@@ -49,12 +49,15 @@ from app.config import (  # noqa: E402
     RuntimeConfig,
     build_runtime_config,
 )
+from app.routes.code import router as code_router  # noqa: E402
 from app.routes.grade import router as grade_router  # noqa: E402
 from app.routes.graph import router as graph_router  # noqa: E402
 from app.routes.health import router as health_router  # noqa: E402
 from app.routes.profile import router as profile_router  # noqa: E402
 from app.routes.quiz import router as quiz_router  # noqa: E402
 from app.routes.rag import router as rag_router  # noqa: E402
+from app.routes.resources import public_router as animation_resources_router  # noqa: E402
+from app.routes.resources import router as animation_router  # noqa: E402
 from app.routes.settings import router as settings_router  # noqa: E402
 from app.routes.students import router as students_router  # noqa: E402
 from app.safety.guard import install_log_redaction  # noqa: E402
@@ -140,6 +143,15 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
     app.include_router(quiz_router)
     # 学段自动推断（票 21）：前端没有选择器，这里是唯一的学段写路径
     app.include_router(grade_router)
+    # 编程（票 18/19）：只提供模板/提示/报错翻译 —— **没有任何执行原语**
+    app.include_router(code_router)
+    # 动画（票 16）分两条：
+    #   ① /api/animation/* 由主进程调用，走既有 X-Auth-Token 中间件；
+    #   ② /resources/animation/* 由 **iframe 直接加载** —— iframe 带不了自定义 header，
+    #      所以刻意不带 /api/ 前缀、不过鉴权中间件，改用**一次性 nonce**（绑定学生+知识点+有效期）。
+    #      这是有意的例外，不是漏挂鉴权：nonce 校验在路由内部完成。
+    app.include_router(animation_router)
+    app.include_router(animation_resources_router)
 
     # ★ 中间件顺序是**有讲究的**，别调换：
     #   Starlette 的洋葱模型里「最后 add 的在最外层」，所以：

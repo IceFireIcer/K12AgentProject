@@ -22,6 +22,7 @@ import { app, BrowserWindow, ipcMain, type WebContents } from 'electron'
 import { apiFetch } from '../bridge/client.ts'
 import { describeRuntimeFailure } from '../agent/events.ts'
 import { gradeStatePath } from '../agent/extensions/grade.ts'
+import { bindCodeRunner, createRendererCodeRunner } from '../agent/extensions/coding.ts'
 import { assertStudentId } from '../agent/pi-paths.ts'
 import type { ChatRuntime } from '../agent/runtime.ts'
 import { createChatRuntime } from '../agent/runtime.ts'
@@ -30,6 +31,8 @@ import type { SidecarState } from '../sidecar/protocol.ts'
 import {
   IPC,
   type ChatSendResult,
+  type CodeExecuteRequest,
+  type CodeExecuteResult,
   type GradeCallResult,
   type GradeState,
   type ProbeRequest,
@@ -42,6 +45,35 @@ import { parseChatSendRequest } from './chat-request.ts'
 import { ChatStreamRegistry, type StreamTarget, type TurnHandle } from './chat-stream.ts'
 
 const chatStreams = new ChatStreamRegistry()
+
+/**
+ * ★★ 票 18 的硬约束：**学生代码绝不在主进程执行**。
+ *
+ * 这里只做「下发 → 等回话」，真正的执行在渲染进程的 Pyodide Worker 里。
+ * Pi 的 Extension 与 UI 同进程且拥有完整系统权限 —— 一旦在主进程跑学生代码，
+ * 沙箱就是摆设。所以这条桥**没有**「执行不出来就自己跑一遍」的兜底：
+ * 那种兜底会静默刺穿安全边界。
+ */
+const rendererCodeRunner = createRendererCodeRunner({
+  dispatch: (request) => {
+    const payload: CodeExecuteRequest = {
+      requestId: request.requestId,
+      code: request.code,
+      timeoutMs: request.timeoutMs,
+      toolCallId: request.toolCallId
+    }
+    let sent = false
+    for (const window of BrowserWindow.getAllWindows()) {
+      const webContents = window.webContents
+      if (webContents.isDestroyed()) continue
+      webContents.send(IPC.codeExecute, payload)
+      sent = true
+    }
+    // 没有任何窗口 = 执行器不可用：抛出去让上层立刻失败（而不是干等超时）
+    if (!sent) throw new Error('没有可用的渲染进程来执行代码')
+  }
+})
+bindCodeRunner(rendererCodeRunner.runner)
 
 /**
  * 当前学段（**只读展示用**，D-020）。
@@ -291,6 +323,17 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
       }
     }
   )
+
+  // ------------------------------------------------------------------ 代码执行
+  // 渲染进程回传结果 → 兑现主进程侧挂着的 Promise（按 requestId 配对）
+  ipcMain.handle(IPC.codeResult, (_event, payload: unknown): boolean => {
+    try {
+      return rendererCodeRunner.settle(payload as CodeExecuteResult)
+    } catch (error) {
+      console.error('[main] 代码执行结果处理异常：', error)
+      return false
+    }
+  })
 
   // ---------------------------------------------------------------- 学段（只读）
   // ★ 只有读，**没有写**：学段由推断引擎独占（D-020）。前端拿它渲染只读徽章。

@@ -487,7 +487,10 @@ const EXPECTED_API_METHODS = [
   'saveSettings',
   'probeSettings',
   'getGrade',
-  'onGradeChanged'
+  'onGradeChanged',
+  // 票 18：代码执行桥（主进程只**下发**代码，渲染进程在 Pyodide Worker 里跑，结果回传）
+  'onCodeExecute',
+  'sendCodeResult'
 ]
 
 /** preload 里绝不允许出现的通用转发方法名。 */
@@ -640,4 +643,3 @@ function pushChannelNames(): string[] {
   assert.ok(block, `${show(channelsFile)} 里找不到 PUSH_CHANNELS`)
   return [...block.matchAll(/IPC\.(\w+)/g)].map((match) => keys[match[1]])
 }
-

@@ -1,0 +1,34 @@
+{
+  "id": "python-variable",
+  "label": "变量",
+  "title": "变量：给数据起一个名字",
+  "concept": "变量",
+  "kp_ids": [
+    "jr-py-variable",
+    "jr-py-loop"
+  ],
+  "grade_levels": [
+    "junior",
+    "senior"
+  ],
+  "duration_ms": 4200,
+  "params": {
+    "value": {
+      "type": "int",
+      "min": 1,
+      "max": 99,
+      "default": 13,
+      "description": "初始值（演示 age = 几）"
+    },
+    "writes": {
+      "type": "int",
+      "min": 1,
+      "max": 3,
+      "default": 2,
+      "description": "再赋值几次（体现「名字不变，值会变」）"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">变量：名字贴在盒子上，值装在盒子里</h1>\n<p class=\"anim-caption\" id=\"caption\">先创建一个变量…</p>\n<div class=\"anim-canvas\">\n  <svg id=\"boxes\" viewBox=\"0 0 460 210\" width=\"100%\" height=\"100%\" role=\"img\" aria-label=\"变量赋值动画\">\n    <g id=\"slots\"></g>\n  </svg>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"status\">age = —</span></p>",
+  "script": "var INITIAL = {{value}};\nvar WRITES = {{writes}};\n\nvar slotsGroup = document.getElementById('slots');\nvar caption = document.getElementById('caption');\nvar status = document.getElementById('status');\n\n// 两个变量盒子：age 与 name（演示「不同名字装不同的东西」）\nvar BOXES = [\n  { name: 'age', x: 40, color: '#2f6fd0' },\n  { name: 'name', x: 250, color: '#1f9d63' }\n];\n\nvar drawn = [];\nfor (var b = 0; b < BOXES.length; b += 1) {\n  var box = BOXES[b];\n  var rect = Sandbox.svgEl('rect');\n  rect.setAttribute('x', String(box.x));\n  rect.setAttribute('y', '46');\n  rect.setAttribute('width', '170');\n  rect.setAttribute('height', '110');\n  rect.setAttribute('rx', '12');\n  rect.setAttribute('fill', '#ffffff');\n  rect.setAttribute('stroke', box.color);\n  rect.setAttribute('stroke-width', '2');\n  slotsGroup.appendChild(rect);\n\n  // 名字标签（像贴在盒子外面的名牌）\n  var tag = Sandbox.svgEl('text');\n  tag.setAttribute('x', String(box.x + 12));\n  tag.setAttribute('y', '32');\n  tag.setAttribute('style', 'font-family:Consolas,Menlo,monospace;font-size:13px;font-weight:650;fill:' + box.color);\n  tag.textContent = box.name;\n  slotsGroup.appendChild(tag);\n\n  var valueText = Sandbox.svgEl('text');\n  valueText.setAttribute('x', String(box.x + 85));\n  valueText.setAttribute('y', '112');\n  valueText.setAttribute('text-anchor', 'middle');\n  valueText.setAttribute('style', 'font-family:Consolas,Menlo,monospace;font-size:28px;font-weight:650;fill:#12233b');\n  valueText.textContent = '—';\n  slotsGroup.appendChild(valueText);\n\n  drawn.push({ rect: rect, valueText: valueText, name: box.name, color: box.color });\n}\n\nvar ageBox = drawn[0];\nvar nameBox = drawn[1];\nvar ageValue = INITIAL;\nvar writeIndex = 0;\n\nfunction setValue(box, text) {\n  box.valueText.textContent = text;\n  anime({ targets: box.valueText, opacity: [0, 1], scale: [0.7, 1], duration: 300, easing: 'easeOutBack' });\n  anime({ targets: box.rect, strokeWidth: [4, 2], duration: 380 });\n}\n\nfunction nextWrite() {\n  // 每次写入都换一个值：体现「变量名不变，装的值会变」\n  writeIndex += 1;\n  ageValue += 1;\n  return ageValue;\n}\n\nSandbox.play(function () {\n  writeIndex = 0;\n  ageValue = INITIAL;\n  ageBox.valueText.textContent = '—';\n  nameBox.valueText.textContent = '—';\n\n  var steps = [];\n\n  steps.push({\n    targets: ageBox.rect,\n    duration: 260,\n    begin: function () {\n      caption.textContent = '写 age = ' + INITIAL + '：Python 先算右边，把结果放进名叫 age 的盒子。';\n      status.textContent = 'age = ' + INITIAL;\n    },\n    complete: function () {\n      setValue(ageBox, String(INITIAL));\n    }\n  });\n\n  steps.push({\n    targets: nameBox.rect,\n    duration: 260,\n    begin: function () {\n      caption.textContent = '再写 name = \"小明\"：同一份程序里可以有多个变量，各自装各自的东西。';\n    },\n    complete: function () {\n      setValue(nameBox, '\"小明\"');\n    }\n  });\n\n  for (var w = 0; w < WRITES; w += 1) {\n    steps.push({\n      targets: ageBox.rect,\n      duration: 320,\n      begin: (function () {\n        return function () {\n          caption.textContent =\n            '再来一次 age = age + 1：先取出盒子里现在的值，加上 1，再把新值放回去。' +\n            '这就是「变量可以被重新赋值」。';\n        };\n      })(),\n      complete: function () {\n        setValue(ageBox, String(nextWrite()));\n        status.textContent = 'age = ' + ageValue;\n      }\n    });\n  }\n  status.textContent = 'age = ' + ageValue;\n\n  steps.push({\n    targets: [ageBox.rect, nameBox.rect],\n    strokeWidth: 3,\n    duration: 300,\n    direction: 'alternate',\n    begin: function () {\n      caption.textContent =\n        '现在 age = ' + ageValue + '，name 还是 \"小明\"。' +\n        '变量只是「名字」，装的东西可以换；名字起得清楚，程序才读得懂。';\n    },\n    complete: function () {\n      Sandbox.progress(1);\n    }\n  });\n\n  var timeline = anime.timeline({ autoplay: true, easing: 'easeInOutQuad' });\n  for (var s = 0; s < steps.length; s += 1) timeline.add(steps[s]);\n  timeline.play();\n\n  var duration = timeline.duration || 4500;\n  return {\n    pause: function () { timeline.pause(); },\n    play: function () { timeline.play(); },\n    restart: function () { timeline.restart(); },\n    finished: {\n      then: function (resolve) {\n        var elapsed = 0;\n        var timer = setInterval(function () {\n          elapsed += 100;\n          if (timeline.completed || elapsed > duration + 800) {\n            clearInterval(timer);\n            resolve();\n          }\n          Sandbox.progress(Math.min(1, elapsed / duration));\n        }, 100);\n      }\n    }\n  };\n});\n\nSandbox.ready({ template: 'python-variable', initial: INITIAL });",
+  "fallback_text": "变量就是**给数据起的一个名字**。写 `age = 13` 的时候，Python 先算等号右边的值，然后把它存进名叫 `age` 的盒子；之后写 `age` 就是取用这个值。同一个名字可以被反复赋值（`age = age + 1` 会先取旧值、加 1、再放回去），这正是程序能「处理数据」的基础。"
+}

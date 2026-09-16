@@ -16,6 +16,8 @@ import {
   IPC,
   type ChatSendRequest,
   type ChatSendResult,
+  type CodeExecuteRequest,
+  type CodeExecuteResult,
   type GradeCallResult,
   type GradeState,
   type IpcChannel,
@@ -50,6 +52,13 @@ export interface K12Api {
   getGrade(): Promise<GradeCallResult<GradeState>>
   /** 订阅学段变化（推进只读徽章），返回取消订阅函数。 */
   onGradeChanged(listener: (state: GradeState) => void): () => void
+  /**
+   * 订阅「下发学生代码去执行」的请求（渲染进程侧在沙箱 Worker 里跑），返回取消订阅函数。
+   * ★ 主进程绝不执行学生代码 —— 它只把代码推下来，结果由 {@link sendCodeResult} 回传。
+   */
+  onCodeExecute(listener: (request: CodeExecuteRequest) => void): () => void
+  /** 回传执行结果（`requestId` 必须**原样带回**，主进程按它配对，否则每次都会超时）。 */
+  sendCodeResult(result: CodeExecuteResult): void
 }
 
 /**
@@ -109,6 +118,21 @@ const api: K12Api = {
     ipcRenderer.invoke(IPC.settingsProbe, payload) as Promise<SettingsCallResult<ProbeResult>>,
   getGrade: (): Promise<GradeCallResult<GradeState>> =>
     ipcRenderer.invoke(IPC.gradeGet) as Promise<GradeCallResult<GradeState>>,
+  onCodeExecute: (listener): (() => void) => {
+    const handler = (_event: IpcRendererEvent, request: unknown): void => {
+      if (!isCodeExecuteRequest(request)) return
+      listener(request)
+    }
+    ipcRenderer.on(IPC.codeExecute, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.codeExecute, handler)
+    }
+  },
+  sendCodeResult: (result): void => {
+    ipcRenderer.invoke(IPC.codeResult, result).catch((error: unknown) => {
+      console.error('[preload] 回传代码执行结果失败：', error)
+    })
+  },
   onGradeChanged: (listener): (() => void) => {
     const handler = (_event: IpcRendererEvent, state: unknown): void => {
       // 边界处过滤：只认四个冻结字面量，别把主进程的半截对象丢给界面去渲染
@@ -133,6 +157,13 @@ function isGradeState(value: unknown): value is GradeState {
   )
 }
 
+/** 下发执行请求的最小形状检查（缺 `requestId`/`code` 的直接丢掉，别让渲染侧拿到半截对象）。 */
+function isCodeExecuteRequest(value: unknown): value is CodeExecuteRequest {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as { requestId?: unknown; code?: unknown }
+  return typeof record.requestId === 'string' && typeof record.code === 'string'
+}
+
 /** 四个学段字面量（与 `shared/ipc-events.ts` 的 `GradeLevel` 同源，此处只做运行期校验）。 */
 const GRADE_LEVELS = ['primary_low', 'primary_high', 'junior', 'senior'] as const
 
@@ -153,7 +184,9 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.settingsSave,
   IPC.settingsProbe,
   IPC.gradeGet,
-  IPC.gradeChanged
+  IPC.gradeChanged,
+  IPC.codeExecute,
+  IPC.codeResult
 ]
 
 contextBridge.exposeInMainWorld('api', api)

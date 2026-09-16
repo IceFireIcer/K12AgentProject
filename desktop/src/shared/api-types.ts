@@ -17,6 +17,94 @@
  */
 
 export interface paths {
+    "/api/code/hint/{kp_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 取某知识点的一条分级提示（手动求助按钮用）
+         * @description 取一条提示（供 ``get_coding_hint`` Tool 调用：学生点「求助」时）。
+         *
+         *     ★ **级别由调用方决定、由本端点封顶**：
+         *       - 调用方（``coding.ts``）维护「该 kp 上已经给过第几级」，据此要**下一级** ——
+         *         它在有状态的那一侧强制「一次只升一级」，这是「不跳级」的落点；
+         *       - 本端点只保证**不越界**：``level`` 超过模板实际写了几级时，退到模板的最高级
+         *         （宁可给最高级的提示，也不要因为越界而让学生的「求助」按钮点了没反应）。
+         *
+         *     没有该 kp 的模板（= 没有提示素材）→ **404 + 可读中文**，
+         *     由编排层退回「用对话引导」（这是能力受限，不是崩溃）。
+         */
+        get: operations["get_coding_hint_api_code_hint__kp_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/code/run-hint": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 提交「代码 + 运行结果」，返回中文反馈与下一级提示（不执行代码）
+         * @description ★ **本端点不执行代码**：它收到的是渲染进程 Pyodide Worker 已经跑完的结果。
+         *
+         *     入参 :class:`CodeRunRequest` 里的 ``stdout`` / ``stderr`` 就是 Worker 回传的原文
+         *     （``stderr`` 非空 = 运行失败）。本函数只做三件事：
+         *
+         *     1. **归一化报错** → :class:`CodeError`（中文解释 + 原始 traceback 留档）；
+         *     2. **生成反馈** → ``feedback``（面向学生，不说「改成什么」）；
+         *     3. **挑下一级提示** → ``next_hint``（按 ``attempt`` 递进，**不跳级**，见 :func:`resolve_hint_level`）。
+         *
+         *     ``attempt`` 是「同一知识点下的第几次尝试」（契约里 ``ge=1``），
+         *     由主进程的 ``evaluate_code`` Tool 按学生维度计数后传入 ——
+         *     **服务端不保存这个计数**（它是单轮临时态，放 Extension 内存 Map 里，执行文档 §6.6）。
+         *
+         *     取不到模板不算失败：没有模板就没有分级提示，此时 ``next_hint=None``，
+         *     反馈本身照给（报错翻译与模板无关）。
+         */
+        post: operations["run_hint_api_code_run_hint_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/code/templates/{kp_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 按知识点取代码模板（含 TODO 脚手架，剔除 solution）
+         * @description 取模板（供 ``get_code_template`` Tool 调用）。
+         *
+         *     - **纯本地文件读取**，不经 LLM、不联网 —— 断网可用（票 19 验收项）；
+         *     - 返回体是 :class:`CodeTemplate`，**结构上没有 ``solution``**（投影而非裁剪）；
+         *     - 取不到 → **404 + 可读中文**（空对象会让前端渲染一张没有脚手架的卡片）；
+         *     - 坏模板只跳过、不抛异常（与题库同口径）。
+         */
+        get: operations["get_code_template_api_code_templates__kp_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/grade/history/{student_id}": {
         parameters: {
             query?: never;
@@ -144,11 +232,15 @@ export interface paths {
         };
         /**
          * 画像与掌握度
-         * @description 读某学生的画像：基本身份 + 掌握度 + 偏好（+ 依赖图推荐，票 20 填充）。
+         * @description 读某学生的画像：基本身份 + 掌握度 + 偏好 + **依赖图推荐**（票 20 填充）。
          *
          *     - 学生不存在 → **404**（空画像会让学生以为「我没学过任何东西」，两者必须区分）；
          *     - ``studentId`` 非法 → **422**（它会被拼进文件系统路径）；
          *     - 库读写失败 → **503**（可读中文；上层 Tool 会把它转成 `error` 事件而不是崩）。
+         *
+         *     ★ ``recommended_kp_ids`` 自票 20 起**不再是空的**：它由 :func:`build_recommendation`
+         *       算出（依赖图 + 掌握度 + 冷启动兜底）。**不要**在别处再算一份 ——
+         *       两套推荐算法会给出两个不同的「下一步」，而学生只会看到其中一个。
          */
         get: operations["student_profile_api_profile__student_id__get"];
         put?: never;
@@ -176,6 +268,33 @@ export interface paths {
          *     「学生还没登录就先产生了学习记录」不该丢数据，也不该 500。
          */
         post: operations["record_learning_event_api_profile__student_id__events_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/recommendation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 下一步学什么（依赖图 + 掌握度 + 冷启动）
+         * @description ★ 个性化推荐的**专用出口**（票 20 的「可演示数据流」）。
+         *
+         *     与 ``GET /profile`` 的差别只有一层：这里会返回**为什么这么推荐**
+         *     （``source`` + 每条的 ``reason`` + 掌握度），前端能显示一句可照念的引导语，
+         *     验收时也能一眼断言「是重练、是依赖图、还是冷启动」。
+         *
+         *     **学生不存在时自动建立**（冷启动兜底）：全新学生 id 直接问「学什么」是正常用法，
+         *     回 404 会让前端显示一个空白页 —— 而冷启动必须能用是票 15/20 的明确验收项。
+         */
+        get: operations["student_recommendation_api_profile__student_id__recommendation_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -222,14 +341,109 @@ export interface paths {
          * 提交答案并批改（客观题规则判分）
          * @description 按 ``qid`` 查库判分，并把结果写进该学生的 ``learning.db``。
          *
-         *     写入两处（都是结构化数据，**不写对话正文**）：
+         *     写入三处（都是结构化数据，**不写对话正文**）：
          *       - ``mastery``：``score`` / ``attempts`` / ``correct`` / ``last_seen_at``；
-         *       - ``learning_history``：一条 ``activity="quiz"`` 记录（票 20 的个性化闭环要吃它）。
+         *       - ``learning_history``：一条 ``activity="quiz"`` 记录（票 20 的个性化闭环要吃它）；
+         *       - ``progress``：闯关状态机（**票 15**，见 :func:`apply_level_progress`）。
+         *
+         *     题目来源有两处，**按此顺序**查（票 15 起）：
+         *       ① 该学生库里的 LLM 生成题（``generated_question``）—— 变式题走这条；
+         *       ② 随包分发的题库。
+         *     两处都要求「这条库里有这道题」，否则 404（**不猜、不新建**）。
          *
          *     ``mastery_delta`` 回传的是**实际生效**的变化量（``新值 - 旧值``）：已经满分时再答对就是 0，
          *     而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）。
          */
         post: operations["grade_quiz_api_quiz_grade_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/quiz/grade-subjective": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 落库主观题判分结论（LLM 调用在 TS 侧，本端点只落库）
+         * @description 把 **TS 侧模型判分**的结论落进 ``learning.db``（票 15 的混合批改）。
+         *
+         *     ★★ 为什么判分结论要从外面送进来、判分逻辑却仍在服务端：
+         *
+         *     - **LLM 调用归 Ts 独占**（Pi 是编排层，Python 不装任何 LLM 客户端）——
+         *       所以模型给出的 ``score`` / ``feedback`` 只能从 TS 侧来；
+         *     - **但「多少分算过」必须由服务端定**（:data:`SUBJECTIVE_PASS_RATIO`）：
+         *       TS 只送分数，不送 ``correct``。若让 TS 送对错，等于把判分规则复制一份到前端进程，
+         *       两边迟早漂移，而漂移的表现是「同样的答案，有时算对有时算错」；
+         *     - **只有登记过评分细则的主观题**走得通（客观题一律 **409**），
+         *       这样 ``scored_by="llm"`` 不会被用来绕开规则判分。
+         *
+         *     写库与 ``/quiz/grade`` **共用** :func:`_record_attempt`（同一个事务边界、
+         *     同一套进度推进），所以两条判分路径在数据侧不可能出现两套语义。
+         */
+        post: operations["grade_subjective_api_quiz_grade_subjective_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/quiz/progress/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 读闯关进度（learning.db 的 progress 表是唯一权威）
+         * @description 读某学生的闯关进度。
+         *
+         *     ★ **冷启动兜底**（票 15/20 的验收项）：新学生 ``progress`` 表是空的，
+         *       这里按**依赖图的拓扑序**自动初始化默认路径（只插不覆盖），
+         *       再返回 —— 前端不会拿到空数组，也不会因为没数据而报错。
+         *     ``kpIds`` 用于「本次答题影响到的关卡」这种小范围回读。
+         */
+        get: operations["read_progress_api_quiz_progress__student_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/quiz/variants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 登记 LLM 生成的变式题（含标准答案；返回体不含答案）
+         * @description 把 TS 侧生成的变式题**登记到该学生的 ``learning.db``**，并返回对外载荷。
+         *
+         *     ★ 两道闸门把「答案泄漏」挡在本端点之外：
+         *
+         *     ① **入参方向**：``reference_answer`` 是模型产出的**标准答案**，只进库、绝不回显；
+         *     ② **出参方向**：返回体是 :class:`QuizPayload`，``questions`` 全是
+         *        :class:`QuizQuestionOut`（结构上没有 ``answer``）——
+         *        转换只走 ``QuizPayload.from_internal``，不存在第二条投影路径。
+         *
+         *     ★ ``qid`` 由 TS 侧生成（带随机段，见 ``quiz.ts`` 的 ``variantQid``）：
+         *       Python 侧只做**形状校验**（长度/字符集），不重新编号 ——
+         *       重新编号会让「学生卡片上的 qid」与「后端登记的 qid」对不上，判分必 404。
+         */
+        post: operations["register_variants_api_quiz_variants_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -447,11 +661,8 @@ export interface components {
          * @description 归一化后的代码错误（面向学生）。原始 traceback 保留供家长/教师导出与排查。
          */
         CodeError: {
-            /**
-             * Line
-             * @default null
-             */
-            line: number | null;
+            /** Line */
+            line?: number | null;
             /** Message */
             message: string;
             /**
@@ -467,12 +678,10 @@ export interface components {
          * @description ``POST /api/code/run-hint`` 的响应：运行结果 + 评估 + 下一级提示（§6.3）。
          */
         CodeEvaluation: {
-            /** @default null */
-            error: components["schemas"]["CodeError"] | null;
+            error?: components["schemas"]["CodeError"] | null;
             /** Feedback */
             feedback: string;
-            /** @default null */
-            nextHint: components["schemas"]["CodingHint"] | null;
+            nextHint?: components["schemas"]["CodingHint"] | null;
             /** Ok */
             ok: boolean;
             /** Stdout */
@@ -1313,6 +1522,85 @@ export interface components {
             hits?: components["schemas"]["RagHit"][];
         };
         /**
+         * RecommendationItem
+         * @description 一条推荐（**下一步学什么**）。
+         *
+         *     字段全部是**可展示**的：``kp_id`` 是机器口径，``name`` 是给学生看的名字
+         *     （由依赖图的 ``kp`` 表解析出来）；``reason`` 是一句可直接照念的中文。
+         */
+        RecommendationItem: {
+            /**
+             * Depth
+             * @default 1
+             */
+            depth: number;
+            /** Gradelevel */
+            gradeLevel?: ("primary_low" | "primary_high" | "junior" | "senior") | null;
+            /** Kpid */
+            kpId: string;
+            /**
+             * Mastery
+             * @default 0
+             */
+            mastery: number;
+            /**
+             * Name
+             * @default
+             */
+            name: string;
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+        };
+        /**
+         * RecommendationResponse
+         * @description ``GET /api/profile/{student_id}/recommendation`` 的响应（票 20）。
+         *
+         *     ``source`` 说明这一批推荐是怎么来的 —— 前端据此决定提示语，
+         *     也是验收时「冷启动 / 依赖图 / 待重练」三种形态的**可断言标志**：
+         *
+         *     | source | 含义 |
+         *     | --- | --- |
+         *     | ``review`` | 优先重练（掌握度不足且练过） |
+         *     | ``graph`` | 依赖图后继（掌握某知识点后往前推） |
+         *     | ``cold_start`` | 全新学生：给图里的入口知识点 |
+         *     | ``empty`` | 依赖图不可用且无任何学习记录（前端按空态展示，**不是错误**） |
+         */
+        RecommendationResponse: {
+            /** Items */
+            items?: components["schemas"]["RecommendationItem"][];
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "review" | "graph" | "cold_start" | "empty";
+            /** Studentid */
+            studentId: string;
+            /**
+             * Summary
+             * @default
+             */
+            summary: string;
+        };
+        /**
+         * RegisterVariantsRequest
+         * @description ``POST /api/quiz/variants`` 的请求体：把 LLM 生成的题登记到该学生的库里。
+         *
+         *     ``student_id`` 在 query 里（与 ``/api/quiz/bank`` 的取题口径一致）；
+         *     这里只放题目本身。**至少要有一道题**（空数组等于一次毫无意义的写入）。
+         */
+        RegisterVariantsRequest: {
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Questions */
+            questions: components["schemas"]["VariantQuestionIn"][];
+        };
+        /**
          * SettingsResponse
          * @description ``GET`` / ``PUT /api/settings`` 的响应（§6.3）。**任何情况下都不含明文 Key。**
          */
@@ -1381,6 +1669,28 @@ export interface components {
             recommendedKpIds?: string[];
             student: components["schemas"]["Student"];
         };
+        /**
+         * SubjectiveGradeRequest
+         * @description ``POST /api/quiz/grade-subjective`` 的请求体：**TS 侧判完分，交服务端落库**。
+         *
+         *     ★ LLM 调用在 TS 侧（Pi 独占），Python 不装任何 LLM 客户端。本端点只做三件事：
+         *     校验（这道题真的是主观题吗）→ 按 ``score`` 定对错（**规则在服务端**）→ 写掌握度与进度。
+         */
+        SubjectiveGradeRequest: {
+            /**
+             * Feedback
+             * @default
+             */
+            feedback: string;
+            /** Qid */
+            qid: string;
+            /** Score */
+            score: number;
+            /** Sessionid */
+            sessionId?: string | null;
+            /** Studentid */
+            studentId: string;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -1394,6 +1704,40 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /**
+         * VariantQuestionIn
+         * @description 登记一道 LLM 生成的变式题（**必须带标准答案**，否则后端判不了分）。
+         *
+         *     ``reference_answer`` 就是**标准答案**：它进 ``learning.db``，绝不出现在任何出参里。
+         *     方向与 :class:`app.contracts.QuizGradeRequest.answer`（学生作答）**相反**，别混。
+         */
+        VariantQuestionIn: {
+            /**
+             * Explanation
+             * @default
+             */
+            explanation: string;
+            /**
+             * Kpid
+             * @default
+             */
+            kpId: string;
+            /** Options */
+            options?: string[] | null;
+            /** Qid */
+            qid: string;
+            /** Referenceanswer */
+            referenceAnswer: string | string[];
+            /** Rubric */
+            rubric?: string | null;
+            /** Stem */
+            stem: string;
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "choice" | "blank" | "code_blank";
+        };
     };
     responses: never;
     parameters: never;
@@ -1403,6 +1747,107 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_coding_hint_api_code_hint__kp_id__get: {
+        parameters: {
+            query?: {
+                /** @description 要第几级提示（1 指方向 / 2 结构 / 3 骨架） */
+                level?: number;
+            };
+            header?: never;
+            path: {
+                kp_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CodingHint"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_hint_api_code_run_hint_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CodeRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CodeEvaluation"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_code_template_api_code_templates__kp_id__get: {
+        parameters: {
+            query?: {
+                /** @description 学生学段（可选；传了就按兼容链卡，不传不过滤） */
+                grade_level?: string | null;
+            };
+            header?: never;
+            path: {
+                kp_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CodeTemplate"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     grade_history_api_grade_history__student_id__get: {
         parameters: {
             query?: never;
@@ -1633,6 +2078,40 @@ export interface operations {
             };
         };
     };
+    student_recommendation_api_profile__student_id__recommendation_get: {
+        parameters: {
+            query?: {
+                /** @description 覆盖学段（默认用画像里的当前学段） */
+                grade_level?: string | null;
+            };
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecommendationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_quiz_bank_api_quiz_bank__kp_id__get: {
         parameters: {
             query?: {
@@ -1691,6 +2170,111 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["QuizResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    grade_subjective_api_quiz_grade_subjective_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubjectiveGradeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuizResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_progress_api_quiz_progress__student_id__get: {
+        parameters: {
+            query?: {
+                /** @description 只看这几关，逗号分隔（可选） */
+                kpIds?: string | null;
+            };
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    register_variants_api_quiz_variants_post: {
+        parameters: {
+            query: {
+                /** @description 学生 id（生成题落在这个学生自己的库里） */
+                student_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegisterVariantsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuizPayload"];
                 };
             };
             /** @description Validation Error */

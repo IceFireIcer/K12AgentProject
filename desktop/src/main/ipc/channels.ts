@@ -54,7 +54,15 @@ export const IPC = {
    */
   gradeGet: 'grade:get',
   /** 主进程 → 渲染进程：推断出的学段发生变化时推送（只读徽章据此更新）。 */
-  gradeChanged: 'grade:changed'
+  gradeChanged: 'grade:changed',
+  /**
+   * 主进程 → 渲染进程：**把学生代码下发到渲染进程执行**（票 18 的硬约束）。
+   * ★ 主进程**绝不执行学生代码** —— Pi 的 Extension 与 UI 同进程且拥有完整系统权限，
+   *   代码只能在渲染进程的 Pyodide Worker 里跑。这条通道就是那座桥。
+   */
+  codeExecute: 'code:execute',
+  /** 渲染进程 → 主进程：回传执行结果（按 requestId 与下发配对）。 */
+  codeResult: 'code:result'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
@@ -68,7 +76,8 @@ export type IpcChannel = (typeof IPC)[keyof typeof IPC]
 export const PUSH_CHANNELS: readonly IpcChannel[] = [
   IPC.sidecarChanged,
   IPC.chatEvent,
-  IPC.gradeChanged
+  IPC.gradeChanged,
+  IPC.codeExecute
 ]
 
 /** 学段来源：`inferred` = 系统判定过；`default` = 冷启动默认值（还没判出来）。 */
@@ -108,3 +117,26 @@ export interface ChatSendRequest {
 export type ChatSendResult =
   | { ok: true; requestId: string; message: null }
   | { ok: false; requestId: null; message: string }
+
+/** 下发到渲染进程执行的学生代码（票 18）。 */
+export interface CodeExecuteRequest {
+  /** 与执行结果配对（桥生成，渲染进程必须原样带回）。 */
+  requestId: string
+  code: string
+  /** 执行超时；超时必须**中断**（Pyodide setInterruptBuffer），不是干等。 */
+  timeoutMs?: number
+  /** 发起这次执行的 Tool 调用号（轨迹与求助计数用）。 */
+  toolCallId?: string
+}
+
+/** 渲染进程回传的执行结果。 */
+export interface CodeExecuteResult {
+  requestId: string
+  stdout: string
+  stderr: string
+  /** 是否被超时中断（`while True: pass` 必须走这条，而不是把界面卡死）。 */
+  interrupted: boolean
+  elapsedMs: number
+  /** 执行器自身的失败说明（如 Worker 没起来）；学生代码的报错走 stderr。 */
+  failure?: string
+}

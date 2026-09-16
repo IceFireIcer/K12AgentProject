@@ -1,8 +1,13 @@
 /**
- * 画像 Extension（票 08，执行文档 §9.2 第 4 行）：注册 `get_student_profile`。
+ * 画像 Extension（票 08 建立，票 20 补齐个性化闭环）：注册 `get_student_profile`。
  *
  * 职责：把「这个学生现在会什么、卡在哪、适合下一步学什么」交给主 Agent，
  * 让它在**同一轮**里调整讲解深度与例子 —— 这是「个性化学习路径」在对话里的落点。
+ *
+ * ★ 闭环的「读」这一端（票 20）：``recommendedKpIds`` 由 Python 侧的
+ *   ``app/routes/profile.py`` 用**依赖图 + 掌握度**算出（掌握「变量」→ 推荐「循环」），
+ *   本文件只把它渲染成给模型看的一句话。**不要在 TS 侧再算一份推荐** ——
+ *   两套推荐会给出两个「下一步」，而学生只会看到其中一个。
  *
  * ★ 三条硬约束（都不是实现细节，是架构决策）：
  *
@@ -14,6 +19,10 @@
  * 3. **`execute()` 自兜异常、绝不抛出**：Pi 的 Extension 与 Agent 同在主进程，
  *    抛异常会同时带走 UI；失败一律返回可读中文 + `details.ok=false`
  *    （`details.ok=false` 会被轨迹图如实记成失败，见 `agent/trace.ts` 的 `toolResultOk`）。
+ *
+ * ★ **不缓存、不落第二份副本**（票 20 明确要求）：每次调用都真发一次
+ *   `GET /api/profile/{student_id}`。缓存会让「上一轮的掌握度变化改变下一轮的推荐输入」
+ *   这条闭环失效 —— 而那正是这一票要证明的东西。
  *
  * 画像数据本身来自 Python 侧一人一份的 `learning.db`（§8.1，`learning_history` **不存对话正文**）。
  */
@@ -62,6 +71,28 @@ interface ProfileResponse {
   recommendedKpIds?: string[]
 }
 
+/** `GET /api/profile/{student_id}/recommendation` 的响应形状（票 20）。 */
+interface RecommendationResponse {
+  source?: string
+  summary?: string
+  items?: Array<{
+    kpId?: string
+    name?: string
+    gradeLevel?: string | null
+    depth?: number
+    mastery?: number
+    reason?: string
+  }>
+}
+
+/** 推荐来源的中文说法（只用于给模型的一句提示，**不是**界面文案）。 */
+const RECOMMENDATION_SOURCE_LABELS: Record<string, string> = {
+  review: '优先重练（这个知识点还没练熟）',
+  graph: '依赖图后继（前置已掌握）',
+  cold_start: '学习路线起点（新学生）',
+  empty: '暂无（知识库或学习记录不足）'
+}
+
 /** 学段的中文名（**只用于拼给模型看的一句话**；学段语气由 Prompt 模板负责，见 `prompts/`）。 */
 const GRADE_LABELS: Record<string, string> = {
   primary_low: '小学低年级',
@@ -101,7 +132,7 @@ export function formatTimestamp(value: number | null | undefined): string {
  */
 export function renderProfileText(
   profile: ProfileResponse,
-  options: { maxMastery?: number; fallbackStudentId?: string } = {}
+  options: { maxMastery?: number; fallbackStudentId?: string; recommendation?: RecommendationResponse | null } = {}
 ): string {
   const maxMastery = Math.max(1, Math.min(20, options.maxMastery ?? 8))
   const student = profile.student ?? {}
@@ -138,18 +169,59 @@ export function renderProfileText(
     )
   }
 
-  const recommended = (profile.recommendedKpIds ?? []).slice(0, 6)
-  lines.push(
-    recommended.length > 0
-      ? `- 依赖图推荐的下一个知识点：${recommended.join(', ')}（优先顺着这条线引导）`
-      : '- 依赖图推荐：暂无（掌握度不足或依赖图未命中，按当前问题本身作答即可）'
-  )
+  // ★ 推荐（票 20）：优先用 `/recommendation` 的**带理由**版本（它还会说明「为什么」：
+  //   是重练、是依赖图后继、还是冷启动）。取不到就退回 `/profile` 里的 kp_id 列表 ——
+  //   两条路径的数据来源**同一处**（Python 的 `build_recommendation`），只是详细程度不同。
+  lines.push(...renderRecommendationLines(profile, options.recommendation ?? null))
 
   const lastActive = formatTimestamp(student.lastActiveAt)
   if (lastActive) lines.push(`- 最近活跃：${lastActive}`)
   lines.push('注意：面向学生的回答里不要出现知识点 id、分数这类内部字段，用自然语言说「你已经会…，我们试试…」。')
   return lines.join('\n')
 }
+
+/** 推荐那几行（带理由时用详细版；否则退回 kp_id 列表）。 */
+function renderRecommendationLines(
+  profile: ProfileResponse,
+  recommendation: RecommendationResponse | null
+): string[] {
+  const items = (recommendation?.items ?? []).filter(
+    (item) => typeof item.kpId === 'string' && item.kpId.length > 0
+  )
+  if (items.length > 0) {
+    const source = recommendation?.source ?? ''
+    const why = RECOMMENDATION_SOURCE_LABELS[source] ?? '依赖图推荐'
+    const listed = items
+      .slice(0, 6)
+      .map((item) => {
+        const name = item.name ? `${item.name}（${item.kpId}）` : item.kpId
+        const score = Number(item.mastery ?? 0)
+        return `${name} 掌握度 ${score.toFixed(2)}`
+      })
+      .join('；')
+    return [
+      `- 推荐下一步（${why}）：${listed}`,
+      recommendation?.summary
+        ? `- 推荐口径（照这个意思用学生能听懂的话说）：${recommendation.summary}`
+        : '- 优先顺着这条线引导，不要跳到更后面的内容。'
+    ]
+  }
+
+  const recommended = (profile.recommendedKpIds ?? []).slice(0, 6)
+  return [
+    recommended.length > 0
+      ? `- 依赖图推荐的下一个知识点：${recommended.join(', ')}（优先顺着这条线引导）`
+      : '- 依赖图推荐：暂无（掌握度不足或依赖图未命中，按当前问题本身作答即可）'
+  ]
+}
+
+/** 画像端点（`GET /api/profile/{student_id}`）。 */
+export const profilePath = (studentId: string): string =>
+  `/api/profile/${encodeURIComponent(studentId)}`
+
+/** 推荐端点（`GET /api/profile/{student_id}/recommendation`，票 20）。 */
+export const recommendationPath = (studentId: string): string =>
+  `/api/profile/${encodeURIComponent(studentId)}/recommendation`
 
 /**
  * `get_student_profile` 的 Tool 工厂。
@@ -164,7 +236,7 @@ export default function profileExtension(pi: AgentExtensionApi): void {
     name: 'get_student_profile',
     label: '学习画像',
     description:
-      '读取当前学生的画像：各知识点掌握度、学习偏好、依赖图推荐的下一步。' +
+      '读取当前学生的画像：各知识点掌握度、学习偏好、依赖图推荐的下一步（含推荐理由）。' +
       '在学生问「我接下来学什么」「我哪里没学好」，或需要判断该讲多深时调用。' +
       '学生身份由宿主应用注入，**无需也不要**传学生标识。',
     promptSnippet: 'get_student_profile：读取当前学生画像与推荐下一步',
@@ -176,13 +248,12 @@ export default function profileExtension(pi: AgentExtensionApi): void {
           '还没有绑定当前学生，无法读取学习画像。请先直接回答学生的问题，不要假设任何学习记录。'
         )
       }
-      const path = `/api/profile/${encodeURIComponent(session.studentId)}`
       try {
         // ⚠️ 调用点动态 import（与 `learning-log.ts` 同因）：`bridge/client.ts` 里有一处缺 `.ts`
         // 的导入，Node 直跑 TS 时会让**整个模块**导入失败；推迟到真正发请求的那一刻，
         // 提取/渲染这类纯逻辑就还能被 `node --test` 覆盖。生产产物照常静态分析内联。
         const { apiFetch } = await import('../../bridge/client.ts')
-        const response = await apiFetch(path, { method: 'GET' })
+        const response = await apiFetch(profilePath(session.studentId), { method: 'GET' })
         if (!response.ok) {
           const snippet = await readSnippet(response)
           if (response.status === 404) {
@@ -198,17 +269,32 @@ export default function profileExtension(pi: AgentExtensionApi): void {
           )
         }
         const profile = (await response.json()) as ProfileResponse
+
+        // ★ 推荐详细版（票 20）：**同一轮里再发一次**，拿到「为什么推荐它」。
+        //   取不到不影响画像本身（推荐只是增强），所以失败静默退回 kp_id 列表。
+        //   ★ **不缓存**：缓存会让「上一轮的变化改变下一轮的输入」这条闭环失效。
+        const recommendation = await fetchRecommendation(apiFetch, session.studentId)
+
         const maxMastery = typeof params?.max_mastery === 'number' ? params.max_mastery : 8
         const text = renderProfileText(profile, {
           maxMastery,
-          fallbackStudentId: session.studentId
+          fallbackStudentId: session.studentId,
+          recommendation
         })
+        // 详细推荐优先；它没有条目时退回 `/profile` 里的 kp_id 列表（两者同源）
+        const recommendedFromDetail = (recommendation?.items ?? [])
+          .map((item) => item.kpId)
+          .filter((kpId): kpId is string => typeof kpId === 'string' && kpId.length > 0)
         return toolSuccess(text, {
           ok: true,
           studentId: session.studentId,
           sessionId: session.sessionId,
           masteryCount: (profile.mastery ?? []).length,
-          recommendedKpIds: profile.recommendedKpIds ?? []
+          recommendedKpIds:
+            recommendedFromDetail.length > 0
+              ? recommendedFromDetail
+              : (profile.recommendedKpIds ?? []),
+          recommendationSource: recommendation?.source ?? null
         })
       } catch (error) {
         // ★ 绝不抛出：Pi 与 UI 同进程，抛出去会同时带走两者（AGENTS §5.14）
@@ -216,6 +302,22 @@ export default function profileExtension(pi: AgentExtensionApi): void {
       }
     }
   })
+}
+
+/** 读推荐详情；**任何失败都返回 `null`**（推荐是增强，缺了不该让画像读不出来）。 */
+async function fetchRecommendation(
+  apiFetch: (path: string, init?: RequestInit) => Promise<Response>,
+  studentId: string
+): Promise<RecommendationResponse | null> {
+  try {
+    const response = await apiFetch(recommendationPath(studentId), { method: 'GET' })
+    if (!response.ok) return null
+    const payload = (await response.json()) as unknown
+    if (!payload || typeof payload !== 'object') return null
+    return payload as RecommendationResponse
+  } catch {
+    return null
+  }
 }
 
 /** 读一小段响应体用于报错（**截断**，避免把整页 HTML/堆栈塞进 Prompt）。 */

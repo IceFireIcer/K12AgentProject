@@ -2,20 +2,25 @@
 /**
  * `payload` 事件的内联卡片**分派器**：按 `kind` 选卡片组件。
  *
- *   `quiz`                → `cards/QuizCard.vue`（票 14：已落地，做题 + 批改结果）
- *   `animation` / `coding` → 占位卡片（票 16–19 落地）
+ *   `quiz`      → `cards/QuizCard.vue`（票 14/15：做题、批改、闯关进度）
+ *   `animation` → `cards/AnimationCard.vue`（票 16/17：沙箱 iframe + RPC + 容错降级）
+ *   `coding`    → `cards/CodingCard.vue`（票 18/19：Monaco + Pyodide Worker）
  *
- * 载荷是契约里的 `unknown`，所以占位分支只读**明确认识的字段**（`note` / `tool`），
- * 读不到就退回到「按 kind 给一句通用说明」—— 结构变化最多让卡片变朴素，不会让页面报错。
+ * 载荷是契约里的 `unknown`，所以每个卡片自己只读**明确认识的字段**，
+ * 读不到就退回「按 kind 给一句通用说明」—— 结构变化最多让卡片变朴素，不会让页面报错。
  */
 import { computed } from 'vue'
 import type { InlineCard } from '../api/events'
 import { PAYLOAD_KIND_HINTS, PAYLOAD_KIND_LABELS } from '../labels'
+import AnimationCard from './AnimationCard.vue'
+import CodingCard from './CodingCard.vue'
 import QuizCard from './QuizCard.vue'
 
 const props = defineProps<{ card: InlineCard }>()
 
 const isQuiz = computed(() => props.card.kind === 'quiz')
+const isAnimation = computed(() => props.card.kind === 'animation')
+const isCoding = computed(() => props.card.kind === 'coding')
 const title = computed(() => PAYLOAD_KIND_LABELS[props.card.kind])
 
 const note = computed(() => readNote(props.card.payload) ?? PAYLOAD_KIND_HINTS[props.card.kind])
@@ -31,7 +36,13 @@ function readNote(payload: unknown): string | null {
   <!-- 练习卡片：题目 / 批改结果都由它自己按载荷结构判断 -->
   <QuizCard v-if="isQuiz" :card="card" />
 
-  <!-- 动画与编程卡片（票 16–19） -->
+  <!-- 动画卡片（票 16/17）：sandboxed iframe + postMessage RPC + 失败降级 -->
+  <AnimationCard v-else-if="isAnimation" :card="card" />
+
+  <!-- 编程卡片（票 18/19）：Monaco + Pyodide Worker（代码绝不在主进程跑） -->
+  <CodingCard v-else-if="isCoding" :card="card" />
+
+  <!-- 未识别的 kind：朴素占位，不报错 -->
   <article v-else class="card" :data-kind="card.kind" data-testid="inline-card">
     <header class="card__head">
       <span class="title">{{ title }}</span>

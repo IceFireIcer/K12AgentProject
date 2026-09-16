@@ -1,0 +1,23 @@
+{
+  "kp_id": "jr-py-variable",
+  "grade_level": "junior",
+  "title": "变量：把三科成绩加起来求平均分",
+  "expected_behavior": "把 TODO 1-2 填好以后，程序打印出「平均分：85.0」（先求和再除以科目数，保留 1 位小数）。",
+  "scaffold": "# 目标：用变量存下三科成绩，算出平均分并打印\nchinese = 88\nmath = 92\nenglish = 75\n\n# TODO 1：把三科成绩相加，再除以科目数（3），把结果存进 average\naverage = ____\n\n# TODO 2：打印「平均分：85.0」这样的结果（保留 1 位小数）\n#         提示：print(f\"平均分：{average:.1f}\")\n____\n",
+  "expected_output": "平均分：85.0\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "平均分是怎么算出来的？先用你自己的话说出这一步，再想「加」和「除」分别该写成哪个符号 —— 注意别写成一个等号。"
+    },
+    {
+      "level": 2,
+      "hint": "先把三科成绩相加得到一个总分，再除以科目数 3。整件事写成一行赋值语句即可：等号右边是算式，等号左边是新变量的名字。"
+    },
+    {
+      "level": 3,
+      "hint": "赋值那句的左半边就是 `average`，右半边三个变量用 `+` 连起来再 `/ 3`；打印用 f-string：`print(f\"平均分：{average:.1f}\")`，其中 `.1f` 表示「保留 1 位小数」。"
+    }
+  ],
+  "solution": "chinese = 88\nmath = 92\nenglish = 75\n\naverage = (chinese + math + english) / 3\n\nprint(f\"平均分：{average:.1f}\")\n"
+}

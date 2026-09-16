@@ -42,6 +42,9 @@ export default defineConfig({
     resolve: { alias: sharedAlias }
   },
   renderer: {
+    // ★ 票 18：自托管的 Pyodide 运行时放在 desktop/resources/pyodide/，
+    //   必须拷进渲染产物才可能离线可用（任何 CDN 引用都会在断网演示时白屏）。
+    publicDir: resolve('resources'),
     resolve: {
       alias: {
         ...sharedAlias,

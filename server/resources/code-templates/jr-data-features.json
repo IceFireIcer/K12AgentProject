@@ -1,0 +1,23 @@
+{
+  "kp_id": "jr-data-features",
+  "grade_level": "junior",
+  "title": "数据与特征：把身高体重改写成 BMI 特征",
+  "expected_behavior": "把 TODO 1-3 填好以后，程序对三个人依次打印：小明 的 BMI = 19.10、小红 的 BMI = 18.83、小刚 的 BMI = 27.04。",
+  "scaffold": "# 目标：把原始数据（身高、体重）改写成能互相比较的特征 —— BMI\nraw = [(\"小明\", 165, 52), (\"小红\", 158, 47), (\"小刚\", 172, 80)]\n\nfor name, height_cm, weight_kg in raw:\n    # TODO 1：身高从厘米换成米（单位不统一，量纲就没法比较）\n    height_m = ____\n\n    # TODO 2：BMI = 体重 ÷ 身高的平方\n    bmi = ____\n\n    # TODO 3：打印「小明 的 BMI = 19.10」（保留 2 位小数）\n    ____\n",
+  "expected_output": "小明 的 BMI = 19.10\n小红 的 BMI = 18.83\n小刚 的 BMI = 27.04\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "BMI 这个特征要能横向比较不同的人，所以单位必须先统一。看看原始数据里的身高是什么单位、公式里需要什么单位，中间差一步换算。"
+    },
+    {
+      "level": 2,
+      "hint": "BMI 这个特征要让不同身高体重的人能横向比较，所以必须先统一单位：原始数据里的身高是厘米，而公式里需要米，中间差一步换算（想想厘米和米之间差多少倍）。换好单位以后，BMI 的公式是「体重 ÷ 身高的平方」—— 注意是身高的**平方**，也就是身高自己乘自己，不是「身高乘 2」。"
+    },
+    {
+      "level": 3,
+      "hint": "三行分别写成这样：第一句 `height_m = height_cm / 100`（厘米换米）；第二句 `bmi = weight_kg / (height_m ** 2)`（`**` 是乘方，分母的括号别漏，漏了会变成「先除以身高、再乘 2」）；第三句用 f-string 打印：`print(f\"{name} 的 BMI = {bmi:.2f}\")`，其中 `.2f` 表示保留 2 位小数。三句都要缩进在 for 循环里。"
+    }
+  ],
+  "solution": "raw = [(\"小明\", 165, 52), (\"小红\", 158, 47), (\"小刚\", 172, 80)]\n\nfor name, height_cm, weight_kg in raw:\n    height_m = height_cm / 100\n    bmi = weight_kg / (height_m ** 2)\n    print(f\"{name} 的 BMI = {bmi:.2f}\")\n"
+}
