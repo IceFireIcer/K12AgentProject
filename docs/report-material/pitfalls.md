@@ -78,3 +78,85 @@
   （最坏情况的流式切分）作为回归防护。
 - **报告用法**：说明「进程间握手协议」这类底层代码是写测试的（而 GUI 部分靠端到端断言），
   体现测试投入的取舍判断。
+
+---
+
+# v2 待验清单（Pi Agent 迁移，2026-09-16 立项）
+
+> **状态说明**：以下条目**多数尚未实测**，是「经一手资料核实、但尚未在本机跑通」的风险。
+> **动手前先来这里看**，验完一条就把它改成正式编号（P-009 起），补上真实的「现象/根因/解决」。
+> **不要把它们当成已解决的问题。**
+>
+> 已从一手产物核实的事实依据：npm tarball `@earendil-works/pi-coding-agent@0.85.1`
+> 的 README / `docs/*.md`（30 篇）/ `dist/**/*.d.ts`、npm registry 元数据、GitHub REST API、`pi.dev` 服务端 HTML。
+
+## P-101 · ★ Pi 的 `esbuild` 原生依赖在 Electron 打包后加载失败（**最高风险，D3 必验**）
+
+- **现象**（据 Pi 官方 issue #9286，标题即「We embed the coding-agent SDK in an Electron desktop app」）：
+  在 Electron 里 `import` Pi 包根后报 `Cannot find package 'esbuild'`（0.85.0 崩；
+  0.85.1 靠下架实验代码缓解，但**包根导出仍会加载 CLI 的 `main.js`**）。
+- **根因**：Pi 包的 `exports` **没有 `./sdk` 子路径**，只能从**包根**导入；
+  包根 `dist/index.d.ts` 首行即 re-export CLI 的 `main`。
+  而传递依赖 `@earendil-works/chord` 把 **`esbuild`（约 10MB 原生二进制）列为正式依赖**，
+  需 asar 解包并按架构分发、参与签名。
+- **解决方向（未验证）**：`electron-builder` 配置里对 `esbuild` 做 `asarUnpack` 白名单；
+  实测 `npm run build:unpack` 后从产物启动。
+  **Plan B：改用 Pi RPC 模式**（`pi --mode rpc` 作子进程，不 import SDK）——形成三进程但绕开该问题。
+- **报告用法**：★ 「换框架的真实代价」——比只说收益可信得多。
+
+## P-102 · Pi 要求 Node >= 22.19，Electron 33 内置 Node 不满足
+
+- **现象**（待验）：`npm i` 或运行时报 `engines` 不满足 / 语法不支持。
+- **根因**：Pi `engines.node >= 22.19.0`（0.75.0+ 起）；Electron 33 内置 Node 版本低于此。
+- **解决方向**：① 升 Electron；② 降到 Pi `0.74.2`（npm 上的 `legacy-node20` tag，要求 >= 20.6）。
+  **D3 首日验证，两个选项都能接受，不要在此纠结。**
+
+## P-103 · `pi.on("session_end", ...)` 不生效（**事件名不存在**）
+
+- **现象**（未实测，但已由一手来源确认）：按迁移提案写 `session_end` 钩子，**永远不触发**。
+- **根因**：**该事件不存在**。全包 1056 文件 grep `session_end` = **0 命中**。
+  真实终态钩子是 **`session_shutdown`**；一轮结束用 **`agent_end` / `agent_settled`**。
+- **解决**：用正确事件名。学习记录 Extension 写「会话级摘要」应用 `session_shutdown`，
+  写「一轮结果」应用 `agent_end`。
+- **报告用法**：**引用第三方技术文档前先核对一手产物**的典型案例（对应 D-009）。
+
+## P-104 · Pi 会话默认写到 `~/.pi/agent/`，导致跨学生数据混放（**合规硬伤**）
+
+- **现象**（待验）：不配置 `agentDir` 时，Pi 默认落盘到
+  `~/.pi/agent/sessions/--<cwd>--/<时间戳>_<uuid>.jsonl`。
+  本项目多个学生共用同一 `cwd` → **所有学生的对话混在同一目录**。
+- **根因**：Pi 的默认会话目录是全局的，与「一人一库」的设计不符。
+- **解决方向**：显式配置 `DefaultResourceLoader({ agentDir })` 或 `settings.sessionDir`
+  指向 `students/<id>/pi-agent/`；
+  **并加自动化断言**：检测 `students/<id>/` 之外不得出现本应用的 `.jsonl`。
+- **报告用法**：★ 「引入第三方运行时后，如何守住数据隔离这条合规底线」。
+
+## P-105 · Pi 默认 System Prompt 泄漏宿主应用的安装路径
+
+- **现象**（据 Pi 官方 issue #6308）：SDK 嵌入时，默认 system prompt 含宿主应用的安装路径，
+  会误导模型，且属信息泄漏。
+- **根因**：Pi 的默认 prompt 会描述运行环境。
+- **解决**：**必须设 `systemPromptOverride`**（`DefaultResourceLoader({ systemPromptOverride })`）。
+  顺带也满足本项目「System Prompt 禁止暴露内部实现」的自有规则。
+- **报告用法**：说明「安全边界要在集成阶段就定义，不能等出问题再补」。
+
+## P-106 · `tool_execution_end` 是只读通知，不能改工具结果
+
+- **现象**（未实测，已由类型定义确认）：想用 `tool_execution_end` 回写「重试计数」或修正结果 → 做不到。
+- **根因**：该事件的处理函数无返回值语义（通知型）；Pi 的可变更事件是
+  `tool_call`（`{block, reason, terminate}` + 原地改 `event.input`）、`tool_result`、
+  `context`、`message_end`、`before_provider_request`。
+- **解决**：**动画重试逻辑写在 Tool 的 `execute()` 内部**（≤3 次后降级），不依赖事件回写。
+  重试计数用 Extension 内的 `Map<toolCallId, number>`，与本轮同生命周期。
+- **报告用法**：说明「框架的事件模型要先分清通知型与可变更型，否则设计会写歪」。
+
+## P-107 · DeepSeek BaseURL 的 `/v1` 分歧（**现场防翻车**）
+
+- **现象**（待验）：设置页默认能连通，用户改一下 BaseURL 就连不上。
+- **根因**：Pi 内置 `deepseek` provider 的 `baseUrl` 是 **`https://api.deepseek.com`（无 `/v1`）**，
+  而本项目前端默认值习惯写 `https://api.deepseek.com/v1`。
+  两者都能用（`openai-completions` 会自行拼 `/chat/completions`），但**混用会让人困惑**。
+- **解决**：统一默认值为 `https://api.deepseek.com/v1`，并在保存时做**真实连通性探测**
+  （`GET /models` 或发一条 1-token 请求），把失败原因回显到设置页。
+- **报告用法**：体现「自填配置」这类需求必须配连通性反馈，否则现场必翻车。
+

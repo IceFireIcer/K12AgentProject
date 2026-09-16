@@ -64,3 +64,55 @@
   **注意**：这不能替代最终的整包验收 —— 我们仍然跑了 `electron-builder --dir`
   并在 `win-unpacked/` 里双击真实 `.exe` 复验通过（`extraResources` 的路径映射只有整包才能验到）。
 - **被否决**：只跑开发态就宣称关卡 A 通过（那样验不到 `extraResources` 与 `resources/server/` 的实际布局）。
+
+## D-008 · 编排框架从 LangGraph 迁移到 Pi Agent SDK（**v2 核心决策，2026-09-16**）
+
+- **决策**：编排层从 **LangGraph（Python，跑在 sidecar 里）** 换成
+  **Pi Agent SDK（`@earendil-works/pi-coding-agent`，TypeScript，嵌入 Electron 主进程）**。
+  主 Agent 由 LLM **自主选 Tool** 路由（**取消 `intent` 字段**），能力经 `pi.registerTool()` 暴露，
+  共 6 个 Extension。
+  **但 Python sidecar 保留**，退化为「数据 / RAG / 嵌入 / 学段信号」服务。
+- **理由（三条实质理由，不是「框架更新」）**：
+  1. **`before_agent_start` 每轮可替换 systemPrompt**（官方返回类型 `BeforeAgentStartEventResult.systemPrompt`，
+     多扩展链式叠加）。学段语气/深度的逐轮微调比 LangGraph 的固定图更自然，**且不需要重建会话**。
+  2. **会话持久化与「一人一库」的冲突从根上消失**。原方案 `compile(checkpointer=...)` 把 checkpointer
+     绑死在图实例上（即 `P-005` 预判的坑），而学生库一人一文件 → 不能全局复用。
+     Pi 把对话历史交给原生 JSONL 会话树，**按学生分目录即满足隔离**，还白送分支/分叉/恢复。
+  3. **路由方式更贴合真实教学对话**：学生的输入常是多意图混合，确定性条件边需要预先穷举，
+     LLM 选 Tool 更自然。
+- **代价（已接受，写进报告）**：
+  - **失去「原生模块零依赖」**：Pi 包根导入会拖入 `esbuild`（`@earendil-works/chord` 的正式依赖），
+    需处理 asar 解包/按架构打包/签名。**这是本决策最大的新增风险**（执行文档风险 #15）。
+  - **S01/S02 传输层需局部返工**：渲染进程↔主进程从 HTTP+SSE 改为 IPC（**6 事件词表不变**，前端解析层可复用）。
+  - **多语言边界移动**：编排从 Python 移到 TS，`TutorState` 作废。
+- **被否决**：① 保留 LangGraph（`P-005` 那个坑要么靠按 student_id 缓存已编译图硬扛，要么破坏合规叙事）；
+  ② **Pi + `better-sqlite3` 全进 Electron、删除 Python**——需主动废除 `AGENTS.md` §4
+  「Electron 侧不得引入任何原生数据库模块」，并放弃 S01/S02 全部成果，且要把 fastembed 换成
+  Ollama/云 API（**等于丢掉「零依赖、开箱即用」这个演示优势**）；
+  ③ **Pi 走 RPC 模式**（`pi --mode rpc` 作子进程）——能绕开 `esbuild`，但会形成三进程，
+  且 hook 注册要走额外 IPC 层。**保留为 D3 打包冒烟的 Plan B。**
+- **★ 一条重要判断（答辩可能被问）**：迁移提案里另有 5 处改动**沿用了旧研判原文，且未给出理由**，
+  已分别裁决为「维持既有决策」：**嵌入模型 BGE-M3/Ollama**（维持 fastembed，D-002）、
+  **TS 手写契约**（维持 pydantic 唯一来源，D-001 衍生）、**11–12 周排期**（维持单人 15 天）、
+  **LLM 一次性生成动画 HTML**（维持模板优先，D-004）、**纯自动推断学段**（改为显式为主+推断为辅）。
+  即：**采纳的是与 Pi 迁移真正相关的改动，不是提案里的全部内容。**
+- **报告用法**：这是「技术选型不是追新，而是逐条评估收益与代价」的典型案例。
+  主动讲代价（失去原生模块零依赖）比被评委问出来更可信。
+
+## D-009 · Pi 迁移提案的事实核实（**方法论素材，2026-09-16**）
+
+- **决策**：提案归档前**先做独立事实核实**，把错误与冲突以批注形式写进
+  `docs/研判文档PiAgent.md`，而不是照抄进权威文档。
+- **核实方式**：读取 npm 正式发布产物 `@earendil-works/pi-coding-agent@0.85.1` 的 tarball
+  （含 README、`docs/*.md` 30 篇、全部 `dist/**/*.d.ts`）、npm registry 元数据、GitHub REST API、
+  `pi.dev` 实际服务端 HTML。**不依赖二手描述。**
+- **查出 14 项事实问题**（详见该文档附录 A），其中会直接导致返工的 3 项：
+  1. **`session_end` 事件不存在**（全包 grep 0 命中）—— 照写会直接不生效。真实为 `session_shutdown` / `agent_end`。
+  2. **`pi-agent-sdk-starter` 仓库 404** —— 真实为 `vanzan01/pi-agent-sdk-starter`，且是 **React 不是 Vue**。
+  3. **`bun install` 那条注意事项不是 Pi 官方结论** —— 是某第三方 starter kit 的 README；
+     且 **Pi 本身不依赖 `better-sqlite3`**（grep 0 命中）。
+- **同时确认了 4 项关键事实**（这些是迁移的真正依据）：
+  `before_agent_start` 可改 systemPrompt、`pi.registerTool()` + 默认导出工厂、
+  「Primitives, not features」是官网原文、**DeepSeek 是 Pi 一等公民 provider**（含自填 OpenAI 兼容端点能力）。
+- **报告用法**：★ 很好的「工程严谨性」素材——**引用第三方技术提案前先核实一手来源**。
+  也可用于说明「为什么我们的文档里会有一份带批注的提案存档」。

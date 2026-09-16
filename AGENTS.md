@@ -2,6 +2,37 @@
 
 面向后续 ZCode / 编码代理的工作区说明。仅记录本仓库特有、从代码本身看不出来的信息。
 
+## 0. ⚠️ 先读这一条：当前工作区只有文档，没有代码
+
+**2026-09-16 用户明确要求删除全部代码、仅保留文档**，已执行并推送。当前仓库顶层只有：
+
+```
+K12Agent/
+├─ AGENTS.md              # 本文件
+├─ 项目执行文档.md         # 唯一权威执行文档（v2.0 Pi Agent 架构版）
+├─ docs/                  # 设计依据与报告素材
+├─ stages/                # 任务切片 S00–S13
+├─ .gitignore  .gitattributes
+```
+
+**`desktop/` 与 `server/` 不存在。** S00/S01/S02 的代码成果（Electron 壳、sidecar 握手、
+pydantic 契约层、SSE 通道、单测与架构守卫）**都不在工作区里**。
+
+**恢复方式**：S02 的完整代码在**附注标签**里，没有丢：
+
+```bash
+git tag -l 'archive/*'                  # 应为 archive/s02-full-code
+git show archive/s02-full-code --stat | head
+git checkout archive/s02-full-code -- desktop server    # 按需恢复（会带回全部文件）
+```
+
+> **恢复 embedding 模型（90MB，从未入 git）**：已备份到仓库外
+> `E:\FolderForVibeCoding\Zcode\K12Agent_backup_resources\resources`，
+> 需手工拷回 `server/resources/models/fastembed/`。**这一步不做，检索跑不起来。**
+
+**因此：** 在开工任何 Stage 之前，**先问用户「是否要从标签恢复代码」**。
+不要默认代码存在，也不要绕过用户直接恢复——删除是用户的有意操作。
+
 ## 1. 项目是什么
 
 中国移动浙江公司发榜赛题 **JBGS-2026-02「多模态 K12 人工智能通识课教学助手对话智能体」**。
@@ -9,91 +40,71 @@
 
 **交付物**：可运行的 Electron 桌面应用原型（**本期只做 Windows .exe**）、完整源码 + 本地运行说明、项目报告与答辩 PPT。
 
-## 2. 当前仓库状态（重要）
+**约束前提**：**单人开发 · 15 天极限冲刺**。
 
-已完成 **S00 环境与依赖基线**、**S01 双端脚手架 + Sidecar 握手（关卡 A ✅ 已过）**（见 `stages/README.md`）：
+## 2. 当前进度与下一步
 
-- `desktop/`：**已创建**。electron-vite + Vue3 + TS + Pinia；Electron 能拉起 Python sidecar 并显示握手结果；`electron-builder --dir` 整包已验证。
-- `server/`：uv 工程 + **`app/` 应用代码已就绪**（FastAPI 入口、握手协议、token 鉴权、`/health`）。Python 3.12.7（`.python-version` 锁定），依赖见 `server/pyproject.toml` + `server/uv.lock`。
-- 嵌入模型在 `server/resources/models/fastembed/`（90.8MB，512 维），**已纳入 `.gitignore`**（体积大，随包分发）。
-- Git 已有提交；`master` 分支。
-- **尚未有**：`server/app/models.py` 契约（S02）、LangGraph 编排（S04）、RAG（S06）、测试框架（后端侧）、lint 配置、Vue 视图/组件。
+| Stage | 内容 | 状态 |
+| --- | --- | --- |
+| S00 | 环境与依赖基线 | ✅ 代码已删除（成果留档） |
+| S01 | 双端脚手架 + Sidecar 握手 | ✅ **关卡 A 已过**（代码已删除，可从标签恢复） |
+| S02 | 契约冻结 + 设置页 + 安全握手 + 事件通道 | ✅ 代码已删除，可从标签恢复；**传输层需局部返工** |
+| **S03** | **Pi Agent 集成 + LLM 适配** | ⬜ **下一步**（见执行文档第 18 节 Day 3 清单） |
 
-**目录结构**（现状）：
+**✅ `stages/` 已于 2026-09-16 按 v2（Pi Agent）架构整体重新切片**，旧卡（LangGraph 版）已删除。
+抢救出的内容落在：`docs/阶段实测记录-S00至S02.md`（实测数据）与 `docs/业务陷阱清单.md`（领域陷阱）。
 
-```
-K12Agent/
-├─ AGENTS.md                  # 本文件
-├─ 项目执行文档.md             # 唯一权威执行文档
-├─ stages/                    # 任务切片（S00–S13），一次做一个
-├─ docs/                      # 设计依据与报告素材（report-material/ 逐日累积）
-├─ desktop/                   # ★ Electron + Vue 桌面壳
-│  ├─ src/main/{index,sidecar,sidecar-logic}.ts   # 窗口 / 进程管理 / 纯逻辑
-│  ├─ src/preload/index.ts                        # contextBridge 白名单
-│  ├─ src/renderer/src/                           # App.vue + stores/
-│  ├─ tests/sidecar-logic.test.ts                 # 单测（node --test）
-│  └─ scripts/verify-ui.mjs                       # CDP 读真实 DOM 做 UI 断言
-└─ server/                    # ★ Python 后端
-   ├─ app/{main,config,encoding}.py + app/api/
-   ├─ packaging/k12-agent-server.spec             # PyInstaller 配置
-   ├─ resources/models/fastembed/                 # 嵌入模型（git 忽略）
-   └─ scripts/{check_env,download_models,smoke_langgraph,export_openapi,build_server}.py
-```
-
-**可用命令**（真实命令，勿用占位描述）：
-
-```bash
-# ── 后端 ──
-cd server
-uv run python scripts/check_env.py         # 一屏自检全部后端环境
-uv run python scripts/smoke_langgraph.py   # LangGraph 能力冒烟（条件边/持久化/流转图）
-uv run python scripts/download_models.py   # 下载/校验嵌入模型
-uv sync                                    # 按 uv.lock 还原依赖
-
-uv run python -m app.main --port 0 --token devtoken --data-dir ./_data   # 单跑 sidecar（stdout 会打握手 JSON）
-uv run python scripts/build_server.py      # PyInstaller 打包 + 产物自检（握手/health/401/中文编码）
-uv run python scripts/build_server.py --verify    # 只自检已有产物
-
-# ── 前端 ──
-cd desktop
-npm install
-npm test                                   # 单测 31 条（node 原生跑 TS，无额外构建）
-npm run typecheck                          # tsc + vue-tsc
-npm run dev                                # 开发态（自动拉起 uv run 的 sidecar）
-K12_SIDECAR_MODE=packaged npm run dev      # 用 server/dist 打包产物验「关卡 A 路径」
-K12_DEBUG_PORT=9222 npm run dev            # 开 CDP（默认关闭），配合下面脚本
-node scripts/verify-ui.mjs                 # UI 断言：就绪态
-node scripts/verify-ui.mjs --expect failed  # UI 断言：失败态不白屏
-npm run build:unpack                       # 整包 → dist/win-unpacked/（真正的关卡 A）
-```
-
-**验证约定**：UI 验收一律用 `scripts/verify-ui.mjs`（CDP 读真实 DOM）而**不要靠截图**——
-本机截图受前台窗口/DPI 影响，常截到别的窗口，无法断言。见 `docs/report-material/pitfalls.md`。
+**S03（D3）是当前风险最高的一天**，同时压着 3 个未验证的致命风险（见执行文档第 17 节 #15–#17）：
+Pi 的 `esbuild` 原生依赖能否在 Electron 打包后加载、Electron 内置 Node 是否 >= 22.19、包根导入副作用。
+**按执行文档第 18 节的顺序做，不要跳。**
 
 ## 3. 文档权威顺序
 
 | 文件 | 角色 |
 | --- | --- |
-| `项目执行文档.md` | **唯一权威执行文档**（已合并：范围、接口契约、数据层 DDL、15 天排期、验收标准、演示脚本、风险表）。开发时**先查这一份**。 |
-| `stages/README.md` | **任务切片索引**（S00–S13 与关卡 A–E）。**开工前先在这里确认「现在做哪个 Stage、前置是否满足」。** |
-| `docs/研判文档Deepseek.md` | 架构与选型依据。与执行文档冲突时以执行文档为准，差异见其第 13 节。 |
+| `项目执行文档.md` | **唯一权威执行文档 v2.0**（范围、契约、数据层 DDL、15 天排期、验收标准、演示脚本、风险表）。开发时**先查这一份**。**Pi 迁移已在本文件裁决完毕。** |
+| `stages/README.md` | **任务切片索引**（S00–S13 与关卡 A–E）。**已按 v2 架构重新切片**。开工前先确认「现在做哪个 Stage、前置是否满足」。 |
+| `docs/阶段实测记录-S00至S02.md` | **已完成阶段的实测数据**（版本矩阵、226MB 体积、0.66s 冷启动、S02 的四个真 bug）。报告第 8 章与答辩要用。 |
+| `docs/业务陷阱清单.md` | 各模块的**领域陷阱与业务验收口径**（与编排框架无关）。重写代码时**最容易漏掉**，动手前扫一眼。 |
+| `docs/研判文档PiAgent.md` | **Pi 迁移提案（含核实批注）**。已归档，**含 6 项未决架构分叉的原始陈述**；执行文档第 13.3 节已给出裁决。**不要再照它实现。** |
+| `docs/研判文档Deepseek.md` | 数据层、RAG、教育适配的设计依据。编排部分已被执行文档取代。 |
 | `docs/项目简介.md` | 赛题原文与评分标准，需求边界以此为准。 |
 | `docs/研判文档Qwen3.7.md` | 早期研判，**部分结论已被取代**。仅作背景参考，不要照它实现。 |
 
-**执行文档相对研判文档的关键裁剪**（不要「恢复」这些，是有意为之）：后端改用 **Python sidecar**；嵌入模型改 **fastembed bge-small-zh-v1.5（移除 Ollama/torch）**；学生库改双库设计；动画改「模板优先+生成补充」；检索加 FTS5 + numpy 两级兜底；语音 ASR/TTS 降为 P2。详见执行文档第 3、5.3、8、13 节。
+**执行文档相对研判文档的关键裁剪**（不要「恢复」这些，是有意为之）：
+编排改用 **Pi Agent SDK（TypeScript，嵌入 Electron 主进程）**，但 **Python sidecar 保留**为数据/RAG/嵌入服务；
+嵌入模型维持 **fastembed bge-small-zh-v1.5（移除 Ollama/torch）**；
+契约维持 **pydantic 唯一来源**；动画维持「模板优先+生成补充」；检索加 FTS5 + numpy 兜底；语音降为 P2；
+学段改为 **显式选择为主 + 自动推断为辅**。详见执行文档第 0 节与第 13 节。
 
 ## 4. 已锁定的技术选型与硬约束
 
 不要擅自替换以下选型，除非用户明确要求：
 
 - 部署形态：**Electron 桌面壳 + Python 后端 sidecar**，全本地化，不做服务器部署。
-- 进程模型：**双进程**。Python（FastAPI + LangGraph）负责编排/RAG/DB/嵌入；Electron 只做 UI 壳 + sidecar 生命周期管理。二者经 `127.0.0.1` HTTP + SSE 通信。
-- 前端（`desktop/`）：**Vue 3 + Pinia + TypeScript**，对话优先布局，内联卡片 + 展开/全屏。**Electron 侧不得引入任何原生数据库模块**（这是刻意的风险隔离）。
+- 进程模型：**双进程 + 主进程内嵌 Agent 运行时**。
+  - **Electron 主进程**：UI 壳 + sidecar 生命周期 + **Pi Agent 编排**（`@earendil-works/pi-coding-agent`）。
+  - **Python sidecar**：数据 / RAG / 嵌入 / 学习记录（**无编排、无 LLM 调用**）。
+  - 二者经 `127.0.0.1` HTTP 通信（token 鉴权）。
+  - **渲染进程 ↔ 主进程**：**IPC 事件流**（`ipcRenderer.on` / `webContents.send`），**沿用原 6 事件词表**（第 6 节编码约定）。
+- 编排：**Pi Agent SDK**（`@earendil-works/pi-coding-agent`，**锁 ^0.85.1**，0.85.0 在 Electron 里会崩）。
+  主 Agent 由 LLM **自主选 Tool** 路由（**不设 `intent` 字段**），能力经 `pi.registerTool()` 暴露，
+  共 6 个 Extension（动画/编程/练习/画像/学段/学习记录）。
+  **不用 LangGraph，不用 `langgraph-checkpoint-sqlite`，不用 `SqliteSaver`。**
+- 前端（`desktop/`）：**Vue 3 + Pinia + TypeScript**，对话优先布局，内联卡片 + 展开/全屏。
+  **Electron 侧不得引入任何原生数据库模块**（这是刻意的风险隔离）——**Pi 迁移不影响此约束**。
 - 后端（`server/`）：**Python 3.12（uv 锁定）+ FastAPI + pydantic v2**。
-- 编排：**LangGraph（Python 版）**，主 Agent + 3 个 SubAgent；持久化用 `langgraph-checkpoint-sqlite` 的 `SqliteSaver`。
 - 契约：**pydantic 模型是唯一契约来源** → 自动 OpenAPI → 生成前端 TS 类型。
-- 数据：**SQLite + sqlite-vec（pip 版）**。**双库**：`kb.sqlite`（全局只读）+ `student-<id>.sqlite`（每人一份）；依赖图用邻接表 + 递归 CTE。
+  **Pi 的 Tool 参数用 TypeBox 声明，必须与 pydantic 模型做一致性断言**（见第 6 节）。
+- 数据（**三处分离**）：
+  - `kb.sqlite`（全局只读）：教材 chunk、embedding、依赖图、题库。
+  - `learning.db`（每人一份）：画像、掌握度、学习历史、进度、学段信号与轨迹。
+  - **Pi JSONL 会话树**（每人一份）：对话历史、工具调用记录。
+  - **必须显式配置 Pi 的 `agentDir` / `sessionDir` 落到 `students/<id>/pi-agent/`**，
+    否则会写进用户全局 `~/.pi/agent/`，造成跨学生数据混放（合规硬伤）。
 - 主模型：**DeepSeek 云端 API**（OpenAI 兼容），必须支持下改供应商名称 / BaseURL / APIKey / Model ID。
+  ⚠️ Pi 内置 DeepSeek provider 的 baseUrl 是 `https://api.deepseek.com`（**无 `/v1`**），
+  与前端默认值的 `/v1` 形式不同，**保存时必须做真实连通性探测**。
 - 嵌入：**fastembed `BAAI/bge-small-zh-v1.5`（512 维，ONNX，约 90MB）**。**不引入 torch，不依赖 Ollama**。维度写在配置常量里，勿散落硬编码。
 - 动画：**Anime.js v3**（**锁 v3，v4 API 不兼容**），运行在 sandboxed iframe。
 - 编程：**Monaco Editor** + **Pyodide**（独立 Web Worker，资源本地自托管）。
@@ -101,45 +112,118 @@ npm run build:unpack                       # 整包 → dist/win-unpacked/（真
 - 硬件：**纯 CPU，无 GPU**。所有本地模型/推理必须 CPU 可跑。
 - 教材来源：**人工编写的 Markdown + 元数据文件**，**不做 PDF 解析**。
 - 范围裁剪：核心只做 4 种交互（对话问答、动画讲解、编程环境、游戏化练习）；**绘本生成、多模态教学资源推荐不纳入核心范围**。
+  **不引入 `pi-subagents`**（非官方第三方包；Pi 官方哲学即「No sub-agents」），SubAgent 用自有 Extension 实现。
 
 ## 5. 架构边界与层规则（改动时必须遵守）
 
-1. **学段由前端按钮切换**并随请求传入；主 Agent 在 `profile_load` 注入，SubAgent 不得自行推断学段。
-2. **主 Agent 负责意图路由与对话答疑**；SubAgent 按功能维度划分（动画 / 编程 / 练习），互不越权。
+1. **学段以显式选择为权威**（前端按钮随请求传入），主 Agent 经 `before_agent_start` 注入；
+   **自动推断只写「建议」，不直接改**，须学生确认。SubAgent 不得自行推断学段。
+2. **主 Agent 负责路由与对话答疑**：路由由 LLM 自主选 Tool 完成；
+   **但关键约束必须在代码层强制**——学段隔离在 `rag_search` Tool 内由 Python 强制（模型改不了 WHERE），
+   安全终审是独立步骤，沙箱是运行时属性，Tool 参数由 TypeBox 校验。**不要把这四条也交给模型。**
 3. 所有跨语言/跨模块调用走**冻结的接口契约**（pydantic 为唯一来源，前端用生成的 TS 类型）；禁止临时加松散字段。
+   **Pi Tool 的 TypeBox 参数也必须纳入契约一致性断言。**
 4. **RAG 检索严格按学段隔离**，允许向上兼容但必须显式标注 `compat`。
+   **四级降级链（vector → cloud → FTS5 → 依赖图/大纲）必须在 Python 侧一次调用内完成**，
+   不要让编排层感知降级。
 5. **内容安全只做后端审核**，采用「流式输出 + 生成结束后整段终审」，违规则撤回并替换为安全提示。
 6. 知识点依赖图**同时**服务于推荐路径规划与检索上下文扩展，两个用途都要保留。
-7. 沙箱隔离是硬要求：动画在 sandboxed iframe（**禁止加 `allow-same-origin`**），Pyodide 在独立 Worker，**不得与侧车进程或主线程共享执行环境**。
-8. 每个学生独立 `student-<id>.sqlite`，**不得跨学生共享或复用连接/数据**。
+7. 沙箱隔离是硬要求：动画在 sandboxed iframe（**禁止加 `allow-same-origin`**），Pyodide 在独立 Worker，
+   **不得与侧车进程或主线程共享执行环境**。
+   ⚠️ **Pi 的 Extension 与 Agent 同进程且拥有完整系统权限**，因此
+   **「学生代码绝不在主进程执行」上升为硬约束**——`evaluate_code` 必须把代码经 IPC 交给渲染进程的
+   Pyodide Worker 执行，结果回传。**这条要有架构守卫测试。**
+8. **每个学生独立存储，不得跨学生共享或复用连接/数据**：
+   `learning.db` 一人一文件；Pi 会话一人一目录（**必须显式改道，见第 4 节**）。
 9. **LLM 与嵌入模型不得明文写入日志**；API Key 仅本地存储。
+   除既有日志过滤器外，**Pi 侧用 `before_provider_request` / `before_provider_headers` 在 provider 边界做第二道脱敏**。
 10. **Python 代码不得裸 `python` 执行**——本机 `python` 指向损坏路径，一律用 `uv run`。
+11. **必须设 `systemPromptOverride`**：Pi 官方 issue #6308 —— SDK 嵌入时默认 system prompt 会
+    **泄漏宿主应用的安装路径**给模型。
+12. **Pi 配置必须隔离**：`ModelRuntime.create({ authPath, modelsPath })` 与 `DefaultResourceLoader({ agentDir })`
+    指向本应用自己的目录，**不得读写用户的 `~/.pi/agent`**。
+13. **`session.dispose()` 必须在 `before-quit` 调用**，否则 JSONL 可能半写。
 
 ## 6. 编码约定
 
-- **接口先行**：先冻结 pydantic 契约（含 SSE 事件枚举），各模块再并行实现；改了模型必须重跑 OpenAPI → TS 生成。
+- **接口先行**：先冻结 pydantic 契约（含 6 个事件枚举），各模块再并行实现；改了模型必须重跑 OpenAPI → TS 生成（`--check` 字节比对）。
+- **事件词表固定 6 个**：`delta | citation | payload | blocked | done | error`。
+  **传输层已从 SSE 改为 IPC，但词表一字不改**，前端解析/分发语义可复用。
+  **`EventSource` 断言保留在架构守卫测试里**，防止有人回退到 SSE 时又踩一次鉴权 header 的坑。
+- **Tool 名 → 事件 `kind` 映射冻结**（新增 Tool 必须同步登记）：
+  `generate_animation→animation`；`get_code_template`/`get_coding_hint`/`evaluate_code→coding`；
+  `generate_quiz`/`submit_quiz`/`generate_variants→quiz`。
 - SubAgent 输出用统一 pydantic Payload（`AnimationPayload` / `CodeTemplate` / `CodingHint` / `CodeEvaluation` / `QuizPayload` / `QuizResult`），不要用松散 dict。
+  **不要引入 `ModuleResult<T>` / `ModuleError` 那套 `{success, error}` 包装**——失败统一走 `error` 事件（带 `degraded`），否则前端要处理两套失败形态。
 - 字段命名：Python `snake_case`，出参统一转 `camelCase`（pydantic alias），前端统一 camelCase。**只做一次约定，不要两边混用。**
-- SSE 前端解析必须用 `fetch` + `ReadableStream`，**不能用 `EventSource`**（它不支持自定义 header，带不了鉴权 token）。
 - 检索 chunk 元数据 schema 固定：`chunk_id, text, embedding, grade_level, chapter_title, section_title, knowledge_point, content_type, parent_chunk_id, token_count`；节级 chunk 控制 300–600 token，父子 chunk（小子块检索、命中回父块作上下文）。
 - 数据合规：K12 涉未成年人数据，**最小化采集，不采集生物特征**。
 
 ## 7. 已知陷阱
 
+### 7.1 基础设施（S01/S02 实测，仍然有效）
+
 - **Python 环境**：本机裸 `python` 指向损坏的 `D:\Code\PythonEvm\python.exe`；pip 实际来自 `PythonEvm312`。**全程用 `uv` 锁定 Python 3.12**，文档只写 `uv run`。
 - **Windows 中文编码（S01 实测修正，比原描述更棘手）**：
   1. 源码运行态：spawn 时传 `PYTHONUTF8=1` + `PYTHONIOENCODING=utf-8`，所有文件读写显式 `encoding="utf-8"`。
-  2. **打包态：上面两个 env 无效**——PyInstaller 的 bootloader 设置 `Py_IgnoreEnvironmentFlag`，实测打包产物 `sys.flags.utf8_mode=0`、`sys.stdout.encoding='gbk'`，即便 env 已设对。**必须在 Python 层 `reconfigure(encoding="utf-8")`**，见 `server/app/encoding.py` 的 `install_utf8_stdio()`（已在 `main.py` 最早期调用）。`scripts/build_server.py` 里有对应的回归断言。
+  2. **打包态：上面两个 env 无效**——PyInstaller 的 bootloader 设置 `Py_IgnoreEnvironmentFlag`，实测打包产物 `sys.flags.utf8_mode=0`、`sys.stdout.encoding='gbk'`，即便 env 已设对。**必须在 Python 层 `reconfigure(encoding="utf-8")`**，见 `server/app/encoding.py` 的 `install_utf8_stdio()`（在 `main.py` 最早期调用）。
   3. 不要试图只靠 env 解决打包态乱码——那是一条死路，会白花半天。
-- **PyInstaller 打包**：必须 `--onedir`（**不用 `--onefile`**，冷启动可达 10s+）；须 `--collect-all sqlite_vec --collect-all fastembed`，否则运行期找不到 `.dll`/模型文件。**统一走 `uv run python scripts/build_server.py`**（它做 collect、自检、清理残留进程），不要手敲 pyinstaller 命令。每加一个原生或数据依赖就重打一次包验证。
+- **PyInstaller 打包**：必须 `--onedir`（**不用 `--onefile`**，冷启动可达 10s+）；须 `--collect-all sqlite_vec --collect-all fastembed`，否则运行期找不到 `.dll`/模型文件。**统一走 `uv run python scripts/build_server.py`**（它做 collect、自检、清理残留进程），不要手敲 pyinstaller 命令。
 - **PyInstaller spec 的 `collect_all` 返回值**：必须在 `Analysis(...)` 之前收集并作为参数传入（接受 2 元组）；**不能**事后 `a.datas += collect_all(...)`——那时 `a.datas` 已是 3 元组，会 `ValueError: not enough values to unpack`。
-- **sidecar 生命周期**：Python 绑 `127.0.0.1:0` 由系统分配端口，用 **stdout 单行 JSON** 握手（`{"event":"ready","port":…}`，失败回 `{"event":"error","message":…}`）；**stdout 只许输出这行 JSON**，日志全走 stderr。Electron 退出时必须杀进程树（Windows `taskkill /PID <pid> /T /F`），否则孤儿进程残留占端口（开发态 `uv run` 会派生子进程，`/T` 不可省）。
-- **stdio 管道分片**：Node 的 `data` 事件可能把握手 JSON 切成半行，必须缓冲到 `\n` 再 parse（`desktop/src/main/sidecar-logic.ts` 的 `LineBuffer`）；非 JSON 行**只记日志、绝不当错误**。
-- **重打包 `WinError 5`**：上次验证留下的 sidecar 仍持有产物 `.pyd`/`.dll` 时，PyInstaller 清 `dist/` 会失败。`build_server.py` 已自动 taskkill 自愈。
-- **UI 验收不要靠截图**：本机截图受前台窗口/DPI 影响，常截到别的窗口。用 `desktop/scripts/verify-ui.mjs`（CDP 读真实 DOM，可断言、可进 CI）。`K12_DEBUG_PORT` 默认关闭，勿让分发包带调试入口。
-- **LangGraph checkpointer 与「一人一库」冲突**：`compile(checkpointer=...)` 把 checkpointer 绑死在图实例上，而学生库是一人一文件，**不能编译一次全局复用**。按 `student_id` 缓存已编译图（推荐），或切学生时重建 saver + 重新 compile。**不要**改用一个共享 DB + `thread_id` 前缀——会破坏合规叙事。
+- **sidecar 生命周期**：Python 绑 `127.0.0.1:0` 由系统分配端口，用 **stdout 单行 JSON** 握手（`{"event":"ready","port":…,"pid":…}`）；**stdout 只许输出这行 JSON**，日志全走 stderr。Electron 退出时必须杀进程树（Windows `taskkill /PID <pid> /T /F`），否则孤儿进程残留占端口。
+  另：`restart()` **不能复用 `stop()`**（`stop()` 会把 `shuttingDown` 置 true，导致之后崩溃不再自动重启）；`onExit()` 会先把 `this.child` 置 null，**必须在置空前先取 pid**，否则进程树不会被回收。
+- **stdio 管道分片**：Node 的 `data` 事件可能把握手 JSON 切成半行，必须缓冲到 `\n` 再 parse；非 JSON 行**只记日志、绝不当错误**。
+- **重打包 `WinError 5`**：上次验证留下的 sidecar 仍持有产物 `.pyd`/`.dll` 时，PyInstaller 清 `dist/` 会失败——打包前先 taskkill 自愈。
+- **UI 验收不要靠截图**：本机截图受前台窗口/DPI 影响，常截到别的窗口。用 CDP 读真实 DOM 做断言（`K12_DEBUG_PORT` 默认关闭，勿让分发包带调试入口）。
+- **Starlette 中间件是洋葱结构**：最后 `add_middleware` 的在最外层。**CORS 必须最后加**，否则鉴权提前 return 的 401 不带 `Access-Control-Allow-Origin`，浏览器会把 401 伪装成 `TypeError: Failed to fetch`。
+- **日志脱敏过滤器必须保留 `%s`/`%(name)s` 占位符**：无脑把 `record.msg` 擦成 `***` 会让 `record.getMessage()` 抛 `TypeError: not all arguments converted during string formatting`。
 - **sqlite-vec 在 Python 中的加载**：需 `conn.enable_load_extension(True)` → `sqlite_vec.load(conn)` → 立刻 `enable_load_extension(False)`；加载失败须回退 FTS5 / numpy 暴力余弦。
+- **node --test 直接跑 .ts 时禁用 TS parameter property**（`constructor(private readonly x)`）——Node 的类型擦除模式不支持，会 `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`。写成显式字段 + 赋值。
 - **动画生成不稳定**：必须保留「模板优先 + 校验 + 重试 3 次 → 降级文字/静态图」链路，不能只生成不兜底。
 - **弱网 / API 不可用**：需有 UI 优雅降级（`error.degraded`），不要假设 DeepSeek 一定可用。
 - **中文输出**：仓库文档、面向学生与家长的文案、System Prompt 均为中文；代码标识符与提交信息可用英文。
-- **学段语气**：System Prompt 按学段差异化（童趣比喻 / 严谨逻辑），实现自适应时不要只改难度数字而忽略语气。
+- **学段语气**：System Prompt 按学段差异化（童趣比喻 / 严谨逻辑），实现时不要只改难度数字而忽略语气。
+
+### 7.2 Pi Agent（v2 新增，**多数尚未实测，动手前先验**）
+
+- **★ `esbuild` 原生依赖是头号打包风险**：Pi 包**没有 `./sdk` 子路径**，只能从包根导入，
+  而包根会 evaluate CLI 的 `main.js`，拖入 `@earendil-works/chord` → **`esbuild`（约 10MB 原生二进制）**。
+  Pi 官方 issue **#9286** 正是「在 Electron 里嵌入 SDK」时 `Cannot find package 'esbuild'`。
+  **处理**：`asarUnpack` 白名单 + 按架构分发 + 签名；**并在 D3 第一天就做 `build:unpack` 冒烟**。
+  **Plan B = 改用 Pi RPC 模式**（`pi --mode rpc` 作子进程，不 import SDK）。
+- **Node 版本**：Pi `0.75+` 要求 **Node >= 22.19.0**，而 Electron 33 内置 Node 低于此。
+  **退路**：升 Electron，或降到 Pi `0.74.2`（`legacy-node20` tag，要求 >= 20.6）。**D3 首日验证。**
+- **★ `session_end` 事件不存在**：全包 grep 0 命中。会话终态用 **`session_shutdown`**；
+  一轮结束用 **`agent_end` / `agent_settled`**。**写 `pi.on("session_end", ...)` 会直接不生效。**
+- **`tool_execution_end` 是只读通知，不能改结果**。动画重试逻辑必须写在 Tool 的 `execute()` 内部，
+  不能指望事件回写。
+- **`before_agent_start` 可返回 `{ systemPrompt }` 替换本轮 system prompt**，多个扩展**链式叠加**
+  （后注册的能看到前者结果）。这是学段注入的正确落点。
+- **`input` 事件可返回 `{action: "continue" | "transform" | "handled"}`**；
+  **`tool_call` 可 `{block, reason, terminate}` 并原地改 `event.input`** —— 这是 Tool 级安全阀的位置。
+- **SDK 入口名字**：`createAgentSession` / `AgentSession` / `AgentSessionRuntime` / `ModelRuntime` /
+  `SessionManager` / `DefaultResourceLoader` / `defineTool`。
+  **不存在 `createAgent` / `PiAgent`** —— 别臆造。
+- **Extension 形态**：导出默认工厂 `(pi: ExtensionAPI) => { pi.on(...); pi.registerTool(...) }`。
+  **不存在 `registerExtension`，也不是插件清单。** 加载器是 jiti（免编译直跑 TS）。
+- **默认 system prompt 会泄漏宿主安装路径**（issue #6308）。**必须设 `systemPromptOverride`。**
+- **Pi 会话默认落到 `~/.pi/agent/sessions/--<cwd>--/`**，不放 `agentDir` 就会跨学生混放。
+  **必须显式改道 + 加自动化断言**（检测 `students/<id>/` 外的本应用 `.jsonl`）。
+- **Pi 是纯 TypeScript，无 Python 绑定**。唯一的 Python 集成路径是 RPC 模式
+  （`subprocess.Popen(["pi","--mode","rpc"])`，LF 分隔 JSONL；
+  ⚠️ **不能用 `readline`**，它会按 Unicode 分隔符切分 JSON 载荷内部）。
+- **不要照搬 `pi-agent-sdk-starter` 的 `bun install` 建议**：那是**某第三方 starter kit** 的 README，
+  不是 Pi 官方结论（Pi 官方文档零处提及 electron），且 **Pi 本身不依赖 `better-sqlite3`**。
+- **`/resources/animation/*` 不能走 `X-Auth-Token`**（iframe 带不了自定义 header），
+  改用**一次性 nonce**（绑定 student_id + kp_id + 有效期）。**不允许做成无鉴权的公开路由。**
+
+## 8. 报告素材纪律
+
+**每天留 30 分钟**把当天的截图 / 关键决策 / 踩坑与解决写进 `docs/report-material/`：
+`decisions.md`（决策→理由→被否决方案，格式参考已有 D-001~D-008）、
+`pitfalls.md`（现象→根因→解决→报告用法，格式参考已有 P-001~P-008）。
+**素材不攒，第 15 天写不出报告。**
+
+**v2 期间必记的两类素材**（答辩直接用）：
+1. **Pi 迁移的真实代价与解决过程**（esbuild 打包、Node 版本、导入图）——主动讲代价比被问出来可信。
+2. **为什么保留 Python sidecar 而不是全单进程**——这是主动权衡，不是妥协。
