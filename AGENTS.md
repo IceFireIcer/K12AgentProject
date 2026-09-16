@@ -35,10 +35,12 @@ git checkout archive/s02-full-code -- desktop server
 **因此：开工任何 Stage 之前，先问用户「是否要从标签恢复代码」。**
 不要默认代码存在，也不要绕过用户直接恢复——删码是用户的有意操作。
 
-> **注意一批「引用了但当前不存在」的文件**：`docs/report-material/{README,decisions,pitfalls}.md`、
-> `docs/阶段实测记录-S00至S02.md`、`docs/graph-smoke.mmd` 在 git HEAD 里有、工作区已被删除（未提交）。
-> 执行文档第 16 节与报告素材纪律反复引用它们。**需要时先恢复**：
-> `git checkout HEAD -- <path>`。不要以为是文档笔误。
+> **注意一批「已被删除但文档仍引用」的文件**：`docs/report-material/{README,decisions,pitfalls}.md`、
+> `docs/阶段实测记录-S00至S02.md`、`docs/graph-smoke.mmd` **已于提交 `ebfaf13` 从仓库删除**
+> （用户确认保持删除）。执行文档第 16 节与报告素材纪律仍引用它们。
+> **如需取回，从删除前的提交取**：
+> `git checkout 7f158c8 -- docs/report-material "docs/阶段实测记录-S00至S02.md" docs/graph-smoke.mmd`
+> 不要以为是文档笔误。
 
 ## 1. 项目是什么
 
@@ -63,9 +65,10 @@ git checkout archive/s02-full-code -- desktop server
 Pi 的 `esbuild` 原生依赖能否在 Electron 打包后加载、Electron 内置 Node 是否 >= 22.19、包根导入副作用。
 **按执行文档第 18 节的顺序做，不要跳。关卡 B 不通过不要开始 D4。**
 
-> **任务分解不单独成文件**：原先的 `stages/` 目录已于 2026-09-16 删除（与执行文档重复）。
-> **「今天做什么」看执行文档第 4 节；「能不能开工」看 4.3 前置依赖；「做完没有」看第 14 节验收。**
-> 旧卡可从历史取回：`git show 8564e67:stages/S04-主Agent与Extension骨架.md`。
+> **任务切片在 `docs/tickets/issues/`**（24 票，一票一文件，按依赖顺序编号，索引见 `docs/tickets/README.md`）：
+> **「今天做什么」看该目录 + 各票 `Blocked by`；「规格是什么」看执行文档；「做完没有」看第 14 节验收。**
+> 切片只是执行文档的任务视图，**冲突时以执行文档为准**。
+> 历史任务卡可从 git 取回：`git show 8564e67:stages/S04-主Agent与Extension骨架.md`。
 
 ## 3. 文档权威顺序（冲突时以此为准）
 
@@ -310,9 +313,10 @@ npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、
 `pitfalls.md`（现象→根因→解决→报告用法，格式参考已有 P-001~P-008）。
 **素材不攒，第 15 天写不出报告。**
 
-> 该目录当前不在工作区（见第 0 节恢复方式）。**`docs/graph-smoke.mmd` 已不是架构证据**
-> （LangGraph 状态图作废），「设计合理性」维度改由**工具调用轨迹图**（`docs/tool-trace.mmd`，D4 产出）承担，
-> 不要贴旧图进报告。
+> 该目录已于提交 `ebfaf13` 删除（用户确认保持删除）。**旧素材**用
+> `git checkout 7f158c8 -- docs/report-material` 取回；**新素材**需先建目录，否则本纪律名存实亡。
+> 另：`docs/graph-smoke.mmd` 已不是架构证据（LangGraph 状态图作废），
+> 「设计合理性」维度改由**工具调用轨迹图**（`docs/tool-trace.mmd`，D4 产出）承担，不要贴旧图进报告。
 
 **v2 期间必记的两类素材**（答辩直接用）：
 1. **Pi 迁移的真实代价与解决过程**（esbuild 打包、Node 版本、导入图）——主动讲代价比被问出来可信。
@@ -323,3 +327,19 @@ npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、
 
 **进度落后时的砍单顺序**（从先到后）：
 高中深度内容 → 交互式题型 → 动画自由生成 → 编程模板 → **学段自动推断（只保留显式选择）** → 教师导出。
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+工作切片以本地 markdown 存放于 `docs/tickets/issues/`（一票一文件，按依赖顺序编号），不使用外部 tracker。
+
+### Triage labels
+
+沿用五个规范角色的默认词表（`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`），记录在各票 `Status:` 行。
+
+### Domain docs
+
+单上下文（single-context）：领域语言与决策以 `项目执行文档.md` + `docs/` 为准；`CONTEXT.md` 尚未创建，缺失时静默跳过，需要时由 `/domain-modeling` 惰性生成。
