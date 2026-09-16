@@ -11,8 +11,41 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
   - '!tests/*'
   - '!scripts/*'
+  # ── 按架构分发（票 03）──
+  # npm 把**所有平台**的可选原生包都装了下来（实测：`@esbuild/win32-arm64/esbuild.exe`
+  # 10,404,864 B、`@mariozechner/clipboard-*` 11 个平台包 ≈ 14MB），与本机 win32-x64 无关。
+  # 这些包**不在 Pi 的运行时导入路径上**（见票 03 的导入图结论），删的是体积不是能力。
+  - '!**/node_modules/@esbuild/aix-*/**'
+  - '!**/node_modules/@esbuild/android-*/**'
+  - '!**/node_modules/@esbuild/darwin-*/**'
+  - '!**/node_modules/@esbuild/freebsd-*/**'
+  - '!**/node_modules/@esbuild/linux-*/**'
+  - '!**/node_modules/@esbuild/netbsd-*/**'
+  - '!**/node_modules/@esbuild/openbsd-*/**'
+  - '!**/node_modules/@esbuild/openharmony-*/**'
+  - '!**/node_modules/@esbuild/sunos-*/**'
+  - '!**/node_modules/@esbuild/win32-arm64/**'
+  - '!**/node_modules/@esbuild/win32-ia32/**'
+  - '!**/node_modules/@mariozechner/clipboard-darwin-*/**'
+  - '!**/node_modules/@mariozechner/clipboard-linux-*/**'
+  - '!**/node_modules/@mariozechner/clipboard-win32-arm64-*/**'
 asarUnpack:
-  # Pi 的 esbuild 等原生依赖必须解包（票 03 的关卡 B₁ 会实测）
+  # ★★ 关卡 B₁（票 03）：原生文件在 asar **里面**跑不起来 —— asar 只是 Electron 的 fs 虚拟层，
+  #    `child_process.spawn()` 与操作系统的 `.node` 加载器都不认识它，必须解包成实体文件。
+  #
+  # 实测结论（0.85.1，见 `node scripts/pi-import-graph.mjs`）：
+  #   - Pi **包根导入**的路径上**没有 esbuild**：esbuild 只被
+  #     `@earendil-works/chord/dist/node/bundle.js` 导入，而该文件只能经 `chord/bundler`
+  #     或 `chord/node/package.js` 到达，Pi 从不导入这两者。所以 esbuild 是「保险丝」不是「真需求」。
+  #   - **真需求是 clipboard 的 `.node`**：包根导入会急切加载
+  #     `@mariozechner/clipboard-win32-x64-msvc/clipboard.win32-x64-msvc.node`
+  #     （经 `dist/utils/clipboard.js` → `copyToClipboard`）。
+  #   两组都解包：esbuild 满足票 03 的显式要求 + 兜住「将来用 chord 打包扩展」的场景。
+  - '**/node_modules/esbuild/**'
+  - '**/node_modules/@esbuild/**'
+  - '**/node_modules/@mariozechner/clipboard*/**'
+  # 渲染进程的静态资源（如后续加本地自托管的 Pyodide/Monaco 大文件）走这里；
+  # 注意 Pi 的文档/模板是**只读**访问，asar 内透明可用，不需要解包。
   - resources/**
 extraResources:
   # 打包后的 Python sidecar（PyInstaller --onedir 产物）；

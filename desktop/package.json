@@ -4,7 +4,7 @@
   "private": true,
   "description": "多模态 K12 人工智能通识课教学助手 —— 桌面端（Electron 壳 + Vue + Pi Agent 运行时）",
   "author": "K12Agent",
-  "main": "./out/main/index.js",
+  "main": "./out/main/index.mjs",
   "scripts": {
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
@@ -12,12 +12,17 @@
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "node --test \"tests/**/*.test.ts\"",
+    "gen:api": "node scripts/gen-api-types.mjs",
+    "check:api": "node scripts/gen-api-types.mjs --check",
+    "smoke:pi": "node scripts/pi-smoke.mjs",
+    "smoke:imports": "node scripts/pi-import-graph.mjs",
     "build": "npm run typecheck && electron-vite build",
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@sinclair/typebox": "^0.34.0",

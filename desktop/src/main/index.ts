@@ -3,15 +3,21 @@
  *
  * 分工（执行文档 §7.4）：
  *   - 本文件只负责「创建窗口 → 启动 sidecar → 把状态推给渲染进程 → 退出时杀干净」。
- *   - Pi Agent 运行时将来挂在这里（票 06/08），当前**不引入任何 Pi 依赖**。
+ *   - Pi Agent 运行时接线点在 `src/main/agent/`（票 03 建立底座，票 06/08 全面接入）。
+ *
+ * ⚠️ **本文件是 ESM**（构建产物 `out/main/index.mjs`，见 `electron.vite.config.ts` 的注释）：
+ *    - **没有 `__dirname`**，一律用 `import.meta.dirname`；
+ *    - 相对导入**必须带 `.ts` 后缀**（ESM 不做扩展名补全）——这也是 `scripts/pi-smoke.mjs`
+ *      能直接 import 同一份 TS 实现的前提。
  */
 
 import { join } from 'node:path'
 import { app, BrowserWindow, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
-import { IPC } from './ipc/channels'
-import { registerIpcHandlers } from './ipc/handlers'
-import { SidecarManager } from './sidecar/manager'
+import { runPiSmoke } from './agent/pi-bootstrap.ts'
+import { IPC } from './ipc/channels.ts'
+import { registerIpcHandlers } from './ipc/handlers.ts'
+import { SidecarManager } from './sidecar/manager.ts'
 
 const APP_ID = 'com.k12agent.desktop'
 
@@ -29,6 +35,18 @@ if (debugPort) {
   }
 }
 
+/**
+ * ★ 关卡 B₁ 的打包态冒烟开关（票 03）。
+ *
+ * `K12_PI_SMOKE=1` 时**不建窗口、不起 sidecar**，只在打包产物的真实主进程里
+ * 走一遍 Pi 的装配（导入 → ModelRuntime → createAgentSession → systemPromptOverride），
+ * 然后把结果打到 stdout 并退出。**不需要任何 API Key**：
+ * 缺 Key 会被明确标成「blocked：缺 Key」，与「Pi 加载失败」严格区分。
+ *
+ * 退出码：0 通过（含「到 Key 为止」）/ 10-13 分步失败 / 1 装配异常。
+ */
+const smokeMode = process.env.K12_PI_SMOKE === '1'
+
 let mainWindow: BrowserWindow | null = null
 let sidecar: SidecarManager | null = null
 /** 退出流程已开始（防止 `before-quit` 递归触发）。 */
@@ -44,7 +62,7 @@ function createWindow(): BrowserWindow {
     title: 'K12 AI 教学助手',
     autoHideMenuBar: true,
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(import.meta.dirname, '../preload/index.js'),
       // 关闭沙箱是 preload 用 ESM/CJS 混合构建的常规要求；
       // 真正的隔离靠 contextIsolation + 不暴露通用 ipcRenderer（见 preload 白名单）。
       sandbox: false,
@@ -72,7 +90,7 @@ function createWindow(): BrowserWindow {
   if (is.dev && process.env.ELECTRON_RENDERER_URL) {
     void window.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    void window.loadFile(join(__dirname, '../renderer/index.html'))
+    void window.loadFile(join(import.meta.dirname, '../renderer/index.html'))
   }
 
   return window
@@ -89,8 +107,32 @@ function pushSidecarState(): void {
   }
 }
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   electronApp.setAppUserModelId(APP_ID)
+
+  // ★ 关卡 B₁：打包态冒烟模式。走完就退，不建窗口、不动 sidecar。
+  if (smokeMode) {
+    const lines: string[] = []
+    const result = await runPiSmoke({
+      userDataDir: app.getPath('userData'),
+      packaged: app.isPackaged,
+      log: (line) => {
+        lines.push(line)
+        // Windows GUI 进程的 stdout 不一定接得到管道，所以**同时落盘**一份作为证据
+        console.log(line)
+      }
+    })
+    try {
+      const { writeFileSync, mkdirSync } = await import('node:fs')
+      const dir = join(app.getPath('userData'), 'pi-agent', 'logs')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'smoke-packaged.log'), `${lines.join('\n')}\n`, 'utf8')
+    } catch {
+      // 落盘失败不影响退出码
+    }
+    app.exit(result.exitCode)
+    return
+  }
 
   // 开发态：F12 开 DevTools、忽略菜单快捷键等
   app.on('browser-window-created', (_, window) => {
