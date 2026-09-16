@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "notes": "四学段教材骨架的依赖关系。★ 语义全项目一致：from 是前置，to 是后继。当前为人工主线骨架（14 个知识点），深度补齐与全量抽检见票 23。",
+  "grade_levels": ["primary_low", "primary_high", "junior", "senior"],
+  "dependencies": [
+    { "from": "pl-ai-around-me", "to": "pl-machine-sees", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "pl-ai-around-me", "to": "pl-ai-manners", "relation": "prerequisite", "weight": 0.8 },
+
+    { "from": "pl-ai-around-me", "to": "ph-data-train-predict", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "pl-machine-sees", "to": "ph-image-classification", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "pl-ai-manners", "to": "ph-ai-ethics-safety", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "ph-data-train-predict", "to": "ph-image-classification", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "ph-data-train-predict", "to": "ph-speech-recognition", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "ph-image-classification", "to": "ph-speech-recognition", "relation": "related", "weight": 0.5 },
+
+    { "from": "ph-image-classification", "to": "jr-data-features", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "ph-data-train-predict", "to": "jr-decision-tree", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "jr-data-features", "to": "jr-decision-tree", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "jr-data-features", "to": "jr-py-variable", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "jr-py-variable", "to": "jr-py-loop", "relation": "prerequisite", "weight": 1.0 },
+
+    { "from": "jr-decision-tree", "to": "jr-neural-basics", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "jr-neural-basics", "to": "sr-ml-pipeline", "relation": "prerequisite", "weight": 1.0 },
+
+    { "from": "sr-ml-pipeline", "to": "sr-loss-gradient", "relation": "prerequisite", "weight": 1.0 },
+    { "from": "sr-loss-gradient", "to": "sr-linear-regression", "relation": "prerequisite", "weight": 1.0 }
+  ]
+}

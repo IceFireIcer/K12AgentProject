@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "notes": "学段错位自检用的术语文表：min_grade = 该术语最早可以出现的学段。低于 min_grade 的文档里出现该词即判为超纲（build_kb 会中止）。这样定的理由：教材是人工写的，最大的风险不是写错而是写窜——低学段冒出高学段术语，检索层完全看不出来，只会在答辩现场被戳破。",
+  "grade_order": ["primary_low", "primary_high", "junior", "senior"],
+  "terms": [
+    { "term": "机器学习", "min_grade": "junior", "note": "小学阶段用「机器怎么学」的口语说法，不引入学科名" },
+    { "term": "算法", "min_grade": "junior", "note": "小学低年级的验收口径明确点名了「算法」属于超纲词" },
+    { "term": "特征向量", "min_grade": "junior", "note": "完整表述留给初中「数据与特征」" },
+    { "term": "特征提取", "min_grade": "junior" },
+    { "term": "决策树", "min_grade": "junior" },
+    { "term": "神经网络", "min_grade": "junior" },
+    { "term": "神经元", "min_grade": "junior" },
+    { "term": "激活函数", "min_grade": "junior" },
+    { "term": "权重", "min_grade": "junior" },
+    { "term": "训练集", "min_grade": "junior", "note": "小学高年级只说「训练数据」，不讲集合划分" },
+    { "term": "测试集", "min_grade": "junior" },
+    { "term": "验证集", "min_grade": "junior" },
+    { "term": "准确率", "min_grade": "primary_high", "note": "小学高年级的「预测会不会出错」一节正式引入" },
+    { "term": "深度伪造", "min_grade": "primary_high" },
+    { "term": "梯度下降", "min_grade": "senior" },
+    { "term": "损失函数", "min_grade": "senior" },
+    { "term": "线性回归", "min_grade": "senior" },
+    { "term": "过拟合", "min_grade": "senior" },
+    { "term": "欠拟合", "min_grade": "senior" },
+    { "term": "均方误差", "min_grade": "senior" },
+    { "term": "正则化", "min_grade": "senior" },
+    { "term": "学习率", "min_grade": "senior" },
+    { "term": "参数", "min_grade": "senior", "note": "初中讲「权重」与原理解释，用「参数」容易与数学课的口径混淆" },
+    { "term": "数据漂移", "min_grade": "senior" }
+  ],
+  "tone_markers": [
+    {
+      "pattern": "小朋友",
+      "forbidden_in": ["junior", "senior"],
+      "note": "小学低年级的拟人语气，初高中必须换成严谨推导"
+    },
+    {
+      "pattern": "小可爱",
+      "forbidden_in": ["junior", "senior"]
+    },
+    {
+      "pattern": "宝贝",
+      "forbidden_in": ["primary_high", "junior", "senior"],
+      "note": "面向学生的教材不做称呼式亲昵，避免不适感"
+    }
+  ]
+}
