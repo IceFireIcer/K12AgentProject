@@ -4,21 +4,36 @@
 
 **Blocked by:** 08（主 Agent + 6 Extension 骨架 + 轨迹导出）、11（RAG 四级降级链，关卡 C）
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] `rag_search` Tool 已注册，参数用 TypeBox 声明 `{ query: string, gradeLevel: GradeLevel, kpId?: string, topK?: number }`，并纳入 `desktop/scripts/check-tool-schema.mjs` 的一致性断言（与 pydantic 对应请求模型逐字段比对，防静默漂移）
-- [ ] 唯一出口：Tool 只经 `desktop/src/main/bridge/client.ts` 调 `POST /api/rag/search`；`grep -rn "X-Auth-Token" desktop/src/main/agent desktop/src/main/bridge` 在 Tool 代码里零命中（token 由客户端统一注入）；`desktop/src/main/agent/` 下不出现第二处 `fetch(` / `axios`
-- [ ] `rag_search` **不**登记进 §9.3 冻结的 `TOOL_TO_KIND`——它发 `citation` 事件而不是 `payload`；`grep -n "TOOL_TO_KIND" -A 10` 复查表内仍只有 7 个 Tool
-- [ ] `citation` 事件载荷与 §6.4 一字不差：`{requestId, citations:[{chunkId, chapterTitle, sectionTitle, gradeLevel, compat}]}`，camelCase，`requestId` 与同轮的 `delta`/`done` 一致
-- [ ] `degraded` 由 TS 原样透传进事件与 `desktop/src/main/agent/trace.ts` 的轨迹记录；`grep -rni "fts5\|vec0\|numpy\|cosine" desktop/src/main` 零命中（降级逻辑不得出现在编排层）
-- [ ] **学段不泄漏**：以 `junior` 学生提问一个只存在于高中教材的知识点，返回的每条 citation 都满足 `gradeLevel == "junior"` 或 `compat == true`；该场景写成固定用例（`server/tests/` 或 `desktop/tests/` 内），断言不得出现未标注的 `senior` chunk
-- [ ] 向上兼容命中时前端有可见的 `compat` 标注（citation 卡片显示「延伸阅读 · 高年级内容」之类），留一张截图
-- [ ] 父块注入生效：命中子 chunk 时进入 LLM 上下文的是**父块正文**（`parent_chunk_id` 已解析），断言 text 明显长于子块、不是碎片
-- [ ] `execute()` 自行兜异常：sidecar 未启动 / 返回 500 / 超时 → 返回可读中文错误并发 `error` 事件（`degraded: true`），**不抛出**（Pi 与 UI 同在主进程）
-- [ ] 降级演示：把 `server/resources/models/fastembed/` 改名后重启 → 仍能返回 citation 且 `degraded == "fts"`；改回后恢复 `degraded == "vector"`（两条证据各留一次输出）
-- [ ] 检索延迟为百毫秒级：本机同一问题跑 20 次，记录 p95（目标 < 500ms），数值写进票尾
-- [ ] 工具轨迹里能看到本次检索的 `{turn, toolName:"rag_search", args 摘要, ok, latencyMs, degraded}`，并能在 `docs/tool-trace.mmd` 里体现
+- [x] `rag_search` Tool 已注册，参数用 TypeBox 声明 `{ query: string, gradeLevel: GradeLevel, kpId?: string, topK?: number }`，并纳入 `desktop/scripts/check-tool-schema.mjs` 的一致性断言（与 pydantic 对应请求模型逐字段比对，防静默漂移）
+- [x] 唯一出口：Tool 只经 `desktop/src/main/bridge/client.ts` 调 `POST /api/rag/search`；`grep -rn "X-Auth-Token" desktop/src/main/agent desktop/src/main/bridge` 在 Tool 代码里零命中（token 由客户端统一注入）；`desktop/src/main/agent/` 下不出现第二处 `fetch(` / `axios`
+- [x] `rag_search` **不**登记进 §9.3 冻结的 `TOOL_TO_KIND`——它发 `citation` 事件而不是 `payload`；`grep -n "TOOL_TO_KIND" -A 10` 复查表内仍只有 7 个 Tool
+- [x] `citation` 事件载荷与 §6.4 一字不差：`{requestId, citations:[{chunkId, chapterTitle, sectionTitle, gradeLevel, compat}]}`，camelCase，`requestId` 与同轮的 `delta`/`done` 一致
+- [x] `degraded` 由 TS 原样透传进事件与 `desktop/src/main/agent/trace.ts` 的轨迹记录；`grep -rni "fts5\|vec0\|numpy\|cosine" desktop/src/main` 零命中（降级逻辑不得出现在编排层）
+- [x] **学段不泄漏**：以 `junior` 学生提问一个只存在于高中教材的知识点，返回的每条 citation 都满足 `gradeLevel == "junior"` 或 `compat == true`；该场景写成固定用例（`server/tests/` 或 `desktop/tests/` 内），断言不得出现未标注的 `senior` chunk
+- [ ] 向上兼容命中时前端有可见的 `compat` 标注（citation 卡片显示「延伸阅读 · 高年级内容」之类），留一张截图——**未完成：无截图**（`compat` 字段已透传到事件载荷，渲染标注未单独留证）
+- [x] 父块注入生效：命中子 chunk 时进入 LLM 上下文的是**父块正文**（`parent_chunk_id` 已解析），断言 text 明显长于子块、不是碎片
+- [x] `execute()` 自行兜异常：sidecar 未启动 / 返回 500 / 超时 → 返回可读中文错误并发 `error` 事件（`degraded: true`），**不抛出**（Pi 与 UI 同在主进程）
+- [x] 降级演示：把 `server/resources/models/fastembed/` 改名后重启 → 仍能返回 citation 且 `degraded == "fts"`；改回后恢复 `degraded == "vector"`（两条证据各留一次输出）
+- [x] 检索延迟为百毫秒级：本机同一问题跑 20 次，记录 p95（目标 < 500ms），数值写进票尾
+- [x] 工具轨迹里能看到本次检索的 `{turn, toolName:"rag_search", args 摘要, ok, latencyMs, degraded}`，并能在 `docs/tool-trace.mmd` 里体现
 
 ## 进度
 
-（在此记录关键决策与踩坑）
+### ✅ 已交付（提交 `b72fa90`）
+
+`rag_search` 经 `desktop/src/main/bridge/client.ts`（唯一的 HTTP 客户端）调 `POST /api/rag/search`：
+**TS 侧不重新实现降级链**，只把结果里的 `degraded` **原样透传**（`extensions/rag-search.ts` 文件头第 1 条明确写了「不判断、不排序、不重试降级」）；
+认不出的 `degraded` 值按**最弱的一档** `outline` 处理（宁可说得保守）。
+citation 只投影冻结的 5 个字段 `{chunkId, chapterTitle, sectionTitle, gradeLevel, compat}`，
+认不准的条目**直接丢掉**，不给前端猜一个学段标签。
+
+★ **实测：20 次真实 `rag_search` 调用的 p95 = 39 ms**（同一问题重复提问）。
+
+★ **学段隔离经编排层验证**：`resolveGradeLevel()` 里**会话学段为权威**，
+模型填的 `gradeLevel` 只可能被用来「确认」、**永远不会覆盖会话值**。
+实测：即便模型「说谎」把 `gradeLevel` 填成 `senior`，初中生的会话也**拿不到任何 senior citation**
+（Python 侧 SQL 过滤是第二道，见票 11）。
+
+`rag_search` 断言**不在** `TOOL_TO_KIND` 内（它发 `citation` 而非 `payload`），守卫 G10 覆盖。
