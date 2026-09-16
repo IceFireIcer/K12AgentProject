@@ -100,9 +100,10 @@ Pi 的 `esbuild` 原生依赖能否在 Electron 打包后加载、Electron 内�
 - 编排：**Pi Agent SDK**（**锁 `^0.85.1`**，0.85.0 在 Electron 里会崩）。主 Agent 由 LLM **自主选 Tool** 路由
   （**不设 `intent` 字段**），能力经 `pi.registerTool()` 暴露，共 6 个 Extension（动画/编程/练习/画像/学段/学习记录）。
   **不用 LangGraph，不用 `langgraph-checkpoint-sqlite`，不用 `SqliteSaver`。**
-- 前端（`desktop/`）：**Electron 33 + electron-vite 3 + Vue 3 + Pinia + TypeScript（strict）**，
+- 前端（`desktop/`）：**Electron 44 + electron-vite 5 + vite 7 + Vue 3 + Pinia 4 + TypeScript 5.9（strict）**，
   对话优先布局，内联卡片 + 展开/全屏。
   **Electron 侧不得引入任何原生数据库模块**（刻意的风险隔离）——**Pi 迁移不影响此约束**。
+  ⚠️ **不要升 vite 8**（`electron-vite@5` 的 peer 不收）、**不要升 TS 7**（`openapi-typescript` peer 为 `^5.x`）。
 - 后端（`server/`）：**Python 3.12（uv 锁定）+ FastAPI + uvicorn + pydantic v2**。
 - 契约：**pydantic 模型是唯一契约来源** → FastAPI 自动产出 OpenAPI → `openapi-typescript` 生成前端 TS 类型。
   **Pi Tool 参数用 TypeBox `TSchema` 声明，必须与 pydantic 模型做一致性断言**（防静默漂移）。
@@ -261,8 +262,9 @@ npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、
   Pi 官方 issue **#9286** 正是「在 Electron 里嵌入 SDK」时 `Cannot find package 'esbuild'`。
   **处理**：`asarUnpack` 白名单 + 按架构分发 + 签名；**并在 D3 第一天就做 `build:unpack` 冒烟**。
   **Plan B = 改用 Pi RPC 模式**（`pi --mode rpc` 作子进程，不 import SDK）。
-- **Node 版本**：Pi `0.75+` 要求 **Node >= 22.19.0**，而 Electron 33 内置 Node 低于此。
-  **退路**：升 Electron，或降到 Pi `0.74.2`（`legacy-node20` tag，要求 >= 20.6）。**D3 首日验证。**
+- **Node 版本（已解除，勿再当作阻塞项）**：Pi `0.85.1` 声明 `engines.node >= 22.19.0`；
+  **Electron 44.4.1 内置 Node 24.21.0**（本机实测 `ELECTRON_RUN_AS_NODE=1 electron -v`），直接满足。
+  **不要为它降 Pi 到 `0.74.2`，也不要主动降 Electron**（≤33 才不满足，届时退路才是 `0.74.2`）。
 - **★ `session_end` 事件不存在**：全包 grep 0 命中。会话终态用 **`session_shutdown`**；
   一轮结束用 **`agent_end` / `agent_settled`**。**写 `pi.on("session_end", ...)` 会直接不生效。**
 - **Pi 共 34 个原生事件**，**不要自建事件总线**（`ModuleEvents` 是重复抽象）。
@@ -317,6 +319,12 @@ npm run build:unpack   # ★ D3 必做：打包后实测 esbuild 是否解包、
 > `git checkout 7f158c8 -- docs/report-material` 取回；**新素材**需先建目录，否则本纪律名存实亡。
 > 另：`docs/graph-smoke.mmd` 已不是架构证据（LangGraph 状态图作废），
 > 「设计合理性」维度改由**工具调用轨迹图**（`docs/tool-trace.mmd`，D4 产出）承担，不要贴旧图进报告。
+
+> ⚠️ **决策编号目前指向已删除的文件**：`项目执行文档.md` 第 0 节引用了 `D-001` / `D-002` / `D-004`
+> （嵌入模型、契约来源、动画策略的依据），第 18 节第 6 步要求「落 D-008」。
+> 这些决策的**正文在被删除的 `docs/report-material/decisions.md` 里，当前工作区不可读**。
+> **需要依据时先取回**：`git show 7f158c8:docs/report-material/decisions.md`。
+> 恢复报告素材目录后此断链自动消失；若长期不恢复，应把这些决策的结论就地摘入执行文档对应小节。
 
 **v2 期间必记的两类素材**（答辩直接用）：
 1. **Pi 迁移的真实代价与解决过程**（esbuild 打包、Node 版本、导入图）——主动讲代价比被问出来可信。
