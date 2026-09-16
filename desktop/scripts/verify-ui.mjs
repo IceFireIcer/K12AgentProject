@@ -91,6 +91,14 @@ const EXPECTED_PHASE_TEXT = ['等待启动', '启动中', '已就绪', '启动�
 const EXPECTED_PHASE_ATTR = ['idle', 'starting', 'ready', 'failed', 'stopped']
 /** 四学段中文名（指示器文案只允许出现这四个 + 「待判定」）。 */
 const GRADE_LABELS = ['小学低年级', '小学高年级', '初中', '高中']
+/**
+ * 四学段**机器字面量**（与 `data-grade` 属性同源）。
+ *
+ * ★ 与 {@link GRADE_LABELS}（中文名）是**两套**取值，别混用：`badgeText` 是「初中」，
+ *   `data-grade` 是 `junior`。这里曾经把中文名数组拿来判 `data-grade`，在
+ *   「data-grade 恒为空」的年代**假装通过**（双方都是 falsy），学段一真判出来就暴露了。
+ */
+const GRADE_LEVELS = ['primary_low', 'primary_high', 'junior', 'senior']
 const GRADE_UNKNOWN_LABEL = '待判定'
 /** 无 Key / 供应商不可用时，主进程给学生的**可读**文案判据（`agent/events.ts` / `runtime.ts`）。 */
 const DEGRADED_NOTICE_MARKERS = [
@@ -643,8 +651,17 @@ if (gradeProbe?.present !== true) {
   )
   check(
     'data-determined 与 data-grade 自洽（判出来才有学段）',
-    (gradeProbe.determined === 'true') === GRADE_LABELS.includes(gradeProbe.grade),
+    // ★ 修 bug（2026-09-16）：原来拿**中文名**数组（GRADE_LABELS）去判 `data-grade`，
+    //   而 `data-grade` 是机器字面量（`junior`）—— 两边取值域不同，这条断言**永远通过**，
+    //   属于「假绿」。学段推断修好、`data-grade` 真的有值之后才暴露出来。
+    //   现在两边各自比对自己的取值域，并额外断言「中文名与机器字面量指向同一档」。
+    (gradeProbe.determined === 'true') === GRADE_LEVELS.includes(gradeProbe.grade),
     `data-determined="${gradeProbe.determined}"，data-grade="${gradeProbe.grade}"`
+  )
+  check(
+    'data-grade 与徽章文案指向同一档学段（机器字面量 ↔ 中文名）',
+    GRADE_LEVELS.indexOf(gradeProbe.grade) === GRADE_LABELS.indexOf(gradeProbe.badgeText),
+    `data-grade="${gradeProbe.grade}" ↔ 徽章「${gradeProbe.badgeText}」`
   )
   if (gradeProbe.noticeText) {
     check(

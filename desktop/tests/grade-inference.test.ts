@@ -8,10 +8,17 @@
  *       —— 两边各改一半的后果是「第 3 轮该触发却永远不触发」，且**没有任何报错**
  *   G2  **第二层的触发与降级**：第 3 轮（不足则第 5 轮）触发一次；**没有 LLM 通道时
  *       `no_llm` 要可见**（日志 + 状态），而不是静默跳过
- *   G3  **`before_agent_start` 的链式保真**：别的扩展拼好的 prompt 只做学段片段替换，
- *       其余内容一个字节都不许丢；拿不到别的扩展的 prompt 时也**绝不能**返回 `undefined`
- *       （那等于放弃覆盖，Pi 的默认 prompt 会把宿主安装路径发出去）
+ *   G3  **chain 保真**：别的扩展拼好的 prompt 只做学段片段替换，其余内容一个字节都不许丢；
+ *       拼出来的 prompt **始终**带权威段（`GRADE_OVERRIDE_HEADING`），且**幂等**
  *   G4  **下一轮生效**：第 N 轮判定出的学段在第 N+1 轮的 prompt 里才生效（学生无感）
+ *
+ * ★★ **2026-09-16 返工（本文件随之改了断言口径）**：原来这些用例假定
+ *   「`grade.ts` 用 `pi.on('input'|'before_agent_start')` 驱动」。实测证明那两条挂不上
+ *   （无 Key 时 `prompt()` 根本不被调用 → `input` 不发；`before_agent_start` 排在凭证校验之后），
+ *   于是改成由 `runtime.ts` 显式调用 `observeTurn()` / `systemPromptFor()`。
+ *   用例改成打**同一套语义**的新入口，并**新增两条守卫**：
+ *     - G1e 本扩展不再订阅任何 Pi 事件（防止有人「顺手加回去」，那会让无 Key 世界再次静默失灵）；
+ *     - G4b `systemPromptFor()` 的输出**幂等**（重复拼装不会叠出第二段权威段）。
  *
  * 跑法：`npm test`
  */
@@ -33,15 +40,14 @@ import {
   LAYER2_MIN_TURNS,
   LAYER2_RETRY_TURN,
   MAX_TURN_CHARS,
+  buildGradeSystemPrompt,
   buildJudgePrompt,
   clampTurnText,
   countUsableTurns,
   createGradeExtension,
-  isStudentTurn,
-  mergeGradePrompt,
   parseProposal,
-  readInputText,
   shouldRequestLayer2,
+  stripGradeOverride,
   swapKnownGradeTemplate,
   type GradeProposal,
   type GradeTurnResponse,
@@ -63,6 +69,17 @@ function pyNumber(source: string, name: string): number {
   const matched = new RegExp(`^${name}\\s*=\\s*([0-9.]+)`, 'm').exec(source)
   assert.ok(matched, `server 侧找不到常量 ${name}（两边必须共用同一组阈值）`)
   return Number(matched[1])
+}
+
+/**
+ * 去掉注释再匹配（守卫只在**代码**上断言）。
+ *
+ * ★ 这不是洁癖：`grade.ts` 的文件头与 `observeTurn` 的注释里**故意**引用了
+ * `pi.on('input')` / `pi.on('before_agent_start')` 来解释返工原因；不去注释就会
+ * 把「解释」误判成「订阅」。同一坑 `architecture-guards.test.ts` 已经踩过并留了实现。
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
 }
 
 /* ------------------------------------------------------------------ *
@@ -100,17 +117,42 @@ test('G1c 本扩展不 import Pi，也不自己发 HTTP', () => {
   assert.ok(gradeExtensionSource.includes('bridge/client.ts'), '必须经 apiFetch 呼 sidecar')
 })
 
-test('G1d 清单里的 grade 扩展文件真实存在，且本扩展只用清单声明过的事件', () => {
+test('G1d 清单里的 grade 扩展文件真实存在，且本扩展**不再订阅任何 Pi 事件**', () => {
   const spec = AGENT_EXTENSION_SPECS.find((entry) => entry.name === 'grade')
   assert.ok(spec, 'extensions/index.ts 里少了 grade 这一项')
   assert.equal(spec!.file, './grade.ts')
   assert.ok(existsSync(join(desktopRoot, 'src', 'main', 'agent', 'extensions', 'grade.ts')), 'grade.ts 没落地')
 
-  const subscribed = [...gradeExtensionSource.matchAll(/pi\.on\(\s*'([^']+)'/g)].map((match) => match[1])
-  assert.deepEqual([...subscribed].sort(), ['before_agent_start', 'input'], '只订阅这两个（tool_call 安全阀归票 22）')
-  for (const event of subscribed) {
-    assert.ok(spec!.events.includes(event), `订阅了清单里没声明的事件：${event}`)
+  // ★★ 2026-09-16 返工（这条断言原来要求「只订阅 input + before_agent_start」）。
+  //   实测：`input` 只在真的调用 `session.prompt()` 时才发，而本项目**无 Key 时根本不调它**；
+  //   `before_agent_start` 又排在凭证校验之后。两条挂在这两个事件上都会让「无 Key 世界」
+  //   静默失灵（grade_signals 0 行、prompt 里 grep 不到学段）。
+  //   现在由 `runtime.ts` 显式调用 observeTurn()/systemPromptFor()，本扩展**不订阅任何事件**。
+  //   这条守卫的作用是防止有人「顺手加回 pi.on(...)」—— 那会重新引入一份只在有 Key 时
+  //   才生效的**重复观察路径**（信号被双份计数）。
+  //   ⚠️ 必须先在**去注释**的源码上匹配：文件头与 `observeTurn` 的注释里会引用这两个事件名做论证。
+  const subscribed = [...stripComments(gradeExtensionSource).matchAll(/\bpi\s*\.\s*on\s*\(/g)]
+  assert.deepEqual(
+    subscribed.map((match) => match[0]),
+    [],
+    'grade 扩展不订阅 Pi 事件（能力由 runtime.ts 显式驱动）'
+  )
+  assert.deepEqual(spec!.events, [], '清单里 grade 的 events 必须为空（与实现一致）')
+})
+
+test('G1e 本扩展导出 runtime.ts 需要的两个显式入口（返回 Promise 之外的同步能力）', () => {
+  for (const member of ['observeTurn', 'systemPromptFor', 'appliedGrade']) {
+    assert.ok(
+      new RegExp(`extension\\.${member}\\s*=`).test(gradeExtensionSource),
+      `grade 扩展必须挂上 ${member}()（runtime.ts 靠它驱动学段）`
+    )
   }
+  assert.ok(
+    /gradeExtension\.observeTurn\(/.test(
+      readFileSync(join(desktopRoot, 'src', 'main', 'agent', 'runtime.ts'), 'utf8')
+    ),
+    'runtime.ts 必须在每轮开始时调用 observeTurn（这是唯一的观察入口）'
+  )
 })
 
 /* ------------------------------------------------------------------ *
@@ -196,55 +238,76 @@ test('G2e 提议解析：宽松读、严格校验', () => {
 })
 
 /* ------------------------------------------------------------------ *
- * G3 链式保真
+ * G3 prompt 组装（链式保真 + 始终可审计）
  * ------------------------------------------------------------------ */
 
-test('G3a 拿不到别的扩展的 prompt → 返回推断学段的模板（绝不返回 undefined）', () => {
-  assert.equal(mergeGradePrompt({ incoming: undefined, inferredGrade: 'junior' }), gradePromptFor('junior'))
-  assert.equal(mergeGradePrompt({ incoming: '', inferredGrade: 'primary_low' }), gradePromptFor('primary_low'))
+test('G3a 拿不到别的扩展的 prompt → 给出推断学段的模板（绝不返回空）', () => {
+  const junior = buildGradeSystemPrompt({ incoming: undefined, inferredGrade: 'junior' })
+  assert.ok(junior.includes(gradePromptFor('junior')), '必须给出推断学段的模板')
+  assert.ok(junior.includes(GRADE_OVERRIDE_HEADING), '★ 权威段必须在（无 Key 世界就靠它证明覆盖生效）')
+  const low = buildGradeSystemPrompt({ incoming: '', inferredGrade: 'primary_low' })
+  assert.ok(low.includes(gradePromptFor('primary_low')))
 })
 
-test('G3b 已经是目标模板 → 不动链条（返回 undefined）', () => {
+test('G3b 已经是目标模板 → 仍然追加权威段（学段可见，可审计）', () => {
+  const merged = buildGradeSystemPrompt({ incoming: gradePromptFor('senior'), inferredGrade: 'senior' })
+  // ★ 旧实现这里返回 undefined（「不动链条」），后果是 wire prompt 里**看不出**学段覆盖有没有生效。
+  assert.ok(merged.includes(GRADE_OVERRIDE_HEADING), '同一学段也要有权威段（可审计性）')
   assert.equal(
-    mergeGradePrompt({ incoming: gradePromptFor('senior'), inferredGrade: 'senior' }),
-    undefined
+    merged.split(gradePromptFor('senior')).length - 1,
+    1,
+    '模板已经在了，权威段里不得再抄一遍（省 ~2.5k token）'
   )
 })
 
 test('G3c 只替换学段模板片段，别的扩展追加的内容一个字节都不丢', () => {
   const incoming = `【别的扩展加的头】\n${GRADE_PROMPTS.primary_high}\n【别的扩展加的尾】`
-  const merged = mergeGradePrompt({ incoming, inferredGrade: 'junior' })
-  assert.ok(merged, '学段变了就必须返回新的 prompt')
-  assert.ok(merged!.startsWith('【别的扩展加的头】'))
-  assert.ok(merged!.endsWith('【别的扩展加的尾】'))
-  assert.ok(merged!.includes(GRADE_PROMPTS.junior), '应当换成推断学段的模板')
-  assert.ok(!merged!.includes(GRADE_PROMPTS.primary_high), '旧学段模板应当被换掉')
+  const merged = buildGradeSystemPrompt({ incoming, inferredGrade: 'junior' })
+  assert.ok(merged.startsWith('【别的扩展加的头】'), '别人的头原样保留')
+  assert.ok(merged.includes('【别的扩展加的尾】'), '别人的尾原样保留')
+  assert.ok(merged.includes(GRADE_PROMPTS.junior), '应当换成推断学段的模板')
+  assert.ok(!merged.includes(GRADE_PROMPTS.primary_high), '旧学段模板应当被换掉')
+  assert.ok(merged.includes(GRADE_OVERRIDE_HEADING))
 })
 
 test('G3d 认不出的自定义 prompt → 原样保留 + 追加权威覆盖块', () => {
   const incoming = '某个扩展自己拼的 system prompt，不是四份模板里的任何一份。'
-  const merged = mergeGradePrompt({ incoming, inferredGrade: 'senior' })
-  assert.ok(merged!.startsWith(incoming), '别人的内容原样保留')
-  assert.ok(merged!.includes(GRADE_OVERRIDE_HEADING))
-  assert.ok(merged!.includes(GRADE_PROMPTS.senior), '覆盖块里必须给出权威学段模板')
+  const merged = buildGradeSystemPrompt({ incoming, inferredGrade: 'senior' })
+  assert.ok(merged.startsWith(incoming), '别人的内容原样保留')
+  assert.ok(merged.includes(GRADE_OVERRIDE_HEADING))
+  assert.ok(merged.includes(GRADE_PROMPTS.senior), '覆盖块里必须给出权威学段模板')
   assert.equal(swapKnownGradeTemplate(incoming, GRADE_PROMPTS.senior), null)
+})
+
+test('G3e ★ 拼装幂等：重复调用不会叠出第二段权威段', () => {
+  const once = buildGradeSystemPrompt({ incoming: GRADE_PROMPTS.primary_high, inferredGrade: 'junior' })
+  const twice = buildGradeSystemPrompt({ incoming: once, inferredGrade: 'junior' })
+  assert.equal(twice, once, '第二次拼装必须与原结果逐字相同')
+  assert.equal(once.split(GRADE_OVERRIDE_HEADING).length - 1, 1, '权威段只允许出现一次')
+  // 剥掉权威段后应当回到原来的「别人的 prompt」（模板已被换成 junior，所以不会与原始相同）
+  assert.ok(!stripGradeOverride(once).includes(GRADE_OVERRIDE_HEADING))
+  assert.equal(stripGradeOverride(GRADE_PROMPTS.senior), GRADE_PROMPTS.senior, '没有权威段时原样返回')
+})
+
+test('G3f ★ Pi 追加的宿主 cwd 行必须被整段丢弃（风险 #19 的二道防线）', () => {
+  // 真实形态（`system-prompt.js` 的 `buildSystemPrompt`）：哪怕给了 customPrompt，
+  // Pi 仍会无条件在**末尾**追加一行 `Current working directory: <绝对路径>`。
+  // `before_agent_start` 拿到的 `event.systemPrompt` 里就有它 —— 覆盖必须把它整段丢掉。
+  const loader = buildGradeSystemPrompt({ incoming: undefined, inferredGrade: 'junior' })
+  const withCwd = `${loader}\nCurrent working directory: C:/Users/Someone/AppData/Roaming/k12-agent-desktop\n`
+  const out = buildGradeSystemPrompt({ incoming: withCwd, inferredGrade: 'junior' })
+
+  assert.ok(!out.includes('Current working directory'), 'cwd 行不得留在最终 prompt 里')
+  assert.ok(!/AppData|C:\//i.test(out), '不得出现宿主路径')
+  assert.equal(out.split(GRADE_OVERRIDE_HEADING).length - 1, 1, '权威段仍然只出现一次')
+  assert.equal(out.split(GRADE_PROMPTS.junior).length - 1, 1, '模板也不得被抄一遍')
 })
 
 /* ------------------------------------------------------------------ *
  * 小工具
  * ------------------------------------------------------------------ */
 
-test('G3e 输入解析：只认 text，扩展注入的不算学生的一轮', () => {
-  assert.equal(readInputText({ type: 'input', text: '你好', source: 'interactive' }), '你好')
-  assert.equal(readInputText({ type: 'input', prompt: '不算' }), '')
-  assert.equal(readInputText(null), '')
-  assert.equal(isStudentTurn({ source: 'interactive' }), true)
-  assert.equal(isStudentTurn({ source: 'rpc' }), true)
-  assert.equal(isStudentTurn({ source: 'extension' }), false, '别的扩展注入的内容自我循环，不能算学段证据')
-  assert.equal(isStudentTurn({}), true)
-})
-
-test('G3f 文本截断与可用轮数', () => {
+test('G3g 文本截断与可用轮数', () => {
   assert.equal(clampTurnText('  你好  '), '你好')
   assert.equal(clampTurnText('x'.repeat(MAX_TURN_CHARS + 50)).length, MAX_TURN_CHARS)
   assert.equal(countUsableTurns([{ text: 'a' }, { text: '  ' }, { text: 'b' }]), 2)
@@ -293,7 +356,15 @@ interface Harness {
   /** 第二层判定被真正调用的次数（= 一次对话里的 LLM 调用计数）。 */
   judgeCalls(): number
   setGrade(grade: GradeLevel): void
-  pushTurn(text: string, source?: string): void
+  /**
+   * 模拟「学生发了一轮」。
+   *
+   * ★ 2026-09-16 返工：原来是 `pi.emit('input', …)`（走 Pi 事件），现在直接调
+   * `extension.observeTurn()` —— 与 `runtime.ts` 的调用方式**逐字一致**（同一入口）。
+   */
+  pushTurn(text: string): void
+  /** 模拟本轮拼 system prompt（`runtime.ts` 的 `before_agent_start` 里就是这么调的）。 */
+  promptFor(incoming: string | undefined): string
 }
 
 function createHarness(options: { judge?: boolean; grade?: GradeLevel } = {}): Harness {
@@ -357,13 +428,14 @@ function createHarness(options: { judge?: boolean; grade?: GradeLevel } = {}): H
     setGrade: (grade: GradeLevel) => {
       nextGrade = grade
     },
-    pushTurn: (text: string, source = 'interactive') => {
-      pi.emit('input', { type: 'input', text, source })
-    }
+    pushTurn: (text: string) => {
+      extension.observeTurn(text)
+    },
+    promptFor: (incoming: string | undefined) => extension.systemPromptFor(incoming)
   }
 }
 
-test('G4a input 上交本轮证据，且不含任何服务端算好的信号', async () => {
+test('G4a observeTurn 上交本轮证据，且不含任何服务端算好的信号', async () => {
   const harness = createHarness()
   harness.pushTurn('电脑怎么认图片呀？')
   await harness.extension.flush()
@@ -375,6 +447,8 @@ test('G4a input 上交本轮证据，且不含任何服务端算好的信号', a
   assert.equal(body.text, '电脑怎么认图片呀？')
   assert.equal(body.sessionId, 'sess-1')
   assert.equal(harness.submitted[0].studentId, 'student_001')
+  // ★ 工厂本身是空实现（不再订阅 Pi 事件）：不订阅也是「已注册」，注册器照常把它算作就位
+  assert.deepEqual(Object.keys(harness.pi.handlers), [], '本扩展不得订阅任何 Pi 事件')
 })
 
 test('G4b 第 3 轮带上第二层提议；没有通道时不带提议而且降级可见', async () => {
@@ -430,30 +504,29 @@ test('G4d 判定出的学段在**下一轮**才进 prompt（学生无感）', as
   harness.pushTurn('第一轮')
   await harness.extension.flush()
 
-  // 第 1 轮的 before_agent_start：别的扩展拼的还是 primary_high → 本扩展不动它
-  const first = harness.pi.emit('before_agent_start', {
-    systemPrompt: GRADE_PROMPTS.primary_high
-  })
-  assert.equal(first, undefined, '本轮还没生效：不改链条')
+  // 第 1 轮：服务端还没判出来 → 别人拼的是 primary_high，学段片段不动（只追加权威段）
+  const first = harness.promptFor(GRADE_PROMPTS.primary_high)
+  assert.ok(first.includes(GRADE_PROMPTS.primary_high), '本轮学段还没交接：模板保持原样')
+  assert.ok(!first.includes(GRADE_PROMPTS.junior), '本轮不得提前换成新学段')
+  assert.equal(harness.extension.appliedGrade(), 'primary_high')
 
   // 第 2 轮：交接发生 → 换成 junior 的模板
   harness.pushTurn('第二轮')
-  const second = harness.pi.emit('before_agent_start', {
-    systemPrompt: GRADE_PROMPTS.primary_high
-  }) as { systemPrompt?: string } | undefined
-  assert.ok(second?.systemPrompt, '第 2 轮必须换成新学段')
-  assert.ok(second!.systemPrompt!.includes(GRADE_PROMPTS.junior))
-  assert.ok(!second!.systemPrompt!.includes(GRADE_PROMPTS.primary_high))
+  const second = harness.promptFor(GRADE_PROMPTS.primary_high)
+  assert.ok(second.includes(GRADE_PROMPTS.junior), '第 2 轮必须换成新学段')
+  assert.ok(!second.includes(GRADE_PROMPTS.primary_high), '旧学段模板应当被换掉')
+  assert.ok(second.includes(GRADE_OVERRIDE_HEADING), '★ 权威段始终在（wire prompt 可断言）')
+  assert.equal(harness.extension.appliedGrade(), 'junior')
 })
 
-test('G4e 学段没变时一律不改别人的 prompt', async () => {
+test('G4e 学段没变时不动别人的模板内容（只追加权威段）', async () => {
   const harness = createHarness({ grade: 'primary_high' })
   harness.pushTurn('随便问一句')
   await harness.extension.flush()
-  assert.equal(
-    harness.pi.emit('before_agent_start', { systemPrompt: GRADE_PROMPTS.primary_high }),
-    undefined
-  )
+  const prompt = harness.promptFor(GRADE_PROMPTS.primary_high)
+  assert.ok(prompt.includes(GRADE_PROMPTS.primary_high), '别人的模板原样保留')
+  assert.equal(prompt.split(GRADE_PROMPTS.primary_high).length - 1, 1, '不得把模板抄第二遍')
+  assert.ok(prompt.includes(GRADE_OVERRIDE_HEADING), '★ 学段没变也要有权威段（可审计）')
   assert.equal(harness.extension.snapshot().pendingGrade, null)
   assert.equal(harness.extension.snapshot().appliedGrade, 'primary_high')
 })
@@ -471,7 +544,7 @@ test('G4f 上交失败不影响本轮对话，只记日志并计数', async () =
     }
   })
   extension(pi as never)
-  pi.emit('input', { type: 'input', text: '你好', source: 'interactive' })
+  extension.observeTurn('你好')
   await extension.flush()
 
   const stats = extension.snapshot()
@@ -480,20 +553,18 @@ test('G4f 上交失败不影响本轮对话，只记日志并计数', async () =
   assert.ok(stats.lastError?.includes('sidecar'))
   assert.ok(logs.some((line) => line.includes('不影响本轮对话')))
   // 对话仍能拿到学段 prompt（绝不因为学段推断失败而少一道覆盖）
-  const merged = pi.emit('before_agent_start', { systemPrompt: undefined }) as
-    | { systemPrompt?: string }
-    | undefined
-  assert.equal(merged?.systemPrompt, gradePromptFor(DEFAULT_GRADE_LEVEL))
+  const prompt = extension.systemPromptFor(undefined)
+  assert.ok(prompt.includes(gradePromptFor(DEFAULT_GRADE_LEVEL)))
+  assert.ok(prompt.includes(GRADE_OVERRIDE_HEADING))
 })
 
 test('G4g 主动 refresh 能立刻取到当前学段（冷启动少一轮滞后）', async () => {
   const harness = createHarness({ grade: 'senior' })
   const grade = await harness.extension.refresh()
   assert.equal(grade, 'senior')
-  const merged = harness.pi.emit('before_agent_start', { systemPrompt: GRADE_PROMPTS.junior }) as
-    | { systemPrompt?: string }
-    | undefined
-  assert.ok(merged!.systemPrompt!.includes(GRADE_PROMPTS.senior))
+  const prompt = harness.promptFor(GRADE_PROMPTS.junior)
+  assert.ok(prompt.includes(GRADE_PROMPTS.senior), 'refresh 之后立刻按 senior 拼')
+  assert.ok(!prompt.includes(GRADE_PROMPTS.junior))
 })
 
 test('G4h reset 清会话状态但不影响服务端数据', async () => {
@@ -534,15 +605,15 @@ test('G4i 换学生必须把学段一起重置（绝不把上一个学生的学�
   extension(pi as never)
 
   // 学生 A 的第 1 轮 → 服务端判定 senior（第 2 轮才生效）
-  pi.emit('input', { type: 'input', text: '梯度下降', source: 'interactive' })
+  extension.observeTurn('梯度下降')
   await extension.flush()
-  pi.emit('input', { type: 'input', text: '链式法则', source: 'interactive' })
+  extension.observeTurn('链式法则')
   await extension.flush()
   assert.equal(extension.snapshot().appliedGrade, 'senior')
 
-  // 换到学生 B：第一次 input 就该回到冷启动默认值，而不是沿用 senior
+  // 换到学生 B：第一次 observeTurn 就该回到冷启动默认值，而不是沿用 senior
   session = { studentId: 'student_002', sessionId: 'sess-B', gradeLevel: 'primary_high' }
-  pi.emit('input', { type: 'input', text: '你好', source: 'interactive' })
+  extension.observeTurn('你好')
   assert.equal(extension.snapshot().appliedGrade, 'primary_high', '换学生后按冷启动默认值起步')
   assert.ok(logs.some((line) => line.includes('切换学生')), '换学生要留一行可见日志')
   await extension.flush()
@@ -574,14 +645,14 @@ test('G4j 同一学生换会话（/new）：学段沿用，但第二层的窗口
   extension(pi as never)
 
   for (let index = 0; index < 3; index += 1) {
-    pi.emit('input', { type: 'input', text: `第 ${index} 轮`, source: 'interactive' })
+    extension.observeTurn(`第 ${index} 轮`)
     await extension.flush()
   }
   assert.equal(judgeCalls, 1, '第 3 轮判定过一次')
   assert.equal(extension.snapshot().turn, 3)
 
   session = { studentId: 'student_001', sessionId: 'sess-B', gradeLevel: 'primary_high' }
-  pi.emit('input', { type: 'input', text: '换会话后的第一轮', source: 'interactive' })
+  extension.observeTurn('换会话后的第一轮')
   await extension.flush()
   const stats = extension.snapshot()
   assert.equal(stats.turn, 1, '新会话的轮次从 1 重新计')

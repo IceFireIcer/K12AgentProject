@@ -5,12 +5,17 @@
  *   1. 目录隔离：`ModelRuntime.create({ authPath, modelsPath })` + `DefaultResourceLoader({ agentDir })`
  *      + `SessionManager.create(cwd, sessionDir)` 全部钉在 `<userData>/pi-agent/`，**不读不写 `~/.pi/agent`**。
  *   2. system prompt 两道覆盖：`systemPromptOverride`（资源加载器层）+
- *      `before_agent_start` 每轮整段替换（★ 最后一道改写点，学段语气就落在这里）。
- *   3. 学段：**由推断系统决定**（`agent/extensions/grade.ts` 独占 `before_agent_start` 的学段落点）。
+ *      `before_agent_start` 每轮改写（★ 最后一道改写点，学段语气就落在这里）。
+ *      两道都走**同一个出口**：`gradeExtension.systemPromptFor()` —— 同一份文本，
+ *      不会出现「第一轮不带权威段、后面带」的不一致。
+ *   3. 学段：**由推断系统决定**（`agent/extensions/grade.ts` 是唯一权威来源）。
+ *      ★ 两件事都由本文件**显式驱动**，不挂 Pi 事件（返工原因见 `grade.ts` 文件头）：
+ *        - 观察：每轮开始调 `gradeExtension.observeTurn(text)`（**在无 Key 早退之前**，
+ *          否则无 Key 世界里学段永远不动）；
+ *        - prompt：`chatFactory` 的 `before_agent_start` 调 `systemPromptFor()`。
  *      运行时**不读**渲染进程传来的学段 —— `ChatSendRequest.gradeLevel` 只是历史字段，
  *      已不再权威（手动选学段的 UI 已取消，见 `ipc/channels.ts` 的字段注释）。
- *      本文件只保留一个**冷启动兜底学段**（`prompts/grade.ts` 的默认值），保证
- *      `systemPromptOverride` 在任何情况下都不会退化成 Pi 的默认 prompt（那会泄漏宿主路径）。
+ *      `setGradeLevel()` 也已退化为**只读回显**，不再有第二个写入点。
  *   4. Pi → 6 事件：事件流交给 `events.ts` 的 `bindTurnStream()`，本文件只管会话与生命周期。
  *   5. provider 边界脱敏审计（§12）：`before_provider_request` 里把**真正要发出去的** system prompt
  *      取出、抹掉任何密钥痕迹、并做宿主路径泄漏断言，然后落盘作证据。
@@ -25,6 +30,9 @@
  * ★ 无 Key 时的行为（本机现状：`DEEPSEEK_API_KEY` 未设置）：
  *   **不假装、不静默、不挂起** —— 直接发一条可读的 `error`（`degraded: true`）并收尾本轮，
  *   文案明确写「这是配置缺失，不是程序故障」（见 `events.ts` 的 `MISSING_KEY_MESSAGE`）。
+ *   ★ 但**学段推断照常工作**：观察（`observeTurn`）发生在早退**之前**，第一层规则引擎
+ *     不依赖 LLM；只有第二层（LLM 复核）会退化成 `degraded="no_llm"`。这是刻意的 ——
+ *     「没有 API Key 时应用仍然可用」的验收口径包含「学段仍然会动」。
  */
 
 import { writeFileSync } from 'node:fs'
@@ -48,7 +56,7 @@ import {
 import quizExtension from './extensions/quiz.ts'
 // ★ 学段**推断**扩展（票 21）：它独占 `input`（收集本轮证据）与 `before_agent_start`（按推断出的
 //   学段替换整段 prompt），并自兜异常。工厂是「可调用 + `.refresh()/.useJudge()` 诊断入口」的形态。
-import gradeExtension from './extensions/grade.ts'
+import gradeExtension, { GRADE_OVERRIDE_HEADING } from './extensions/grade.ts'
 import ragSearchExtension from './extensions/rag-search.ts'
 import {
   ensureModelsJson,
@@ -64,7 +72,6 @@ import {
   resolveStudentPiPaths,
   type StudentPiPaths
 } from './pi-paths.ts'
-import { DEFAULT_GRADE_LEVEL, gradePromptFor, normalizeGradeLevel } from './prompts/grade.ts'
 import { createTraceExtension, exportToolTrace, ToolTraceRecorder, type TraceExportOptions } from './trace.ts'
 
 /* ------------------------------------------------------------------ *
@@ -117,7 +124,10 @@ export interface ChatRuntime {
   readonly credentials: PiCredentials
   /** 供应商是否具备凭证（`false` = 只能跑到「准备发请求」为止）。 */
   readonly authReady: boolean
-  /** 运行时侧的**兜底**学段（冷启动默认值；权威学段由 `extensions/grade.ts` 的推断给出）。 */
+  /**
+   * ★ **当前生效的学段**（唯一权威来源：`extensions/grade.ts` 的推断状态）。
+   * 冷启动（一次推断都还没发生）时是 `prompts/grade.ts` 的默认值。
+   */
   readonly gradeLevel: GradeLevel
   /** 诊断：最近一轮 `before_agent_start` 采用的 system prompt。 */
   readonly lastSystemPrompt?: string
@@ -134,6 +144,16 @@ export interface ChatRuntime {
   setGradeLevel(grade: GradeLevel | string | undefined): GradeLevel
   /** 跑一轮：事件经 `sink` 投递（`sink` 就是 `ChatStreamRegistry` 的 `TurnHandle`）。 */
   runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome>
+  /**
+   * ★ 等本轮（以及此前排队的）学段证据上交完毕。
+   *
+   * 为什么需要它：上交是 fire-and-forget（**判定结果下一轮才生效**，本轮对话绝不排队等它），
+   * 所以 `runTurn()` 返回时服务端可能还没判完。调用方（`ipc/handlers.ts`）要在本轮结束后
+   * 读一次 `learning.db` 里的学段推给界面 —— 不 flush 就会**永远慢一拍**，
+   * 只读徽章停在上一轮的学段上。
+   * 内部已兜异常（提交失败只记日志），**不会抛**。
+   */
+  flushGrades(): Promise<void>
   /** 关闭会话（`session.dispose()` 会把 JSONL flush 干净）。**幂等**。 */
   dispose(): Promise<void>
 }
@@ -229,14 +249,6 @@ interface PiSessionManagerLike {
 
 /** 会话内部的可变状态（用闭包而不是类字段，避免 Pi 对象在类实例上被长期持有）。 */
 interface RuntimeState {
-  /**
-   * 冷启动兜底学段（`prompts/grade.ts` 的默认值）。
-   *
-   * ★ **不再是「权威学段」**：学段由推断系统决定（`extensions/grade.ts` 在 `before_agent_start`
-   *   里替换整段 prompt）。这里只保证「推断扩展没接上时也有一份合法模板」——
-   *   `systemPromptOverride` 绝不能返回空，否则会退化成 Pi 的默认 prompt（泄漏宿主安装路径）。
-   */
-  grade: GradeLevel
   /** `before_agent_start` 看到的基座 prompt（未覆盖时长什么样，证据用）。 */
   basePromptSeen?: string
   lastPrompt?: string
@@ -272,7 +284,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   const useProbe = probeRequested && !credentials.apiKey
 
   const pi = (await loadPi()) as unknown as PiModuleLike
-  const state: RuntimeState = { grade: DEFAULT_GRADE_LEVEL, wireLeaks: [], providerRequests: 0 }
+  const state: RuntimeState = { wireLeaks: [], providerRequests: 0 }
   /** ★ 工具调用轨迹（票 08 的「设计合理性」证据；`dispose()` 时落盘）。 */
   const trace = new ToolTraceRecorder()
   /** 扩展装配结论（供 `extensionReport` 诊断字段；注册发生在 Pi 调用工厂时）。 */
@@ -287,20 +299,28 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   })
 
   /**
-   * ② ★ prompt 基座（学段兜底）+ provider 边界审计（同一个工厂，注册顺序即执行顺序）。
+   * ② ★ prompt 基座 + 学段落点 + provider 边界审计（同一个工厂，注册顺序即执行顺序）。
    *
    * `before_agent_start` 的返回值会写进 `agent.state.systemPrompt`，是 **Pi 拼完 prompt 之后**
    * 的最后一道改写点 —— 也正因如此，它同时承担「抹掉 Pi 追加的 cwd 环境块」和「垫一份合法模板」。
    * **多个扩展的返回值是链式叠加的（后注册者看到前者结果）**，所以：
    *   - 不要在这里返回 `undefined`（那等于放弃覆盖，Pi 的默认 prompt 会带着宿主路径发出去）；
-   *   - ★ 学段**推断**的落点是后注册的 `extensions/grade.ts`（它读 `event.systemPrompt`
-   *     再整段替换成本轮推断学段的模板）—— 本工厂垫的那份是**兜底**，不是权威值。
+   *   - ★ 学段**推断**的落点就在这里：`gradeExtension.systemPromptFor()` 读 `event.systemPrompt`
+   *     再替换/追加成本轮推断学段的权威段（见 `extensions/grade.ts` 的 `buildGradeSystemPrompt`）。
+   *
+   * ⚠️ **为什么学段 prompt 不在 grade 扩展自己 `pi.on('before_agent_start')` 里拼**（票 21 返工）：
+   *   Pi 的 `before_agent_start` **排在凭证校验之后**（`prompt()` 先查 `hasConfiguredAuth`，
+   *   不过就抛 `No API key found…`，`emitBeforeAgentStart()` 永远到不了）。本项目的
+   *   **无 Key 世界**（本机现状，也是验收口径之一）就属于这种情况 —— 挂在事件上的话，
+   *   提示词里永远看不到学段覆盖。放在这里则由本文件在**两条路径**上都显式调用，
+   *   无 Key 时也能把「本轮按哪个学段作答」拼出来（`state.lastPrompt` 就是断言证据）。
    */
   const chatFactory = (extensionApi: PiExtensionLike): void => {
     extensionApi.on('before_agent_start', (event: unknown) => {
       const base = (event as { systemPrompt?: unknown }).systemPrompt
       if (typeof base === 'string') state.basePromptSeen = base
-      const prompt = gradePromptFor(state.grade)
+      // ★ 单一入口：学段的替换/权威段全在 grade 扩展里（这里只负责接上链条）
+      const prompt = gradeExtension.systemPromptFor(typeof base === 'string' ? base : undefined)
       state.lastPrompt = prompt
       return { systemPrompt: prompt }
     })
@@ -366,8 +386,11 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   const resourceLoader = new pi.DefaultResourceLoader({
     cwd: options.cwd ?? paths.root,
     agentDir: paths.agentDir,
-    // 第一道：不让 Pi 拼默认 prompt（默认那份会列出 readme/docs 的绝对路径）
-    systemPromptOverride: () => gradePromptFor(state.grade),
+    // 第一道：不让 Pi 拼默认 prompt（默认那份会列出 readme/docs 的绝对路径）。
+    // ★ 学段是**推断**出来的（`extensions/grade.ts`），所以这里也走同一个出口 ——
+    //   两道覆盖（这里 + `before_agent_start`）必须给出**同一份**文本，否则第一轮
+    //   与后续轮次的提示词会不一致（前者带权威段、后者不带）。
+    systemPromptOverride: () => gradeExtension.systemPromptFor(undefined),
     // ★ 注册顺序 = 执行顺序（`before_agent_start` 的返回值链式叠加，后注册者看到前者结果）：
     //   ① 学段注入 + provider 边界审计（本文件的 chatFactory）
     //   ② 六个业务 Extension（票 08 的注册器）+ 轨迹扩展（票 08 基础设施）
@@ -405,7 +428,9 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       studentId: paths.studentId,
       // 会话 id 每轮重取：Pi 换会话文件（/new、branch）后 `learning_history.session_id` 要跟着变
       sessionId: sessionManager.getSessionId?.() ?? sessionId,
-      gradeLevel: state.grade
+      // ★ 学段来自**推断**（唯一权威来源）：`grade.ts` 的 `appliedGrade()`。
+      //   本地不再维护第二份学段状态（旧实现的 `state.grade` 会让「哪一份算数」变成猜谜）。
+      gradeLevel: gradeExtension.appliedGrade()
     })
   }
   bindCurrentSession()
@@ -442,6 +467,27 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     customTools
   })
 
+  /**
+   * ★ 学段装配自检（**常驻**，但只在异常时出声）：建完会话当场验证 prompt 出口能用。
+   *
+   * 为什么要有它：学段推断曾经**整体静默失灵**（`grade_signals` 0 行、prompt 里
+   * grep 不到学段），而进程、日志、UI 全都没有任何异常 —— 只有「没动静」。
+   * 一条「没动静」的故障不该靠人工读库才发现，所以这里主动做一次可判定的检查：
+   * `systemPromptFor()` 的输出**必须**含权威段标题，否则题词覆盖没生效。
+   * 通过时**保持安静**（不刷日志），失败时打一条 error 说清看哪里。
+   */
+  try {
+    const prompt = gradeExtension.systemPromptFor(undefined)
+    if (!prompt.includes(GRADE_OVERRIDE_HEADING)) {
+      console.error(
+        '[agent] 学段装配自检未通过：system prompt 里没有权威段标题（' +
+          `${GRADE_OVERRIDE_HEADING}）—— 学段覆盖不会生效，请检查 extensions/grade.ts 的 systemPromptFor`
+      )
+    }
+  } catch (error) {
+    console.error('[agent] 学段装配自检抛异常（学段推断本轮不可用）：', error)
+  }
+
   const auth = await modelRuntime.checkAuth(credentials.providerId)
   const authReady = auth !== undefined
   let disposed = false
@@ -454,7 +500,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     credentials: useProbe ? { ...credentials, offlineProbe: true, source: 'offline-probe', apiKey: undefined } : credentials,
     authReady,
     get gradeLevel() {
-      return state.grade
+      return gradeExtension.appliedGrade()
     },
     get lastSystemPrompt() {
       return state.lastPrompt
@@ -478,14 +524,20 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     },
     trace,
 
-    setGradeLevel(grade) {
-      return applyGrade(state, grade)
+    /**
+     * ★ 学段**由推断系统独占**：本方法已不再是「写入点」。
+     *
+     * 保留签名只是为了不破坏 `ChatRuntime` 的既有调用面；它现在**只回读**当前生效的学段
+     * （`gradeExtension.appliedGrade()`），任何传入值都不会写回去 —— 否则调用方就能把
+     * 推断结果顶掉，而「学段只由推断决定」是 §10 的硬约束（渲染进程连表达这个意图的能力都
+     * 不该有，`chapters.ts` 的字段注释与守卫 G6 都按这条口径）。
+     */
+    setGradeLevel(_grade) {
+      return gradeExtension.appliedGrade()
     },
 
     async runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome> {
-      // ★★ 学段**不在这里改**：客户端的 `gradeLevel` 不再权威（学段由推断系统决定），
-      //    本文件只保留 `state.grade` 作为冷启动兜底 —— 显式 `setGradeLevel()` 之外的
-      //    任何写入都会把推断结果顶掉（`extensions/grade.ts` 的 `before_agent_start` 才是落点）。
+      // ★★ 学段**不在这里改**：由 `extensions/grade.ts` 的推断独占。
 
       // ★★ 每轮绑定当前学生上下文（票 09）：见 `bindCurrentSession()` 的注释 ——
       //    学生身份**不是** Tool 参数，模型没有表达「读别人」的能力。
@@ -504,13 +556,30 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       const target = useProbe ? probeSink(sink) : sink
 
       try {
+        // ★★ 学段观察必须在**这里**、在**两条对话路径之前**（票 21 返工的核心）：
+        //    `grade.ts` 原本把观察挂在 Pi 的 `input` 事件上，而下面「无 Key」那条分支
+        //    **不会调用 `session.prompt()`** —— 于是 `input` 一次都不发，学段永远不动。
+        //    观察本身只是「收证据 + 交给服务端」，与能否连上模型无关（第一层规则引擎不用 LLM）。
+        //    同步返回、fire-and-forget 上交：绝不拖慢本轮对话。
+        //    ⚠️ 顺便完成「上一轮判定 → 本轮生效」的交接（`applyPending` 就在这里面）。
+        gradeExtension.observeTurn(input.text)
+        // ★ 交接之后**再绑一次**：本轮的事件处理器（`agent_end` 写学习记录、Tool 读画像/题库）
+        //   必须看到「本轮真正生效的学段」，而不是上一轮那一份。两次调用都是纯对象赋值，很便宜。
+        bindCurrentSession()
+
         // 无 Key：**不调 prompt()**，直接给可读结论（Pi 在 prompt() 最开头就会因缺凭证抛错，
         // 且那时连 `before_agent_start` 都不会触发 —— 所以在这里前置判定，文案才不会退化成异常）
         if (!credentials.apiKey && !useProbe) {
+          // ★ 无 Key 也要把「本轮按哪个学段作答」拼出来：它是 `chat-system-prompt.txt` 的证据来源，
+          //   与真正发出去的那份**同一个函数**（`systemPromptFor`），不是另写一份。
+          state.lastPrompt = gradeExtension.systemPromptFor(undefined)
+          dumpPrompts(paths, state)
           emitTerminal(sink, MISSING_KEY_MESSAGE)
           return { ok: false, status: 'missing-key', detail: `key来源=${credentials.source}` }
         }
         if (!authReady) {
+          state.lastPrompt = gradeExtension.systemPromptFor(undefined)
+          dumpPrompts(paths, state)
           emitTerminal(sink, `${MISSING_KEY_MESSAGE}（供应商凭证检查未通过）`)
           return { ok: false, status: 'missing-key', detail: 'checkAuth 未通过' }
         }
@@ -547,17 +616,34 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     },
 
     /**
+     * ★ 等排队的学段证据上交完毕（见 `ChatRuntime.flushGrades` 的接口注释）。
+     *
+     * `gradeExtension.flush()` 内部已经兜了全部异常（提交失败只记日志、计数），所以这里
+     * 不会再抛 —— 调用方在**对话路径**上，不能因为学段队列出问题就把这一轮带崩。
+     */
+    async flushGrades() {
+      await gradeExtension.flush()
+    },
+
+    /**
      * ★ 幂等：`before-quit` 与窗口销毁都可能触发（Pi 的 JSONL 必须在进程退出前 flush）。
      *
-     * 顺序：① 导出工具调用轨迹（**读内存**，dispose 之后照样能导，但放在前面语义更清楚）
-     *       ② `session.dispose()` 把 JSONL flush 干净。
-     * 两者都在 try/catch 里：收尾失败不该把退出流程卡住（调用方是 `before-quit`）。
+     * 顺序：① 等学段队列走完（**最后一个 `/api` 调用方**，必须排在 sidecar 停之前）
+     *       ② 导出工具调用轨迹（**读内存**）
+     *       ③ `session.dispose()` 把 JSONL flush 干净。
+     * 每一步都在 try/catch 里：收尾失败不该把退出流程卡住（调用方是 `before-quit`）。
      */
     async dispose() {
       if (disposed) return
       disposed = true
       // 诊断（`K12_PI_TRACE=1`）：退出路径上「有没有真的调到 dispose」必须可观测
       if (tracePiEvents) console.warn('[pi] session.dispose() 已调用（JSONL flush）')
+      try {
+        // 别把最后一轮的学段证据丢在队列里（`flush()` 自己吞异常，这里再兜一次是防未知）
+        await gradeExtension.flush()
+      } catch {
+        // 学段队列收尾失败不影响退出
+      }
       exportTrace()
       try {
         session.dispose()
@@ -602,18 +688,6 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
 /* ------------------------------------------------------------------ *
  * 小工具
  * ------------------------------------------------------------------ */
-
-/**
- * 学段写入的唯一实现点（`setGradeLevel()` 走它）：非法值落到默认学段（**不推断、不猜测**）。
- *
- * ⚠️ `runTurn()` **不调用它**：学段不再由客户端参数驱动（学段推断见 `extensions/grade.ts`），
- *    每轮重设会让推断结果被渲染进程传来的历史值顶回去。
- */
-function applyGrade(state: RuntimeState, grade: GradeLevel | string | undefined): GradeLevel {
-  const next = normalizeGradeLevel(grade)
-  state.grade = next
-  return next
-}
 
 /** 发终态（`error` + `done`）：保证 UI 永远从「正在回答」里出来。 */
 function emitTerminal(sink: ChatTurnSink, message: string): void {

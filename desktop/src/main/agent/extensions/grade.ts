@@ -4,11 +4,34 @@
  * 设计（旧设计「学生手选 + 推断只给建议」已废止）：
  *
  * ```text
- * 每轮 input ──▶ 上交本轮证据 ──▶ Python：signals.py 提取四类信号（不调 LLM）
- *                                    └─▶ rules.py 规则引擎（最终决策者）
- *                                          └─▶ 必要时原子改 learning.db 的 student.grade_level
- *   下一轮 before_agent_start ──▶ 用**新学段**的模板拼 system prompt（学生无感）
+ * 每轮开始 ──▶ 上交本轮证据 ──▶ Python：signals.py 提取四类信号（不调 LLM）
+ *                                  └─▶ rules.py 规则引擎（最终决策者）
+ *                                        └─▶ 必要时原子改 learning.db 的 student.grade_level
+ *   同一轮拼 prompt ──▶ 用**已交接的**学段拼 system prompt（学生无感）
  * ```
+ *
+ * ★★ **本扩展不再订阅任何 Pi 事件**（票 21 的返工，2026-09-16 实测结论）。
+ *
+ * 原设计把观察挂在 `pi.on('input')`、把 prompt 覆盖挂在 `pi.on('before_agent_start')`。
+ * 实测这两条在**本项目的 SDK 嵌入形态**下都不可靠，理由分两层、都不是「Pi 的 hook 坏了」：
+ *
+ * 1. **`input` 只在真的调用 `session.prompt()` 时才发**。Pi 的 `prompt()` 里
+ *    `emitInput()` 是第一句（`agent-session.js`），但本项目在**无 API Key** 时会
+ *    `runTurn()` 前置判定并**直接 return，根本不调 `prompt()`**（`runtime.ts` 的
+ *    「无 Key：不假装、不静默、不挂起」分支）—— 于是观察一次都不发生。
+ *    「无 Key 也要能推学段」是硬要求（第一层规则引擎不依赖 LLM），所以观察**不能**挂在 `input` 上。
+ * 2. **`before_agent_start` 在 Pi 里排在凭证校验之后**（`prompt()` 先 `hasConfiguredAuth`，
+ *    不过就抛 `No API key found`，`emitBeforeAgentStart()` 永远到不了）。也就是说即便调了
+ *    `prompt()`，无 Key 时 prompt 覆盖也不会触发 —— 它只能在「真的会有 provider 请求」时生效。
+ *
+ * 结论（**这就是当前实现**）：
+ *   - **观察**：由 `runtime.ts` 在每轮开始**显式调用** {@link GradeExtension.observeTurn}
+ *     （唯一入口、唯一提交路径，不存在双份计数）；
+ *   - **prompt 覆盖**：由 `runtime.ts` 的 `chatFactory` 在 `before_agent_start` 里用
+ *     {@link buildGradeSystemPrompt} 拼（同样唯一一处），并在末尾**始终**追加
+ *     {@link GRADE_OVERRIDE_HEADING} 权威段，使「本轮按哪个学段作答」在提示词里**可审计**
+ *     （旧实现靠「整份模板替换」，模板相同时静默不动，线上根本看不出覆盖有没有生效）。
+ *   - 本文件保留**纯逻辑 + 出口**，因此它同时是可单测的（不 import Pi、不发 HTTP）。
  *
  * ★ 五条纪律（都不是实现细节）：
  *
@@ -16,15 +39,14 @@
  *    （`{turn, text, sessionId}` + 可选的第二层提议）。判据全在 `server/app/grade/signals.py`，
  *    两份实现必然漂移，而漂移的表现是「学段莫名乱动」。
  * 2. **决策在服务端**：本文件只认服务端回的 `grade`，不自己算阈值、不自己判方向。
- * 3. **下一轮生效**：服务端在第 N 轮判定出的学段在**第 N+1 轮**的 `before_agent_start` 生效
- *    （`pendingGrade` → `appliedGrade` 的交接发生在下一次 `input`）。学生看不到「切换」事件，
+ * 3. **下一轮生效**：服务端在第 N 轮判定出的学段在**第 N+1 轮**的 prompt 生效
+ *    （`pendingGrade` → `appliedGrade` 的交接发生在下一次 `observeTurn`）。学生看不到「切换」事件，
  *    这正是执行文档 §10.4 要求的「无感」。
- * 4. **绝不阻塞对话**：`input` 里的上交是 fire-and-forget（判定的产物下一轮才用），
- *    失败只记日志；`before_agent_start` 是**同步**的，绝不 await 网络。
- * 5. **链式保真**：`before_agent_start` 的返回值会被 Pi **链式叠加**（后注册者看到前者结果）。
- *    别的扩展（`runtime.ts` 的 chatFactory 等）已经把学段 prompt 拼好了，本扩展
- *    **只在学段确实变化时**替换其中的模板片段，并在末尾追加覆盖块作为兜底 ——
- *    绝不整段丢弃别人的内容（那会把「抹掉宿主路径泄漏」的那道覆盖一起冲掉）。
+ * 4. **绝不阻塞对话**：`observeTurn` 里的上交是 fire-and-forget（判定的产物下一轮才用），
+ *    失败只记日志；prompt 拼装是**同步纯函数**，绝不 await 网络。
+ * 5. **链式保真**：{@link buildGradeSystemPrompt} 只在**认得出**别的扩展用的是哪份学段模板时
+ *    原地替换片段，认不出就原样保留别人的内容再追加权威段 —— 绝不整段丢弃别人的内容
+ *    （那会把「抹掉宿主路径泄漏」的那道覆盖一起冲掉）。
  *
  * ★ 第二层（一次轻量 LLM 判定）走**可注入的 judge**：Pi 的 `ExtensionAPI` 面上没有
  *   completion 能力（只有 `ctx.model` / `ctx.modelRegistry`），所以接线要由 `runtime.ts`
@@ -36,8 +58,10 @@
 import type { GradeLevel } from '@shared/ipc-events'
 import {
   DEFAULT_GRADE_LEVEL,
+  GRADE_LABELS,
   GRADE_LEVELS,
   GRADE_PROMPTS,
+  GRADE_STYLES,
   gradePromptFor,
   normalizeGradeLevel
 } from '../prompts/grade.ts'
@@ -69,7 +93,10 @@ export const gradeTurnsPath = (studentId: string): string =>
   `/api/grade/turns/${encodeURIComponent(studentId)}`
 
 /**
- * 追加式覆盖块的标题（**只在认不出别的扩展拼的是哪份模板时**才用）。
+ * 追加式权威段的标题（`buildGradeSystemPrompt` 的产物里**始终**有它）。
+ *
+ * ★ 它不再只是「认不出别的扩展模板时的兜底块」：从返工起，它同时是
+ *   **「覆盖到底有没有生效」的唯一可判定标志**（wire prompt 里 grep 得到它 = 学段落点在工作）。
  * 用中文写，是为了让模型一眼看出这一段是权威的学段指令。
  */
 export const GRADE_OVERRIDE_HEADING = '## 学段（系统自动推断，以此段为准）'
@@ -175,7 +202,25 @@ export interface GradeExtensionOptions {
 
 /** `grade` 扩展 = 工厂 + 诊断/接线入口（**诊断不进 LLM 上下文**）。 */
 export interface GradeExtension {
+  /**
+   * 工厂。★ **本扩展不再订阅任何 Pi 事件**（理由见文件头）：工厂本身是空实现，
+   * 能力全部经 {@link observeTurn} / {@link systemPromptFor} 由 `runtime.ts` 显式驱动。
+   * 保留它是因为 `extensions/index.ts` 的注册器按「是不是一个函数」判定扩展是否就位。
+   */
   (pi: AgentExtensionApi): void
+  /**
+   * ★★ **唯一的观察入口**：`runtime.ts` 在**每轮开始时**调用一次（不论有没有 API Key ——
+   * 无 Key 时 `session.prompt()` 根本不会被调用，`input` 事件一次都不发）。
+   * 同步返回，绝不阻塞本轮对话；本轮的判定结果**下一轮**才用。
+   */
+  observeTurn(text: string): void
+  /**
+   * 本轮 system prompt（**同步纯逻辑**）：`runtime.ts` 的 `before_agent_start` 里调用。
+   * 末尾始终带 {@link GRADE_OVERRIDE_HEADING} 权威段，使覆盖在提示词里可审计。
+   */
+  systemPromptFor(incoming: string | undefined): string
+  /** 当前生效学段（诊断；`before_agent_start` 用的就是它）。 */
+  appliedGrade(): GradeLevel
   /** 接线第二层判定通道（`runtime.ts` 建会话后调用；不接线 = 干净降级）。 */
   useJudge(judge: Layer2Judge | null): void
   snapshot(): GradeExtensionStats
@@ -190,26 +235,6 @@ export interface GradeExtension {
 /* ------------------------------------------------------------------ *
  * 纯函数（可单测）
  * ------------------------------------------------------------------ */
-
-/** 从 `input` 事件里取学生输入（只认 `text`，别把别的字段当正文）。 */
-export function readInputText(event: unknown): string {
-  if (!event || typeof event !== 'object') return ''
-  const record = event as Record<string, unknown>
-  if (typeof record.text === 'string') return record.text
-  return ''
-}
-
-/**
- * 这一条 input 是否算「学生说的一句话」。
- *
- * `source === "extension"` 的内容是别的扩展注入的（不是学生打的字），
- * 用它去推学段会自我循环 —— 直接跳过。
- */
-export function isStudentTurn(event: unknown): boolean {
-  if (!event || typeof event !== 'object') return false
-  const source = (event as Record<string, unknown>).source
-  return source === undefined || source === 'interactive' || source === 'rpc'
-}
 
 /** 截断到上限（服务端也会再挡一道；这里先截，免得白传）。 */
 export function clampTurnText(text: string): string {
@@ -318,27 +343,64 @@ export function swapKnownGradeTemplate(incoming: string, target: string): string
 }
 
 /**
- * `before_agent_start` 的 prompt 组装（**纯函数**，链式语义全在这里）。
+ * 本轮 system prompt 的组装（**纯函数**，链式语义全在这里）。
  *
- * 三种情形：
- *   - 别的扩展**没给** prompt（`undefined`/空）→ 返回推断学段的模板
- *     （★ 绝不能返回 `undefined`：那等于放弃覆盖，Pi 的默认 prompt 会把宿主安装路径发出去）；
- *   - 已经是目标模板 → 返回 `undefined`（**不动链条**，谁也别改谁）；
- *   - 是别的学段的模板 → 原地替换模板片段，保留其余内容；
- *     认不出来（别的扩展拼了自定义 prompt）→ 原样保留 + 追加一段权威覆盖块。
+ * ★ 与旧实现（`mergeGradePrompt`）的关键差异：**学段没变时也要追加权威段**。
+ *   旧实现「已经是目标模板 → 返回 `undefined`，不动链条」，于是**提示词里没有任何痕迹**
+ *   能证明覆盖真的生效了 —— 这一条正是票 21 返工的起因（wire prompt 里 grep 不到
+ *   推断学段，只能去读磁盘上的模板文件反推）。现在的语义是：
+ *
+ *   - 别的扩展**没给** prompt（`undefined`/空）→ 直接给出目标模板；
+ *   - 认得出别的扩展用的是**别的学段**模板 → 原地替换该片段（保留其余内容）；
+ *   - 已经是目标模板 / 认不出的自定义 prompt → 原样保留；
+ *   然后**一律**在最末尾追加权威段（{@link GRADE_OVERRIDE_HEADING}），使「本轮按哪个学段
+ *   作答」在提示词里**始终可审计**。目标模板不在基座里时才在权威段里补上，避免同一份
+ *   模板在一个 prompt 里出现两遍（约 2.5k token，不能白花）。
+ *
+ * 权威段是**幂等**的：重复拼装不会叠出第二段（见 {@link stripGradeOverride}）。
  */
-export function mergeGradePrompt(params: {
+export function buildGradeSystemPrompt(params: {
   incoming: string | undefined
   inferredGrade: GradeLevel
-}): string | undefined {
+}): string {
   const target = gradePromptFor(params.inferredGrade)
   const incoming = params.incoming
-  if (typeof incoming !== 'string' || incoming.trim() === '') return target
-  if (incoming === target) return undefined
-  if (incoming.includes(target)) return undefined
-  const swapped = swapKnownGradeTemplate(incoming, target)
-  if (swapped !== null) return swapped
-  return `${incoming}\n\n${GRADE_OVERRIDE_HEADING}\n${target}`
+  if (typeof incoming !== 'string' || incoming.trim() === '') {
+    return withGradeOverride(target, params.inferredGrade, false)
+  }
+  const bare = stripGradeOverride(incoming)
+  const merged = bare.includes(target) ? bare : (swapKnownGradeTemplate(bare, target) ?? bare)
+  return withGradeOverride(merged, params.inferredGrade, !merged.includes(target))
+}
+
+/**
+ * 去掉上一次追加的权威段（幂等的前提）。
+ *
+ * 权威段总是**拼在最末尾**且以 {@link GRADE_OVERRIDE_HEADING} 起头，所以「最后一次出现」
+ * 之后的内容就是我们要替换掉的；找不到标题时原样返回（不动别人的 prompt）。
+ */
+export function stripGradeOverride(prompt: string): string {
+  const at = prompt.lastIndexOf(GRADE_OVERRIDE_HEADING)
+  if (at < 0) return prompt
+  return prompt.slice(0, at).replace(/\s+$/, '')
+}
+
+/**
+ * 追加权威段（**幂等**：先剥掉旧的再追加，链式调用不会叠出多段）。
+ *
+ * 段落用中文写清「这是系统自动推断的结果」并点名学段与语言风格 ——
+ * 模型一眼认出这段是权威指令；`includeTemplate` 为真时再补上模板全文
+ * （只在基座里认不出目标模板时才需要）。
+ */
+function withGradeOverride(prompt: string, grade: GradeLevel, includeTemplate: boolean): string {
+  const base = stripGradeOverride(prompt).trim()
+  const lines = [
+    GRADE_OVERRIDE_HEADING,
+    `- 本轮按「${GRADE_LABELS[grade] ?? grade}」作答（更高学段的问题按该学段的处置办法回答）。`,
+    `- 语言风格：${GRADE_STYLES[grade] ?? ''}`
+  ]
+  const overlay = includeTemplate ? `${lines.join('\n')}\n\n${gradePromptFor(grade)}` : lines.join('\n')
+  return base === '' ? overlay : `${base}\n\n${overlay}`
 }
 
 /* ------------------------------------------------------------------ *
@@ -564,62 +626,76 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     }
   }
 
-  const extension = ((pi: AgentExtensionApi): void => {
-    // ── ① 学生开口：先交接上一轮的判定，再上交本轮证据（fire-and-forget） ──
-    pi.on('input', (event: unknown) => {
-      try {
-        if (!isStudentTurn(event)) return undefined // 别的扩展注入的内容不算学生的一轮
-        const text = readInputText(event)
-        const session = sessionProvider()
-        trackBoundary(session)
+  /**
+   * ★★ **唯一的观察入口**（票 21 返工）：由 `runtime.ts` 在每轮开始时调用。
+   *
+   * 为什么不是 `pi.on('input', …)`：见文件头「不再订阅任何 Pi 事件」的第 1 条 ——
+   * 无 Key 时 `runTurn()` 根本不会调 `session.prompt()`，`input` 一次都不发，
+   * 而「无 Key 也要能推学段」是硬要求。**同步返回，绝不阻塞本轮对话**：判定结果下一轮才用。
+   *
+   * 语义（与旧 `input` 处理器**逐条不变**，只是入口换了）：
+   *   ① 交接上一轮判定出的学段 → ② 累计本轮证据 → ③ 串行上交（fire-and-forget）。
+   */
+  const observeTurn = (text: string): void => {
+    try {
+      const clean = typeof text === 'string' ? text : ''
+      const session = sessionProvider()
+      trackBoundary(session)
 
-        applyPending()
-        turn += 1
-        const turnIndex = turn
-        if (text.trim()) {
-          buffer.push({ turn: turnIndex, text: clampTurnText(text) })
-          if (buffer.length > LAYER2_WINDOW_TURNS) buffer = buffer.slice(-LAYER2_WINDOW_TURNS)
-        }
-
-        // ★ 串行排队：这一轮的判定结果下一轮才用，绝不让本轮对话等它
-        //   （`.catch` 只是保住队列：`submitTurn` 自己已经兜了异常，这里再兜一次是防止
-        //    队列被一个漏网的 reject 卡死 —— 卡死之后所有轮次都不再上交，且没有任何报错）
-        queue = queue
-          .then(() => submitTurn(turnIndex, text, session?.sessionId ?? ''))
-          .catch((error: unknown) => {
-            failed += 1
-            lastError = error instanceof Error ? error.message : String(error)
-            log(`[grade] 学段证据上交队列异常（已恢复）：${lastError}`, 'warn')
-          })
-      } catch (error) {
-        // 事件处理器里绝不抛：Pi 与 UI 同进程
-        log(
-          `[grade] 本轮学段观察失败（已忽略，不影响对话）：${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          'warn'
-        )
+      applyPending()
+      turn += 1
+      const turnIndex = turn
+      if (clean.trim()) {
+        buffer.push({ turn: turnIndex, text: clampTurnText(clean) })
+        if (buffer.length > LAYER2_WINDOW_TURNS) buffer = buffer.slice(-LAYER2_WINDOW_TURNS)
       }
-      return undefined // 不参与文本改写：随便返回一个 action 会顶掉别的扩展的决定
-    })
 
-    // ── ② 每轮开始：按**推断出的**学段拼 system prompt（链式保真） ──
-    pi.on('before_agent_start', (event: unknown) => {
-      try {
-        const incoming = (event as { systemPrompt?: unknown } | undefined)?.systemPrompt
-        const merged = mergeGradePrompt({
-          incoming: typeof incoming === 'string' ? incoming : undefined,
-          inferredGrade: appliedGrade
+      // ★ 串行排队：这一轮的判定结果下一轮才用，绝不让本轮对话等它
+      //   （`.catch` 只是保住队列：`submitTurn` 自己已经兜了异常，这里再兜一次是防止
+      //    队列被一个漏网的 reject 卡死 —— 卡死之后所有轮次都不再上交，且没有任何报错）
+      queue = queue
+        .then(() => submitTurn(turnIndex, clean, session?.sessionId ?? ''))
+        .catch((error: unknown) => {
+          failed += 1
+          lastError = error instanceof Error ? error.message : String(error)
+          log(`[grade] 学段证据上交队列异常（已恢复）：${lastError}`, 'warn')
         })
-        return merged === undefined ? undefined : { systemPrompt: merged }
-      } catch (error) {
-        // 兜底：出任何意外也要给出学段模板（绝不放行 Pi 的默认 prompt）
-        log(`[grade] 学段 prompt 组装失败，退回默认模板：${error instanceof Error ? error.message : String(error)}`, 'warn')
-        return { systemPrompt: gradePromptFor(appliedGrade) }
-      }
-    })
+    } catch (error) {
+      // 调用方在主进程的对话路径上：这里绝不抛（Pi 与 UI 同进程）
+      log(
+        `[grade] 本轮学段观察失败（已忽略，不影响对话）：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        'warn'
+      )
+    }
+  }
+
+  /** 本轮 system prompt（**同步纯逻辑**，`runtime.ts` 的 `before_agent_start` 调它）。 */
+  const currentSystemPrompt = (incoming: string | undefined): string => {
+    try {
+      return buildGradeSystemPrompt({ incoming, inferredGrade: appliedGrade })
+    } catch (error) {
+      // 兜底：出任何意外也要给出学段模板（绝不放行 Pi 的默认 prompt）
+      log(`[grade] 学段 prompt 组装失败，退回默认模板：${error instanceof Error ? error.message : String(error)}`, 'warn')
+      return gradePromptFor(appliedGrade)
+    }
+  }
+
+  /**
+   * 工厂**故意为空**：本扩展的能力全部经 {@link GradeExtension.observeTurn} /
+   * {@link GradeExtension.systemPromptFor} 由 `runtime.ts` 显式驱动（理由见文件头）。
+   *
+   * 但工厂仍然保留 —— `extensions/index.ts` 的注册器按「是不是一个函数」判定扩展是否就位，
+   * 去掉它会让注册报告里 grade 变成「未注册」，而它其实是在工作的。
+   */
+  const extension = ((_pi: AgentExtensionApi): void => {
+    // 无 Pi 事件订阅（刻意的，见文件头）。保留空工厂只为让注册器把它算作「已就位」。
   }) as GradeExtension
 
+  extension.observeTurn = observeTurn
+  extension.systemPromptFor = currentSystemPrompt
+  extension.appliedGrade = () => appliedGrade
   extension.useJudge = (next: Layer2Judge | null): void => {
     judge = next
     warnedNoJudge = false

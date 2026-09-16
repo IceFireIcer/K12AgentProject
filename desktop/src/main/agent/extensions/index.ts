@@ -171,8 +171,13 @@ export const AGENT_EXTENSION_SPECS: readonly AgentExtensionSpec[] = [
     ticket: '21',
     file: './grade.ts',
     tools: [],
-    events: ['before_agent_start', 'input', 'tool_call'],
-    dependsOn: ['四学段 system prompt 模板', 'tool_call 安全阀（票 22）']
+    // ★ **空数组是有意的**（2026-09-16 返工）：本扩展**不订阅任何 Pi 事件**。
+    //   原设计订阅 `input`（收证据）+ `before_agent_start`（拼 prompt），但实测两条在
+    //   「无 API Key」这条主路径上都不会触发（`prompt()` 根本不被调用 / 排在凭证校验之后），
+    //   于是学段永远不动。现在由 `runtime.ts` 在每轮开始时**显式调用**
+    //   `observeTurn()` / `systemPromptFor()`（见 `grade.ts` 文件头的完整论证）。
+    events: [],
+    dependsOn: ['四学段 system prompt 模板', 'runtime.ts 显式驱动（observeTurn / systemPromptFor）']
   },
   {
     name: 'learning-log',

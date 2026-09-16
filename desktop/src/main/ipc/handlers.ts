@@ -400,6 +400,14 @@ async function runChatTurn(text: string, handle: TurnHandle): Promise<void> {
     }
     // ★ 学段是**推断**出来的：每轮结束后读一次 sidecar 的真值，变了才推送。
     //   放在本轮之后（不是之前）—— 推断的输入就是这一轮的内容。
+    //
+    // ★★ 必须先 `flushGrades()`（票 21 返工）：`grade.ts` 的观察是**本轮开始时**
+    //   发起、**不阻塞本轮对话**的（fire-and-forget）。不 flush 就直接读库，
+    //   读到的是**上一轮**的结论 —— 只读徽章会永远慢一拍（实测过：连发三句
+    //   递进提问，界面始终停在第一次的学段上）。flush 内部已兜异常，不会抛。
+    //   注意：这不是「本轮生效」—— 服务端判出的新学段**下一轮**才进 system prompt，
+    //   但**徽章应当立刻反映已落库的真值**（学生看得见系统的适配）。
+    await instance.flushGrades().catch(() => {})
     pushGradeState(await readGradeState(instance))
   } catch (error) {
     // 兜底：runTurn 自己已经兜了异常，这里防的是「兜底逻辑本身出错」——绝不让它冒成未捕获异常
