@@ -37,8 +37,9 @@ if str(ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.config import build_runtime_config  # noqa: E402
+from app.config import KNOWLEDGE_DIR, build_runtime_config  # noqa: E402
 from app.contracts import MASTERY_DELTA_LIMIT, QuizQuestion, QuizQuestionOut  # noqa: E402
+from app.knowledge.library import GRADE_LEVELS, compatible_grades, load_library  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.routes.quiz import (  # noqa: E402
     BADGE_LEVELS,
@@ -153,6 +154,39 @@ class LoopCase(unittest.TestCase):
             if item["kpId"] == kp_id:
                 return item
         return None
+
+    def set_grade(self, grade_level: str) -> str:
+        """给当前学生**显式**设定学段（走真实的学生行，不是请求参数）。
+
+        ★ 学段必须落在 ``learning.db`` 的学生行上：关卡路径与解锁判定都
+        **只认服务端的学生记录**（客户端自述不算数，见 AGENTS §5.1）。
+        """
+        from app.routes.quiz import student_db_path  # noqa: PLC0415
+
+        store = LearningStore(student_db_path(self.tmp, self.student))
+        try:
+            store.upsert_student(self.student, nickname="", grade_level=grade_level)
+        finally:
+            store.close()
+        return grade_level
+
+    def walk_path(self, *, grade_level: str) -> list[dict]:
+        """★ 真实走一遍该学段的关卡路径：逐关取题（HTTP），返回逐关结果。
+
+        返回每项 ``{kpId, gradeLevel, status}``（``status`` 是 ``/api/quiz/bank`` 的
+        HTTP 状态码）。**真的发请求**，不是从依赖图里结构推导 —— 死胡同的表现就是
+        「进度条上有这一关、取题却 404」，只有走一遍才抓得住。
+        """
+        body = self.progress().json()
+        rows: list[dict] = []
+        for item in body["levels"]:
+            response = self.client.get(
+                f"/api/quiz/bank/{item['kpId']}", params={"gradeLevel": grade_level}
+            )
+            rows.append(
+                {"kpId": item["kpId"], "gradeLevel": grade_level, "status": response.status_code}
+            )
+        return rows
 
     def query(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         db = self.tmp / "students" / self.student / "learning.db"
@@ -598,14 +632,26 @@ class TestGateD(LoopCase):
     ★ 注意：`jr-py-variable` 在整条链的第 5 跳，冷启动时它是 `locked` 的。
       所以这里的做法是**先把链上的前置逐关打过去，再在目标关做关卡 D 的观测** ——
       这既是真实的闯关流程，也让「答对 A → 下一关是 A 的后继」这条被完整走一遍。
+
+    ★★ **夹具的学段被显式钉在 ``junior``（这是本类唯一一处前提修正，见下面 ``setUp``）**：
+      `jr-py-variable` / `jr-py-loop` 是**初中**知识点，而本类的断言全部关于
+      「逐关打通 → 后继被放出来」这个**机制**，与学段无关。以前夹具依赖
+      「冷启动默认学段（`primary_high`）也能看到初中关卡」，而那个前提正是本文件要修掉的
+      死胡同（`primary_high` 学生看得到、但取不到 `jr-*` 的题）。所以改成
+      「把学生的学段显式设成 `junior`，在这条本来就是为初中设计的演示线上走一遍」——
+      机制断言逐条保留，只是不再跨学段取材。
     """
 
     CURRENT = "jr-py-variable"
     NEXT = "jr-py-loop"
+    #: 本类学生显式学段：让 ``CURRENT`` / ``NEXT`` 落在兼容范围内（见类文档）。
+    GRADE = "junior"
 
     def setUp(self) -> None:
         super().setUp()
         self.set_student("student_gate_d")
+        # ★ 先设学段再冷启动：关卡路径与解锁判定都只认服务端学生行上的学段。
+        self.set_grade(self.GRADE)
         self.exit_stack_ok = True
 
     def _unlock(self, kp_id: str) -> None:
@@ -617,7 +663,7 @@ class TestGateD(LoopCase):
             _variant(f"unlock-{kp_id}-{i}", kp_id, stem=f"练习 {i}", answer="2")
             for i in range(1, 5)
         ]
-        response = self.register(questions, grade="junior")
+        response = self.register(questions, grade=self.GRADE)
         self.assertEqual(response.status_code, 200, response.text)
         for item in response.json()["questions"]:
             graded = self.grade(item["qid"], "2")
@@ -631,7 +677,7 @@ class TestGateD(LoopCase):
             _variant(f"{qid_prefix}-{i}", self.CURRENT, stem=f"变量练习 {i}", answer="2")
             for i in range(1, count + 1)
         ]
-        response = self.register(questions, grade="junior")
+        response = self.register(questions, grade=self.GRADE)
         self.assertEqual(response.status_code, 200, response.text)
         return [item["qid"] for item in response.json()["questions"]]
 
@@ -873,6 +919,198 @@ class TestGateD(LoopCase):
 
 
 # --------------------------------------------------------------------------- #
+# 6.5 ★★ 关卡路径必须被学段隔离约束住（死胡同回归）
+# --------------------------------------------------------------------------- #
+@unittest.skipUnless(REAL_KB.exists(), f"缺少真实知识库 {REAL_KB}（先跑 scripts/build_kb.py）")
+class TestPathIsScopedToTheStudentsGrade(LoopCase):
+    """★★ 「路径里的每一关都取得到题」—— 这是本次修复的**唯一目的**。
+
+    缺陷形态（修之前实测）：:func:`_default_level_order` 走**全图 33 关**，
+    而 :func:`select_questions` 按学段隔离 —— 冷启动的 ``primary_high`` 学生拿到 33 关，
+    其中 **16 关是初中/高中**，取题全部 **404**。普通游玩就能走到：
+    小学高年级掌握 ``ph-image-classification`` → 解锁初中后继 ``jr-data-features``
+    → 该关在前端是可点的，取题却 404，闭环在**计分功能**里断掉。
+
+    本类对**四个学段各走一遍完整路径**（真发 HTTP 逐关取题），断言：
+
+    1. ★ 每一关都取得到题（``404 count = 0``）—— 真走一遍，不做结构推导；
+    2. ★ 路径里**不得出现高于该学生学段**的关卡（初中生看不到高中内容）；
+    3. ★ 学段隔离**没有被削弱**：该学生路径之外的更高学段 kp，
+       直接请求仍然 **404**（证明修的是「路径范围」而不是「取题的隔离」）；
+    4. 前置必须排在后继之前（路径仍是拓扑序）。
+    """
+
+    def _kp_grades(self) -> dict[str, str]:
+        """知识点 → 学段（读教材，**不猜**）。"""
+        return {doc.kp_id: doc.grade_level for doc in load_library(KNOWLEDGE_DIR)}
+
+    def _successors(self, kp_id: str) -> list[str]:
+        """依赖图里的直接后继（用真 kb，与解锁判定同一个数据来源）。"""
+        from app.knowledge.deps import successors  # noqa: PLC0415
+        from app.store.connections import connect  # noqa: PLC0415
+
+        conn = connect(self.tmp / "shared" / "kb.sqlite", readonly=True)
+        try:
+            return [row.kp_id for row in successors(conn, kp_id, max_depth=1)]
+        finally:
+            conn.close()
+
+    def _walk(self, grade_level: str) -> tuple[list[str], list[dict]]:
+        """把学生设成 ``grade_level``、冷启动，再逐关取题。返回 ``(路径, 逐关结果)``。"""
+        self.set_student(f"student_scope_{grade_level}")
+        self.set_grade(grade_level)
+        body = self.progress().json()
+        self.assertEqual(body["gradeLevel"], grade_level, "学生学段应来自服务端记录")
+        path = [item["kpId"] for item in body["levels"]]
+        self.assertTrue(path, f"{grade_level} 的关卡路径不该为空（冷启动必须能开始）")
+        rows = self.walk_path(grade_level=grade_level)
+        self.assertEqual(
+            [row["kpId"] for row in rows], path, "逐关取题的顺序应与进度路径一一对应"
+        )
+        return path, rows
+
+    def test_every_level_in_each_grades_path_is_fetchable(self) -> None:
+        """★★ 四个学段各走一遍完整路径：**每一关都要取得到题**（0 × 404）。"""
+        grades = self._kp_grades()
+        sizes: dict[str, int] = {}
+        for grade_level in GRADE_LEVELS:
+            with self.subTest(grade=grade_level):
+                path, rows = self._walk(grade_level)
+                sizes[grade_level] = len(path)
+
+                missing = [row["kpId"] for row in rows if row["status"] == 404]
+                detail = "\n".join(
+                    f"  - {row['kpId']}（{grades.get(row['kpId'], '?')}）→ HTTP {row['status']}"
+                    for row in rows
+                    if row["status"] != 200
+                )
+                self.assertEqual(
+                    missing,
+                    [],
+                    f"★ {grade_level} 的关卡路径里有 {len(missing)} 关取不到题"
+                    f"（死胡同！）：\n{detail}",
+                )
+
+        # 路径规模随学段单调不减（兼容范围是「本学段 + 更低学段」的累积）
+        ordered = [sizes[grade] for grade in GRADE_LEVELS]
+        self.assertEqual(ordered, sorted(ordered), f"各学段路径规模应单调不减：{sizes}")
+
+    def test_no_level_in_the_path_is_above_the_students_grade(self) -> None:
+        """★ 路径里不得出现高于该学生学段的关卡（学段隔离的第一半）。"""
+        grades = self._kp_grades()
+        for grade_level in GRADE_LEVELS:
+            with self.subTest(grade=grade_level):
+                allowed = set(compatible_grades(grade_level))
+                path, _ = self._walk(grade_level)
+                offenders = [kp for kp in path if grades.get(kp) not in allowed]
+                self.assertEqual(
+                    offenders,
+                    [],
+                    f"★ {grade_level} 的路径里出现了兼容范围（{sorted(allowed)}）外的关卡："
+                    f"{[(kp, grades.get(kp)) for kp in offenders]}",
+                )
+                # 每关的学段都要**真的读得到**（教材里没有的 kp 是另一种静默错误）
+                unknown = [kp for kp in path if kp not in grades]
+                self.assertEqual(unknown, [], f"路径里有教材查不到的 kp：{unknown}")
+
+    def test_higher_grade_successor_is_absent_from_path_but_still_404_on_direct_fetch(
+        self,
+    ) -> None:
+        """★★ 死胡同**确实被修掉**、且**隔离没有被绕过**。
+
+        对每个「有更高学段可走」的学生，取一条**真实存在**的跨学段边
+        （路径上的 kp → 更高学段的直接后继，正是缺陷的成因），断言：
+
+        - 那个更高学段的 kp **不在**路径里（不再被解锁、不再显示为可点的死关）；
+        - 但**直接请求**它仍然 **404** —— 说明修的是「路径不该包含它」，
+          而不是「把取题的学段隔离放宽了」。两条一起才叫收敛，只放宽隔离是把缺陷藏起来。
+        """
+        grades = self._kp_grades()
+        checked: dict[str, str] = {}
+        for grade_level in GRADE_LEVELS:
+            allowed = set(compatible_grades(grade_level))
+            path, _ = self._walk(grade_level)
+            path_set = set(path)
+
+            crossing: list[tuple[str, str]] = []
+            for kp in path:
+                for successor in self._successors(kp):
+                    if successor not in grades:
+                        continue
+                    if grades[successor] not in allowed:
+                        crossing.append((kp, successor))
+            if not crossing:
+                # senior 的兼容范围就是四学段全体，不存在「更高学段」——这是预期的空集
+                self.assertEqual(
+                    grade_level,
+                    GRADE_LEVELS[-1],
+                    f"★ {grade_level} 应当能走出一条跨到更高学段的边（夹具前提不成立）",
+                )
+                continue
+
+            source, higher = sorted(crossing)[0]
+            checked[grade_level] = f"{source} → {higher}（{grades[higher]}）"
+            self.assertNotIn(
+                higher,
+                path_set,
+                f"★ {higher}（{grades[higher]}）高于 {grade_level} 学生，不该在路径里出现",
+            )
+            response = self.client.get(
+                f"/api/quiz/bank/{higher}", params={"gradeLevel": grade_level}
+            )
+            self.assertEqual(
+                response.status_code,
+                404,
+                f"★ 学段隔离必须仍然生效：{grade_level} 学生直接取 {higher}"
+                f"（{grades[higher]}）应当是 404，实测 {response.status_code}",
+            )
+
+        # 三个非最高学段都必须真的验过一条跨学段边（否则这条断言可能在空转）
+        self.assertEqual(
+            sorted(checked),
+            sorted(GRADE_LEVELS[:-1]),
+            f"跨学段边只在这些学段验到：{checked}",
+        )
+
+    def test_the_reported_dead_end_pair_is_gone_for_primary_high(self) -> None:
+        """★ 复现工单里点名的那个死胡同：`primary_high` 学生走不到 `jr-data-features`。
+
+        缺陷场景：小学高年级学生掌握 ``ph-image-classification``，解锁后继
+        ``jr-data-features``（初中）→ 取题 404。修复后：该后继**根本不进路径**
+        （解锁时就被学段过滤掉），而直接请求它仍然 404（隔离不变）。
+        """
+        path, rows = self._walk("primary_high")
+        self.assertNotIn("jr-data-features", path, "★ 初中知识点不该出现在小学高年级的路径里")
+        self.assertIn(
+            "ph-image-classification",
+            path,
+            "前提：`ph-image-classification` 本身是该学生兼容范围内的关卡",
+        )
+        self.assertIn("jr-data-features", self._successors("ph-image-classification"),
+                      "前提：`jr-data-features` 确实是它的后继（否则这条用例没在测那条边）")
+
+        # 真走一遍「掌握前置」：解锁的后继里不许出现跨学段的那一个
+        questions = [
+            _variant(f"deadend-{i}", "ph-image-classification", stem=f"练习 {i}", answer="2")
+            for i in range(1, 5)
+        ]
+        response = self.register(questions, grade="primary_high")
+        self.assertEqual(response.status_code, 200, response.text)
+        for item in response.json()["questions"]:
+            self.grade(item["qid"], "2")
+        after = {item["kpId"]: item["stage"] for item in self.progress().json()["levels"]}
+        self.assertEqual(
+            after.get("jr-data-features"),
+            None,
+            "★ 前置通关后也不该把初中的后继解锁出来（解锁同样要按学段过滤）",
+        )
+        direct = self.client.get(
+            "/api/quiz/bank/jr-data-features", params={"gradeLevel": "primary_high"}
+        )
+        self.assertEqual(direct.status_code, 404, "★ 直接请求更高学段的内容仍应 404（隔离未被削弱）")
+
+
+# --------------------------------------------------------------------------- #
 # 7. 冷启动
 # --------------------------------------------------------------------------- #
 class TestColdStart(LoopCase):
@@ -1010,8 +1248,16 @@ class TestLearningHistory(LoopCase):
         → jr-data-features → **jr-py-variable**）。早期实现沿用
         `deps.DEFAULT_DEPTH=3`，结果它**根本没进关卡列表** ——
         表现为「依赖图明明有这条线，学生的进度里却没有这一关」。
+
+        ★ **前提修正（与 `TestGateD` 同一处，理由一样）**：这条断言测的是
+          「递归深度别把深处的关卡截掉」这个**机制**，与学段无关；而深链的终点是
+          **初中**知识点，冷启动默认学段（`primary_high`）下它本就该被学段过滤掉
+          （那正是本次修复的另一半）。所以把学生显式设成 `junior`，
+          让「深链覆盖」这件事在一个**该学段真的能看到这条链**的学生上被验证。
+          修复后仍要证明的是：在兼容范围内，4 跳的关卡**一关不少**。
         """
         self.set_student("student_deep")
+        self.set_grade("junior")
         body = self.progress().json()
         ids = {item["kpId"] for item in body["levels"]}
         for expected in ("jr-py-variable", "jr-py-loop"):
@@ -1025,6 +1271,11 @@ class TestLearningHistory(LoopCase):
             ordered.index("jr-py-variable"),
             ordered.index("jr-py-loop"),
             "★ 前置（变量）必须排在后继（循环）之前",
+        )
+        self.assertLess(
+            ordered.index("ph-image-classification"),
+            ordered.index("jr-data-features"),
+            "★ 跨学段那条边（图片分类 → 数据特征）也要保持前置先于后继",
         )
 
 

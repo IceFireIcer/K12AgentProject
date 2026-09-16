@@ -10,6 +10,14 @@
 - 没有 API Key 时编排层没有 LLM 兜底 → 学生撞上死胡同
   （25% 多模态 + 15% 体验分的闭环断了）。
 
+★ 后续修复（同一缺口的第二层）：题库补齐到 33/33 之后，**关卡路径仍走全图 33 关**，
+  而取题按学段隔离 —— 于是 ``primary_high`` 学生的路径里有 **16 关是初中/高中内容**，
+  取题全部 404（普通游玩即可走到）。修法是**把路径与解锁也按学生学段过滤**
+  （与 :func:`select_questions` 同一个 ``compatible_grades`` 判据），
+  见 ``test_quiz_loop.py::TestPathIsScopedToTheStudentsGrade`` 的真实走查。
+  本文件补上**跨学段那一半**的守卫：该学生兼容范围内的 kp 必须**取得出来**，
+  范围外必须**取不到**（隔离不许被放宽）。
+
 题库加载器（``load_bank``）对坏题**只跳过、不抛异常**——这是为现场演示做的取舍，
 但它带来一个副作用：**一条写错的题会静默消失**，覆盖率悄悄掉一格而没人发现。
 所以本文件盯住四件事：
@@ -43,8 +51,8 @@ if str(ROOT) not in sys.path:
 
 from app.config import KNOWLEDGE_DIR  # noqa: E402
 from app.contracts import QuizPayload, QuizQuestion, QuizQuestionOut  # noqa: E402
-from app.knowledge.library import GRADE_LEVELS, load_library  # noqa: E402
-from app.routes.quiz import default_bank_dir, load_bank  # noqa: E402
+from app.knowledge.library import GRADE_LEVELS, compatible_grades, load_library  # noqa: E402
+from app.routes.quiz import default_bank_dir, load_bank, select_questions  # noqa: E402
 
 BANK_DIR = default_bank_dir()
 
@@ -252,7 +260,91 @@ class TestBankCoverage(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 3. ★★ 结构上不泄漏答案（逐条、递归遍历嵌套键）
+# 3. ★★ 学段可达性：题库的「可取出范围」必须与学段隔离一致（跨学段断言）
+# --------------------------------------------------------------------------- #
+class TestGradeReachabilityMatchesIsolation(unittest.TestCase):
+    """★★ 「覆盖率」不能只看**题库里有题**，还要看**这个学段的学生取不取得到**。
+
+    这是覆盖率守卫的**跨学段那一半**：上面的 ``test_every_knowledge_point_has_enough_questions``
+    统计的是全库题数，而 ``/api/quiz/bank`` 走的是
+    :func:`app.routes.quiz.select_questions` —— **按学段隔离取题**
+    （本学段 + 更低学段，见 ``knowledge.library.compatible_grades``）。
+
+    两者错位的失效形态正是本仓库踩过的那个死胡同：关卡路径若跨了学段，
+    「覆盖率 33/33 全绿」也挡不住「路径上的某一关 404」。所以这里对四个学段各断言：
+
+    1. ★ 该学生**兼容范围内**的每个知识点，都能经**真实取题函数**取到
+       ≥ :data:`MIN_QUESTIONS_PER_KP` 道题（不是「库里存在」，而是「取得出来」）；
+    2. ★ 该学生**兼容范围外**（= 更高学段）的知识点，取题结果为 **0** ——
+       证明隔离没有被放宽（放宽隔离会把上一条变成「什么都取得到」的假绿）。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.report = load_bank(BANK_DIR)
+        cls.kps = knowledge_points()
+
+    def test_every_kp_in_scope_is_reachable_and_out_of_scope_is_not(self) -> None:
+        self.assertTrue(self.report.entries, "题库为空，这条断言会空转")
+        for grade_level in GRADE_LEVELS:
+            allowed = set(compatible_grades(grade_level))
+            with self.subTest(grade=grade_level):
+                unreachable: list[str] = []
+                leaked: list[str] = []
+                for kp_id, kp_grade in sorted(self.kps.items()):
+                    picked = select_questions(
+                        self.report,
+                        kp_id=kp_id,
+                        grade_level=grade_level,
+                        count=MIN_QUESTIONS_PER_KP,
+                    )
+                    if kp_grade in allowed:
+                        if len(picked) < MIN_QUESTIONS_PER_KP:
+                            unreachable.append(
+                                f"{kp_id}（{kp_grade}）：只取到 {len(picked)} 道"
+                            )
+                    elif picked:
+                        leaked.append(f"{kp_id}（{kp_grade}）：{grade_level} 学生取到了 {len(picked)} 道")
+
+                self.assertEqual(
+                    unreachable,
+                    [],
+                    f"★ {grade_level} 学生的兼容范围里有知识点取不到题"
+                    f"（闯关路径会 404）：\n  "
+                    + "\n  ".join(unreachable),
+                )
+                self.assertEqual(
+                    leaked,
+                    [],
+                    f"★ 学段隔离被放宽了：{grade_level} 学生取到了更高学段的题：\n  "
+                    + "\n  ".join(leaked),
+                )
+
+    def test_a_real_cross_grade_pair_is_blocked(self) -> None:
+        """★ 具名复现：`primary_high` 取初中 kp 必须是空的。
+
+        上一条是遍历式的；这一条把工单点名的那个跨学段对子写死，
+        让「隔离真的卡在这条边上」这件事**不依赖遍历逻辑写对**也能被看见。
+        """
+        self.assertEqual(self.kps.get("ph-image-classification"), "primary_high")
+        self.assertEqual(self.kps.get("jr-data-features"), "junior")
+
+        blocked = select_questions(
+            self.report, kp_id="jr-data-features", grade_level="primary_high", count=3
+        )
+        self.assertEqual(
+            blocked, [], "★ 小学高年级学生不该取到初中的题（初中提问不得返回高中内容同理）"
+        )
+        ok = select_questions(
+            self.report, kp_id="jr-data-features", grade_level="junior", count=3
+        )
+        self.assertGreaterEqual(
+            len(ok), MIN_QUESTIONS_PER_KP, "前提：初中学生本来取得到这个 kp（否则上一条是空转）"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 4. ★★ 结构上不泄漏答案（逐条、递归遍历嵌套键）
 # --------------------------------------------------------------------------- #
 class TestOutwardPayloadNeverLeaksTheAnswer(unittest.TestCase):
     """把**每一条**题库记录投影成对外载荷，递归查嵌套键里有没有 ``answer``。
@@ -346,7 +438,7 @@ class TestOutwardPayloadNeverLeaksTheAnswer(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 4. ★ mutation check：覆盖率断言不能是空转
+# 5. ★ mutation check：覆盖率断言不能是空转
 # --------------------------------------------------------------------------- #
 class TestCoverageCheckIsNotVacuous(unittest.TestCase):
     """★ 把加载器指向一份「少一个知识点」的题库，覆盖率检查必须变红。

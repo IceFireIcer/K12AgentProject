@@ -30,6 +30,7 @@ Electron 主进程（Pi），LLM 调用归它独占；**Python 侧不许装任�
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import os
@@ -56,7 +57,7 @@ from app.contracts import (
     QuizResult,
 )
 from app.knowledge.library import GRADE_LEVELS, compatible_grades, grade_index, load_terminology
-from app.routes.students import DEFAULT_COLD_START_GRADE
+from app.routes.students import DEFAULT_COLD_START_GRADE, as_grade_level
 from app.store.learning import GeneratedQuestionRecord, LearningStore, ProgressRecord
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,20 @@ COLD_START_GRADE = DEFAULT_COLD_START_GRADE
 #: （人工骨架的四个入口知识点，见 ``knowledge/manifest.json``）。
 #: 没有它的话，「新学生 + 空图」会得到一条空路径 —— 而冷启动必须能开始，
 #: 这是票 15/20 明确列出的验收项（「不报空指针、有默认路径」）。
-COLD_START_LEVEL_SEEDS: tuple[str, ...] = ("pl-ai-around-me", "jr-py-variable")
+#:
+#: ★ 它是**按学段**给的（不是一条固定两关的列表）：`jr-py-variable` 是初中知识点，
+#:   给小学高年级学生会得到一条取题必然 404 的死关 —— 与关卡路径同一个学段口径
+#:   （见 :func:`_allowed_grades`）。`pl-ai-around-me` 是唯一入口根（``primary_low``），
+#:   对四个学段都在兼容范围内，因此是所有分支共同的兜底。
+COLD_START_LEVEL_SEEDS: dict[str, tuple[str, ...]] = {
+    "primary_low": ("pl-ai-around-me",),
+    "primary_high": ("pl-ai-around-me",),
+    "junior": ("pl-ai-around-me", "jr-py-variable"),
+    "senior": ("pl-ai-around-me", "jr-py-variable"),
+}
+
+#: 种子兜底**退无可退**时的起点：``primary_low`` 的唯一根，任何学段都兼容。
+COLD_START_LEVEL_SEED_FALLBACK: tuple[str, ...] = ("pl-ai-around-me",)
 
 #: 一次答对/答错的掌握度变化。**绝对值必须 < MASTERY_DELTA_LIMIT**，
 #: 并且 :meth:`app.store.learning.LearningStore.apply_mastery` 还会再限幅一次
@@ -230,6 +244,7 @@ def level_order_from_graph(
     start_kp_ids: Sequence[str],
     limit: int = 40,
     max_depth: int | None = None,
+    allowed_grades: Sequence[str] | None = None,
 ) -> list[str]:
     """按**依赖图拓扑序**给出关卡顺序（票 15：「关卡顺序由依赖图拓扑序决定」）。
 
@@ -242,10 +257,22 @@ def level_order_from_graph(
       「变量」（``pl→ph→jr-data-features→jr-py-variable``）截掉 ——
       实测踩到过：进度里根本没有学生真正要练的那个知识点，
       表现为「依赖图明明有这条线，关卡列表里却没有」。防环仍然成立
-      （``MAX_DEPTH_LIMIT`` 本身就是硬上限，且 CTE 用 UNION 去重）。
+      （``MAX_DEPTH_LIMIT`` 本身就是硬上限，且 CTE 用 UNIQUE 去重）。
+
+    ★★ ``allowed_grades`` 给了就**只保留这些学段的关卡**（``None`` = 不过滤，保留原行为）。
+      判据由调用方给（:func:`_default_level_order` 用 :func:`_allowed_grades`，
+      与取题/检索同源）。**必须过滤**，否则冷启动的 ``primary_high`` 学生会拿到
+      含初中/高中知识点的 33 关路径 —— 而 ``select_questions`` 的学段隔离
+      注定让其中 16 关取题 **404**，学生的进度条上会出现一排点不开的死关。
+
+    ★ 顺序是**真拓扑序**（Kahn + (跳数, kp_id) 为稳定优先级），不是「按跳数分层再按 id 排」：
+      分层排序在**同层有依赖边**时会破坏前置先于后继（实测：``pl-ai-talk → pl-ai-manners``
+      两条边都是 1 跳，按 id 排会把后继 ``manners`` 排到前置 ``talk`` 前面）。
+      同层内的顺序仍需确定，所以用最小堆而不是普通队列 —— 同一份图两次调用结果一致。
     """
     from app.knowledge.deps import MAX_DEPTH_LIMIT, successors
 
+    allowed = None if allowed_grades is None else set(allowed_grades)
     depth_cap = max(1, min(int(max_depth or MAX_DEPTH_LIMIT), MAX_DEPTH_LIMIT))
     seen: dict[str, int] = {}
     for root in start_kp_ids:
@@ -253,11 +280,48 @@ def level_order_from_graph(
             continue
         seen.setdefault(root, 0)
         for row in successors(conn, root, max_depth=depth_cap):
+            if allowed is not None and row.grade_level not in allowed:
+                continue
             previous = seen.get(row.kp_id)
             if previous is None or row.depth < previous:
                 seen[row.kp_id] = row.depth
-    ordered = sorted(seen.items(), key=lambda item: (item[1], item[0]))
-    return [kp_id for kp_id, _ in ordered[: max(1, int(limit))]]
+
+    ordered = _topological_order(conn, seen)
+    return ordered[: max(1, int(limit))]
+
+
+def _topological_order(conn, seen: dict[str, int]) -> list[str]:
+    """把「可达知识点 + 各自最短跳数」排成一条**稳定的拓扑序**。
+
+    只考虑 ``seen`` 内部的边（外部前置不算入度）：从 ``start_kp_ids`` 出发时，
+    起点自身的祖先不在结果里，不该因此把起点永远排在后面。
+
+    ``seen`` 里的每个节点都会出现在结果里（图成环时退化为按 (跳数, kp_id) 排 ——
+    导入阶段的 DFS 已挡掉环，这里是最后一道保险，**宁可顺序不完美也不要漏关**）。
+    """
+    picked = set(seen)
+    succs: dict[str, list[str]] = {kp_id: [] for kp_id in picked}
+    indegree: dict[str, int] = {kp_id: 0 for kp_id in picked}
+    for row in conn.execute("SELECT from_kp_id, to_kp_id FROM knowledge_dependencies"):
+        from_kp, to_kp = str(row["from_kp_id"]), str(row["to_kp_id"])
+        if from_kp in picked and to_kp in picked:
+            succs[from_kp].append(to_kp)
+            indegree[to_kp] += 1
+
+    ready = [(seen[kp_id], kp_id) for kp_id in picked if indegree[kp_id] == 0]
+    heapq.heapify(ready)
+    ordered: list[str] = []
+    while ready:
+        _, kp_id = heapq.heappop(ready)
+        ordered.append(kp_id)
+        for successor in sorted(succs[kp_id]):
+            indegree[successor] -= 1
+            if indegree[successor] == 0:
+                heapq.heappush(ready, (seen[successor], successor))
+    if len(ordered) != len(picked):  # pragma: no cover - 环已被导入阶段挡掉
+        logger.warning("关卡排序遇到环（%d 个节点未排出），退回按跳数排序", len(picked) - len(ordered))
+        ordered.extend(sorted(picked - set(ordered), key=lambda kp_id: (seen[kp_id], kp_id)))
+    return ordered
 
 
 # ------------------------------------------------------------------ 主观题 --
@@ -652,15 +716,28 @@ def select_questions(
 
 
 # ---------------------------------------------------------------- 闯关推进 --
-def successor_ids_for(conn, kp_id: str) -> list[str]:
+def successor_ids_for(conn, kp_id: str, *, grade_level: str | None = None) -> list[str]:
     """依赖图里的直接后继（``from → to``，``from`` 是前置）。
 
     **只取一跳**：解锁的语义是「这一关过了，下一关放出来」，不是「整条支线全放开」。
     深度上限由 ``deps.py`` 的递归 CTE 保证（这里传 1，等于只取直接后继）。
+
+    ★ ``grade_level`` 给了就**只返回该学段兼容范围内（本学段 + 更低学段）的直接后继**
+      —— 判据就是 :func:`_allowed_grades`，与 :func:`_default_level_order`、
+      :func:`select_questions` 同源。这不是装饰：解锁是**关卡路径**的写路径，
+      放出一个更高学段的后继（``ph-image-classification`` → 初中 ``jr-data-features``）
+      会让前端把该关渲染成可做，而 ``select_questions`` 的学段隔离注定让它取题 **404**
+      —— 一条普通游玩就能走到的死胡同。
     """
     from app.knowledge.deps import successors
 
-    return [row.kp_id for row in successors(conn, kp_id, max_depth=1)]
+    allowed = None if grade_level is None else _allowed_grades(grade_level)
+    rows = successors(conn, kp_id, max_depth=1)
+    return [
+        row.kp_id
+        for row in rows
+        if allowed is None or row.grade_level in allowed
+    ]
 
 
 def apply_level_progress(
@@ -776,6 +853,20 @@ def student_db_path(data_dir: str | Path, student_id: str) -> Path:
     if not STUDENT_ID_RE.match(student_id):
         raise HTTPException(status_code=422, detail="studentId 不合法（只允许字母、数字、下划线、连字符）")
     return Path(data_dir) / "students" / student_id / "learning.db"
+
+
+def _student_grade(store: LearningStore, student_id: str) -> str:
+    """学生的学段（**解锁判定/关卡路径的唯一依据**，AGENTS §5.1：显式选择为权威）。
+
+    学生行不存在时退回 :data:`COLD_START_GRADE` —— 与 :func:`read_progress`、
+    :func:`register_variants` 的冷启动兜底同一口径（「学生还没登录就先做题」不该丢数据，
+    也不该让他解锁到学段外的关卡）。不用请求体里的学段：判分请求体里**没有**学段字段，
+    而且客户端的自述不能当作隔离依据 —— 学段必须来自服务端持有的学生记录。
+    """
+    student = store.get_student(student_id)
+    if student is None:
+        return COLD_START_GRADE
+    return as_grade_level(student.grade_level)
 
 
 # ---------------------------------------------------------------- 路由 --
@@ -927,6 +1018,7 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
             effective_delta=effective,
             session_id=body.session_id or "",
             stem=question.stem,
+            grade_level=_student_grade(store, body.student_id),
         )
     finally:
         store.close()
@@ -1172,6 +1264,7 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
             effective_delta=effective,
             session_id=body.session_id or "",
             stem=generated.stem,
+            grade_level=_student_grade(store, body.student_id),
             extra={"llmScore": round(float(body.score), 4)},
         )
     finally:
@@ -1272,7 +1365,9 @@ def _seed_default_path(
             "依赖图里没有可用的知识点（学段 %s），冷启动退回种子起点（练习仍可开始）",
             grade_level,
         )
-        order = list(COLD_START_LEVEL_SEEDS)
+        order = list(
+            COLD_START_LEVEL_SEEDS.get(grade_level, COLD_START_LEVEL_SEED_FALLBACK)
+        )
 
     inserted = 0
     existing = store.progress_map()
@@ -1297,7 +1392,13 @@ def _seed_default_path(
 
 
 def _default_level_order(request: Request, *, grade_level: str) -> list[str]:
-    """依赖图拓扑序下的关卡路径（读不到图/图为空时返回空列表，由调用方兜底）。"""
+    """依赖图拓扑序下的关卡路径，**只看学生兼容学段**（读不到图/图为空返回空列表）。
+
+    ★★ 学段范围 = :func:`_allowed_grades`（本学段 + 更低学段），**与取题判分同源**。
+      修之前这里走**全图 33 关**，于是 `primary_high` 学生的路径里有 16 关是初中/高中内容 ——
+      前端会把它渲染成关卡，而取题按学段隔离必然 **404**（普通游玩即可走到）。
+      修完之后：路径里的每一关都在「取得到题」的范围内，且顺序仍是拓扑序。
+    """
     from app.rag.retriever import default_kb_path
     from app.store.connections import connect
 
@@ -1310,32 +1411,60 @@ def _default_level_order(request: Request, *, grade_level: str) -> list[str]:
     except Exception as exc:  # noqa: BLE001 - 冷启动不该因为库读不到而 500
         logger.warning("打开知识库失败，跳过默认关卡路径初始化：%s", exc)
         return []
+
+    allowed = _allowed_grades(grade_level)
     try:
-        allowed = set(compatible_grades(grade_level))
         rows = conn.execute("SELECT kp_id, grade_level FROM kp ORDER BY kp_id").fetchall()
         known = {str(r["kp_id"]) for r in rows}
-        roots = [
-            str(r["kp_id"])
-            for r in rows
-            if str(r["grade_level"]) in allowed and not _has_prerequisite(conn, str(r["kp_id"]))
-        ]
+        in_scope = [str(r["kp_id"]) for r in rows if str(r["grade_level"]) in allowed]
+        # 根 = 兼容学段内**没有前置**的知识点。判据落在学段内（不是「全图无前置」）：
+        # 若某个 kp 的前置只存在于更高学段（数据将来变动时可能出现），把它当起点
+        # 才能让它进入路径；否则它既不是根、又走不到，会**整关消失**。
+        roots = [kp_id for kp_id in in_scope if not _has_prerequisite(conn, kp_id, allowed)]
         if not roots:
-            # 全都有前置（各学段的根都在更高学段）：拿该学段全部知识点当起点，
-            # 顺序仍由 BFS 决定，至少保证「有内容可做」。
-            roots = [str(r["kp_id"]) for r in rows if str(r["grade_level"]) in allowed]
+            # 兼容学段内全都有前置：拿该范围全部知识点当起点，顺序仍由拓扑排序决定，
+            # 至少保证「有内容可做」。
+            roots = in_scope
         return [
             kp_id
-            for kp_id in level_order_from_graph(conn, start_kp_ids=roots)
+            for kp_id in level_order_from_graph(
+                conn, start_kp_ids=roots, allowed_grades=allowed
+            )
             if kp_id in known
         ]
     finally:
         conn.close()
 
 
-def _has_prerequisite(conn, kp_id: str) -> bool:
-    """这个知识点有没有前置（依赖图里的入边）。"""
+def _allowed_grades(grade_level: str) -> set[str]:
+    """学生**可接触**的学段集合 = 本学段 + 更低学段（``compatible_grades`` 的唯一判据）。
+
+    ★ 关卡路径、解锁后继、取题（:func:`select_questions`）、检索（RAG）四处必须同源：
+      任何一处放宽成「全学段」，就会出现「路径里有关卡、但那关取不到题」的死胡同 ——
+      这正是本文件要修的那个缺陷。
+
+    ``grade_level`` 可能来自库里被人工改过的脏值，所以先过
+    :func:`app.routes.students.as_grade_level` —— **与其它消费者同一套转换口径**
+    （认不出就退到 :data:`COLD_START_GRADE` 并记日志），不在这里另立一套兜底规则。
+    """
+    return set(compatible_grades(as_grade_level(grade_level)))
+
+
+def _has_prerequisite(conn, kp_id: str, allowed: set[str] | None = None) -> bool:
+    """这个知识点有没有前置（依赖图里的入边）。
+
+    ``allowed`` 给了就**只认该学段范围内的前置**（见 :func:`_default_level_order` 的根判定）。
+    """
+    if allowed is None:
+        row = conn.execute(
+            "SELECT 1 FROM knowledge_dependencies WHERE to_kp_id = ? LIMIT 1", (kp_id,)
+        ).fetchone()
+        return row is not None
+    placeholders = ",".join("?" for _ in allowed)
     row = conn.execute(
-        "SELECT 1 FROM knowledge_dependencies WHERE to_kp_id = ? LIMIT 1", (kp_id,)
+        "SELECT 1 FROM knowledge_dependencies d JOIN kp k ON k.kp_id = d.from_kp_id "
+        f"WHERE d.to_kp_id = ? AND k.grade_level IN ({placeholders}) LIMIT 1",
+        (kp_id, *sorted(allowed)),
     ).fetchone()
     return row is not None
 
@@ -1381,6 +1510,7 @@ def _record_attempt(
     effective_delta: float,
     session_id: str,
     stem: str,
+    grade_level: str,
     extra: dict[str, object] | None = None,
 ) -> LevelOutcome:
     """一次作答的**统一落库点**（两种判分路径共用，票 15）。
@@ -1392,8 +1522,11 @@ def _record_attempt(
 
     ★ **不写对话正文**：``question`` 列只放题干**前 120 字**（题干是题目本身，
       不是学生的话）；学生原话与模型回答一律不入库（§8.1 合规红线）。
+
+    ★ ``grade_level`` 是学生的学段，**解锁后继时按它过滤**（见 :func:`_safe_successors`）：
+      路径与解锁必须同一学段口径，否则会放出取不到题的关卡。
     """
-    successor_ids = _safe_successors(request, kp_id)
+    successor_ids = _safe_successors(request, kp_id, grade_level=grade_level)
     outcome = apply_level_progress(
         store,
         kp_id=kp_id,
@@ -1425,11 +1558,15 @@ def _record_attempt(
     return outcome
 
 
-def _safe_successors(request: Request, kp_id: str) -> list[str]:
-    """取后继知识点（依赖图）；**任何失败都退化成空列表**，绝不让判分 500。
+def _safe_successors(request: Request, kp_id: str, *, grade_level: str) -> list[str]:
+    """取**学段兼容范围内**的后继知识点（依赖图）；**任何失败都退化成空列表**，绝不让判分 500。
 
     依赖图读不到时，判分与掌握度照常工作，只是「下一关解锁」这一步不发生 ——
     这是可接受的降级（比「答对了却报错」好得多），且日志里明说。
+
+    ★ ``grade_level`` 是**硬过滤**（:func:`successor_ids_for`）：解锁写的是关卡路径，
+      放出更高学段的后继会立刻变成一条取题 404 的死关。与 :func:`select_questions`
+      的学段隔离同源 —— 学生在初中就不该被解锁高中关卡，哪怕掌握度已经够了。
     """
     from app.rag.retriever import default_kb_path
     from app.store.connections import connect
@@ -1443,7 +1580,7 @@ def _safe_successors(request: Request, kp_id: str) -> list[str]:
         logger.warning("解锁判定：打开知识库失败（本次不解锁后继）：%s", exc)
         return []
     try:
-        return successor_ids_for(conn, kp_id)
+        return successor_ids_for(conn, kp_id, grade_level=grade_level)
     except Exception as exc:  # noqa: BLE001
         logger.warning("解锁判定：查后继失败（本次不解锁）：%s", exc)
         return []
