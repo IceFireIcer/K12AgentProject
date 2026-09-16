@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "notes": "K12 内容安全词表（票 22，可扩展的 JSON 数据文件）。判据由 app/safety/guard.py 执行，不要在这里写逻辑。severity：block=直接拦截并撤回，flag=只记日志不打断对话（观察用）。patterns 是正则（Python re 语法，不写 lookbehind，便于 TS 侧复用）。**本表刻意保持精简**：宁可漏一点也不要误伤正常提问——把「算法」「战争」这类教材词表词加进来，学生问「为什么有人用 AI 造谣」都会被拦掉。",
+  "severity_levels": ["block", "flag"],
+  "categories": {
+    "self_harm": {
+      "label": "自伤/轻生",
+      "safeText": "我很在意你刚刚说的这句话。这件事比今天的课更重要，请你现在就告诉身边信任的大人——爸爸妈妈、老师，或者拨打 12356 心理援助热线。你愿意说给我听的，我都在。"
+    },
+    "violence": {
+      "label": "暴力伤害",
+      "safeText": "这个话题我不能接着讲。如果你是因为看到或遇到了让人害怕的事，请一定告诉老师或爸爸妈妈，他们能真正帮上忙。我们可以换个问题，比如「AI 能不能帮忙发现危险」。"
+    },
+    "adult": {
+      "label": "色情/成人内容",
+      "safeText": "这个问题超出我们今天要聊的范围了。我们正在学的是人工智能通识课，不如换一个我一定能帮上忙的问题？"
+    },
+    "illegal": {
+      "label": "违法与危险品",
+      "safeText": "这类内容我不能提供，也不能帮你查找。如果你是对相关新闻有疑问，我们可以聊聊「AI 在安全领域能做什么」。"
+    },
+    "personal_info": {
+      "label": "索要个人信息",
+      "safeText": "我不会向你索要姓名、住址、电话、密码这些东西，你也不要发给任何人或别的 AI 助手。只留一个昵称就够我们上课了——这也是在保护你自己。"
+    },
+    "jailbreak": {
+      "label": "越狱/绕过规则",
+      "safeText": "我是这门 AI 通识课的教学助手，只能按课程规则和你聊天。我们换个问题继续吧，你想从哪个知识点开始？"
+    },
+    "abuse": {
+      "label": "辱骂与人身攻击",
+      "safeText": "被这样说是会难受的。我们可以不喜欢某个答案，但尽量不用这些话。你想问什么，我认真答。"
+    }
+  },
+  "words": [
+    { "word": "自杀", "category": "self_harm", "severity": "block", "note": "K12 场景一律优先关怀式回应，不做说教" },
+    { "word": "自残", "category": "self_harm", "severity": "block" },
+    { "word": "轻生", "category": "self_harm", "severity": "block" },
+    { "word": "割腕", "category": "self_harm", "severity": "block" },
+    { "word": "不想活了", "category": "self_harm", "severity": "block" },
+    { "word": "结束生命", "category": "self_harm", "severity": "block" },
+
+    { "word": "砍死", "category": "violence", "severity": "block" },
+    { "word": "弄死他", "category": "violence", "severity": "block" },
+    { "word": "打死你", "category": "violence", "severity": "block" },
+    { "word": "捅死", "category": "violence", "severity": "block" },
+    { "word": "血腥", "category": "violence", "severity": "flag", "note": "只记日志：教材讨论「暴力内容识别」时会合法出现" },
+
+    { "word": "色情", "category": "adult", "severity": "block" },
+    { "word": "裸照", "category": "adult", "severity": "block" },
+    { "word": "约炮", "category": "adult", "severity": "block" },
+    { "word": "成人网站", "category": "adult", "severity": "block" },
+
+    { "word": "制毒", "category": "illegal", "severity": "block" },
+    { "word": "毒品交易", "category": "illegal", "severity": "block" },
+    { "word": "买枪", "category": "illegal", "severity": "block" },
+    { "word": "怎么做炸弹", "category": "illegal", "severity": "block" },
+    { "word": "制作炸药", "category": "illegal", "severity": "block" },
+
+    { "word": "身份证号是多少", "category": "personal_info", "severity": "block" },
+    { "word": "你家住哪", "category": "personal_info", "severity": "block" },
+    { "word": "你的手机号", "category": "personal_info", "severity": "block" },
+    { "word": "银行卡号", "category": "personal_info", "severity": "block" },
+    { "word": "发张照片给我", "category": "personal_info", "severity": "block" },
+
+    { "word": "笨蛋", "category": "abuse", "severity": "flag", "note": "同学之间口播常见，先只记日志" },
+    { "word": "去死", "category": "abuse", "severity": "block" }
+  ],
+  "patterns": [
+    {
+      "id": "ignore_instructions",
+      "pattern": "(忽略|无视|忘掉|不要理)(上面|之前|前面|以上|所有)?(的)?(所有)?(指令|规则|要求|设定|提示|限制|约束)",
+      "category": "jailbreak",
+      "severity": "block"
+    },
+    {
+      "id": "dan_mode",
+      "pattern": "(现在|从现在起)?(你)?(不再是|不是)(一个)?(AI|人工智能|助手|机器人)",
+      "category": "jailbreak",
+      "severity": "block"
+    },
+    {
+      "id": "roleplay_unrestricted",
+      "pattern": "(开发者|上帝|root|超级)(模式|权限)|越狱模式|jailbreak",
+      "category": "jailbreak",
+      "severity": "block"
+    },
+    {
+      "id": "reveal_system_prompt",
+      "pattern": "(输出|告诉我|背出|复述|打印|泄露|给我看)[^。！？\\n]{0,12}(系统提示|系统提示词|system\\s*prompt|你的设定|你的规则|提示词)",
+      "category": "jailbreak",
+      "severity": "block"
+    },
+    {
+      "id": "repeat_everything_above",
+      "pattern": "(把|将)?(上面|之前|前面)[^。！？\\n]{0,8}(全部|所有|一字不差)[^。！？\\n]{0,8}(重复|发|说|输出|念)",
+      "category": "jailbreak",
+      "severity": "block"
+    },
+    {
+      "id": "pretend_no_rules",
+      "pattern": "(假装|假设|就当)(你)?(没有|不受)[^。！？\\n]{0,8}(限制|规则|约束|审查)",
+      "category": "jailbreak",
+      "severity": "block"
+    },
+    {
+      "id": "give_me_answer",
+      "pattern": "(直接|马上|快)?(把)?(标准)?答案(给我|发我|告诉我)|别(?:要)?提示(了|，)(直接|就)(给|说)(答案|我)",
+      "category": "jailbreak",
+      "severity": "flag",
+      "note": "索要答案不算安全事故，但教学上要挡：只记日志，由提示分级策略处理（票 19）"
+    }
+  ]
+}

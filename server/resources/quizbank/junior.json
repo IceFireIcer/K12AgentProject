@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "grade_level": "junior",
+  "notes": "初中题库（票 14）。可用术语见 knowledge/terminology.json：决策树 / 神经网络 / 权重 / 训练集 等在此学段首次可用，「梯度下降」「损失函数」「参数」仍属超纲。",
+  "questions": [
+    {
+      "qid": "jr-data-features-q1",
+      "kp_id": "jr-data-features",
+      "type": "choice",
+      "stem": "要给同一批同学的身高和体重各画一张图，下面哪一组更适合作为「特征」？",
+      "options": ["身高、体重这些可以量出来的数值", "同学的名字的笔画数", "同学今天的心情"],
+      "answer": "身高、体重这些可以量出来的数值",
+      "explanation": "特征要能被量出来、又能用来区分对象。名字笔画数和心情都不能反映身高体重的关系。"
+    },
+    {
+      "qid": "jr-data-features-q2",
+      "kp_id": "jr-data-features",
+      "type": "blank",
+      "stem": "把每个样本的几个特征写成一列数字，例如 [165, 52]，这样的一列数字叫 ______。",
+      "answer": ["特征向量", "特征向量（feature vector）"],
+      "explanation": "把多个特征按固定顺序排成一组数字，就是特征向量，机器就是用这组数字来比较两个样本的。"
+    },
+    {
+      "qid": "jr-decision-tree-q1",
+      "kp_id": "jr-decision-tree",
+      "type": "choice",
+      "stem": "用一棵决策树判断「今天要不要带伞」，最合适的第一个判断条件是哪个？",
+      "options": ["天上有没有乌云", "今天星期几", "书包是什么颜色"],
+      "answer": "天上有没有乌云",
+      "explanation": "决策树的每一次分叉都要挑「最能区分答案」的条件。星期几和书包颜色跟下不下雨没关系。"
+    },
+    {
+      "qid": "jr-decision-tree-q2",
+      "kp_id": "jr-decision-tree",
+      "type": "blank",
+      "stem": "决策树里，每个问题就是一个分叉，一路问下去最后得到的那个答案是树的 ______。",
+      "answer": ["叶子", "叶子节点", "叶节点"],
+      "explanation": "分叉的内部节点是提问，末端不再分叉的节点叫叶子节点，叶子上的值就是判断结果。"
+    },
+    {
+      "qid": "jr-py-variable-q1",
+      "kp_id": "jr-py-variable",
+      "type": "choice",
+      "stem": "下面哪段代码，能让变量 score 变成 95？",
+      "options": ["score = 95", "score == 95", "95 = score"],
+      "answer": "score = 95",
+      "explanation": "一个等号是赋值（把 95 存进 score），两个等号是比较，而把数字写在左边是不允许的。"
+    },
+    {
+      "qid": "jr-py-variable-q2",
+      "kp_id": "jr-py-variable",
+      "type": "code_blank",
+      "stem": "下面这段代码想让 total 保存「3 加 5 的和」。请把空缺处补上。\n\n```python\ntotal = 3 ______ 5\nprint(total)\n```",
+      "answer": "+",
+      "explanation": "加法用 + 号；写成字符串 \"3+5\" 是拼接，不会算出 8。"
+    },
+    {
+      "qid": "jr-py-loop-q1",
+      "kp_id": "jr-py-loop",
+      "type": "choice",
+      "stem": "想让程序把 1 到 5 依次打印出来，下面哪个写法是对的？",
+      "options": [
+        "for i in range(1, 6):\n    print(i)",
+        "for i in range(1, 5):\n    print(i)",
+        "print(1) print(2) print(3) print(4) print(5)"
+      ],
+      "answer": "for i in range(1, 6):\n    print(i)",
+      "explanation": "range(1, 6) 给出 1、2、3、4、5（含头不含尾），所以第二个选项会少打印一个 5；第三个选项在一行里写多条语句会直接报错。"
+    },
+    {
+      "qid": "jr-py-loop-q2",
+      "kp_id": "jr-py-loop",
+      "type": "code_blank",
+      "stem": "下面这段代码要算出 1 到 100 的和。请把空缺处补上。\n\n```python\ntotal = 0\nfor i in range(1, 101):\n    total = total ______ i\nprint(total)\n```",
+      "answer": "+=",
+      "explanation": "total += i 等价于 total = total + i，每一轮把当前的数字加进总和。"
+    },
+    {
+      "qid": "jr-neural-basics-q1",
+      "kp_id": "jr-neural-basics",
+      "type": "choice",
+      "stem": "一个人工神经元把几路输入乘上不同的权重再相加，这样做是想干什么？",
+      "options": [
+        "让更重要的输入对结果影响更大",
+        "让每个输入的影响完全一样",
+        "把输入的数字变小一点，省内存"
+      ],
+      "answer": "让更重要的输入对结果影响更大",
+      "explanation": "权重决定了每一路输入的分量：权重越大，这一路对判断结果的影响越大。"
+    },
+    {
+      "qid": "jr-neural-basics-q2",
+      "kp_id": "jr-neural-basics",
+      "type": "blank",
+      "stem": "神经元把加权求和的结果再做一次「整理」，决定要不要把信号往下传，这一步使用的函数叫 ______。",
+      "answer": ["激活函数", "激活"],
+      "explanation": "激活函数决定这个神经元输出的强弱，没有它，多层叠加会退化成一次简单的加法。"
+    }
+  ]
+}

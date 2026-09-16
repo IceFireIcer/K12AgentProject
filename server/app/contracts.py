@@ -390,7 +390,7 @@ class StudentCreateRequest(CamelModel):
 
     #: 显示用昵称（**不采集真实姓名**：K12 数据最小化，见 §12）
     nickname: str = Field(min_length=1, max_length=32)
-    #: 冷启动默认学段由前端显式给定（§10.1：显式选择为权威）
+    #: 冷启动默认学段（§10.1）。**前端不参与学段决定**：没有选择器，请求也不带学段
     grade_level: GradeLevel
 
     @field_validator("nickname")
@@ -534,14 +534,16 @@ class GradeSignals(CamelModel):
     """``GET /api/grade/signals/{student_id}``：学段信号与推断建议。
 
     ⚠️ **自动推断只写「建议」，不直接改**（AGENTS §5.1）：``suggested_level`` 供前端弹
-    建议条，学生确认后才写 `grade_history(source=confirmed)`。
+    达到阈值时**自动生效**并写 `grade_history(source="inferred")`；
+    学生端只读展示当前学段，**没有选择器、没有确认动作**（§10.3）。
     """
 
     student_id: str
-    #: 当前**生效**的学段（显式选择优先；学生从未选择时是冷启动默认值）
+    #: 当前**生效**的学段（由推断引擎写入；无历史时是冷启动默认值）
     current_level: GradeLevel
-    #: 当前学段来源：explicit（显式）/ inferred（推断）/ confirmed（学生确认了建议）
-    source: Literal["explicit", "inferred", "confirmed"] = "explicit"
+    #: 当前学段来源。**只有 inferred 一种**：学段完全由系统推断，
+    #: `explicit` / `confirmed` 随手动选择入口一起废止（D-020）。
+    source: Literal["inferred"] = "inferred"
     #: 推断建议（``None`` = 无建议；置信度 < 0.6 不调整，§10.3）
     suggested_level: GradeLevel | None = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -730,7 +732,7 @@ class ChatRequest(CamelModel):
     """
 
     student_id: str
-    #: 显式选择为权威（§10.1）；自动推断只写建议，不在这里改
+    #: **学段不由这里决定**（§10.1）：请求不带学段，推断引擎是唯一写路径
     grade_level: GradeLevel
     text: str
     #: 关联 Pi 会话（省略 = 用当前会话）

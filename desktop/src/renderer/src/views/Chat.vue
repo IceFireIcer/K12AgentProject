@@ -4,9 +4,13 @@
  *
  * 大对话区 + 底部输入框；所有内容都来自 `stores/chat.ts`（它订阅 IPC 6 事件流）。
  * 新消息贴底滚动 —— 流式回答时正文会不断变长，这里用「轮次数 + 末尾正文长度」作为触发点。
+ *
+ * ★ 顶部常驻**学段只读指示器**：学段由系统从对话里判定，学生改不了，
+ *   指示器只把「当前按哪个年级讲」显示出来（判定变化时给一句提示）。
  */
 import { nextTick, ref, watch } from 'vue'
 import ChatMessage from '../components/ChatMessage.vue'
+import GradeIndicator from '../components/GradeIndicator.vue'
 import MessageComposer from '../components/MessageComposer.vue'
 import { useChatStore } from '../stores/chat'
 
@@ -39,6 +43,8 @@ function onSend(text: string): void {
 
 <template>
   <section class="chat" data-testid="chat-area">
+    <GradeIndicator />
+
     <div ref="logEl" class="chat__log" data-testid="chat-log">
       <div class="shell">
         <div v-if="chat.turns.length === 0" class="empty" data-testid="chat-empty">

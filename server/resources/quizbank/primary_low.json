@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "grade_level": "primary_low",
+  "notes": "小学低年级题库（票 14）。题干用童话/生活化说法，禁用术语见 knowledge/terminology.json —— 加载时会被 out_of_scope_terms() 复核，超纲即判为坏题。答案只在本文件里（QuizQuestionOut 不带 answer）。",
+  "questions": [
+    {
+      "qid": "pl-ai-around-me-q1",
+      "kp_id": "pl-ai-around-me",
+      "type": "choice",
+      "stem": "下面哪件事，是「会认脸的门禁」帮我们做的？",
+      "options": [
+        "站在门口看一眼就知道是不是我们班的同学",
+        "帮我们把作业写完整",
+        "替我们把书包收拾好"
+      ],
+      "answer": "站在门口看一眼就知道是不是我们班的同学",
+      "explanation": "会认脸的门禁，是让机器「看」到你的脸，再和记住的脸比一比。它只会看，不会帮你写作业。"
+    },
+    {
+      "qid": "pl-ai-around-me-q2",
+      "kp_id": "pl-ai-around-me",
+      "type": "blank",
+      "stem": "手机里的语音助手能把我们说的话变成文字，是因为它先「听」到了我们的 ______。",
+      "answer": ["声音", "说话的声音"],
+      "explanation": "先听到声音，再猜出说的是哪些字，这就是语音助手在做的事。"
+    },
+    {
+      "qid": "pl-machine-sees-q1",
+      "kp_id": "pl-machine-sees",
+      "type": "choice",
+      "stem": "小机器人想认出照片里的是猫还是狗，它最需要先看到下面哪一样？",
+      "options": ["好多张猫和狗的照片", "一张空白的纸", "一段音乐"],
+      "answer": "好多张猫和狗的照片",
+      "explanation": "要先看过很多猫和狗的照片，它才能记住猫和狗各长什么样。"
+    },
+    {
+      "qid": "pl-machine-sees-q2",
+      "kp_id": "pl-machine-sees",
+      "type": "blank",
+      "stem": "机器把我们拍的照片看成一小格一小格的方块，这些方块叫 ______。",
+      "answer": ["像素", "像点"],
+      "explanation": "照片放大很多倍以后，能看到一个个小方块，它们就是像素。"
+    },
+    {
+      "qid": "pl-ai-manners-q1",
+      "kp_id": "pl-ai-manners",
+      "type": "choice",
+      "stem": "和 AI 小助手聊天时，下面哪种做法最合适？",
+      "options": [
+        "说清楚自己想问什么，再用礼貌的话提问",
+        "把家里人的名字、住址、电话都告诉它",
+        "它答错了就大声骂它"
+      ],
+      "answer": "说清楚自己想问什么，再用礼貌的话提问",
+      "explanation": "说清楚问题它才好帮忙；家里的名字、住址、电话属于私人信息，不要告诉任何人或 AI 小助手。"
+    },
+    {
+      "qid": "pl-ai-manners-q2",
+      "kp_id": "pl-ai-manners",
+      "type": "blank",
+      "stem": "AI 小助手有时候也会说错话，我们不要直接相信，可以先问问 ______。",
+      "answer": ["老师", "爸爸妈妈", "家长"],
+      "explanation": "拿不准的时候，问一问老师或爸爸妈妈，是最稳妥的办法。"
+    }
+  ]
+}

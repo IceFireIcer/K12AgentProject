@@ -62,6 +62,13 @@ export type TurnStatus = 'streaming' | 'done' | 'blocked' | 'error'
 export interface ChatTurn {
   requestId: string
   userText: string
+  /**
+   * 这一轮回答时**系统判定出的学段**（`null` = 当时还没判出来）。
+   *
+   * ★ 学段不由学生选择、也不随 `chat:send` 发送：判定在主进程做（规则 + 轻量 LLM），
+   *   渲染进程只是把「当前判定结果」记在轮次上，让每条回答都能标出它是按哪个年级生成的。
+   */
+  gradeLevel: GradeLevel | null
   /** `delta` 累积出的正文（撤回后为 `safeText`）。 */
   text: string
   citations: Citation[]
@@ -94,10 +101,15 @@ export function emptyConversation(): ConversationState {
   return { turns: [], pending: {}, ignoredEvents: 0 }
 }
 
-export function createTurn(requestId: string, userText: string): ChatTurn {
+export function createTurn(
+  requestId: string,
+  userText: string,
+  gradeLevel: GradeLevel | null = null
+): ChatTurn {
   return {
     requestId,
     userText,
+    gradeLevel,
     text: '',
     citations: [],
     cards: [],
@@ -125,11 +137,17 @@ export function subscribeToChatEvents(
   })
 }
 
-/** 建立一轮（收到 `chat:send` 回执后调用）；把超前到达的事件按序回放。 */
+/**
+ * 建立一轮（收到 `chat:send` 回执后调用）；把超前到达的事件按序回放。
+ *
+ * `gradeLevel` 是**这一轮回答时系统判定出的学段**（`null` = 当时还没判出来）。
+ * 它只是给轮次做展示标注，判分/检索用的学段一律由主进程决定（前端不参与、也改不了）。
+ */
 export function startTurn(
   state: ConversationState,
   requestId: string,
-  userText: string
+  userText: string,
+  gradeLevel: GradeLevel | null = null
 ): ConversationState {
   if (state.turns.some((turn) => turn.requestId === requestId)) return state
 
@@ -139,7 +157,7 @@ export function startTurn(
 
   let next: ConversationState = {
     ...state,
-    turns: [...state.turns, createTurn(requestId, userText)],
+    turns: [...state.turns, createTurn(requestId, userText, gradeLevel)],
     pending
   }
   for (const event of buffered) {

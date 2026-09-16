@@ -16,7 +16,7 @@ import { app, BrowserWindow, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { runPiSmoke } from './agent/pi-bootstrap.ts'
 import { IPC } from './ipc/channels.ts'
-import { registerIpcHandlers } from './ipc/handlers.ts'
+import { disposeChatRuntime, registerIpcHandlers } from './ipc/handlers.ts'
 import { SidecarManager } from './sidecar/manager.ts'
 
 const APP_ID = 'com.k12agent.desktop'
@@ -166,32 +166,46 @@ app.on('window-all-closed', () => {
 })
 
 /**
- * 退出清理：必须杀掉 sidecar 的**整棵进程树**（Windows 上 `uv → python` 会留下孤儿进程占端口）。
- * 先 `preventDefault` 把退出推迟到 kill 完成，再 `app.quit()`；`quitting` 保证只跑一次、不会递归。
+ * 退出清理：顺序是**硬要求**，不能对调。
+ *
+ *   ① `disposeChatRuntime()` —— Pi 的 `session.dispose()`（JSONL flush）+ 工具调用轨迹落盘。
+ *      **必须排在停 sidecar 之前**：Tool 可能是最后一个写 `/api/*` 的调用方，
+ *      dispose 之后不应再有 `/api` 请求（sidecar 先死会让最后一条学习记录丢在重试队列里）。
+ *   ② 杀掉 sidecar 的**整棵进程树**（Windows 上 `uv → python` 会留下孤儿进程占端口）。
+ *
+ * 每一步各自 try/catch：**收尾失败不能挡住退出**（否则用户只能去任务管理器杀进程）。
+ * 先 `preventDefault` 把退出推迟到两步都结束，再 `app.quit()`；`quitting` 保证只跑一次、不会递归。
  *
  * ★ 一次性保证：`quitting` 置位后就永远走上面那个 early return，
  *   所以即使 `app.quit()` 再次触发 `before-quit`，也不会重复杀进程。
+ * ★ 双保险：`registerIpcHandlers()` 里还有一条幂等的 `before-quit` 兜底
+ *   （`disposeChatRuntime()` 自身幂等，重复调用不会二次 dispose），
+ *   这里保留它 —— 入口改动被误删时，JSONL 仍不会半写。
  */
 app.on('before-quit', (event) => {
   if (quitting) return
   quitting = true
   event.preventDefault()
 
-  // ★★ 票 06 接线点：Pi 的 `session.dispose()` 必须在这里调用（且只调一次）——
-  //    否则 Pi 的 JSONL 会话可能半写。**票 02 不引入任何 Pi 依赖**，这里只留位置：
-  //
-  //      await session.dispose()
-  //
-  //    顺序：先 dispose（把会话 flush 干净）再停 sidecar，
-  //    因为 Tool 可能是最后一个写 /api 的调用方（dispose 之后不应再有 /api 请求）。
   const current = sidecar
   sidecar = null
-  void (current ? current.stop() : Promise.resolve())
-    .catch((error: unknown) => {
-      // 收尾异常不能挡住退出：日志留在 stdout（stderr），进程该走还得走
+
+  void (async () => {
+    // ① 先 flush Pi 会话（`before-quit` 里必须 await，否则进程可能在 flush 前就没了）
+    try {
+      await disposeChatRuntime()
+    } catch (error) {
+      console.error('[main] Pi 会话收尾异常（继续退出）：', error)
+    }
+
+    // ② 再停 sidecar（整棵进程树）
+    try {
+      await (current ? current.stop() : Promise.resolve())
+    } catch (error) {
+      // 收尾异常不能挡住退出：日志留在 stderr，进程该走还得走
       console.error('[main] sidecar 收尾异常：', error)
-    })
-    .finally(() => {
-      app.quit()
-    })
+    }
+  })().finally(() => {
+    app.quit()
+  })
 })

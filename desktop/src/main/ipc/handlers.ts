@@ -7,26 +7,174 @@
  *   - 通道名 → `./channels`（唯一来源）
  *   - 轮次生命周期（请求号、窗口销毁清理）→ `./chat-stream`
  *   - 入参校验 → `./chat-request`
- *   - 事件内容 → `./stub-chat`（★ 假数据源，票 06 替换）
+ *   - 事件内容 → `../agent/runtime` + `../agent/events`（★ 票 06：真实 Pi 流，不再是假数据源）
+ *
+ * ★ 会话工厂是**懒加载单例**：不把 Pi 的模块图拖进启动路径，
+ *   首条消息才装配会话（装配失败也只影响对话，应用仍能起来报错而不是白屏）。
+ * ★ 退出清理：`disposeChatRuntime()` 必须在 `before-quit` 调用（`src/main/index.ts` 有标记点），
+ *   否则 Pi 的 JSONL 可能半写。本文件另注册一条 `before-quit` 兜底（幂等），
+ *   即使入口漏接，会话也一定被 flush。
+ * ★ 设置域三条 invoke（`settings:read` / `settings:save` / `settings:probe`）也在这里注册：
+ *   渲染进程侧只认 `window.api` 上的三个方法，HTTP 与 token 全留在主进程。
  */
 
-import { ipcMain, type WebContents } from 'electron'
+import { app, BrowserWindow, ipcMain, type WebContents } from 'electron'
+import { apiFetch } from '../bridge/client.ts'
+import { describeRuntimeFailure } from '../agent/events.ts'
+import { gradeStatePath } from '../agent/extensions/grade.ts'
+import { assertStudentId } from '../agent/pi-paths.ts'
+import type { ChatRuntime } from '../agent/runtime.ts'
+import { createChatRuntime } from '../agent/runtime.ts'
 import type { SidecarManager } from '../sidecar/manager.ts'
 import type { SidecarState } from '../sidecar/protocol.ts'
-import { IPC, type ChatSendResult } from './channels.ts'
+import {
+  IPC,
+  type ChatSendResult,
+  type GradeCallResult,
+  type GradeState,
+  type ProbeRequest,
+  type ProbeResult,
+  type SettingsCallResult,
+  type SettingsSnapshot,
+  type SettingsUpdateRequest
+} from './channels.ts'
 import { parseChatSendRequest } from './chat-request.ts'
-import { ChatStreamRegistry, type StreamTarget } from './chat-stream.ts'
-import { runStubTurn } from './stub-chat.ts'
+import { ChatStreamRegistry, type StreamTarget, type TurnHandle } from './chat-stream.ts'
 
-/**
- * ★★ 票 06 接线点：把 `runStubTurn(...)` 换成「Pi 的 `message_update` / `tool_execution_end`
- *    → 同一批 `TurnEvent`」。**本文件其余部分、preload、渲染进程都不需要改** ——
- *    通道与载荷已冻结，换数据源不动 UI。
- */
 const chatStreams = new ChatStreamRegistry()
 
 /**
- * ★ 返回值里绝不带 token —— `SidecarState` 结构上就没有 token 字段（别在票 02 里加回来）。
+ * 当前学段（**只读展示用**，D-020）。
+ *
+ * ★ 这里**没有写入函数**，也不该有：学段由推断引擎独占（`agent/extensions/grade.ts`
+ *   把每轮证据上交到 sidecar，规则引擎决定后写 `learning.db`）。前端连"请求改学段"
+ *   的能力都不提供 —— 所以这条通道只有读。
+ * ★ 缓存只为「值没变就不推送」，真值永远以 sidecar 的 `learning.db` 为准。
+ */
+let currentGrade: GradeState | null = null
+
+/**
+ * 从 sidecar 读当前学段。
+ *
+ * ★ `origin` 的判定是刻意的：`lastTurn === 0` 表示**还没发生过任何推断**，
+ *   此时显示为 `default`，前端渲染成「待判定」而不是假装系统已经判过。
+ *   拿冷启动默认值冒充推断结果，演示时会被一眼看穿。
+ */
+async function readGradeState(instance: ChatRuntime): Promise<GradeState | null> {
+  try {
+    const response = await apiFetch(gradeStatePath(instance.studentId))
+    if (!response.ok) return null
+    const body = (await response.json()) as {
+      grade?: unknown
+      lastTurn?: unknown
+      reason?: unknown
+    }
+    if (typeof body.grade !== 'string' || body.grade.length === 0) return null
+    const lastTurn = typeof body.lastTurn === 'number' ? body.lastTurn : 0
+    return {
+      gradeLevel: body.grade as GradeState['gradeLevel'],
+      origin: lastTurn > 0 ? 'inferred' : 'default',
+      reason: typeof body.reason === 'string' ? body.reason : null
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 值变了才推送 —— 每轮都推会让只读徽章反复闪动。 */
+function pushGradeState(next: GradeState | null): void {
+  if (!next) return
+  const unchanged =
+    currentGrade !== null &&
+    currentGrade.gradeLevel === next.gradeLevel &&
+    currentGrade.origin === next.origin
+  if (unchanged) return
+  currentGrade = next
+  for (const window of BrowserWindow.getAllWindows()) {
+    const webContents = window.webContents
+    if (webContents.isDestroyed()) continue
+    webContents.send(IPC.gradeChanged, next)
+  }
+}
+
+/**
+ * ★ 默认学生 id（票 09：一人一目录、一人一库）。
+ *
+ * 为什么是常量而不是从渲染进程传：`ChatSendRequest` 里**没有** `studentId`（守卫 G7 冻结了
+ * 只有 `text` / `gradeLevel` 两个字段），身份必须由**主进程**决定 —— 一旦学生 id 变成模型/前端
+ * 可填的参数，`get_student_profile(student_id=...)` 这种形状就允许读数别人的画像。
+ *
+ * 「选学生」的 UI 属票 20/21；在那之前，本机固定用 `student_001`，
+ * 并留一个**显式**的环境变量改道口（`K12_STUDENT_ID`）供人工验收跨学生隔离用：
+ * 换一个 id 重启 = 换一套 `students/<id>/pi-agent/` 会话目录，绝不复用别人的。
+ */
+export const DEFAULT_STUDENT_ID = 'student_001'
+
+/** 环境变量优先（经 `assertStudentId` 校验）；非法或未设置时回落到 {@link DEFAULT_STUDENT_ID}。 */
+export function resolveActiveStudentId(): string {
+  const fromEnv = process.env.K12_STUDENT_ID
+  if (!fromEnv) return DEFAULT_STUDENT_ID
+  try {
+    return assertStudentId(fromEnv)
+  } catch (error) {
+    console.warn(
+      `[main] K12_STUDENT_ID 非法（${fromEnv}），已回落到 ${DEFAULT_STUDENT_ID}：` +
+        (error instanceof Error ? error.message : String(error))
+    )
+    return DEFAULT_STUDENT_ID
+  }
+}
+
+/**
+ * ★ 唯一的会话持有者（模块级单例；`null` = 还没建或已经 dispose）。
+ * 当前按「一个应用一个学生一个会话」使用：`studentId` 决定落盘目录，
+ * 换学生必须先 `disposeChatRuntime()` 再重建（票 09 的会话目录与 learning.db 都按学生分）。
+ */
+let runtime: ChatRuntime | null = null
+/** 正在装配中的 Promise（并发首条消息只装配一次）。 */
+let runtimePending: Promise<ChatRuntime> | null = null
+
+/**
+ * 取当前会话（没有就装配）。**Pi 只在真的发消息时被加载**。
+ * `userDataDir` 用 Electron 的 `app.getPath('userData')`，绝不回退 `~/.pi`（票 03/09 的硬约束）。
+ */
+export async function ensureChatRuntime(): Promise<ChatRuntime> {
+  if (runtime) return runtime
+  if (!runtimePending) {
+    runtimePending = createChatRuntime({
+      userDataDir: app.getPath('userData'),
+      // ★ 票 09：会话与 JSONL 落 `<userData>/students/<id>/pi-agent/`（一人一份，显式改道）
+      studentId: resolveActiveStudentId()
+    })
+      .then((instance) => {
+        runtime = instance
+        return instance
+      })
+      .finally(() => {
+        runtimePending = null
+      })
+  }
+  return await runtimePending
+}
+
+/**
+ * ★ `before-quit` 必须调用它（`session.dispose()` → JSONL flush）。
+ * 幂等：重复调用安全（`ChatRuntime.dispose()` 自身也幂等）。
+ */
+export async function disposeChatRuntime(): Promise<void> {
+  const instance = runtime
+  runtime = null
+  if (!instance) return
+  await instance.dispose()
+}
+
+/** 诊断用：会话是否已装配（不暴露 Pi 对象本身）。 */
+export function isChatRuntimeReady(): boolean {
+  return runtime !== null
+}
+
+/**
+ * 返回值里绝不带 token —— `SidecarState` 结构上就没有 token 字段（别在票 02 里加回来）。
  */
 export function registerIpcHandlers(sidecar: SidecarManager): void {
   ipcMain.handle(IPC.sidecarGetInfo, (): SidecarState => sidecar.getState())
@@ -37,10 +185,230 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
 
     // 请求号由主进程生成，并贯穿本轮全部事件（`done` 另带 `messageId`）
     const handle = chatStreams.open(toStreamTarget(event.sender), parsed.request.text)
-    // ★ 假数据源：确定性 6 事件序列。真实数据源在票 06 接上（见上方接线点注释）。
-    runStubTurn(handle, parsed.request.text)
+
+    // ★ 真实数据源：Pi 的 `message_update` / `tool_execution_end` / `agent_end`
+    //   → 6 事件（映射表在 `agent/events.ts`）。这里只启动，回执立即返回给渲染进程。
+    //   ★ 学段**不再随请求传入**：`parsed.request.gradeLevel` 已不是权威值（学段由推断系统
+    //     在 `extensions/grade.ts` 的 `before_agent_start` 里决定），所以这里只递文本。
+    void runChatTurn(parsed.request.text, handle)
     return { ok: true, requestId: handle.requestId, message: null }
   })
+
+  // ★ 退出兜底（幂等）——**与 `src/main/index.ts` 的 `before-quit` 并存是刻意的**：
+  //   入口那份负责「先 flush Pi 会话、再停 sidecar」的**顺序**（Tool 可能是最后一个 `/api` 调用方）；
+  //   这一份负责「入口的接线被误删时 JSONL 仍不半写」。`disposeChatRuntime()` 自身幂等，
+  //   两次调用只会 dispose 一次（`ChatRuntime.dispose()` 有 `disposed` 标记）。
+  //   自带 `.catch`：退出路径上没人接这个 Promise，兜底自己绝不能变成 unhandled rejection。
+  app.on('before-quit', () => {
+    void disposeChatRuntime().catch((error: unknown) => {
+      console.error('[main] Pi 会话兜底收尾异常（继续退出）：', error)
+    })
+  })
+
+  // ── 设置域（票 07：渲染进程 → IPC → 主进程 → sidecar，渲染进程永远看不到 token）──
+  //
+  // 三条都是 **invoke**（有回执），所以**不登记**进 `PUSH_CHANNELS`。
+  // 处理器一律不抛异常：失败也回一句可读中文（`SettingsCallResult` 的判别联合）。
+  // 请求出口只有 `bridge/client.ts` 的 `apiFetch`（它负责注入 `X-Auth-Token`），
+  // 本文件里不出现任何地址、也不出现任何 `fetch(`（守卫 G5 会当场拦下）。
+
+  ipcMain.handle(IPC.settingsRead, async (): Promise<SettingsCallResult<SettingsSnapshot>> => {
+    try {
+      const response = await apiFetch('/api/settings', {
+        method: 'GET',
+        signal: AbortSignal.timeout(SETTINGS_REQUEST_TIMEOUT_MS)
+      })
+      if (!response.ok) {
+        return { ok: false, message: `读取设置失败（HTTP ${response.status}）：${await readDetail(response)}` }
+      }
+      const data = (await response.json()) as unknown
+      if (!isSettingsSnapshot(data)) {
+        return { ok: false, message: '读取设置失败：后端回执不符合契约（缺 llm / embedding 两栏）。' }
+      }
+      return { ok: true, data }
+    } catch (error) {
+      return { ok: false, message: `读取设置失败：${describeError(error)}` }
+    }
+  })
+
+  ipcMain.handle(
+    IPC.settingsSave,
+    async (_event, payload: unknown): Promise<SettingsCallResult<SettingsSnapshot>> => {
+      // 入参形状不合法（被篡改 / 渲染进程 bug）：给可读回执，别让 body 变成 "undefined"
+      if (typeof payload !== 'object' || payload === null) {
+        return { ok: false, message: '保存设置失败：请求体不是对象（渲染进程传参有误）。' }
+      }
+
+      try {
+        const response = await apiFetch('/api/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload as SettingsUpdateRequest),
+          signal: AbortSignal.timeout(SETTINGS_REQUEST_TIMEOUT_MS)
+        })
+        if (!response.ok) {
+          return { ok: false, message: `保存设置失败（HTTP ${response.status}）：${await readDetail(response)}` }
+        }
+        const data = (await response.json()) as unknown
+        if (!isSettingsSnapshot(data)) {
+          return { ok: false, message: '保存设置失败：后端回执不符合契约（缺 llm / embedding 两栏）。' }
+        }
+        return { ok: true, data }
+      } catch (error) {
+        return { ok: false, message: `保存设置失败：${describeError(error)}` }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.settingsProbe,
+    async (_event, payload: unknown): Promise<SettingsCallResult<ProbeResult>> => {
+      // 探测要真的发一次外呼（DNS + TLS + 首字节），所以超时给得比读写宽：
+      // 15s 是「校园网慢但能用」与「不把设置页吊死」的折中。
+      if (typeof payload !== 'object' || payload === null) {
+        return { ok: false, message: '探测失败：请求体不是对象（渲染进程传参有误）。' }
+      }
+
+      try {
+        const response = await apiFetch('/api/settings/probe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload as ProbeRequest),
+          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+        })
+        if (!response.ok) {
+          return { ok: false, message: `探测请求失败（HTTP ${response.status}）：${await readDetail(response)}` }
+        }
+        const data = (await response.json()) as unknown
+        if (typeof data !== 'object' || data === null || typeof (data as ProbeResult).ok !== 'boolean') {
+          return { ok: false, message: '探测失败：后端回执不符合契约（缺 ok 字段）。' }
+        }
+        // ★ 探测的「失败」不是 IPC 失败：`ok:false` + 可读 message 要原样交给界面回显
+        //   （401 / 超时 / DNS / 404 各有各的说法，不能只吐一个 false）。
+        return { ok: true, data: data as ProbeResult }
+      } catch (error) {
+        return { ok: false, message: `探测请求失败：${describeError(error)}` }
+      }
+    }
+  )
+
+  // ---------------------------------------------------------------- 学段（只读）
+  // ★ 只有读，**没有写**：学段由推断引擎独占（D-020）。前端拿它渲染只读徽章。
+  ipcMain.handle(IPC.gradeGet, async (): Promise<GradeCallResult<GradeState>> => {
+    let instance: ChatRuntime
+    try {
+      instance = await ensureChatRuntime()
+    } catch (error) {
+      return { ok: false, message: `读学段失败：对话运行时尚未就绪（${describeRuntimeFailure(error)}）` }
+    }
+    const state = await readGradeState(instance)
+    if (!state) {
+      return { ok: false, message: '读学段失败：本地数据服务没有返回学段状态。' }
+    }
+    currentGrade = state
+    return { ok: true, data: state }
+  })
+}
+
+/** 读/存设置的单次请求超时（本机回环，正常在毫秒级；超了就是 sidecar 卡住）。 */
+const SETTINGS_REQUEST_TIMEOUT_MS = 8000
+/** 连通性探测的超时：真的要走一次外呼，宽一些。 */
+const PROBE_TIMEOUT_MS = 15_000
+
+/** 后端回执的最小形状检查（不通过就报可读错误，别让界面拿半个对象去渲染）。 */
+function isSettingsSnapshot(value: unknown): value is SettingsSnapshot {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as { llm?: unknown; embedding?: unknown }
+  return typeof record.llm === 'object' && record.llm !== null && typeof record.embedding === 'object' && record.embedding !== null
+}
+
+/**
+ * 把非 2xx 回执变成一句人话。
+ *
+ * FastAPI 的错误体是 `{"detail": "..."}`（鉴权失败、422、500 都是这个形状）；
+ * 兜底取 `message` 字段，再兜底取截断后的原文（**绝不把整页 HTML 塞进 UI**）。
+ */
+async function readDetail(response: Response): Promise<string> {
+  try {
+    const text = await response.text()
+    if (!text) return '后端没有给出说明'
+    try {
+      const parsed = JSON.parse(text) as { detail?: unknown; message?: unknown }
+      const detail = parsed.detail ?? parsed.message
+      if (typeof detail === 'string' && detail.trim() !== '') return clip(detail)
+      // 422 的 detail 是数组（pydantic 校验错误），说清「字段在哪」比吐 JSON 有用
+      if (Array.isArray(detail)) {
+        const first = detail[0] as { loc?: unknown; msg?: unknown } | undefined
+        const field = Array.isArray(first?.loc) ? first?.loc.filter((part) => part !== 'body').join('.') : ''
+        const message = typeof first?.msg === 'string' ? first.msg : '校验未通过'
+        return clip(field ? `${field}：${message}` : message)
+      }
+    } catch {
+      // 回执不是 JSON（网关页面 / 代理错误）：原文截断即可
+    }
+    return clip(text)
+  } catch {
+    return '后端回执无法读取'
+  }
+}
+
+/** 异常 → 可读中文（区分「sidecar 没起来」「超时」「网络异常」三类，排查方向完全不同）。 */
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    if (error.name === 'TimeoutError') return '请求超时（本地数据服务没有在超时时间内响应）。'
+    if (error.name === 'AbortError') return '请求被取消。'
+    if (error.message.includes('sidecar 尚未就绪')) {
+      return '本地数据服务（sidecar）尚未就绪：请等界面上的状态变成「已就绪」后重试。'
+    }
+    return error.message
+  }
+  return String(error)
+}
+
+/** 单行化 + 截断（错误行要能进状态栏，不能是一条 2KB 的 JSON）。 */
+function clip(text: string): string {
+  const single = text.replace(/\s+/g, ' ').trim()
+  return single.length > 200 ? `${single.slice(0, 200)}…` : single
+}
+
+/**
+ * 跑一轮对话：装配会话 → 把 6 事件投给本轮句柄。
+ *
+ * ★ 失败必须变成一条**可读的 `error` 事件**（`degraded: true`），且文案要能**区分两类问题**：
+ *   - 「缺 Key / 连不上模型」→ 配置或网络问题（`agent/runtime.ts` 给文案）；
+ *   - 「Pi 装配不起来」（打包缺 esbuild、Node 版本不符…）→ **运行时故障**，文案里明说。
+ *   混淆这两者会让排查方向彻底跑偏（票 03 踩过：把认证失败读成流式没通）。
+ */
+async function runChatTurn(text: string, handle: TurnHandle): Promise<void> {
+  let instance: ChatRuntime
+  try {
+    instance = await ensureChatRuntime()
+  } catch (error) {
+    // ★ 装配失败 = 运行时故障（**不是**缺 Key）：文案与降级标记都要能区分
+    handle.emit({ name: 'error', data: { message: describeRuntimeFailure(error), degraded: false } })
+    handle.emit({ name: 'done', data: { messageId: `turn:${handle.requestId}` } })
+    handle.finish()
+    console.error('[main] Pi 会话装配失败：', error)
+    return
+  }
+
+  try {
+    const outcome = await instance.runTurn({ text }, handle)
+    if (!outcome.ok && outcome.detail) {
+      // 结论只进 stderr（面向排查），UI 那一份文案由 runtime 通过 6 事件给出
+      console.warn(`[main] 本轮结论：${outcome.status} —— ${outcome.detail}`)
+    }
+    // ★ 学段是**推断**出来的：每轮结束后读一次 sidecar 的真值，变了才推送。
+    //   放在本轮之后（不是之前）—— 推断的输入就是这一轮的内容。
+    pushGradeState(await readGradeState(instance))
+  } catch (error) {
+    // 兜底：runTurn 自己已经兜了异常，这里防的是「兜底逻辑本身出错」——绝不让它冒成未捕获异常
+    const message = error instanceof Error ? error.message : String(error)
+    handle.emit({ name: 'error', data: { message: `本轮没能完成（内部异常）：${message}`, degraded: false } })
+    handle.emit({ name: 'done', data: { messageId: `turn:${handle.requestId}` } })
+    handle.finish()
+    console.error('[main] 对话轮次异常：', error)
+  }
 }
 
 /**

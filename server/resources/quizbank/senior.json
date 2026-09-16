@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "grade_level": "senior",
+  "notes": "高中题库（票 14）。本学段可用全部术语（含 梯度下降 / 损失函数 / 参数 / 学习率）。",
+  "questions": [
+    {
+      "qid": "sr-ml-pipeline-q1",
+      "kp_id": "sr-ml-pipeline",
+      "type": "choice",
+      "stem": "一条完整的机器学习流程，下面哪个顺序是对的？",
+      "options": [
+        "收集数据 → 划分训练集与测试集 → 训练 → 在测试集上评估",
+        "先训练 → 再收集数据 → 最后划分测试集",
+        "评估 → 训练 → 划分数据"
+      ],
+      "answer": "收集数据 → 划分训练集与测试集 → 训练 → 在测试集上评估",
+      "explanation": "数据要先收集再划分，训练只能用训练集；用测试集评估必须在训练之后，否则评估结果会虚高。"
+    },
+    {
+      "qid": "sr-ml-pipeline-q2",
+      "kp_id": "sr-ml-pipeline",
+      "type": "blank",
+      "stem": "如果训练时反复用测试集调参数，最后得到的评估分数会偏高，这种做法的错误在于把测试集当成了 ______。",
+      "answer": ["训练集", "验证集"],
+      "explanation": "一旦用测试集去调参数，它就参与了训练过程，评估结果不再代表模型面对新数据时的表现。"
+    },
+    {
+      "qid": "sr-loss-gradient-q1",
+      "kp_id": "sr-loss-gradient",
+      "type": "choice",
+      "stem": "损失函数在梯度下降里的作用是什么？",
+      "options": [
+        "度量当前预测和真实答案差多少，为参数更新提供方向",
+        "把训练数据压缩得更小",
+        "决定用多少层神经元"
+      ],
+      "answer": "度量当前预测和真实答案差多少，为参数更新提供方向",
+      "explanation": "损失函数给出「差多少」，对它求梯度才知道参数该往哪个方向改、改多少。"
+    },
+    {
+      "qid": "sr-loss-gradient-q2",
+      "kp_id": "sr-loss-gradient",
+      "type": "blank",
+      "stem": "每次更新参数时，沿着梯度反方向走的步长由 ______ 决定；它太大会震荡，太小则收敛很慢。",
+      "answer": ["学习率", "learning rate"],
+      "explanation": "学习率控制每一步走多远：过大容易在最优点两侧来回跳，过小则要迭代很多次才收敛。"
+    },
+    {
+      "qid": "sr-linear-regression-q1",
+      "kp_id": "sr-linear-regression",
+      "type": "choice",
+      "stem": "用学习时长预测考试分数，线性回归模型的输出形式是哪个？",
+      "options": ["y = w x + b", "y = w / x", "y = x 的平方根"],
+      "answer": "y = w x + b",
+      "explanation": "线性回归假设输出是输入的线性函数，w 是权重、b 是偏置，训练就是找出最合适的 w 与 b。"
+    },
+    {
+      "qid": "sr-linear-regression-q2",
+      "kp_id": "sr-linear-regression",
+      "type": "code_blank",
+      "stem": "下面这段代码要用最小二乘法拟合一条直线并取出斜率。请把空缺处补上。\n\n```python\nimport numpy as np\nw, b = np.polyfit(hours, scores, ______)\n```",
+      "answer": "1",
+      "explanation": "np.polyfit 的第三个参数是多项式次数，拟合直线取 1；取 2 就变成二次曲线了。"
+    },
+    {
+      "qid": "sr-linear-regression-q3",
+      "kp_id": "sr-linear-regression",
+      "type": "choice",
+      "stem": "训练误差很小、但在测试集上误差明显变大，这种现象叫什么？",
+      "options": ["过拟合", "欠拟合", "数据漂移"],
+      "answer": "过拟合",
+      "explanation": "过拟合是模型把训练数据里的细节和噪声也记住了，换到新数据上就不灵了；欠拟合则是训练误差本身就很大。"
+    }
+  ]
+}

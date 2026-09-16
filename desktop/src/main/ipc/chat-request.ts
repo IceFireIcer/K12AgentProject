@@ -6,14 +6,12 @@
  * 失败返回可读中文回执（`ok: false`），**不抛异常**——抛出去只会变成穿过 IPC 的堆栈文本。
  */
 
-import type { GradeLevel } from '@shared/ipc-events'
 import type { ChatSendRequest } from './channels.ts'
 
 /** 单条输入的长度上限（防手滑粘贴整本书；也保护下游 Prompt 预算）。 */
 export const MAX_INPUT_CHARS = 2000
 
 /** 四学段字面量（执行文档 §6.2，冻结）。 */
-const GRADE_LEVELS: readonly GradeLevel[] = ['primary_low', 'primary_high', 'junior', 'senior']
 
 export type ChatSendParse =
   | { ok: true; request: ChatSendRequest }
@@ -34,12 +32,8 @@ export function parseChatSendRequest(payload: unknown): ChatSendParse {
     return { ok: false, message: `发送失败：一次最多输入 ${MAX_INPUT_CHARS} 个字，可以先说说你最想弄懂的那一点。` }
   }
 
-  const gradeLevel = readGradeLevel(record.gradeLevel)
-  return { ok: true, request: gradeLevel === undefined ? { text } : { text, gradeLevel } }
-}
-
-/** 学段必须是四个冻结字面量之一；不是就当作「没给」（由下游用默认值，而不是把脏值传下去）。 */
-function readGradeLevel(value: unknown): GradeLevel | undefined {
-  if (typeof value !== 'string') return undefined
-  return (GRADE_LEVELS as readonly string[]).includes(value) ? (value as GradeLevel) : undefined
+  // ★ 刻意**不读** payload 里的学段（即使是旧客户端发来的）：
+  //   学段完全由推断引擎决定（D-020），请求携带的学段一律忽略 ——
+  //   留着"能读就采信"的分支，等于给手动改学段留了一个后门。
+  return { ok: true, request: { text } }
 }

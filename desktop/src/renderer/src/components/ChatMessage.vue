@@ -5,14 +5,18 @@
  * 6 事件在这里各自找到位置：
  *   `delta`   → 正文实时增长（`assistant-text`）
  *   `citation`→ 来源小标签（SourceChips）
- *   `payload` → 内联卡片占位（InlineCard，按 `kind` 分派）
+ *   `payload` → 内联卡片（InlineCard：练习卡片已落地，动画/编程为占位）
  *   `blocked` → 正文已被替换成安全提示 + 撤回说明（BlockedNotice）
  *   `done`    → 状态徽章变成「回答完成」
  *   `error`   → 可读的降级提示（DegradedNotice）
+ *
+ * ★ 每条回答都标出**这一轮用的学段**（`turn.gradeLevel`）：这个值来自系统对学段的
+ *   自动判定（学生不选学段），标出来是为了让「同一道题换个年级问，回答不一样」看得见。
+ *   还没判出学段时该徽章不显示（宁可不标，也不标一个假的）。
  */
 import { computed } from 'vue'
 import type { ChatTurn } from '../api/events'
-import { TURN_STATUS_LABELS } from '../labels'
+import { GRADE_LABELS, TURN_STATUS_LABELS } from '../labels'
 import InlineCard from '../cards/InlineCard.vue'
 import BlockedNotice from './BlockedNotice.vue'
 import DegradedNotice from './DegradedNotice.vue'
@@ -22,6 +26,7 @@ const props = defineProps<{ turn: ChatTurn }>()
 
 const streaming = computed(() => props.turn.status === 'streaming')
 const statusLabel = computed(() => TURN_STATUS_LABELS[props.turn.status])
+const gradeLabel = computed(() => (props.turn.gradeLevel ? GRADE_LABELS[props.turn.gradeLevel] : null))
 </script>
 
 <template>
@@ -33,6 +38,14 @@ const statusLabel = computed(() => TURN_STATUS_LABELS[props.turn.status])
     <div class="bubble bubble--assistant" data-testid="assistant-message">
       <div class="meta">
         <span class="who">AI 老师</span>
+        <span
+          v-if="gradeLabel"
+          class="chip chip--accent"
+          data-testid="turn-grade"
+          :data-grade="turn.gradeLevel"
+        >
+          {{ gradeLabel }}
+        </span>
         <span class="chip" :class="streaming ? 'chip--accent' : 'chip--ok'" data-testid="turn-status">
           {{ statusLabel }}
         </span>

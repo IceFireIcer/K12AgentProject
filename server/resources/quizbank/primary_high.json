@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "grade_level": "primary_high",
+  "notes": "小学高年级题库（票 14）。可用术语见 knowledge/terminology.json（准确率、深度伪造在此学段首次可用；「参数」「训练集」等仍属超纲）。",
+  "questions": [
+    {
+      "qid": "ph-data-train-predict-q1",
+      "kp_id": "ph-data-train-predict",
+      "type": "choice",
+      "stem": "我们给机器看了 100 张水果图片，并且告诉它每张是什么水果。这个环节叫什么？",
+      "options": ["训练", "预测", "拍照"],
+      "answer": "训练",
+      "explanation": "带着答案给机器看数据，让它自己找规律，这一步叫训练；训练之后再用没见过的图片让它猜，才叫预测。"
+    },
+    {
+      "qid": "ph-data-train-predict-q2",
+      "kp_id": "ph-data-train-predict",
+      "type": "blank",
+      "stem": "机器训练完以后，我们拿一张它从没见过的图片让它判断，这个过程叫 ______。",
+      "answer": ["预测", "推理"],
+      "explanation": "用新数据去考它，看它猜得准不准，这就是预测。"
+    },
+    {
+      "qid": "ph-image-classification-q1",
+      "kp_id": "ph-image-classification",
+      "type": "choice",
+      "stem": "把图片分成「猫」「狗」「兔子」三类时，机器最主要的依据是什么？",
+      "options": [
+        "图片里形状、颜色等可以被量出来的特征",
+        "图片的文件名是 cat 还是 dog",
+        "图片是今天拍的还是昨天拍的"
+      ],
+      "answer": "图片里形状、颜色等可以被量出来的特征",
+      "explanation": "机器看的是能算出来的特征（比如耳朵的形状、毛色的深浅），文件名和拍摄时间跟画面内容没有关系。"
+    },
+    {
+      "qid": "ph-image-classification-q2",
+      "kp_id": "ph-image-classification",
+      "type": "blank",
+      "stem": "机器分对了 90 张、分错了 10 张，一共 100 张，那么它的 ______ 是 90%。",
+      "answer": ["准确率", "正确率", "对的比率"],
+      "explanation": "分对的张数占总张数的比例，就是准确率。"
+    },
+    {
+      "qid": "ph-speech-recognition-q1",
+      "kp_id": "ph-speech-recognition",
+      "type": "choice",
+      "stem": "语音识别要把「说的声音」变成「文字」，中间最关键的一步是什么？",
+      "options": [
+        "把声音切成一小段一小段再逐段判断",
+        "把声音的音量调到最大",
+        "把说话的语速放慢十倍"
+      ],
+      "answer": "把声音切成一小段一小段再逐段判断",
+      "explanation": "一下子判断一整句话太难，切成小段逐段判断，再拼成句子，识别就稳得多。"
+    },
+    {
+      "qid": "ph-speech-recognition-q2",
+      "kp_id": "ph-speech-recognition",
+      "type": "blank",
+      "stem": "家里有电视声、说话声的时候，语音助手常常听不清，因为这些声音是 ______。",
+      "answer": ["噪音", "噪声", "干扰"],
+      "explanation": "和要听的声音混在一起、影响判断的声音都叫噪音，噪音越大越难听清。"
+    },
+    {
+      "qid": "ph-ai-ethics-safety-q1",
+      "kp_id": "ph-ai-ethics-safety",
+      "type": "choice",
+      "stem": "有人用 AI 把同学的头像换到别人的照片上，还发了出去。下面哪种说法是对的？",
+      "options": [
+        "这是在伤害别人，属于不合适也不允许的行为",
+        "照片好看就没关系",
+        "只要不写名字就不算伤害别人"
+      ],
+      "answer": "这是在伤害别人，属于不合适也不允许的行为",
+      "explanation": "用别人的脸去合成假照片叫深度伪造，会伤害同学的名誉和心情，不管好不好看都是错的；不写名字也一样能认出来。"
+    },
+    {
+      "qid": "ph-ai-ethics-safety-q2",
+      "kp_id": "ph-ai-ethics-safety",
+      "type": "code_blank",
+      "stem": "下面这段代码想判断「分数及格就提示继续加油」。请把空缺处补上。\n\n```python\nscore = 88\nif score ______ 60:\n    print(\"及格了，继续加油\")\n```",
+      "answer": ">=",
+      "explanation": "要表达「大于或等于」，Python 里写成 >=。"
+    }
+  ]
+}

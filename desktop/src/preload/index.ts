@@ -12,7 +12,19 @@
  */
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import { IPC, type ChatSendRequest, type ChatSendResult, type IpcChannel } from '../main/ipc/channels'
+import {
+  IPC,
+  type ChatSendRequest,
+  type ChatSendResult,
+  type GradeCallResult,
+  type GradeState,
+  type IpcChannel,
+  type ProbeRequest,
+  type ProbeResult,
+  type SettingsCallResult,
+  type SettingsSnapshot,
+  type SettingsUpdateRequest
+} from '../main/ipc/channels'
 import type { SidecarState } from '../main/sidecar/protocol'
 import { IPC_EVENT_NAMES, type IpcEvent } from '../shared/ipc-events'
 
@@ -25,6 +37,35 @@ export interface K12Api {
   sendChat(request: ChatSendRequest): Promise<ChatSendResult>
   /** 订阅 6 事件流（`delta|citation|payload|blocked|done|error`），返回取消订阅函数。 */
   onChatEvent(listener: (event: IpcEvent) => void): () => void
+  /** 读设置（`GET /api/settings`；Key 只回掩码，明文永不进渲染进程）。 */
+  readSettings(): Promise<SettingsCallResult<SettingsSnapshot>>
+  /** 保存设置（`PUT /api/settings`；`apiKey` 空串/掩码 = 保留已存值）。 */
+  saveSettings(payload: SettingsUpdateRequest): Promise<SettingsCallResult<SettingsSnapshot>>
+  /** 真实连通性探测（`POST /api/settings/probe`；失败原因可读，不落库、不改配置）。 */
+  probeSettings(payload: ProbeRequest): Promise<SettingsCallResult<ProbeResult>>
+  /**
+   * 读**当前学段**（只读）。
+   * ★ 故意**没有** `setGrade`：学段完全由系统推断，前端连请求改的能力都不该有（D-020）。
+   */
+  getGrade(): Promise<GradeCallResult<GradeState>>
+  /** 订阅学段变化（推进只读徽章），返回取消订阅函数。 */
+  onGradeChanged(listener: (state: GradeState) => void): () => void
+}
+
+/**
+ * ★ `window.api` 的全局声明**放在这里**（而不是只放 `index.d.ts`）。
+ *
+ * 为什么不只靠 `src/preload/index.d.ts`：tsconfig 的 `include` 同时匹配 `index.ts` 与
+ * `index.d.ts` 时，TypeScript 会**丢掉同名的 .d.ts**（`index.ts` 胜出），于是
+ * `tsconfig.node.json`（含 `tests/**`，而 `tests/renderer-quiz.test.ts` 会 import 渲染进程模块）
+ * 里 `window.api` 就成了未声明属性 —— 实测报 `TS2339: Property 'api' does not exist`。
+ * 两份 `declare global` 类型完全相同（都指向本文件的 `K12Api`），接口合并不会冲突；
+ * `tsconfig.web.json` 只收 `src/preload/*.d.ts`，因此两边各自只看到一份声明。
+ */
+declare global {
+  interface Window {
+    api: K12Api
+  }
 }
 
 const api: K12Api = {
@@ -54,8 +95,46 @@ const api: K12Api = {
     return () => {
       ipcRenderer.removeListener(IPC.chatEvent, handler)
     }
+  },
+
+  // 设置域：纯 invoke 转发（回执是判别联合 `{ok,data} | {ok,message}`，失败不抛异常）。
+  // token 与地址全在主进程（`bridge/client.ts`），这里只是把参数照原样递过去。
+  readSettings: (): Promise<SettingsCallResult<SettingsSnapshot>> =>
+    ipcRenderer.invoke(IPC.settingsRead) as Promise<SettingsCallResult<SettingsSnapshot>>,
+
+  saveSettings: (payload): Promise<SettingsCallResult<SettingsSnapshot>> =>
+    ipcRenderer.invoke(IPC.settingsSave, payload) as Promise<SettingsCallResult<SettingsSnapshot>>,
+
+  probeSettings: (payload): Promise<SettingsCallResult<ProbeResult>> =>
+    ipcRenderer.invoke(IPC.settingsProbe, payload) as Promise<SettingsCallResult<ProbeResult>>,
+  getGrade: (): Promise<GradeCallResult<GradeState>> =>
+    ipcRenderer.invoke(IPC.gradeGet) as Promise<GradeCallResult<GradeState>>,
+  onGradeChanged: (listener): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: unknown): void => {
+      // 边界处过滤：只认四个冻结字面量，别把主进程的半截对象丢给界面去渲染
+      if (!isGradeState(state)) return
+      listener(state)
+    }
+    ipcRenderer.on(IPC.gradeChanged, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.gradeChanged, handler)
+    }
   }
 }
+
+/** 学段状态的最小形状检查（`origin` 缺省按 `default` 处理：宁可显示待判定）。 */
+function isGradeState(value: unknown): value is GradeState {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as { gradeLevel?: unknown; origin?: unknown }
+  return (
+    typeof record.gradeLevel === 'string' &&
+    (GRADE_LEVELS as readonly string[]).includes(record.gradeLevel) &&
+    (record.origin === 'inferred' || record.origin === 'default')
+  )
+}
+
+/** 四个学段字面量（与 `shared/ipc-events.ts` 的 `GradeLevel` 同源，此处只做运行期校验）。 */
+const GRADE_LEVELS = ['primary_low', 'primary_high', 'junior', 'senior'] as const
 
 /** 事件名是否在冻结的 6 个之内（`IPC_EVENT_NAMES` 是 `shared/ipc-events.ts` 的运行时副本）。 */
 function isIpcEvent(payload: unknown): payload is IpcEvent {
@@ -69,7 +148,12 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.sidecarGetInfo,
   IPC.sidecarChanged,
   IPC.chatSend,
-  IPC.chatEvent
+  IPC.chatEvent,
+  IPC.settingsRead,
+  IPC.settingsSave,
+  IPC.settingsProbe,
+  IPC.gradeGet,
+  IPC.gradeChanged
 ]
 
 contextBridge.exposeInMainWorld('api', api)

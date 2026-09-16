@@ -17,6 +17,97 @@
  */
 
 export interface paths {
+    "/api/grade/history/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 学段变化轨迹
+         * @description ``grade_history`` 全量轨迹（含冷启动基线那行：``from_level`` 为空）。
+         */
+        get: operations["grade_history_api_grade_history__student_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/grade/signals/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 学段信号与待生效的推断建议
+         * @description 当前学段 + 最近信号 + （够格但被挡住时的）待生效建议。
+         *
+         *     ★ 与旧设计不同：这里**不再有「学生确认」这一步** —— 学段由系统自动生效，
+         *     ``source`` 恒为 ``inferred``。``suggested_level`` 的含义因此收窄为
+         *     「证据已够、但被冷却期或置信度挡住的下一个学段」，供前端显示「将在下一轮生效」。
+         */
+        get: operations["grade_signals_api_grade_signals__student_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/grade/state/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 当前学段状态（轻量）
+         * @description 桌面端每轮取「当前学段」的入口（不含信号列表，载荷最小）。
+         *
+         *     学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，
+         *     而不是 404 —— 学段推断从第一轮就要开始工作。
+         */
+        get: operations["grade_state_api_grade_state__student_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/grade/turns/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 上交一批轮次证据，由服务端提取信号并判定学段
+         * @description ★ **学段推断的主入口**：一批轮次证据 → 信号 → 判定 → （必要时）改学段。
+         *
+         *     依次处理 ``turns``（按给定顺序 = 轮次升序），**逐轮判定**，
+         *     返回最后一轮的结论 + 每一轮的轨迹。信号逐轮落库：即使中途失败，
+         *     已写入的信号也不会丢，下一次调用照样能算出正确的连续轮次。
+         */
+        post: operations["submit_grade_turns_api_grade_turns__student_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/graph/deps/{kp_id}": {
         parameters: {
             query?: never;
@@ -38,6 +129,107 @@ export interface paths {
         get: operations["graph_deps_api_graph_deps__kp_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 画像与掌握度
+         * @description 读某学生的画像：基本身份 + 掌握度 + 偏好（+ 依赖图推荐，票 20 填充）。
+         *
+         *     - 学生不存在 → **404**（空画像会让学生以为「我没学过任何东西」，两者必须区分）；
+         *     - ``studentId`` 非法 → **422**（它会被拼进文件系统路径）；
+         *     - 库读写失败 → **503**（可读中文；上层 Tool 会把它转成 `error` 事件而不是崩）。
+         */
+        get: operations["student_profile_api_profile__student_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 学习记录写入（答题/代码/动画观看/答疑）
+         * @description 把一条结构化学习记录写进该学生的 ``learning.db``。
+         *
+         *     冷启动兜底：学生行不存在时按请求里的学段（缺省 ``primary_high``）建一条 ——
+         *     「学生还没登录就先产生了学习记录」不该丢数据，也不该 500。
+         */
+        post: operations["record_learning_event_api_profile__student_id__events_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/quiz/bank/{kp_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 按知识点 + 学段取题（剔除 answer）
+         * @description 取题（供练习 Extension 的 ``generate_quiz`` Tool 调用）。
+         *
+         *     - 本题库**按学段分文件**，因此学段是必填参数；只允许取**不高于**学生学段的题；
+         *     - 返回体是 :class:`QuizPayload`，``questions`` 全是 :class:`QuizQuestionOut`
+         *       （**结构上没有 ``answer``**，不是靠 ``exclude`` 临时裁的）；
+         *     - 取不到题 → **404** + 可读中文（``questions: []`` 看起来像「这个知识点没题」，
+         *       与「kpId 拼错了」分不开，所以不用空数组表达失败）；
+         *     - 题库目录不存在/坏题多 → 不算错误：返回 404，由编排层决定改用 LLM 生成（票 15）。
+         */
+        get: operations["get_quiz_bank_api_quiz_bank__kp_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/quiz/grade": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 提交答案并批改（客观题规则判分）
+         * @description 按 ``qid`` 查库判分，并把结果写进该学生的 ``learning.db``。
+         *
+         *     写入两处（都是结构化数据，**不写对话正文**）：
+         *       - ``mastery``：``score`` / ``attempts`` / ``correct`` / ``last_seen_at``；
+         *       - ``learning_history``：一条 ``activity="quiz"`` 记录（票 20 的个性化闭环要吃它）。
+         *
+         *     ``mastery_delta`` 回传的是**实际生效**的变化量（``新值 - 旧值``）：已经满分时再答对就是 0，
+         *     而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）。
+         */
+        post: operations["grade_quiz_api_quiz_grade_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -108,11 +300,16 @@ export interface paths {
         put?: never;
         /**
          * 探测 LLM 连通性（票 07 实现）
-         * @description ⚠️ **票 04 不实现探测**：真实连通性探测（``GET /models`` / 1-token 请求 +
-         *     可读失败原因）属票 07。
+         * @description 真实连通性探测（票 07 落地）：``GET {baseUrl}/models``，必要时补一条 1-token 对话请求。
          *
-         *     这里**返回 501 而不是造一个 ``{ok:false}``** —— 假结果会被设置页当成
-         *     「用户填错了」显示，比没实现更糟（执行文档 §6.2 明确要求真实探测）。
+         *     ★ **BaseURL 的 `/v1` 陷阱**：默认值历史上是 ``https://api.deepseek.com/v1``（OpenAI 兼容习惯），
+         *     而 Pi 内置 DeepSeek provider 用的是 ``https://api.deepseek.com``（**无 `/v1`**）。
+         *     两者都可能连通、也都可能只有一种能连通，所以这里**不自动改写**用户填的值：
+         *     先原样探测（探测的就是「保存后会用的那个地址」），只有在**路径不存在**（404/405）时才拿
+         *     另一种写法做一次诊断，并在失败原因里明确告诉用户该改成哪一个。
+         *
+         *     探测的是**提交的候选配置**（先探测、满意再保存）；Key 提交掩码/空串时用已存 Key。
+         *     **探测失败不阻塞保存**（断网/离线演示仍要能存配置），失败原因一律是可读中文。
          */
         post: operations["probe_settings_api_settings_probe_post"];
         delete?: never;
@@ -134,6 +331,8 @@ export interface paths {
         /**
          * 新建学生（含学段）
          * @description 新建学生。请求体校验（含四学段字面量）由契约模型完成，非法学段直接 422。
+         *
+         *     落盘位置：``<userData>/students/<id>/learning.db``（一人一库，§8.2）。
          */
         post: operations["create_student_api_students_post"];
         delete?: never;
@@ -451,30 +650,106 @@ export interface components {
          */
         EmbeddingMode: "local_fastembed" | "cloud_api" | "none";
         /**
+         * GradeEvaluationOut
+         * @description 一轮的判定结论（演示脚本与报告直接用它叙述「第 N 轮为什么没改」）。
+         */
+        GradeEvaluationOut: {
+            /** Changed */
+            changed: boolean;
+            /** Confidence */
+            confidence: number;
+            /** Direction */
+            direction: number;
+            /**
+             * Grade
+             * @enum {string}
+             */
+            grade: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Reason */
+            reason: string;
+            /** Streak */
+            streak: number;
+            /** Turn */
+            turn: number;
+        };
+        /**
+         * GradeHistoryEntry
+         * @description ``grade_history`` 的一行（学段变化轨迹）。
+         */
+        GradeHistoryEntry: {
+            /**
+             * Confidence
+             * @default 0
+             */
+            confidence: number;
+            /** Fromlevel */
+            fromLevel?: ("primary_low" | "primary_high" | "junior" | "senior") | null;
+            /** Source */
+            source: string;
+            /**
+             * Tolevel
+             * @enum {string}
+             */
+            toLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Ts */
+            ts: number;
+            /** Turn */
+            turn: number;
+        };
+        /**
+         * GradeHistoryResponse
+         * @description ``grade_history`` 轨迹（报告叙事：「第 3 轮调为小学低年级（0.75）」）。
+         */
+        GradeHistoryResponse: {
+            /**
+             * Currentlevel
+             * @enum {string}
+             */
+            currentLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Entries */
+            entries?: components["schemas"]["GradeHistoryEntry"][];
+            /** Studentid */
+            studentId: string;
+        };
+        /**
          * GradeLevel
          * @enum {string}
          */
         GradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
         /**
+         * GradeProposalInput
+         * @description 第二层 LLM 的**提议**（``{suggestedGrade, confidence}``）。
+         *
+         *     ★ 它只是提议：规则引擎可以采纳（同向时抬高置信度）、可以无视，也可以否决（反向）。
+         */
+        GradeProposalInput: {
+            /** Confidence */
+            confidence: number;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+            /**
+             * Suggestedgrade
+             * @enum {string}
+             */
+            suggestedGrade: "primary_low" | "primary_high" | "junior" | "senior";
+        };
+        /**
          * GradeSignal
          * @description 一条学段判定信号（§8.3 `grade_signals`）。
          */
         GradeSignal: {
-            /**
-             * Raw
-             * @default null
-             */
-            raw: string | null;
+            /** Raw */
+            raw?: string | null;
             /**
              * Signaltype
              * @enum {string}
              */
             signalType: "vocab" | "depth" | "quiz_perf" | "meta_cognition";
-            /**
-             * Ts
-             * @default null
-             */
-            ts: number | null;
+            /** Ts */
+            ts?: number | null;
             /** Value */
             value: number;
         };
@@ -483,7 +758,8 @@ export interface components {
          * @description ``GET /api/grade/signals/{student_id}``：学段信号与推断建议。
          *
          *     ⚠️ **自动推断只写「建议」，不直接改**（AGENTS §5.1）：``suggested_level`` 供前端弹
-         *     建议条，学生确认后才写 `grade_history(source=confirmed)`。
+         *     达到阈值时**自动生效**并写 `grade_history(source="inferred")`；
+         *     学生端只读展示当前学段，**没有选择器、没有确认动作**（§10.3）。
          */
         GradeSignals: {
             /**
@@ -500,17 +776,124 @@ export interface components {
             signals?: components["schemas"]["GradeSignal"][];
             /**
              * Source
-             * @default explicit
-             * @enum {string}
+             * @default inferred
+             * @constant
              */
-            source: "explicit" | "inferred" | "confirmed";
+            source: "inferred";
             /** Studentid */
             studentId: string;
+            /** Suggestedlevel */
+            suggestedLevel?: ("primary_low" | "primary_high" | "junior" | "senior") | null;
+        };
+        /**
+         * GradeStateOut
+         * @description 轻量状态（桌面端每轮取「当前学段」；不含信号列表）。
+         */
+        GradeStateOut: {
             /**
-             * Suggestedlevel
-             * @default null
+             * Confidence
+             * @default 0
              */
-            suggestedLevel: ("primary_low" | "primary_high" | "junior" | "senior") | null;
+            confidence: number;
+            /**
+             * Cooldownremainingturns
+             * @default 0
+             */
+            cooldownRemainingTurns: number;
+            /**
+             * Direction
+             * @default 0
+             */
+            direction: number;
+            /**
+             * Grade
+             * @enum {string}
+             */
+            grade: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Lastchangeturn */
+            lastChangeTurn?: number | null;
+            /** Lastturn */
+            lastTurn: number;
+            /** Source */
+            source: string;
+            /**
+             * Streak
+             * @default 0
+             */
+            streak: number;
+            /** Studentid */
+            studentId: string;
+            /** Suggestedlevel */
+            suggestedLevel?: ("primary_low" | "primary_high" | "junior" | "senior") | null;
+        };
+        /**
+         * GradeTurnInput
+         * @description **一轮**证据：轮次号 + 学生原话 + （可选）答题表现与第二层提议。
+         */
+        GradeTurnInput: {
+            proposal?: components["schemas"]["GradeProposalInput"] | null;
+            quiz?: components["schemas"]["QuizPerformanceInput"] | null;
+            /** Sessionid */
+            sessionId?: string | null;
+            /**
+             * Text
+             * @default
+             */
+            text: string;
+            /** Turn */
+            turn: number;
+        };
+        /**
+         * GradeTurnResponse
+         * @description 上交证据后的判定结果（**服务端决策**，桌面端只负责按它换下一轮的 prompt）。
+         */
+        GradeTurnResponse: {
+            /** Changed */
+            changed: boolean;
+            /** Confidence */
+            confidence: number;
+            /** Cooldownremainingturns */
+            cooldownRemainingTurns: number;
+            /** Degraded */
+            degraded?: string | null;
+            /** Direction */
+            direction: number;
+            /** Evaluations */
+            evaluations?: components["schemas"]["GradeEvaluationOut"][];
+            /**
+             * Grade
+             * @enum {string}
+             */
+            grade: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Llmconfidence */
+            llmConfidence?: number | null;
+            /**
+             * Previousgrade
+             * @enum {string}
+             */
+            previousGrade: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Reason */
+            reason: string;
+            /** Ruleconfidence */
+            ruleConfidence: number;
+            /** Signals */
+            signals?: components["schemas"]["GradeSignal"][];
+            /** Source */
+            source: string;
+            /** Streak */
+            streak: number;
+            /** Studentid */
+            studentId: string;
+            /** Turn */
+            turn: number;
+        };
+        /**
+         * GradeTurnsRequest
+         * @description ``POST /api/grade/turns/{student_id}`` 的请求体（**一批轮次证据**，按轮次升序）。
+         */
+        GradeTurnsRequest: {
+            /** Turns */
+            turns: components["schemas"]["GradeTurnInput"][];
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -543,6 +926,47 @@ export interface components {
          * @enum {string}
          */
         LearningActivity: "qa" | "animation" | "coding" | "quiz";
+        /**
+         * LearningEventAck
+         * @description 学习记录写入的回执（§6.3：``{ok}``）。
+         */
+        LearningEventAck: {
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+        };
+        /**
+         * LearningEventRequest
+         * @description ``POST /api/profile/{student_id}/events`` 的请求体（学习记录写入）。
+         *
+         *     由 ``learning-log`` Extension 构造，字段全部是**从对话里提取出来的结构化信息**：
+         *     没有任何一个字段用于承载对话正文（这是有意的，见模块头）。
+         */
+        LearningEventRequest: {
+            /**
+             * Activity
+             * @enum {string}
+             */
+            activity: "qa" | "animation" | "coding" | "quiz";
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /** Gradelevel */
+            gradeLevel?: ("primary_low" | "primary_high" | "junior" | "senior") | null;
+            /** Iscorrect */
+            isCorrect?: boolean | null;
+            /**
+             * Kpid
+             * @default
+             */
+            kpId: string;
+            /** Sessionid */
+            sessionId?: string | null;
+        };
         /**
          * LlmConfig
          * @description LLM 配置的**出参形态**（发给渲染进程 / 与磁盘一致的只读视图）。
@@ -631,11 +1055,8 @@ export interface components {
             correct: number;
             /** Kpid */
             kpId: string;
-            /**
-             * Lastseenat
-             * @default null
-             */
-            lastSeenAt: number | null;
+            /** Lastseenat */
+            lastSeenAt?: number | null;
             /**
              * Score
              * @default 0
@@ -683,11 +1104,8 @@ export interface components {
             answer: string | string[];
             /** Qid */
             qid: string;
-            /**
-             * Sessionid
-             * @default null
-             */
-            sessionId: string | null;
+            /** Sessionid */
+            sessionId?: string | null;
             /** Studentid */
             studentId: string;
         };
@@ -707,6 +1125,39 @@ export interface components {
             source: "bank" | "generated";
         };
         /**
+         * QuizPerformanceInput
+         * @description 答题表现（从 ``learning.db`` 读出来的结构化摘要，由桌面端带上来）。
+         *
+         *     **不带题干与作答正文**，只有数字 —— 与 ``learning_history`` 的口径一致。
+         */
+        QuizPerformanceInput: {
+            /**
+             * Attempts
+             * @default 0
+             */
+            attempts: number;
+            /**
+             * Correct
+             * @default 0
+             */
+            correct: number;
+            /**
+             * Currentstreak
+             * @default 0
+             */
+            currentStreak: number;
+            /**
+             * Hintsrequested
+             * @default 0
+             */
+            hintsRequested: number;
+            /**
+             * Toohard
+             * @default false
+             */
+            tooHard: boolean;
+        };
+        /**
          * QuizQuestionOut
          * @description ★ **对外模型**：没有 ``answer``，发给 TS 与前端（§6.3 答案泄漏防护）。
          *
@@ -718,11 +1169,8 @@ export interface components {
             explanation: string;
             /** Kpid */
             kpId: string;
-            /**
-             * Options
-             * @default null
-             */
-            options: string[] | null;
+            /** Options */
+            options?: string[] | null;
             /** Qid */
             qid: string;
             /** Stem */
@@ -955,6 +1403,134 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    grade_history_api_grade_history__student_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GradeHistoryResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    grade_signals_api_grade_signals__student_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GradeSignals"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    grade_state_api_grade_state__student_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GradeStateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_grade_turns_api_grade_turns__student_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GradeTurnsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GradeTurnResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     graph_deps_api_graph_deps__kp_id__get: {
         parameters: {
             query?: {
@@ -978,6 +1554,143 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DepNode"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    student_profile_api_profile__student_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StudentProfile"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_learning_event_api_profile__student_id__events_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LearningEventRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LearningEventAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_quiz_bank_api_quiz_bank__kp_id__get: {
+        parameters: {
+            query?: {
+                /** @description 学生学段（四学段之一，必填） */
+                grade_level?: string | null;
+                /** @description 取几道题 */
+                count?: number;
+                /** @description 题目不足时是否允许取用更低学段的题 */
+                allow_compat?: boolean;
+            };
+            header?: never;
+            path: {
+                kp_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuizPayload"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    grade_quiz_api_quiz_grade_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["QuizGradeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuizResult"];
                 };
             };
             /** @description Validation Error */

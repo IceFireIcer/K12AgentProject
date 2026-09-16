@@ -49,11 +49,15 @@ from app.config import (  # noqa: E402
     RuntimeConfig,
     build_runtime_config,
 )
+from app.routes.grade import router as grade_router  # noqa: E402
 from app.routes.graph import router as graph_router  # noqa: E402
 from app.routes.health import router as health_router  # noqa: E402
+from app.routes.profile import router as profile_router  # noqa: E402
+from app.routes.quiz import router as quiz_router  # noqa: E402
 from app.routes.rag import router as rag_router  # noqa: E402
 from app.routes.settings import router as settings_router  # noqa: E402
 from app.routes.students import router as students_router  # noqa: E402
+from app.safety.guard import install_log_redaction  # noqa: E402
 from app.security import (  # noqa: E402
     ALLOWED_ORIGIN_REGEX,
     ALLOWED_ORIGINS,
@@ -132,6 +136,10 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
     app.include_router(students_router)
     app.include_router(rag_router)
     app.include_router(graph_router)
+    app.include_router(profile_router)
+    app.include_router(quiz_router)
+    # 学段自动推断（票 21）：前端没有选择器，这里是唯一的学段写路径
+    app.include_router(grade_router)
 
     # ★ 中间件顺序是**有讲究的**，别调换：
     #   Starlette 的洋葱模型里「最后 add 的在最外层」，所以：
@@ -160,6 +168,10 @@ def main(argv: list[str] | None = None) -> int:
         log_level=args.log_level,
     )
     configure_logging(cfg.log_level)
+    # ★ 日志脱敏：LLM/嵌入的明文与 API Key 不得进日志（执行文档 §12）。
+    #   放在 configure_logging 之后、任何业务日志之前；它会保留 %s / %(name)s 占位符，
+    #   否则 record.getMessage() 会抛 TypeError（见 P-009）。
+    install_log_redaction()
     logger = logging.getLogger(APP_TITLE)
 
     try:

@@ -430,15 +430,16 @@ test('登记中心：已结束的轮次再发事件被丢弃（旧轮不污染�
 
 // ── 4. chat:send 入参校验与冻结映射表 ────────────────────────────────────
 
-test('入参校验：空串 / 非对象 / 超长 / 脏学段都被挡住，且给出可读中文', () => {
+test('入参校验：空串 / 非对象 / 超长都被挡住，且给出可读中文', () => {
   assert.equal(parseChatSendRequest(null).ok, false)
   assert.equal(parseChatSendRequest({ text: '   ' }).ok, false)
   assert.equal(parseChatSendRequest({ text: '一'.repeat(MAX_INPUT_CHARS + 1) }).ok, false)
-  assert.equal(parseChatSendRequest({ text: 'ok', gradeLevel: 'college' }).ok, true)
 
+  // ★ 请求里**不带学段**：学段由系统推断（D-020）。旧客户端塞进来的脏值
+  //   （'college' / 'junior'）既不能进请求对象，也不能改变解析结果。
   const parsed = parseChatSendRequest({ text: '  你好  ', gradeLevel: 'junior' })
   assert.equal(parsed.ok, true)
-  assert.deepEqual(parsed.ok ? parsed.request : null, { text: '你好', gradeLevel: 'junior' })
+  assert.deepEqual(parsed.ok ? parsed.request : null, { text: '你好' })
 
   for (const bad of [null, { text: '' }, { text: '一'.repeat(MAX_INPUT_CHARS + 1) }]) {
     const result = parseChatSendRequest(bad)
@@ -447,10 +448,11 @@ test('入参校验：空串 / 非对象 / 超长 / 脏学段都被挡住，且�
   }
 })
 
-test('入参校验：非法的 gradeLevel 被丢掉，而不是把脏值传给下游', () => {
-  const parsed = parseChatSendRequest({ text: '你好', gradeLevel: 'university' })
+test('★ 入参校验：请求里携带的学段被彻底忽略（学段只能由系统推断，D-020）', () => {
+  // 旧客户端/手工调用可能仍带 gradeLevel；它既不能进请求对象，也不能影响解析结果。
+  const parsed = parseChatSendRequest({ text: '你好', gradeLevel: 'senior' })
   assert.equal(parsed.ok, true)
-  assert.equal(parsed.ok ? parsed.request.gradeLevel : 'x', undefined)
+  assert.deepEqual(parsed.ok ? { ...parsed.request } : null, { text: '你好' })
 })
 
 test('冻结映射：7 个 Tool 在表内，rag_search / get_student_profile 不在表内', () => {

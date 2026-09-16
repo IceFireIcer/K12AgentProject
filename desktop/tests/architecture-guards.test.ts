@@ -294,9 +294,11 @@ test('G5: src/main/bridge/client.ts 是唯一对 sidecar 发 HTTP 请求的文�
   const files = listFiles(mainDir)
   assert.ok(files.length > 0, 'src/main 下没有扫到任何文件，守卫形同虚设，请检查扫描路径')
 
+  // 只看**可执行代码**：注释里写「这里不出现 fetch(」是解释纪律，不该被判违规
+  // （踩过一次：注释里举反例，守卫当场把写注释的人拦下）。
   const offenders = files
     .filter((file) => resolve(file) !== resolve(bridgeClientFile))
-    .filter((file) => FETCH_PATTERN.test(readSource(file)))
+    .filter((file) => FETCH_PATTERN.test(stripComments(readSource(file))))
     .map(show)
 
   assert.deepEqual(
@@ -386,8 +388,9 @@ test('G6c: 面向渲染进程的 IPC 请求/回执类型里没有 token（chat �
     assert.ok(!/token/i.test(field), `IPC 类型里出现 token 字段：${field}`)
   }
 
-  // 正向断言：`chat:send` 的入参只允许「文本 + 学段」，没有通道参数、没有鉴权参数
-  assert.deepEqual([...requestFields].sort(), ['gradeLevel', 'text'])
+  // 正向断言：`chat:send` 的入参**只有文本** —— 没有通道参数、没有鉴权参数，
+  // 也**没有学段**：学段由系统推断（D-020），前端连请求改学段的能力都不提供
+  assert.deepEqual([...requestFields].sort(), ['text'])
 })
 
 // ── G7 对话事件流经「主进程 IPC ↔ preload 白名单通道」 ──────────────────
@@ -475,7 +478,17 @@ test('G8: 通道名只在 channels.ts 出现一次（主进程与 preload 共用
 // ── G9 preload 白名单 ────────────────────────────────────────────────
 
 /** 渲染进程能看到的全部能力（每次新增都必须在这里显式登记并被审阅）。 */
-const EXPECTED_API_METHODS = ['getSidecarInfo', 'onSidecarChanged', 'sendChat', 'onChatEvent']
+const EXPECTED_API_METHODS = [
+  'getSidecarInfo',
+  'onSidecarChanged',
+  'sendChat',
+  'onChatEvent',
+  'readSettings',
+  'saveSettings',
+  'probeSettings',
+  'getGrade',
+  'onGradeChanged'
+]
 
 /** preload 里绝不允许出现的通用转发方法名。 */
 const GENERIC_BRIDGE_METHODS = ['send', 'sendSync', 'invoke', 'on', 'once', 'off', 'postMessage', 'ipcRenderer']

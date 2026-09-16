@@ -12,7 +12,10 @@
  * {@link configureSidecarEndpoint}，停止/失败时调用 {@link clearSidecarEndpoint}。
  */
 
-import { healthUrl } from '../sidecar/protocol'
+// ⚠️ 相对导入**必须带 `.ts` 后缀**（与 `src/main/index.ts` 同一条纪律）：
+//    electron-vite 的产物是 ESM，ESM 不做扩展名补全；`node --test` / `scripts/*.mjs`
+//    直接 import 本文件时也走同一套解析规则。少了后缀就只有打包器能读懂，裸 Node 会 404。
+import { healthUrl } from '../sidecar/protocol.ts'
 
 /** `GET /health` 的响应体（§6.3）。 */
 export interface HealthPayload {

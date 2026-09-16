@@ -20,7 +20,9 @@ import { randomBytes } from 'node:crypto'
 import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs'
 import { join } from 'node:path'
 import { app } from 'electron'
-import { clearSidecarEndpoint, configureSidecarEndpoint, probeHealth, type HealthPayload } from '../bridge/client'
+// ⚠️ 相对导入**必须带 `.ts` 后缀**：产物是 ESM（无扩展名补全），裸 Node / `node --test`
+//    直接 import 本文件时同样要求写全 —— 少了后缀只有打包器能读懂。
+import { clearSidecarEndpoint, configureSidecarEndpoint, probeHealth, type HealthPayload } from '../bridge/client.ts'
 import {
   LINE_BUFFER_MAX_BYTES,
   MAX_RESTARTS,
@@ -36,7 +38,7 @@ import {
   type SidecarState,
   type StartupFailure,
   type StartupFailureContext
-} from './protocol'
+} from './protocol.ts'
 
 /** 探活轮询间隔（§7.4：就绪前给启动动画，不要白屏）。 */
 const HEALTH_POLL_INTERVAL_MS = 300

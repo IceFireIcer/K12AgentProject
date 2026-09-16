@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -516,11 +517,31 @@ class TestSettingsRoute(unittest.TestCase):
         self.assertEqual(anonymous.get("/api/settings").status_code, 401)
         self.assertEqual(anonymous.put("/api/settings", json={"llm": {}}).status_code, 401)
 
-    def test_probe_is_not_faked(self) -> None:
-        """★ 探测属票 07：这里必须**明确未实现**，不能返回一个假的 `{ok:false}`。"""
-        response = self.client.post("/api/settings/probe", json={"llm": {"apiKey": SECRET_KEY}})
-        self.assertEqual(response.status_code, 501)
-        self.assertIn("票 07", response.json()["detail"])
+    def test_probe_is_a_real_connectivity_check(self) -> None:
+        """★ 探测属票 07，**已落地**：真外呼 + 可读中文原因 + 失败不阻塞保存。
+
+        刻意指向回环上的死端口：不经外网、秒级返回，且必须是**可读原因**
+        而不是裸堆栈 —— 用户是老师/学生，不是开发者。
+        """
+        self.client.put("/api/settings", json={"llm": {"apiKey": SECRET_KEY}})
+        started = time.monotonic()
+        response = self.client.post(
+            "/api/settings/probe",
+            json={"llm": {"baseUrl": "http://127.0.0.1:9/v1"}},
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["ok"])
+        self.assertLess(elapsed, 5.0, "探测不能挂住 UI")
+        self.assertTrue(
+            any(
+                word in response.json()["message"]
+                for word in ("连接被拒绝", "网络请求失败", "连接超时")
+            ),
+            response.json()["message"],
+        )
+        self.assertNotIn(SECRET_KEY, response.text)
 
     def test_probe_declares_the_frozen_contract_shape(self) -> None:
         schema = build_openapi_document()["components"]["schemas"]["ProbeResult"]

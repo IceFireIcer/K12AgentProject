@@ -512,6 +512,148 @@
         "title": "EmbeddingMode",
         "type": "string"
       },
+      "GradeEvaluationOut": {
+        "additionalProperties": false,
+        "description": "一轮的判定结论（演示脚本与报告直接用它叙述「第 N 轮为什么没改」）。",
+        "properties": {
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "direction": {
+            "title": "Direction",
+            "type": "integer"
+          },
+          "grade": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Grade",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "streak": {
+            "title": "Streak",
+            "type": "integer"
+          },
+          "turn": {
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "turn",
+          "direction",
+          "streak",
+          "confidence",
+          "changed",
+          "grade",
+          "reason"
+        ],
+        "title": "GradeEvaluationOut",
+        "type": "object"
+      },
+      "GradeHistoryEntry": {
+        "additionalProperties": false,
+        "description": "``grade_history`` 的一行（学段变化轨迹）。",
+        "properties": {
+          "confidence": {
+            "default": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "fromLevel": {
+            "anyOf": [
+              {
+                "enum": [
+                  "primary_low",
+                  "primary_high",
+                  "junior",
+                  "senior"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fromlevel"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "toLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Tolevel",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "integer"
+          },
+          "turn": {
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ts",
+          "turn",
+          "toLevel",
+          "source"
+        ],
+        "title": "GradeHistoryEntry",
+        "type": "object"
+      },
+      "GradeHistoryResponse": {
+        "additionalProperties": false,
+        "description": "``grade_history`` 轨迹（报告叙事：「第 3 轮调为小学低年级（0.75）」）。",
+        "properties": {
+          "currentLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Currentlevel",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/GradeHistoryEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId",
+          "currentLevel"
+        ],
+        "title": "GradeHistoryResponse",
+        "type": "object"
+      },
       "GradeLevel": {
         "enum": [
           "primary_low",
@@ -521,6 +663,40 @@
         ],
         "title": "GradeLevel",
         "type": "string"
+      },
+      "GradeProposalInput": {
+        "additionalProperties": false,
+        "description": "第二层 LLM 的**提议**（``{suggestedGrade, confidence}``）。\n\n★ 它只是提议：规则引擎可以采纳（同向时抬高置信度）、可以无视，也可以否决（反向）。",
+        "properties": {
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "note": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Note",
+            "type": "string"
+          },
+          "suggestedGrade": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Suggestedgrade",
+            "type": "string"
+          }
+        },
+        "required": [
+          "suggestedGrade",
+          "confidence"
+        ],
+        "title": "GradeProposalInput",
+        "type": "object"
       },
       "GradeSignal": {
         "additionalProperties": false,
@@ -535,7 +711,6 @@
                 "type": "null"
               }
             ],
-            "default": null,
             "title": "Raw"
           },
           "signalType": {
@@ -557,7 +732,6 @@
                 "type": "null"
               }
             ],
-            "default": null,
             "title": "Ts"
           },
           "value": {
@@ -574,7 +748,7 @@
       },
       "GradeSignals": {
         "additionalProperties": false,
-        "description": "``GET /api/grade/signals/{student_id}``：学段信号与推断建议。\n\n⚠️ **自动推断只写「建议」，不直接改**（AGENTS §5.1）：``suggested_level`` 供前端弹\n建议条，学生确认后才写 `grade_history(source=confirmed)`。",
+        "description": "``GET /api/grade/signals/{student_id}``：学段信号与推断建议。\n\n⚠️ **自动推断只写「建议」，不直接改**（AGENTS §5.1）：``suggested_level`` 供前端弹\n达到阈值时**自动生效**并写 `grade_history(source=\"inferred\")`；\n学生端只读展示当前学段，**没有选择器、没有确认动作**（§10.3）。",
         "properties": {
           "confidence": {
             "default": 0.0,
@@ -601,12 +775,8 @@
             "type": "array"
           },
           "source": {
-            "default": "explicit",
-            "enum": [
-              "explicit",
-              "inferred",
-              "confirmed"
-            ],
+            "const": "inferred",
+            "default": "inferred",
             "title": "Source",
             "type": "string"
           },
@@ -629,7 +799,6 @@
                 "type": "null"
               }
             ],
-            "default": null,
             "title": "Suggestedlevel"
           }
         },
@@ -638,6 +807,283 @@
           "currentLevel"
         ],
         "title": "GradeSignals",
+        "type": "object"
+      },
+      "GradeStateOut": {
+        "additionalProperties": false,
+        "description": "轻量状态（桌面端每轮取「当前学段」；不含信号列表）。",
+        "properties": {
+          "confidence": {
+            "default": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "cooldownRemainingTurns": {
+            "default": 0,
+            "title": "Cooldownremainingturns",
+            "type": "integer"
+          },
+          "direction": {
+            "default": 0,
+            "title": "Direction",
+            "type": "integer"
+          },
+          "grade": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Grade",
+            "type": "string"
+          },
+          "lastChangeTurn": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastchangeturn"
+          },
+          "lastTurn": {
+            "title": "Lastturn",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "streak": {
+            "default": 0,
+            "title": "Streak",
+            "type": "integer"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "suggestedLevel": {
+            "anyOf": [
+              {
+                "enum": [
+                  "primary_low",
+                  "primary_high",
+                  "junior",
+                  "senior"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggestedlevel"
+          }
+        },
+        "required": [
+          "studentId",
+          "grade",
+          "source",
+          "lastTurn"
+        ],
+        "title": "GradeStateOut",
+        "type": "object"
+      },
+      "GradeTurnInput": {
+        "additionalProperties": false,
+        "description": "**一轮**证据：轮次号 + 学生原话 + （可选）答题表现与第二层提议。",
+        "properties": {
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GradeProposalInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "quiz": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuizPerformanceInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sessionId": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessionid"
+          },
+          "text": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Text",
+            "type": "string"
+          },
+          "turn": {
+            "maximum": 100000.0,
+            "minimum": 0.0,
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "turn"
+        ],
+        "title": "GradeTurnInput",
+        "type": "object"
+      },
+      "GradeTurnResponse": {
+        "additionalProperties": false,
+        "description": "上交证据后的判定结果（**服务端决策**，桌面端只负责按它换下一轮的 prompt）。",
+        "properties": {
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "cooldownRemainingTurns": {
+            "title": "Cooldownremainingturns",
+            "type": "integer"
+          },
+          "degraded": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Degraded"
+          },
+          "direction": {
+            "title": "Direction",
+            "type": "integer"
+          },
+          "evaluations": {
+            "items": {
+              "$ref": "#/components/schemas/GradeEvaluationOut"
+            },
+            "title": "Evaluations",
+            "type": "array"
+          },
+          "grade": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Grade",
+            "type": "string"
+          },
+          "llmConfidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llmconfidence"
+          },
+          "previousGrade": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Previousgrade",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "ruleConfidence": {
+            "title": "Ruleconfidence",
+            "type": "number"
+          },
+          "signals": {
+            "items": {
+              "$ref": "#/components/schemas/GradeSignal"
+            },
+            "title": "Signals",
+            "type": "array"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "streak": {
+            "title": "Streak",
+            "type": "integer"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "turn": {
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "studentId",
+          "grade",
+          "previousGrade",
+          "changed",
+          "source",
+          "reason",
+          "confidence",
+          "ruleConfidence",
+          "turn",
+          "direction",
+          "streak",
+          "cooldownRemainingTurns"
+        ],
+        "title": "GradeTurnResponse",
+        "type": "object"
+      },
+      "GradeTurnsRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/grade/turns/{student_id}`` 的请求体（**一批轮次证据**，按轮次升序）。",
+        "properties": {
+          "turns": {
+            "items": {
+              "$ref": "#/components/schemas/GradeTurnInput"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Turns",
+            "type": "array"
+          }
+        },
+        "required": [
+          "turns"
+        ],
+        "title": "GradeTurnsRequest",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -699,6 +1145,92 @@
         ],
         "title": "LearningActivity",
         "type": "string"
+      },
+      "LearningEventAck": {
+        "additionalProperties": false,
+        "description": "学习记录写入的回执（§6.3：``{ok}``）。",
+        "properties": {
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "title": "LearningEventAck",
+        "type": "object"
+      },
+      "LearningEventRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/profile/{student_id}/events`` 的请求体（学习记录写入）。\n\n由 ``learning-log`` Extension 构造，字段全部是**从对话里提取出来的结构化信息**：\n没有任何一个字段用于承载对话正文（这是有意的，见模块头）。",
+        "properties": {
+          "activity": {
+            "enum": [
+              "qa",
+              "animation",
+              "coding",
+              "quiz"
+            ],
+            "title": "Activity",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Detail",
+            "type": "string"
+          },
+          "gradeLevel": {
+            "anyOf": [
+              {
+                "enum": [
+                  "primary_low",
+                  "primary_high",
+                  "junior",
+                  "senior"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gradelevel"
+          },
+          "isCorrect": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iscorrect"
+          },
+          "kpId": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Kpid",
+            "type": "string"
+          },
+          "sessionId": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessionid"
+          }
+        },
+        "required": [
+          "activity"
+        ],
+        "title": "LearningEventRequest",
+        "type": "object"
       },
       "LlmConfig": {
         "additionalProperties": false,
@@ -804,7 +1336,6 @@
                 "type": "null"
               }
             ],
-            "default": null,
             "title": "Lastseenat"
           },
           "score": {
@@ -905,7 +1436,6 @@
                 "type": "null"
               }
             ],
-            "default": null,
             "title": "Sessionid"
           },
           "studentId": {
@@ -952,6 +1482,47 @@
         "title": "QuizPayload",
         "type": "object"
       },
+      "QuizPerformanceInput": {
+        "additionalProperties": false,
+        "description": "答题表现（从 ``learning.db`` 读出来的结构化摘要，由桌面端带上来）。\n\n**不带题干与作答正文**，只有数字 —— 与 ``learning_history`` 的口径一致。",
+        "properties": {
+          "attempts": {
+            "default": 0,
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "correct": {
+            "default": 0,
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Correct",
+            "type": "integer"
+          },
+          "currentStreak": {
+            "default": 0,
+            "maximum": 100.0,
+            "minimum": -100.0,
+            "title": "Currentstreak",
+            "type": "integer"
+          },
+          "hintsRequested": {
+            "default": 0,
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Hintsrequested",
+            "type": "integer"
+          },
+          "tooHard": {
+            "default": false,
+            "title": "Toohard",
+            "type": "boolean"
+          }
+        },
+        "title": "QuizPerformanceInput",
+        "type": "object"
+      },
       "QuizQuestionOut": {
         "additionalProperties": false,
         "description": "★ **对外模型**：没有 ``answer``，发给 TS 与前端（§6.3 答案泄漏防护）。\n\n判分所需的标准答案只留在 Python 侧：``POST /api/quiz/grade`` 按 ``qid`` 查库判分，\n前端与 TS 都不需要答案。",
@@ -976,7 +1547,6 @@
                 "type": "null"
               }
             ],
-            "default": null,
             "title": "Options"
           },
           "qid": {
@@ -1417,6 +1987,188 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/grade/history/{student_id}": {
+      "get": {
+        "description": "``grade_history`` 全量轨迹（含冷启动基线那行：``from_level`` 为空）。",
+        "operationId": "grade_history_api_grade_history__student_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GradeHistoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "学段变化轨迹",
+        "tags": [
+          "grade"
+        ]
+      }
+    },
+    "/api/grade/signals/{student_id}": {
+      "get": {
+        "description": "当前学段 + 最近信号 + （够格但被挡住时的）待生效建议。\n\n★ 与旧设计不同：这里**不再有「学生确认」这一步** —— 学段由系统自动生效，\n``source`` 恒为 ``inferred``。``suggested_level`` 的含义因此收窄为\n「证据已够、但被冷却期或置信度挡住的下一个学段」，供前端显示「将在下一轮生效」。",
+        "operationId": "grade_signals_api_grade_signals__student_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GradeSignals"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "学段信号与待生效的推断建议",
+        "tags": [
+          "grade"
+        ]
+      }
+    },
+    "/api/grade/state/{student_id}": {
+      "get": {
+        "description": "桌面端每轮取「当前学段」的入口（不含信号列表，载荷最小）。\n\n学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，\n而不是 404 —— 学段推断从第一轮就要开始工作。",
+        "operationId": "grade_state_api_grade_state__student_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GradeStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "当前学段状态（轻量）",
+        "tags": [
+          "grade"
+        ]
+      }
+    },
+    "/api/grade/turns/{student_id}": {
+      "post": {
+        "description": "★ **学段推断的主入口**：一批轮次证据 → 信号 → 判定 → （必要时）改学段。\n\n依次处理 ``turns``（按给定顺序 = 轮次升序），**逐轮判定**，\n返回最后一轮的结论 + 每一轮的轨迹。信号逐轮落库：即使中途失败，\n已写入的信号也不会丢，下一次调用照样能算出正确的连续轮次。",
+        "operationId": "submit_grade_turns_api_grade_turns__student_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GradeTurnsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GradeTurnResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "上交一批轮次证据，由服务端提取信号并判定学段",
+        "tags": [
+          "grade"
+        ]
+      }
+    },
     "/api/graph/deps/{kp_id}": {
       "get": {
         "description": "查一个知识点的前置/后继。\n\n- 知识点不存在 → **404**（不返回空数组：空数组看起来像「这个点没有邻居」，\n  而实际上可能是 kp_id 拼错了，两者必须区分开）；\n- 深度上限由 :data:`app.knowledge.deps.MAX_DEPTH_LIMIT` 卡死（元数据笔误成环也不会挂）。\n\n★ 返回结构里带 ``depth`` 与 ``direction``：前端画邻域图与排序都要用，\n调用方也就不必自己再走一遍图。",
@@ -1492,6 +2244,231 @@
         "summary": "Graph Deps",
         "tags": [
           "graph"
+        ]
+      }
+    },
+    "/api/profile/{student_id}": {
+      "get": {
+        "description": "读某学生的画像：基本身份 + 掌握度 + 偏好（+ 依赖图推荐，票 20 填充）。\n\n- 学生不存在 → **404**（空画像会让学生以为「我没学过任何东西」，两者必须区分）；\n- ``studentId`` 非法 → **422**（它会被拼进文件系统路径）；\n- 库读写失败 → **503**（可读中文；上层 Tool 会把它转成 `error` 事件而不是崩）。",
+        "operationId": "student_profile_api_profile__student_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StudentProfile"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "画像与掌握度",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/events": {
+      "post": {
+        "description": "把一条结构化学习记录写进该学生的 ``learning.db``。\n\n冷启动兜底：学生行不存在时按请求里的学段（缺省 ``primary_high``）建一条 ——\n「学生还没登录就先产生了学习记录」不该丢数据，也不该 500。",
+        "operationId": "record_learning_event_api_profile__student_id__events_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LearningEventRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningEventAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "学习记录写入（答题/代码/动画观看/答疑）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/quiz/bank/{kp_id}": {
+      "get": {
+        "description": "取题（供练习 Extension 的 ``generate_quiz`` Tool 调用）。\n\n- 本题库**按学段分文件**，因此学段是必填参数；只允许取**不高于**学生学段的题；\n- 返回体是 :class:`QuizPayload`，``questions`` 全是 :class:`QuizQuestionOut`\n  （**结构上没有 ``answer``**，不是靠 ``exclude`` 临时裁的）；\n- 取不到题 → **404** + 可读中文（``questions: []`` 看起来像「这个知识点没题」，\n  与「kpId 拼错了」分不开，所以不用空数组表达失败）；\n- 题库目录不存在/坏题多 → 不算错误：返回 404，由编排层决定改用 LLM 生成（票 15）。",
+        "operationId": "get_quiz_bank_api_quiz_bank__kp_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "kp_id",
+            "required": true,
+            "schema": {
+              "title": "Kp Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "学生学段（四学段之一，必填）",
+            "in": "query",
+            "name": "grade_level",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "学生学段（四学段之一，必填）",
+              "title": "Grade Level"
+            }
+          },
+          {
+            "description": "取几道题",
+            "in": "query",
+            "name": "count",
+            "required": false,
+            "schema": {
+              "default": 3,
+              "description": "取几道题",
+              "maximum": 10,
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "题目不足时是否允许取用更低学段的题",
+            "in": "query",
+            "name": "allow_compat",
+            "required": false,
+            "schema": {
+              "default": true,
+              "description": "题目不足时是否允许取用更低学段的题",
+              "title": "Allow Compat",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuizPayload"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "按知识点 + 学段取题（剔除 answer）",
+        "tags": [
+          "quiz"
+        ]
+      }
+    },
+    "/api/quiz/grade": {
+      "post": {
+        "description": "按 ``qid`` 查库判分，并把结果写进该学生的 ``learning.db``。\n\n写入两处（都是结构化数据，**不写对话正文**）：\n  - ``mastery``：``score`` / ``attempts`` / ``correct`` / ``last_seen_at``；\n  - ``learning_history``：一条 ``activity=\"quiz\"`` 记录（票 20 的个性化闭环要吃它）。\n\n``mastery_delta`` 回传的是**实际生效**的变化量（``新值 - 旧值``）：已经满分时再答对就是 0，\n而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）。",
+        "operationId": "grade_quiz_api_quiz_grade_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuizGradeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuizResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "提交答案并批改（客观题规则判分）",
+        "tags": [
+          "quiz"
         ]
       }
     },
@@ -1600,7 +2577,7 @@
     },
     "/api/settings/probe": {
       "post": {
-        "description": "⚠️ **票 04 不实现探测**：真实连通性探测（``GET /models`` / 1-token 请求 +\n可读失败原因）属票 07。\n\n这里**返回 501 而不是造一个 ``{ok:false}``** —— 假结果会被设置页当成\n「用户填错了」显示，比没实现更糟（执行文档 §6.2 明确要求真实探测）。",
+        "description": "真实连通性探测（票 07 落地）：``GET {baseUrl}/models``，必要时补一条 1-token 对话请求。\n\n★ **BaseURL 的 `/v1` 陷阱**：默认值历史上是 ``https://api.deepseek.com/v1``（OpenAI 兼容习惯），\n而 Pi 内置 DeepSeek provider 用的是 ``https://api.deepseek.com``（**无 `/v1`**）。\n两者都可能连通、也都可能只有一种能连通，所以这里**不自动改写**用户填的值：\n先原样探测（探测的就是「保存后会用的那个地址」），只有在**路径不存在**（404/405）时才拿\n另一种写法做一次诊断，并在失败原因里明确告诉用户该改成哪一个。\n\n探测的是**提交的候选配置**（先探测、满意再保存）；Key 提交掩码/空串时用已存 Key。\n**探测失败不阻塞保存**（断网/离线演示仍要能存配置），失败原因一律是可读中文。",
         "operationId": "probe_settings_api_settings_probe_post",
         "requestBody": {
           "content": {
@@ -1672,7 +2649,7 @@
         ]
       },
       "post": {
-        "description": "新建学生。请求体校验（含四学段字面量）由契约模型完成，非法学段直接 422。",
+        "description": "新建学生。请求体校验（含四学段字面量）由契约模型完成，非法学段直接 422。\n\n落盘位置：``<userData>/students/<id>/learning.db``（一人一库，§8.2）。",
         "operationId": "create_student_api_students_post",
         "requestBody": {
           "content": {

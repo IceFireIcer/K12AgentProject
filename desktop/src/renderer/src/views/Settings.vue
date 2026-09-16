@@ -1,64 +1,338 @@
 <script setup lang="ts">
 /**
- * 设置视图 —— ★ 占位（票 07 接手本文件）。
+ * 设置视图（票 07）：模型供应商四项自填 + 真实连通性探测 + 嵌入配置三选一。
  *
- * 票 05 只提供「入口 + 当前链路事实」，方便当场核对
- * 「窗口 → 主进程 IPC → sidecar」这条线是通的：
- *   - sidecar 状态（阶段 / 端口 / 进程 pid / 运行形态）来自 `sidecar:changed` 推送；
- *   - 供应商名称 / BaseURL / APIKey / ModelID 与**真实连通性探测**归票 07；
- *   - 嵌入配置三选一（local_fastembed / cloud_api / none）归票 07。
+ * 链路（渲染进程不直连本地服务，也没有任何 HTTP 能力）：
+ *   本视图 → `stores/settings.ts` → `window.api`（preload 白名单）
+ *   → 主进程 IPC 处理器 → `PUT /api/settings` / `POST /api/settings/probe`
+ *
+ * 界面纪律（与票 07 的自测项一一对应）：
+ * - **供应商名称 / BaseURL / APIKey / ModelID 全部可改**（赛题硬要求，不得写死某一家）；
+ * - Key 是**密码框且永不回填掩码**：只显示「已配置 …abcd / 未配置」，留空即沿用已存 Key；
+ * - 探测结果（成功或失败原因）内联展示，**失败也能保存**（离线场景）；
+ * - BaseURL 的 `/v1` 差异写在输入框下面，不靠用户猜。
  */
+import { computed, onMounted } from 'vue'
+import { GRADE_UNKNOWN_LABEL } from '../labels'
+import { EMBEDDING_MODE_LABELS, type EmbeddingMode } from '../api/settings'
 import { useChatStore } from '../stores/chat'
-import { GRADE_LABELS } from '../labels'
+import { useSettingsStore } from '../stores/settings'
 import { useSidecarStore } from '../stores/sidecar'
 
 const sidecar = useSidecarStore()
 const chat = useChatStore()
+const settings = useSettingsStore()
+
+const EMBEDDING_MODES: readonly EmbeddingMode[] = ['local_fastembed', 'cloud_api', 'none']
+
+const probeTitle = computed(() => (settings.probeAt ? `探测结果（${settings.probeAt}）` : '探测结果'))
+const cloudEmbedding = computed(() => settings.embedding.mode === 'cloud_api')
+
+onMounted(() => {
+  void settings.load()
+})
 </script>
 
 <template>
   <section class="settings" data-testid="settings-view">
     <header class="head">
       <h2 class="title">设置</h2>
-      <span class="chip chip--warn">占位视图 · 票 07 落地</span>
+      <span class="chip chip--accent">本地保存 · 真实探测</span>
+      <span v-if="settings.dirty" class="chip chip--warn" data-testid="settings-dirty">有未保存的修改</span>
     </header>
 
     <p class="lead">
-      模型供应商（供应商名称 / BaseURL / APIKey / ModelID）与嵌入配置的填写与**真实连通性探测**
-      由票 07 完成。本次先给出入口，并把当前链路的真实状态摆在下面，便于对照。
+      模型供应商四项都可以自己填（不锁定任何一家）：填完点「保存并探测」，应用会**真的**去调一次该地址，
+      把成功或失败原因显示在下面。配置只存在这台电脑上，API Key 不外传、不写日志、界面上永远只显示掩码。
     </p>
 
-    <dl class="rows" data-testid="settings-sidecar">
-      <div class="row">
-        <dt>本地数据服务</dt>
-        <dd>{{ sidecar.phaseText }}</dd>
-      </div>
-      <div class="row">
-        <dt>端口</dt>
-        <dd>{{ sidecar.state?.port ?? '—' }}</dd>
-      </div>
-      <div class="row">
-        <dt>后端进程 PID</dt>
-        <dd>{{ sidecar.state?.pid ?? '—' }}</dd>
-      </div>
-      <div class="row">
-        <dt>运行形态</dt>
-        <dd>{{ sidecar.state?.mode === 'packaged' ? '打包产物' : '开发态' }}</dd>
-      </div>
-      <div class="row">
-        <dt>当前学段（随对话请求传入）</dt>
-        <dd>{{ GRADE_LABELS[chat.gradeLevel] }}（选择器归票 06）</dd>
-      </div>
-    </dl>
+    <p v-if="settings.bridgeError" class="notice notice--warn" data-testid="settings-bridge-missing">
+      {{ settings.bridgeError }}
+    </p>
+    <p v-if="settings.errorText" class="notice notice--danger" data-testid="settings-error">
+      {{ settings.errorText }}
+    </p>
+    <p v-if="settings.notice" class="notice notice--ok" data-testid="settings-notice">
+      {{ settings.notice }}
+    </p>
 
-    <p v-if="sidecar.errorText" class="error" data-testid="settings-error">{{ sidecar.errorText }}</p>
+    <!-- ─────────────────────────── 模型供应商 ─────────────────────────── -->
+    <form class="card" data-testid="settings-llm" @submit.prevent="settings.save()">
+      <h3 class="card__title">模型供应商</h3>
+      <p class="card__lead">四项都自填：供应商名称只用于显示，真正决定调用的是 BaseURL / ModelID / APIKey。</p>
 
-    <section class="safe">
-      <h3 class="safe__title">安全约定（已生效）</h3>
+      <div class="field">
+        <label class="field__label" for="llm-provider">供应商名称</label>
+        <input
+          id="llm-provider"
+          v-model="settings.draft.providerName"
+          class="field__input"
+          data-testid="settings-llm-provider"
+          type="text"
+          autocomplete="off"
+          placeholder="例如 DeepSeek / 校内网关 / 自建服务"
+        />
+        <p class="field__hint">仅用于显示与排查，填什么都行。</p>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="llm-baseurl">BaseURL</label>
+        <input
+          id="llm-baseurl"
+          v-model="settings.draft.baseUrl"
+          class="field__input"
+          data-testid="settings-llm-baseurl"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="https://api.deepseek.com/v1"
+        />
+        <p class="field__hint" data-testid="settings-baseurl-hint">{{ settings.baseUrlHintText }}</p>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="llm-apikey">APIKey</label>
+        <div class="field__row">
+          <input
+            id="llm-apikey"
+            v-model="settings.draft.apiKey"
+            class="field__input"
+            data-testid="settings-llm-apikey"
+            type="password"
+            autocomplete="new-password"
+            spellcheck="false"
+            :placeholder="settings.hasStoredKey ? '留空则继续使用已保存的 Key' : '粘贴你的 API Key'"
+            @input="settings.markKeyEdited()"
+          />
+          <span
+            class="chip"
+            :class="settings.hasStoredKey ? 'chip--ok' : 'chip--warn'"
+            data-testid="settings-key-status"
+          >
+            {{ settings.keyStatus }}
+          </span>
+        </div>
+        <p class="field__hint">{{ settings.keyStatusHint }}；Key 只写进本机的配置文件，读回来永远是掩码。</p>
+        <button
+          v-if="settings.hasStoredKey"
+          class="btn btn--danger btn--small"
+          type="button"
+          data-testid="settings-clear-key"
+          @click="settings.clearStoredKey()"
+        >
+          清除已保存的 Key
+        </button>
+        <p v-if="settings.keyCleared" class="field__hint field__hint--warn" data-testid="settings-key-cleared">
+          保存后已保存的 Key 会被删除（此操作不可撤销）。
+        </p>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="llm-modelid">ModelID</label>
+        <input
+          id="llm-modelid"
+          v-model="settings.draft.modelId"
+          class="field__input"
+          data-testid="settings-llm-modelid"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="例如 deepseek-chat"
+        />
+        <p class="field__hint">必须是该地址支持的模型名；探测结果里如果提示「没有看到这个模型」，先核对这里。</p>
+      </div>
+
+      <div class="actions">
+        <button
+          class="btn btn--primary"
+          type="submit"
+          data-testid="settings-save"
+          :disabled="settings.busy"
+        >
+          {{ settings.saving ? '保存中…' : '保存并探测' }}
+        </button>
+        <button
+          class="btn"
+          type="button"
+          data-testid="settings-save-only"
+          :disabled="settings.busy"
+          @click="settings.save({ probeAfter: false })"
+        >
+          仅保存
+        </button>
+        <button
+          class="btn"
+          type="button"
+          data-testid="settings-probe"
+          :disabled="settings.busy"
+          @click="settings.probeNow()"
+        >
+          {{ settings.probing ? '探测中…' : '仅探测（不保存）' }}
+        </button>
+        <button
+          class="btn"
+          type="button"
+          data-testid="settings-reset"
+          :disabled="settings.busy || !settings.dirty"
+          @click="settings.resetDraft()"
+        >
+          放弃修改
+        </button>
+      </div>
+
+      <p class="actions__note">
+        探测与保存是分开的：探测失败也能保存（断网、校园网受限时先存好，稍后再探测）。
+      </p>
+
+      <div
+        v-if="settings.probe"
+        class="probe"
+        :class="settings.probe.ok ? 'probe--ok' : 'probe--fail'"
+        data-testid="settings-probe-result"
+      >
+        <p class="probe__head">
+          {{ probeTitle }} · {{ settings.probe.ok ? '连通成功' : '未能连通' }}
+        </p>
+        <p class="probe__body" data-testid="settings-probe-message">{{ settings.probe.message }}</p>
+        <p v-if="!settings.probe.ok" class="probe__hint">
+          这是失败原因，不是「配置保存失败」——你可以先保存，换好网络或用正确的地址后再探测。
+        </p>
+      </div>
+      <p v-else-if="settings.probing" class="probe probe--pending" data-testid="settings-probe-pending">
+        正在探测（最多几秒钟；超时会明确告诉你，不会一直等）。
+      </p>
+    </form>
+
+    <!-- ─────────────────────────── 嵌入配置 ─────────────────────────── -->
+    <section class="card" data-testid="settings-embedding">
+      <h3 class="card__title">教材检索用的嵌入</h3>
+      <p class="card__lead">
+        检索默认用随安装包分发的本地模型（离线可跑、512 维）。也可以改成云端接口，或直接关掉嵌入。
+      </p>
+
+      <div
+        v-for="mode in EMBEDDING_MODES"
+        :key="mode"
+        class="radio"
+      >
+        <input
+          :id="`embedding-${mode}`"
+          v-model="settings.embedding.mode"
+          :data-testid="`settings-embedding-${mode}`"
+          type="radio"
+          :value="mode"
+        />
+        <label :for="`embedding-${mode}`">{{ EMBEDDING_MODE_LABELS[mode] }}</label>
+      </div>
+
+      <template v-if="cloudEmbedding">
+        <div class="field">
+          <label class="field__label" for="embedding-baseurl">嵌入接口地址</label>
+          <input
+            id="embedding-baseurl"
+            v-model="settings.embedding.baseUrl"
+            class="field__input"
+            data-testid="settings-embedding-baseurl"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="https://api.example.com/v1"
+          />
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="embedding-apikey">嵌入接口 APIKey</label>
+          <div class="field__row">
+            <input
+              id="embedding-apikey"
+              v-model="settings.embedding.apiKey"
+              class="field__input"
+              data-testid="settings-embedding-apikey"
+              type="password"
+              autocomplete="new-password"
+              spellcheck="false"
+              :placeholder="settings.embeddingKeyStatus === '未配置' ? '粘贴嵌入接口的 Key' : '留空则沿用已存的 Key'"
+              @input="settings.markEmbeddingKeyEdited()"
+            />
+            <span class="chip" data-testid="settings-embedding-key-status">{{ settings.embeddingKeyStatus }}</span>
+            <button
+              v-if="settings.embeddingKeyStatus !== '未配置'"
+              class="btn btn--danger btn--small"
+              type="button"
+              @click="settings.clearStoredEmbeddingKey()"
+            >
+              清除
+            </button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="field__label" for="embedding-modelid">嵌入模型 ID</label>
+          <input
+            id="embedding-modelid"
+            v-model="settings.embedding.modelId"
+            class="field__input"
+            data-testid="settings-embedding-modelid"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="例如 bge-m3"
+          />
+        </div>
+      </template>
+
+      <p class="field__hint" data-testid="settings-embedding-hint">
+        本地模型是 BAAI/bge-small-zh-v1.5（512 维）。切换模式不会清掉已填的云端地址与模型名，
+        换回来时它们还在。
+      </p>
+
+      <div class="actions">
+        <button
+          class="btn btn--primary"
+          type="button"
+          data-testid="settings-embedding-save"
+          :disabled="settings.busy"
+          @click="settings.save({ probeAfter: false })"
+        >
+          保存嵌入配置
+        </button>
+      </div>
+    </section>
+
+    <!-- ──────────────────────── 本地服务与安全约定 ──────────────────────── -->
+    <section class="card card--plain">
+      <h3 class="card__title">本地数据服务</h3>
+      <dl class="rows" data-testid="settings-sidecar">
+        <div class="row">
+          <dt>状态</dt>
+          <dd>{{ sidecar.phaseText }}</dd>
+        </div>
+        <div class="row">
+          <dt>端口</dt>
+          <dd>{{ sidecar.state?.port ?? '—' }}</dd>
+        </div>
+        <div class="row">
+          <dt>后端进程 PID</dt>
+          <dd>{{ sidecar.state?.pid ?? '—' }}</dd>
+        </div>
+        <div class="row">
+          <dt>运行形态</dt>
+          <dd>{{ sidecar.state?.mode === 'packaged' ? '打包产物' : '开发态' }}</dd>
+        </div>
+        <div class="row">
+          <dt>当前学段（系统自动判定，只读）</dt>
+          <dd data-testid="settings-grade">{{ chat.currentGradeLabel ?? GRADE_UNKNOWN_LABEL }}</dd>
+        </div>
+      </dl>
+      <p v-if="sidecar.errorText" class="notice notice--danger">{{ sidecar.errorText }}</p>
+    </section>
+
+    <section class="card card--plain">
+      <h3 class="card__title">安全约定</h3>
       <ul class="safe__list">
-        <li>渲染进程不直连本地数据服务，也没有 HTTP 能力：所有数据都经主进程 IPC 白名单。</li>
-        <li>本地数据服务的访问令牌只在主进程内存里，不会出现在页面能拿到的任何对象中。</li>
-        <li>API Key 仅本地存储、不回显明文、不写入日志（票 07 落地时同样遵守）。</li>
+        <li>设置由本地数据服务写进这台电脑的配置文件，界面上的 Key 永远是掩码（…abcd）。</li>
+        <li>API Key 不上传、不进日志；留空提交不会删除已保存的 Key，删除必须显式点击。</li>
+        <li>供应商四项全部可改，不锁定任何一家服务；BaseURL 带不带 /v1 都允许。</li>
       </ul>
     </section>
   </section>
@@ -90,24 +364,202 @@ const chat = useChatStore()
   font-size: 14px;
   line-height: 1.8;
   color: var(--text-muted);
-  max-width: 720px;
+  max-width: 760px;
 }
 
-.rows {
-  margin: 22px 0 0;
-  padding: 16px 18px;
+.card {
+  margin-top: 20px;
+  padding: 18px 20px 20px;
   border-radius: var(--radius);
   background: var(--surface);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-sm);
 }
 
+.card--plain {
+  background: var(--surface-muted);
+  box-shadow: none;
+}
+
+.card__title {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.card__lead {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--text-muted);
+}
+
+.field {
+  margin-top: 16px;
+}
+
+.field__label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.field__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.field__input {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-muted);
+  font: inherit;
+  color: var(--text);
+}
+
+.field__row .field__input {
+  flex: 1;
+  min-width: 240px;
+}
+
+.field__input:focus {
+  outline: 2px solid rgba(47, 111, 208, 0.35);
+  outline-offset: 1px;
+  background: var(--surface);
+}
+
+.field__hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-faint);
+}
+
+.field__hint--warn {
+  color: var(--warn);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+
+.actions__note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.btn--small {
+  padding: 5px 12px;
+  font-size: 13px;
+}
+
+.btn--danger {
+  color: var(--danger);
+  border-color: rgba(179, 38, 30, 0.3);
+  background: var(--danger-soft);
+}
+
+.btn--danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.probe {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.probe--ok {
+  background: var(--ok-soft);
+  border-color: rgba(26, 127, 75, 0.24);
+  color: var(--ok);
+}
+
+.probe--fail {
+  background: var(--warn-soft);
+  border-color: rgba(154, 100, 0, 0.28);
+  color: var(--warn);
+}
+
+.probe--pending {
+  color: var(--text-muted);
+}
+
+.probe__head {
+  font-weight: 650;
+}
+
+.probe__body {
+  margin-top: 4px;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.probe__hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.notice {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.notice--ok {
+  background: var(--ok-soft);
+  border: 1px solid rgba(26, 127, 75, 0.24);
+  color: var(--ok);
+}
+
+.notice--warn {
+  background: var(--warn-soft);
+  border: 1px solid rgba(154, 100, 0, 0.24);
+  color: var(--warn);
+}
+
+.notice--danger {
+  background: var(--danger-soft);
+  border: 1px solid rgba(179, 38, 30, 0.2);
+  color: var(--danger);
+}
+
+.rows {
+  margin-top: 12px;
+}
+
 .row {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  padding: 6px 0;
-  font-size: 14px;
+  padding: 4px 0;
+  font-size: 13px;
 }
 
 .row dt {
@@ -118,31 +570,6 @@ const chat = useChatStore()
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: right;
-}
-
-.error {
-  margin-top: 14px;
-  padding: 12px 14px;
-  border-radius: var(--radius);
-  background: var(--danger-soft);
-  border: 1px solid rgba(179, 38, 30, 0.2);
-  color: var(--danger);
-  font-size: 13px;
-  line-height: 1.7;
-  word-break: break-word;
-}
-
-.safe {
-  margin-top: 24px;
-  padding: 16px 18px;
-  border-radius: var(--radius);
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-}
-
-.safe__title {
-  font-size: 14px;
-  font-weight: 650;
 }
 
 .safe__list {
