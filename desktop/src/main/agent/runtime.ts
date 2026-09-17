@@ -53,12 +53,15 @@ import {
   registerAgentExtensions,
   type AgentExtensionApi
 } from './extensions/index.ts'
-import animationExtension from './extensions/animation.ts'
+// ★ 只 import `createAnimationExtension`（**不再用默认导出**）：默认导出是
+//   `createAnimationExtension()`（**没接 `generate`**），而票 17 的补充路径要求接上自由生成器
+//   —— 见下方 `agentExtensionsFactory` 的说明。
+import { createAnimationExtension } from './extensions/animation.ts'
 import codingExtension from './extensions/coding.ts'
 import quizExtension from './extensions/quiz.ts'
 // ★ 学段**推断**扩展（票 21）：它独占 `input`（收集本轮证据）与 `before_agent_start`（按推断出的
 //   学段替换整段 prompt），并自兜异常。工厂是「可调用 + `.refresh()/.useJudge()` 诊断入口」的形态。
-import gradeExtension, { GRADE_OVERRIDE_HEADING } from './extensions/grade.ts'
+import gradeExtension, { GRADE_OVERRIDE_HEADING, buildJudgePrompt, parseProposal } from './extensions/grade.ts'
 import ragSearchExtension from './extensions/rag-search.ts'
 import {
   ensureModelsJson,
@@ -68,6 +71,19 @@ import {
   resolveCredentials,
   type PiCredentials
 } from './pi-bootstrap.ts'
+// ★ 内容安全投递层（票 22）：输入检查 + 生成结束后的整段终审 + provider 边界脱敏。
+//   判定全在 Python 的 `app/safety/guard.py`，本文件只负责把它接到**真实对话回合**上。
+import {
+  auditProviderHeaders,
+  createModelCompleter,
+  createSafetyGateSink,
+  emitBlockedTurn,
+  finalizeTurn,
+  reviewInput,
+  type TextCompleter
+} from './safety/review.ts'
+// ★ 动画自由生成（票 17 的补充路径）：模板未命中时才被调用，无 Key 时干净降级。
+import { createAnimationGenerator } from './animation/generator.ts'
 import {
   assertSessionManagerIsolated,
   ensureStudentPiDirs,
@@ -110,8 +126,8 @@ export interface ChatTurnInput {
 /** 本轮的结论（供日志与工具调用轨迹用；UI 只认 6 事件）。 */
 export interface ChatTurnOutcome {
   ok: boolean
-  /** `ok` / `missing-key` / `provider-error` / `busy` / `exception`。 */
-  status: 'ok' | 'missing-key' | 'provider-error' | 'busy' | 'exception'
+  /** `ok` / `missing-key` / `provider-error` / `busy` / `exception` / `blocked`。 */
+  status: 'ok' | 'missing-key' | 'provider-error' | 'busy' | 'exception' | 'blocked'
   /** 面向开发者的说明（**不进 UI**）。 */
   detail?: string
 }
@@ -173,6 +189,15 @@ const PROBE_NOTICE =
 
 /** 并发保护：同一时刻只允许一轮（渲染进程也有 streaming 守卫，这里是第二道）。 */
 export const BUSY_MESSAGE = '上一条回答还没说完，请等它结束再发下一条。'
+
+/**
+ * 学段第二层（轻量 LLM 判定）的单次超时（毫秒）。
+ *
+ * 为什么不能无限等：判定是**每轮 fire-and-forget 上交链**上的一环（`grade.ts` 的队列），
+ * 它挂在 `flushGrades()` 上被 `before-quit` / 每轮结束等待。一次挂死的调用会把整条队列
+ * 连同退出流程一起拖住。超时 → `judge_error` → 本轮只用第一层（学段照常能改），代价可接受。
+ */
+export const JUDGE_TIMEOUT_MS = 8_000
 
 /** 诊断开关：把 Pi 原生事件名按顺序打到 stderr（**只打事件名，见 `tracePiEvent`**）。 */
 const tracePiEvents = process.env.K12_PI_TRACE === '1'
@@ -257,6 +282,16 @@ interface RuntimeState {
   wirePrompt?: string
   wireLeaks: string[]
   providerRequests: number
+  /** ★ provider 边界（`before_provider_headers`）审计：命中并脱敏掉的敏感头名（去重）。 */
+  redactedHeaderKeys: Set<string>
+  /** ★ 该钩子被调用的次数（验收证据：hook 真的挂上了）。 */
+  headerAudits: number
+  /** ★ 脱敏数据的来源（`sidecar` = Python 的 `redact_provider_headers`；`fallback` = 本地名单）。 */
+  headerAuditSource: 'sidecar' | 'fallback' | 'none'
+  /** ★ 内容安全：输入侧拦截次数 / 生成侧终审撤回次数（验收与轨迹的证据）。 */
+  inputBlocks: number
+  finalizations: number
+  retractions: number
 }
 
 /**
@@ -286,7 +321,38 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   const useProbe = probeRequested && !credentials.apiKey
 
   const pi = (await loadPi()) as unknown as PiModuleLike
-  const state: RuntimeState = { wireLeaks: [], providerRequests: 0 }
+  const state: RuntimeState = {
+    wireLeaks: [],
+    providerRequests: 0,
+    redactedHeaderKeys: new Set<string>(),
+    headerAudits: 0,
+    headerAuditSource: 'none',
+    inputBlocks: 0,
+    finalizations: 0,
+    retractions: 0
+  }
+
+  /**
+   * ★★ 模型文本补全的**单一接线点**（三个用途共用：内容安全自审 / 学段第二层 / 动画自由生成）。
+   *
+   * 为什么是「先给壳、后填芯」（`lazyComplete` + {@link completerHolder}）：
+   *   - 补全器要等 `ModelRuntime` 与 `model` 解析完才造得出来（它们在下面几十行）；
+   *   - 而**动画扩展的工厂在 `resourceLoader.reload()` 时就要拿到 `generate`**
+   *     （Pi 的 `extensionFactories` 是那时调用的），比 `model` 解析更早。
+   *   所以这里给扩展一个稳定的函数壳，真正的实现等 `completerHolder` 填上再用。
+   *
+   * ★ 无 Key 时 `completerHolder` **保持为 `null`**，`lazyComplete` 抛出可读文案 ——
+   *   三个用途各自走自己的降级分支（自审跳过词表照跑 / 学段报 `no_llm` / 动画降级为文字+SVG）。
+   *   **绝不**在这里造一个假补全器：那会让「无 Key」变成「静默乱答」。
+   */
+  let completerHolder: TextCompleter | null = null
+  const lazyComplete: TextCompleter = async (request) => {
+    const completer = completerHolder
+    if (!completer) {
+      throw new Error('模型通道未接线：本机没有可用的 API Key（可在设置页填写或设置环境变量 DEEPSEEK_API_KEY）')
+    }
+    return await completer(request)
+  }
   /** ★ 工具调用轨迹（票 08 的「设计合理性」证据；`dispose()` 时落盘）。 */
   const trace = new ToolTraceRecorder()
   /** 扩展装配结论（供 `extensionReport` 诊断字段；注册发生在 Pi 调用工厂时）。 */
@@ -338,6 +404,82 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       state.wirePrompt = redacted
       state.wireLeaks = findHostPathLeaks(redacted, [options.userDataDir, process.execPath])
     })
+
+    // ★★ provider 边界（§12 的第二道脱敏）的**另一半**：`before_provider_headers`。
+    //
+    //   `before_provider_request` 管的是**请求体**（我们只从中取 system prompt 做泄漏断言），
+    //   而凭据恰恰在**请求头**里（`Authorization: Bearer sk-…`）。所以「API Key 明文不得入日志」
+    //   这条纪律在 provider 边界上的落点就是这个钩子 —— 它此前**从未注册**（票 22 的欠账）。
+    //
+    //   ★ Pi 的语义（实测读源码，别按直觉改）：
+    //     - handler **原地改 `event.headers`**，返回值被忽略（`emitBeforeProviderHeaders`）；
+    //     - `ProviderHeaders = Record<string, string | null>`，赋 `null` = 删除该头。
+    //   ★★ 我们的语义（**与「删除 Authorization」相反，别搞反**）：
+    //     `Authorization` 是**发请求必须带**的东西。审计副本必须干净，但真实请求头一个字节都不能动 ——
+    //     把 Key 抹成 `***` 会让每一轮对话都 401。所以本钩子**只读不写**：
+    //     取脱敏副本（Python 的 `redact_provider_headers` 是唯一实现）→ 断言「副本里没有明文 Key」
+    //     → 记进状态供验收与日志（**只记头名与命中项，绝不记值**）。
+    //
+    //   异常纪律：脱敏服务挂了也绝不拦住这一轮（extensions/index.ts 的注册器自兜异常，
+    //   这里再兜一次是因为「审计失败」与「对话失败」必须解耦）。
+    extensionApi.on('before_provider_headers', (event: unknown) => {
+      const headers = (event as { headers?: unknown }).headers
+      if (!headers || typeof headers !== 'object') return
+      state.headerAudits += 1
+      const names = Object.keys(headers as Record<string, unknown>)
+      // ★ 头名级别的诊断（`K12_PI_TRACE=1` 时打开）：**只打头名，绝不打值**。
+      //   为什么要它 —— 实测发现（0.85.1 + openai-completions + `apiKey` 形态）：
+      //   Pi 传给本 hook 的 `headers` 是**空对象**，`Authorization` 由底层 SDK 在
+      //   `transformHeaders` **之后**注入（用本机假 provider 抓到的地面真值：
+      //   网络上确实有 `authorization`，而 hook 里 names=[]）。
+      //   所以「hook 触发了但没看到敏感头」是**正常形态**，必须能和「hook 没触发」分开。
+      if (tracePiEvents && state.headerAudits <= 3) {
+        console.warn(
+          `[safety] provider 头 hook 第 ${state.headerAudits} 次触发，头名=[${names.join(', ')}]（值一律不打印）`
+        )
+      }
+      if (names.length === 0) {
+        // ★ 兜底审计：hook 看不到头时，**能审计的就剩「凭据本身」** —— 而它才是敏感度的源头。
+        //   判定可执行：密钥必须能被 `redactSecret` 完整抹掉（日志侧唯一实现）。
+        //   抹不掉的密钥 = 一旦进了任何日志就再也清不掉，这是必须当场发现的问题。
+        const key = credentials.apiKey
+        if (key && key.length >= 6 && redactSecret(key, key) !== '***') {
+          console.error('[safety] 凭据脱敏断言失败：API Key 无法被完整抹除（不得进入任何日志）')
+        }
+        return
+      }
+      void auditProviderHeaders(headers as Record<string, string | null>)
+        .then((audit) => {
+          state.headerAuditSource = audit.source
+          for (const key of audit.sensitiveKeys) state.redactedHeaderKeys.add(key.toLowerCase())
+          // ★ 审计断言（自证清白）：脱敏副本里绝不允许原样出现真实 Key。
+          //   与 `findHostPathLeaks` 同一性质 —— 把「应该做到的事」写成可判定的检查，
+          //   而不是只在注释里声明。失败时**只说结论**（不打印任何值）。
+          if (credentials.apiKey && credentials.apiKey.length >= 6) {
+            const leaked = Object.values(audit.headers).some((value) => value.includes(credentials.apiKey!))
+            if (leaked) {
+              console.error('[safety] provider 头脱敏断言失败：审计副本里仍有明文 Key（脱敏实现有缺口）')
+            }
+          }
+          // ★ 可观测（验收要求「show the hook being invoked」）：只在**确实有敏感头**时出一行，
+          //   免得每一轮都刷屏。**只打头名与来源，绝不打值**（§12）。
+          if (audit.sensitiveKeys.length > 0) {
+            console.warn(
+              `[safety] provider 头审计（第 ${state.headerAudits} 次）：已脱敏 ${audit.sensitiveKeys
+                .map((key) => key.toLowerCase())
+                .join('、')}（实现来源=${audit.source}；真实请求头未被修改）`
+            )
+          }
+        })
+        .catch((error: unknown) => {
+          // 审计是**旁路**：它失败不影响这一轮对话（Pi 也会吞掉 handler 异常并报给扩展）
+          console.warn(
+            `[safety] provider 头审计失败（不影响本轮对话）：${
+              error instanceof Error ? error.message : String(error)
+            }`
+          )
+        })
+    })
   }
 
   /**
@@ -365,7 +507,15 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         quiz: quizExtension,
         // 动画（票 16/17）：模板优先 + 校验 + 重试 ≤3 + 降级文字/静态图。
         // 重试计数在扩展内部的 Map 里 —— `tool_execution_end` 是**只读通知**，不能靠它回写。
-        animation: animationExtension,
+        //
+        // ★★ 票 17 的补充路径（自由生成）在这里**真正接上**（审计结论：此前没接 `generate`，
+        //    于是「模板未命中 → 自由生成 → 降级」这条被单测覆盖的链路在生产里**不可达**）。
+        //    `createAnimationGenerator` 的分工：模型出片段 → Python 拼装+校验 → 不过则重试/降级。
+        //    **无 Key 时它直接抛**（`complete` 是 `lazyComplete`，拿不到实现就拒绝），
+        //    扩展随即降级为文字 + 静态 SVG —— 有兜底，不白屏。
+        animation: createAnimationExtension({
+          generate: createAnimationGenerator({ complete: lazyComplete })
+        }),
         // 编程（票 18/19）：模板 / 分级求助 / 报错翻译。
         // ★ 它**不执行学生代码** —— 执行经 IPC 下发到渲染进程的 Pyodide Worker。
         coding: codingExtension,
@@ -462,6 +612,33 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   if (runtimeKey) await modelRuntime.setRuntimeApiKey(credentials.providerId, runtimeKey)
   const effectiveModel = useProbe ? { ...(model as object), baseUrl: PROBE_BASE_URL } : model
 
+  // ★ 凭证就绪判定必须在**填充补全器之前**做完（它是三处降级分支的共同判据）
+  const auth = await modelRuntime.checkAuth(credentials.providerId)
+  const authReady = auth !== undefined
+
+  /**
+   * ★★ 模型通道的**填充**（`lazyComplete` 的芯；三个用途共用，见文件上方 `completerHolder` 的说明）。
+   *
+   * 三个必要条件缺一不可（这就是「无 Key 世界干净降级」的判据）：
+   *   1. `credentials.apiKey` 存在 —— 才有真的凭证；
+   *   2. `authReady` —— Pi 的 `checkAuth` 也认了（Key 形态不对时这里就挡下）；
+   *   3. **不是离线探针** —— 探针用的假 Key 指向不可达地址，拿它去跑自审/判学段毫无意义，
+   *      只会白等超时。探针模式的存在意义只有「把 prompt 走到终态」，与模型能力无关。
+   *
+   * 上面任一条不满足 → `completerHolder` 保持 `null` → 三个用途各自降级（**都不崩、都不挂**）：
+   *   - 内容安全：自审那半跳过，**词表那半照跑**（无 Key 也可用）；
+   *   - 学段第二层：`grade.ts` 报 `no_llm`（服务端出参里也标 `degraded`），第一层照常改学段；
+   *   - 动画自由生成：`generate` 抛「没有 API Key」→ 扩展降级为文字 + 静态 SVG。
+   */
+  if (credentials.apiKey && authReady && !useProbe) {
+    completerHolder = createModelCompleter(modelRuntime as never, effectiveModel, {
+      // 自审/判学段/生成片段都是**纯文本任务**：不给工具（模型能调用工具就会去调，
+      // 而那些工具会改学生数据）。`maxTokens` 给够写一段片段，不追求长输出。
+      maxTokens: 1_200,
+      temperature: 0
+    })
+  }
+
   const customTools = debugThrowTools(pi)
   const { session } = await pi.createAgentSession({
     cwd: options.cwd ?? paths.root,
@@ -474,6 +651,42 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     noTools: 'builtin',
     customTools
   })
+
+  /**
+   * ★★ 学段第二层（LLM 判定）的**接线点**（票 21）。
+   *
+   * `grade.ts` 的 `useJudge()` 是它自己文档里点名的注入点，但**此前没有任何生产调用方**
+   * （审计结论：`grep useJudge src/main` 只有定义与注释）—— 后果是第二层**永远**报 `no_llm`，
+   * 即便本机配好了 Key，而执行文档 §10.3 的「第 3 轮（不足则第 5 轮）触发一次轻量 LLM 判定」
+   * 因此从未真正生效过。
+   *
+   * 判定 prompt 的模板与响应解析都复用 `grade.ts` 的导出（`buildJudgePrompt` / `parseProposal`）——
+   * **不在这里另写一份**，否则「模型该怎么答」与「我们怎么读」会各改一半。
+   *
+   * ★ 无 Key 时传 `null`（`useJudge(null)`）：扩展会把第二层标成 `no_llm` 并**大声说一次**，
+   *   第一层规则引擎照常工作（四类信号照常提取、照常能改学段），绝不静默、绝不崩。
+   */
+  gradeExtension.useJudge(
+    credentials.apiKey && authReady && !useProbe
+      ? async ({ turns, currentGrade }) => {
+          try {
+            const raw = await lazyComplete({
+              prompt: buildJudgePrompt(turns, currentGrade),
+              timeoutMs: JUDGE_TIMEOUT_MS
+            })
+            return parseProposal(raw)
+          } catch (error) {
+            // 判定失败 = 这一轮只用第一层（`grade.ts` 会把状态标成 `judge_error` 并记日志）
+            console.warn(
+              `[grade] 第二层 LLM 判定调用失败（本轮只用第一层规则信号）：${
+                error instanceof Error ? error.message : String(error)
+              }`
+            )
+            return null
+          }
+        }
+      : null
+  )
 
   /**
    * ★ 学段装配自检（**常驻**，但只在异常时出声）：建完会话当场验证 prompt 出口能用。
@@ -496,11 +709,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     console.error('[agent] 学段装配自检抛异常（学段推断本轮不可用）：', error)
   }
 
-  const auth = await modelRuntime.checkAuth(credentials.providerId)
-  const authReady = auth !== undefined
   let disposed = false
   let busy = false
-
   return {
     paths,
     studentId: paths.studentId,
@@ -575,6 +785,47 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         //   必须看到「本轮真正生效的学段」，而不是上一轮那一份。两次调用都是纯对象赋值，很便宜。
         bindCurrentSession()
 
+        // ★★ 内容安全【第一道：输入侧检查】（票 22 / §12）——**在发起模型调用之前**。
+        //
+        //    为什么放在这里而不是 Pi 的 `input` 事件里：`input` 只在真的调 `session.prompt()`
+        //    时才发，而下面的「无 Key」分支根本不调它（与学段推断同一个坑，见上）。
+        //    放在这里则**两条路径都覆盖**：命中就立刻 `blocked`，一个字都不发给模型。
+        //
+        //    ⚠️ 判定在 Python（`guard.check_input`），这里只投递 —— **绝不在 TS 侧另写词表**。
+        const inputVerdict = await reviewInput(input.text, { gradeLevel: gradeExtension.appliedGrade() })
+        if (inputVerdict && !inputVerdict.allowed) {
+          state.inputBlocks += 1
+          state.lastPrompt = gradeExtension.systemPromptFor(undefined)
+          dumpPrompts(paths, state)
+          emitBlockedTurn(sink, inputVerdict)
+          console.warn(
+            `[safety] 输入侧拦截（不发模型请求）：类别=${inputVerdict.category} 来源=${inputVerdict.source} ` +
+              `命中=${inputVerdict.matched.join('、') || '无'}（不回显正文）`
+          )
+          return { ok: false, status: 'blocked', detail: `输入侧命中 ${inputVerdict.category}` }
+        }
+
+        /**
+         * ★★ 内容安全【第三道：生成结束后整段终审】的**投递管道**（票 22）。
+         *
+         * `createSafetyGateSink` 是一个 `TurnSink` 包装器，它做一件必须做对的事：
+         * **扣住 `done`**，等终审跑完；违规时**先发 `blocked`、再补 `done`**。
+         * 理由见 `safety/review.ts` 的详细注释（`done` 对渲染进程是终态，之后到达的
+         * `blocked` 会被归约器丢掉 → 撤回静默失效）。
+         *
+         * ★ 终审必须**发生在 `done` 之前**，而 Pi 的 `agent_end` 一到就会发 `done` ——
+         *   所以门在 `finish()` 里不立刻转发，而是等 `finalizeTurn()` 的结论。
+         */
+        const gate = createSafetyGateSink({
+          inner: target,
+          finalize: (text) =>
+            finalizeTurn(text, {
+              // 无 Key 时 `completerHolder` 为 null → 自审那半跳过；**词表那半照跑**。
+              complete: completerHolder ? lazyComplete : null,
+              gradeLevel: gradeExtension.appliedGrade()
+            })
+        })
+
         // 无 Key：**不调 prompt()**，直接给可读结论（Pi 在 prompt() 最开头就会因缺凭证抛错，
         // 且那时连 `before_agent_start` 都不会触发 —— 所以在这里前置判定，文案才不会退化成异常）
         if (!credentials.apiKey && !useProbe) {
@@ -594,7 +845,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
 
         const binding = bindTurnStream(
           session,
-          target,
+          gate,
           { requestId: sink.requestId },
           // 诊断钩子（`K12_PI_TRACE=1`）：**只打事件名与结构性字段**，绝不记录消息正文或凭证
           tracePiEvents ? { onEvent: tracePiEvent } : {}
@@ -611,11 +862,33 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           binding.unsubscribe()
         }
 
+        // ★★ 等终审与收尾走完**再返回**。
+        //
+        // 为什么必须 await：门是在 `bindTurnStream` 的订阅回调里被驱动的（同步），而终审是异步的。
+        // 不等它，`runTurn()` 就会在 `blocked` 还没发出去时返回，调用方（`ipc/handlers.ts`）
+        // 紧接着 `flushGrades()` + 读学段 —— 而 `blocked` 与 `done` 可能在那之后才到。
+        // `settled()` 内部有兜底（没有终态事件也会 resolve），所以这里**不会挂住**。
+        await gate.settled()
+        state.finalizations += gate.finalizations
+        state.retractions += gate.retractions
+        // ★ 每轮一条结构性审计行（验收与排查的落点）：证明「生成侧终审」在这条真实回合上
+        //   被装配过、跑了几次、撤回过没有。**只有结构字段与计数，绝无正文**（§12）。
+        //   `finalizations=0` 的两种正常含义：① 本轮以失败收尾（没有正文要撤）；
+        //   ② 本轮还没产生任何正文。都不是故障。
+        console.warn(
+          `[safety] 本轮内容安全：输入侧检查=通过 生成侧终审=${gate.finalizations} 次 ` +
+            `撤回=${gate.retractions} 次（正文 ${gate.bufferedChars} 字符）`
+        )
+
         dumpPrompts(paths, state)
         const leaks = state.wireLeaks
         if (leaks.length > 0) {
           // 泄漏是**开发期缺陷**，不该让学生看见：记在结论里，UI 只看到正常收尾
           return { ok: false, status: 'provider-error', detail: `system prompt 泄漏：${leaks.join(' / ')}` }
+        }
+        // 撤回过的轮次：结论如实记（面向开发者），UI 那边看到的是安全文案
+        if (gate.retractions > 0) {
+          return { ok: false, status: 'blocked', detail: '本轮回答被安全终审撤回' }
         }
         return { ok: true, status: 'ok' }
       } finally {

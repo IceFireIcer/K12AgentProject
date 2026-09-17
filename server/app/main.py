@@ -60,7 +60,9 @@ from app.routes.resources import public_router as animation_resources_router  # 
 from app.routes.resources import router as animation_router  # noqa: E402
 from app.routes.settings import router as settings_router  # noqa: E402
 from app.routes.students import router as students_router  # noqa: E402
+from app.animation.compose import router as animation_compose_router  # noqa: E402
 from app.safety.guard import install_log_redaction  # noqa: E402
+from app.safety.route import router as safety_router  # noqa: E402
 from app.security import (  # noqa: E402
     ALLOWED_ORIGIN_REGEX,
     ALLOWED_ORIGINS,
@@ -152,6 +154,15 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
     #      这是有意的例外，不是漏挂鉴权：nonce 校验在路由内部完成。
     app.include_router(animation_router)
     app.include_router(animation_resources_router)
+    # 内容安全（票 22）：输入侧检查 / 生成结束后的整段终审 / provider 边界脱敏。
+    # ★ 这一挂是**必须的**：主进程的 `agent/safety/review.ts` 是投递层，判定全在这里；
+    #   不挂载的话 `blocked` 事件在真实回合里**永远不会产生**（审计发现的头号缺陷）。
+    #   `include_in_schema=False`（在 route.py 里）：内部管道，不进 OpenAPI 生成物。
+    app.include_router(safety_router)
+    # 动画自由生成的合流（票 17 的补充路径）：模型出片段 → 这里拼装 + 校验 → 422 则重试。
+    # ★ 不挂载的话，`animation.ts` 的 `generate` 会拿到 404 并降级 —— 表面上「有兜底」，
+    #   但「自由生成」这条链路**永远不可达**（与被审计出的缺陷同一形态）。
+    app.include_router(animation_compose_router)
 
     # ★ 中间件顺序是**有讲究的**，别调换：
     #   Starlette 的洋葱模型里「最后 add 的在最外层」，所以：
