@@ -11,7 +11,8 @@
  *      能直接 import 同一份 TS 实现的前提。
  */
 
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { app, BrowserWindow, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { runPiSmoke } from './agent/pi-bootstrap.ts'
@@ -111,6 +112,74 @@ function pushSidecarState(): void {
     window.webContents.send(IPC.sidecarChanged, state)
   }
 }
+
+/**
+ * ★ 便携（绿色）版：把 Electron 的 `userData` 挪到 **exe 同级的 `data/`**，
+ * 使全部本地数据（config.json / learning.db / Pi JSONL / 日志）随程序目录走。
+ *
+ * 为什么必须显式改道：Electron 默认把 `userData` 放在
+ * `%APPDATA%/<appName>` —— 便携版拷到别人机器上跑，数据会散落在系统盘，
+ * 既不符合「绿色版」的预期，也会让**上一台机器的学习记录留在本机**。
+ *
+ * 判定方式（两条都认，避免「双击 exe 没带开关」时行为不一致）：
+ *   ① 环境变量 `K12_PORTABLE=1`；
+ *   ② **exe 同级存在 `portable.marker`**（构建便携版时随包放进去）。
+ *
+ * ⚠️ 必须在 `whenReady` **之前**调用 `app.setPath`：一旦有窗口或任何模块
+ *    读过 userData，再改就来不及了（那时目录已经被创建/写入）。
+ * ⚠️ 只在打包态生效：开发态若也改道，`npm run dev` 会把数据写进 `desktop/`，
+ *    污染源码目录。
+ */
+function applyPortableDataDir(): boolean {
+  if (!app.isPackaged) return false
+
+  // ★★ 关键：electron-builder 的 `portable` 目标**先把应用解压到临时目录再运行**，
+  //    所以 `app.getPath('exe')` 指向的是临时目录 —— 数据写那里会被清理掉，
+  //    用户会看到「关掉再开，东西全没了」。真正的「用户把 exe 放在哪」
+  //    只有 electron-builder 注入的 `PORTABLE_EXECUTABLE_DIR` 知道。
+  //    （同理，`portable.marker` 也在临时目录里 —— 它只用来表示「这是便携版」，
+  //     不能用来推断数据该放哪。）
+  // ★ 实测教训：**不要依赖 `PORTABLE_EXECUTABLE_DIR`**。
+  //   electron-builder 的 portable 启动器是用 NSIS 的
+  //   `Kernel32::SetEnvironmentVariable` **在启动器进程里**设这个变量的，
+  //   而 Electron 子进程并未继承到它（实测：便携单文件形态下该变量为 undefined，
+  //   数据静默写回了 `%APPDATA%` —— 正是「便携版不便携」这个最典型的坏味道）。
+  //
+  //   所以判定只用一条**不依赖环境变量**的事实：**exe 同级存在 `portable.marker`**。
+  //   - 便携单文件形态：启动器把应用解压到临时目录并运行，marker 在**临时目录**里，
+  //     数据也落临时目录 → 这恰好可以当「一次性试跑」，但**不能当长期绿色版**；
+  //   - 绿色（zip）形态：解压目录里 `exe` 与 `marker` 同级且**目录是真实持久的**，
+  //     数据就落在用户解压的位置 —— 这才是可长期使用的便携形态。
+  //   两种形态共用同一套代码，不需要为它们分别加开关。
+  const exeDir = dirname(app.getPath('exe'))
+  const marker = join(exeDir, 'portable.marker')
+
+  let forced = process.env.K12_PORTABLE === '1'
+  if (!forced) {
+    try {
+      forced = existsSync(marker)
+    } catch {
+      forced = false
+    }
+  }
+  if (!forced) return false
+
+  const dataDir = join(exeDir, 'data')
+  try {
+    app.setPath('userData', dataDir)
+    app.setPath('sessionData', join(dataDir, 'session'))
+    console.warn(`[main] 便携模式：数据目录 = ${dataDir}`)
+    return true
+  } catch (error) {
+    // 改道失败（例如装在只读目录）：退回默认 userData，**不让应用起不来**
+    console.error('[main] 便携模式改道失败，退回默认 userData：', error)
+    return false
+  }
+}
+
+// ★ 便携改道必须早于 whenReady（见函数注释）。返回值这里不用，
+//   但**绝不能省掉这次调用** —— 它决定了 userData 落在哪。
+applyPortableDataDir()
 
 void app.whenReady().then(async () => {
   electronApp.setAppUserModelId(APP_ID)

@@ -56,9 +56,24 @@ win:
   executableName: k12-agent-desktop
   target:
     - nsis
+    # ★ 便携（绿色）版：单个 exe，解压到临时目录运行，数据落 exe 同级 data/。
+    #   与 nsis 的区别是「不安装、可放 U 盘」—— 演示现场最省事的一种形态。
+    - portable
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
 npmRebuild: false
+
+portable:
+  artifactName: ${name}-${version}-portable.${ext}
+  # 解压临时目录，不写注册表、不建快捷方式
+  unpackDirName: k12-agent-desktop-portable
+
+# ★ 便携标记：`src/main/index.ts` 的 applyPortableDataDir() 靠它判断
+#   「这是便携版，把 userData 挪到 exe 同级 data/」。
+#   随包放一个空文件即可（也可用环境变量 K12_PORTABLE=1 强制）。
+extraFiles:
+  - from: build/portable.marker
+    to: portable.marker
