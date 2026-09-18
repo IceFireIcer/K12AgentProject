@@ -33,7 +33,7 @@ import logging
 from typing import Literal
 
 from fastapi import APIRouter
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.contracts import CamelModel
 from app.safety import guard
@@ -46,7 +46,16 @@ router = APIRouter(prefix="/api", tags=["safety"], include_in_schema=False)
 MAX_CHECK_CHARS = 8000
 MAX_SELF_REVIEW_CHARS = 8000
 MAX_HEADERS = 64
+#: 单个请求头的**值**长度上限（字符）。
+#:
+#: ★ 审计发现：这个常量此前只出现在定义与 ``__all__`` 里 —— 而
+#: ``RedactHeadersRequest.headers`` 上的 ``max_length=MAX_HEADERS`` 作用在 **dict 上**，
+#: 限制的是**条目数**，单头长度上限**从未生效**（「看起来有约束其实没有」）。
+#: 现在由 :meth:`RedactHeadersRequest.model_validator` 逐值强制（超长 → 422）。
+#: 为什么要限制：这个端点的返回值会进日志/审计，一个几 MB 的畸形头会把日志撑爆；
+#: 同时它也挡住「用超长头做内存放大」的畸形输入。
 MAX_HEADER_CHARS = 2048
+
 
 class SafetyCheckRequest(CamelModel):
     """一次安全检查的入参。``extra="forbid"``（CamelModel 的默认）挡住临时加松散字段。"""
@@ -81,9 +90,28 @@ class SelfReviewPromptResponse(CamelModel):
     prompt: str
 
 class RedactHeadersRequest(CamelModel):
-    """provider 头脱敏的入参（真正的请求头副本）。"""
+    """provider 头脱敏的入参（真正的请求头副本）。
+
+    ``headers`` 上有两个**不同**的限制，别看混：
+
+    - ``max_length=MAX_HEADERS`` 作用在 dict 上 → 限制的是**条目数**；
+    - :meth:`_check_header_lengths` 逐值限制**单个头的长度**（``MAX_HEADER_CHARS``）。
+      单靠前者会让「一个 10MB 的头」直接进日志/审计（审计发现这个上限此前从未生效）。
+    """
 
     headers: dict[str, str] = Field(default_factory=dict, max_length=MAX_HEADERS)
+
+    @model_validator(mode="after")
+    def _check_header_lengths(self) -> "RedactHeadersRequest":
+        """逐值校验单头长度：超限 → 422（可读中文，指出是哪个头）。"""
+        too_long = [
+            name for name, value in self.headers.items() if len(str(value)) > MAX_HEADER_CHARS
+        ]
+        if too_long:
+            raise ValueError(
+                f"请求头过长（单个头上限 {MAX_HEADER_CHARS} 字符）：{'、'.join(sorted(too_long)[:5])}"
+            )
+        return self
 
 class RedactHeadersResponse(CamelModel):
     """脱敏副本 + 命中并抹掉的敏感头名（**只有头名，没有值** —— 值里就是凭据）。"""

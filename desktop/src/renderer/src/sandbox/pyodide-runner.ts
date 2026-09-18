@@ -201,21 +201,45 @@ export function createPyodideRunner(
 
     readyPromise = new Promise<void>((resolve, reject) => {
       let settled = false
-      const guard = setTimeout(() => {
-        if (settled) return
-        settled = true
-        const failure = `Pyodide 加载超时（${LOAD_TIMEOUT_MS}ms 内没有就绪）。请检查 <renderer>/pyodide/ 下的本地资源是否完整。`
-        // ★ 不能只有 reject：一个**永不 settle** 的 reject 会让界面无限转圈，
-        //   所以 readyPromise 的失败要同时把状态改成 failed 并给可读文案。
-        setStatus({ phase: 'failed', failure })
-        readyPromise = null // 允许重试（现场演示时"再点一次"应该有意义）
-        reject(new Error(failure))
-      }, LOAD_TIMEOUT_MS)
 
       const created = workerFactory()
       worker = created
 
+      /**
+       * ★ 「这条消息/这个回调是不是当前这个 Worker 发出来的？」
+       *
+       * 为什么必须判断（H5 的修复点）：加载超时或失败后允许重试
+       * （`readyPromise = null` → 下一次 `run()` 再进来一次），而**旧 Worker 不会自己消失** ——
+       * 它还在拉那 9 MB wasm。若处理器不认身份，会有两处真实故障：
+       *   ① 旧 Worker 迟到的 `ready` 把 `interruptBuffer` 覆盖成**旧的那块 SAB**，
+       *      而 `run()` 把代码发给**新** Worker → 超时写的 SIGINT 进了没人看的缓冲区，
+       *      `while True: pass` 再也中断不了、`pending` 永不兑现 —— 共享运行器整场报废；
+       *   ② 旧 Worker 的 `result` / `error` 冒充当前回执（`runId` 全局递增，概率低但没必要留）。
+       * 两道防线合起来用：**重试前先 terminate 旧 Worker** + 处理器首行认身份。
+       */
+      const isCurrent = (): boolean => created === worker
+
+      const guard = setTimeout(() => {
+        if (settled) return
+        settled = true
+        const failure = `Pyodide 加载超时（${LOAD_TIMEOUT_MS}ms 内没有就绪）。请检查 <renderer>/pyodide/ 下的本地资源是否完整。`
+        if (isCurrent()) {
+          // ★ 不能只有 reject：一个**永不 settle** 的 reject 会让界面无限转圈，
+          //   所以 readyPromise 的失败要同时把状态改成 failed 并给可读文案。
+          setStatus({ phase: 'failed', failure })
+          // ★ 先把旧 Worker 拆掉再开放重试：否则它继续占内存、还会发出迟到的 `ready`
+          //   （那条消息正是「中断缓冲区被覆盖」的成因）。
+          terminateWorker()
+          readyPromise = null // 允许重试（现场演示时"再点一次"应该有意义）
+        }
+        // 无论如何都要 reject：悬着一个永不 settle 的 await 比一条失败更糟。
+        // （dispose() 之后这条已无人在意，但也不会留下悬空的 run()）
+        reject(new Error(failure))
+      }, LOAD_TIMEOUT_MS)
+
       created.onmessage = (event: MessageEvent<ReadyMessage | ResultMessage | ErrorMessage>): void => {
+        // 旧 Worker 的消息一律不认（它已被 terminate，或者只是迟到）
+        if (!isCurrent()) return
         const message = event.data
         if (!message || typeof message !== 'object') return
 
@@ -257,6 +281,8 @@ export function createPyodideRunner(
             if (!settled) {
               settled = true
               clearTimeout(guard)
+              // 与超时分支同口径：旧 Worker 先拆掉，再开放重试
+              terminateWorker()
               readyPromise = null
               reject(new Error(message.failure))
             }
@@ -281,11 +307,13 @@ export function createPyodideRunner(
 
       // Worker 内部未捕获异常（脚本解析失败 / OOM）——收敛成可读错误，别让界面白屏
       created.onerror = (): void => {
+        if (!isCurrent()) return
         const failure = 'Python 运行环境（Worker）异常退出，可能是内存不足。请稍后重试。'
         setStatus({ phase: 'failed', failure })
         if (!settled) {
           settled = true
           clearTimeout(guard)
+          terminateWorker()
           readyPromise = null
           reject(new Error(failure))
           return
@@ -314,6 +342,23 @@ export function createPyodideRunner(
     })
 
     return readyPromise
+  }
+
+  /**
+   * 拆掉**当前** Worker（重试前 / dispose / 加载失败的统一出口）。
+   *
+   * 顺序很关键：**先把 `worker` 指针置空，再 terminate**。置空后那些闭包里的
+   * `isCurrent()` 立刻返回 `false`，于是即便之后还有一条迟到的消息被投递，
+   * 也只会被丢掉 —— 不会覆盖新 Worker 的 `interruptBuffer`，也不会改状态。
+   * （同时摘掉两个回调，进一步避免已被 terminate 的 Worker 触发我们这边的逻辑。）
+   */
+  function terminateWorker(): void {
+    const current = worker
+    worker = null
+    if (current === null) return
+    current.onmessage = null
+    current.onerror = null
+    current.terminate()
   }
 
   /**
@@ -423,8 +468,8 @@ export function createPyodideRunner(
     }
     clearInterruptBuffer()
     interruptBuffer = null
-    worker?.terminate()
-    worker = null
+    // ★ 走统一出口：先置空指针再 terminate，迟到的 worker 消息因此会被身份判断丢掉
+    terminateWorker()
     readyPromise = null
     setStatus({ phase: 'idle', loadMs: null, capability: null, failure: null })
   }

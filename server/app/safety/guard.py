@@ -42,6 +42,7 @@ import json
 import logging
 import re
 import threading
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -212,11 +213,65 @@ def _compile_patterns(wordlist: WordList) -> list[tuple[re.Pattern[str], Mapping
     return compiled
 
 
+# --------------------------------------------------------------------------- #
+# 匹配前的**归一化**（防「最普通的打字方式」绕过）
+# --------------------------------------------------------------------------- #
+#: 零宽 / 不可见 / 双向控制字符：把词切开就能绕过朴素子串匹配
+#: （``自\u200b杀`` 在屏幕上与「自杀」一模一样，但 ``in`` 判不出）。
+#: 范围覆盖：零宽空格/连接符/方向标记（200b–200f）、行/段分隔符（2028–2029）、
+#: 双向嵌入与覆盖（202a–202e）、词连接符（2060–2064）、BOM（feff）。
+_INVISIBLE_CHARS_RE = re.compile("[\u200b-\u200f\u2028-\u202e\u2060-\u2064\ufeff]")
+
+#: 词内部的分隔符（``自 杀`` / ``自　杀`` / ``自-杀``）：全部当「没写」处理。
+#: 含换行 —— 「买\n枪」这类跨行拆分同样是绕过手法（词表里的词都是 2–6 字的整词，
+#: 被换行劈开的概率极低，所以不会带来实质误伤）。
+_CJK_SEPARATORS = (
+    " \t\r\n\u3000\u00a0\u2007\u2008\u2009\u200a·・.,，、;；:：-—_~～/\\|+*'\"“”‘’()（）[]【】<>《》?!！？"
+)
+#: 只在**两个 CJK 字符之间**吃掉分隔符 —— 英文单词里的空格必须保留
+#: （否则「a b」会粘成「ab」，把无关文本焊成命中）。
+_CJK_CHAR = r"[\u3400-\u4dbf\u4e00-\u9fff]"
+_CJK_GAP_RE = re.compile(f"({_CJK_CHAR})[{re.escape(_CJK_SEPARATORS)}]+(?={_CJK_CHAR})")
+
+
+def normalize_for_matching(text: str) -> str:
+    """把文本归一化成**用于匹配**的形态（**只用于匹配，不用于回显/存库**）。
+
+    三步（业务陷阱清单 §5：朴素子串匹配下「最普通的打字方式」就能绕过第一道防线）：
+
+    1. ``NFKC`` —— 全角标点/字母向内折叠（``ＡＢＣ`` → ``ABC``），
+       同时把大部分兼容字符收敛成标准形态；
+    2. **删掉零宽/不可见/双向控制字符** —— ``自\\u200b杀``、``自\\ufeff杀`` 屏幕上就是「自杀」；
+    3. **吃掉两个 CJK 字符之间的空白与标点** —— ``自 杀`` / ``自　杀``（全角空格）/``自-杀``。
+
+    ⚠️ 归一化只影响**匹配用的那份副本**：返回的 ``SafetyVerdict.matched`` 里只有
+    **命中的词**（词表原文），不回显位移，因此不存在「命中的 span 映射不回原文」的问题
+    （这是有意的取舍：回显位移需要一张偏移映射表，而本项目从不回显学生原话）。
+
+    ⚠️ **已知残留风险（需产品确认后补词表，本期不做自动转写）**：
+    繁体（``自殺``）、拼音（``zisha``）、同音替代（``自沙``）、英文（``self-harm``）
+    **不在本次修复范围内** —— 它们不是「打字习惯」问题，而是词表覆盖面问题；
+    自动繁→简转写要引第三方表，且会把教材里的正常繁体内容（如引用港台资料）
+    卷进误伤。已在 ``docs/report-material/pitfalls.md`` 记一条。
+    """
+    if not text:
+        return text
+    folded = unicodedata.normalize("NFKC", str(text))
+    stripped = _INVISIBLE_CHARS_RE.sub("", folded)
+    return _CJK_GAP_RE.sub(r"\1", stripped)
+
+
 def _match_all(text: str, wordlist: WordList) -> list[WordHit]:
+    """词表 + 越狱正则匹配。**先归一化再匹配**（否则零宽/空格变体全放行）。
+
+    正则同样跑在归一化文本上：越狱话术里塞零宽字符是常见绕过手法
+    （``Ignore all previous instructions`` 的空格变体也一样）。
+    """
+    normalized = normalize_for_matching(text)
     hits: list[WordHit] = []
     for entry in wordlist.words:
         token = str(entry["word"])
-        if token and token in text:
+        if token and (token in normalized or token in text):
             hits.append(
                 WordHit(
                     token=token,
@@ -226,7 +281,7 @@ def _match_all(text: str, wordlist: WordList) -> list[WordHit]:
                 )
             )
     for pattern, entry in _compile_patterns(wordlist):
-        found = pattern.search(text)
+        found = pattern.search(normalized) or pattern.search(text)
         if found:
             hits.append(
                 WordHit(
@@ -363,40 +418,63 @@ def _coerce_bool(value: Any) -> bool | None:
 
 
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
-    """从模型输出里抠出第一个 JSON 对象（允许 ```json 围栏与前后废话）。"""
+    """从模型输出里抠出第一个 JSON 对象（允许 ```json 围栏与前后废话）。
+
+    ★ **单次线性扫描**（``O(n)``，每个字符只看一遍）。曾经的实现是「每个 ``{`` 起点都做一次
+    到底扫描，失败后 ``find("{", start+1)`` 再来一遍」——最坏 ``O(n²)``：
+    实测全 ``{`` 的 8000 字符输入要 **2.04 秒**（``{"`` 交替 0.86 秒），
+    而 ``MAX_SELF_REVIEW_CHARS`` 正好是 8000。调用链是**同步**端点 ``/api/safety/check``，
+    一次畸形响应就能占住一个线程池 worker（并发几个就把池子占满）。
+
+    现行算法：从左到右扫**一遍**，遇到 ``{`` 压栈、遇到 ``}`` 弹栈，
+    字符串与转义状态在同一次扫描里维护（所以 ``{"reason": "写 { 号"}`` 里的花括号不会被误配对）。
+    **只在「栈空了」的那个右括号处尝试解析** —— 它对应的正是**最外层**对象：
+
+    - 顶层对象合法 → 立刻返回（这一条覆盖了 ``{"violation": true, "detail": {"a": 1}}``
+      这类嵌套输入：内层右括号不触发解析，外层那一次直接拿到整个对象）；
+    - 顶层对象非法 → 继续扫下一个顶层对象（``{乱写} {"violation": true}`` 能找到后者）；
+    - 全程没有合法顶层对象 → 返回 ``None``（**坏 JSON 返回 None，绝不抛**）。
+
+    每个顶层候选互不重叠，所以总解析代价是 ``O(n)``。
+    已知取舍：外层非法而**恰好内层合法**的畸形输入（``{"x": y {"violation": true}}``）
+    现在返回 ``None``（旧实现会退到内层对象）。这条代价是有意接受的：
+    「解析不出来」在调用链上的语义是「审核不可用 → 不据此拦截」，
+    不会把内容误判成违规；而为了它去逐层重扫，就等于把 ``O(n²)`` 请回来。
+    """
+    if not raw:
+        return None
     text = raw.strip()
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    start = text.find("{")
-    while start != -1:
-        depth = 0
-        in_string = False
-        escaped = False
-        for index in range(start, len(text)):
-            char = text[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = text[start : index + 1]
-                    try:
-                        parsed = json.loads(candidate)
-                    except json.JSONDecodeError:
-                        break
-                    return parsed if isinstance(parsed, dict) else None
-        start = text.find("{", start + 1)
+
+    starts: list[int] = []  # 未闭合的 `{` 位置（栈）
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            starts.append(index)
+        elif char == "}":
+            if not starts:
+                continue  # 多余的右括号（前面废话里的）：跳过，继续找后面的对象
+            start = starts.pop()
+            if starts:
+                continue  # 嵌套内的右括号：它的外层的右括号会负责解析整个顶层对象
+            try:
+                parsed = json.loads(text[start : index + 1])
+            except json.JSONDecodeError:
+                continue  # 这个顶层对象不合法 → 继续找下一个
+            return parsed if isinstance(parsed, dict) else None
     return None
 
 
@@ -621,18 +699,48 @@ class RedactionFilter(logging.Filter):
         return True
 
 
-def install_log_redaction(logger_: logging.Logger | None = None) -> RedactionFilter:
-    """把脱敏过滤器挂到根 logger（幂等）。
+def _attach_filter_once(target: Any, redaction: RedactionFilter) -> None:
+    """把过滤器挂到 logger / handler 上（**幂等**：已有 RedactionFilter 实例就不再加）。"""
+    for existing in list(getattr(target, "filters", ())):
+        if isinstance(existing, RedactionFilter):
+            return
+    target.addFilter(redaction)
 
-    ⚠️ **必须在写任何日志之前调用**（建议紧挨 ``install_utf8_stdio()``，见 ``app/main.py``）。
+
+def install_log_redaction(logger_: logging.Logger | None = None) -> RedactionFilter:
+    """把脱敏过滤器挂到根 logger **以及它现有的 handler** 上（幂等）。
+
+    ★★ **为什么必须同时挂 handler（生产路径上漏掉这一半 = 脱敏完全不生效）**：
+    ``Logger.filter()`` 只对「**直接在该 logger 上调用**」的记录生效；
+    子 logger（``app.rag.retriever`` 等）通过 ``propagate`` 把记录交给 root 的 **handler** 时,
+    **不会再跑 root logger 的 filter**。而 ``configure_logging()`` 用 ``logging.basicConfig``
+    建的是 root 的 handler —— 于是「只 addFilter 到 root logger」的实现里，
+    真实业务日志（子 logger 打的）一条都没被脱敏。
+
+    实测（修复前）::
+
+        install_log_redaction(); register_secret('sk-supersecret123456')
+        logging.getLogger('app.rag.retriever').info('调用失败 key=%s', 'sk-supersecret123456')
+        # 实际输出：INFO:app.rag.retriever:调用失败 key=sk-supersecret123456   ← 明文
+
+    挂到 handler 上之后，记录在 ``emit`` 之前一定会过一遍脱敏，传播路径漏不掉。
+
+    ⚠️ **必须在写任何日志之前、且在 handler 建好之后调用**（``app/main.py`` 里紧挨
+    ``configure_logging()``）。若之后又有新 handler（例如 uvicorn 自建），**再调一次本函数**
+    即可补齐 —— 它是幂等的，重复调用不会叠加第二个过滤器。
+
     本函数不在 import 时自动生效 —— 模块级副作用会让单测互相污染。
     """
     target = logger_ if logger_ is not None else logging.getLogger()
-    for existing in target.filters:
-        if isinstance(existing, RedactionFilter):
-            return existing
-    redaction = RedactionFilter()
-    target.addFilter(redaction)
+    existing = next((f for f in target.filters if isinstance(f, RedactionFilter)), None)
+    redaction = existing if existing is not None else RedactionFilter()
+    _attach_filter_once(target, redaction)
+
+    # handler 侧：root 的 handler 承接所有 propagate 上来的记录（子 logger 的日志就是这条路）。
+    # 同一个 filter 实例挂到多个 handler 上没有问题（它是无状态纯函数式改写）。
+    root = logging.getLogger()
+    for handler in [*root.handlers, *target.handlers]:
+        _attach_filter_once(handler, redaction)
     return redaction
 
 

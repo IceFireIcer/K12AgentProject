@@ -17,7 +17,10 @@
 ``learning.db``，避免两处各建一遍目录。``STUDENT_DIR_NAME`` / ``LEARNING_DB_NAME`` 的取值
 必须与那边的 ``STUDENTS_DIR_NAME`` / ``LEARNING_DB_NAME`` 保持一致。
 
-**不要在这里做学段推断**：学段以显式选择为权威（AGENTS §5.1），自动推断只写建议。
+**学段不由这里决定**：学段来自**服务端推断**（``app/grade/rules.py`` 的规则引擎，
+D-020：自动推断、自动生效），学生在界面上**没有选择入口**、只有只读指示器。
+本模块的 ``create_student`` 仍带 ``gradeLevel``，但它只是**冷启动默认值**（新建学生的初始档），
+此后一切变更都由 ``POST /api/grade/turns`` 走规则引擎写入。
 """
 
 from __future__ import annotations
@@ -323,6 +326,27 @@ def resolve_student_data_root(request: Request) -> Path | None:
     return data_dir
 
 
+def require_data_dir(request: Request) -> str:
+    """★ 各条**按学生存数据**的路由统一用它取 ``<data-dir>``；取不到就 503。
+
+    **归口理由**：没显式传 ``--data-dir`` 时 :func:`resolve_student_data_root` 会返回 ``None``
+    （兜底值是共享的 ``server/_data``，见它的说明）。不同路由必须给同一个口径，
+    否则会出现「画像路由拒收、练习路由却把学生的掌握度写进仓库里的共享目录」这种
+    半隔离状态 —— 实测踩到过（跑一次单测就在仓库里留下 12 个学生目录）。
+
+    503 而**不是**静默兜底：这是**配置缺失**（Electron 没传参数），不是学生数据的问题，
+    调用方（编排层）据此提示用户重启应用，而不是让他看到一份「凭空清空」的学习记录。
+    错误文案带上 ``data-dir`` 字样，便于日志与 UI 直接定位。
+    """
+    data_root = resolve_student_data_root(request)
+    if data_root is None:
+        raise HTTPException(
+            status_code=503,
+            detail="sidecar 未配置 data-dir：无法定位学生数据目录（应由 Electron 经 --data-dir 传入 <userData>）",
+        )
+    return str(data_root)
+
+
 # --------------------------------------------------------------------------- #
 # 路由
 # --------------------------------------------------------------------------- #
@@ -356,6 +380,7 @@ __all__ = [
     "get_students_store",
     "list_student_ids",
     "open_learning_store",
+    "require_data_dir",
     "resolve_student_data_root",
     "router",
     "student_dir",

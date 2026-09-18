@@ -111,13 +111,40 @@ def emit_handshake(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+def _resolve_listen_family(host: str) -> int:
+    """按 host 选出正确的 socket family（**IPv4 优先**，没有 A 记录才用 IPv6）。
+
+    为什么需要它（审计发现）：此前硬编码 ``socket.AF_INET``，于是 ``--host ::1``
+    通过了 ``ALLOWED_HOSTS`` 校验、却在 ``bind()`` 时抛
+    ``[Errno 11001] getaddrinfo failed`` —— 「允许的取值」里混进一个**一定绑不上**的，
+    错误信息还是英文的 DNS 错误，排查成本高。
+
+    选 IPv4 优先而不是「按 getaddrinfo 顺序取第一个」：``localhost`` 在多数机器上同时有
+    ``::1`` 与 ``127.0.0.1``，取第一个会让绑定结果随机器/网络栈变化（不可复现）。
+    显式取 IPv4 保持与历史行为一致（默认 host 就是 ``127.0.0.1``），
+    只有 ``::1`` 这种**只有 IPv6** 的输入才会切到 ``AF_INET6``。
+    """
+    infos = socket.getaddrinfo(host, 0, type=socket.SOCK_STREAM)
+    families = [info[0] for info in infos]
+    if socket.AF_INET in families:
+        return socket.AF_INET
+    if families:
+        return families[0]
+    raise OSError(f"无法解析监听地址：{host}")
+
+
 def bind_listening_socket(host: str, port: int) -> socket.socket:
     """绑定监听 socket（不 listen —— asyncio 的 create_server 会自己 listen）。
 
     交给 uvicorn 用 ``server.run(sockets=[sock])``，于是：
     ① 真实端口在**启动前**就已知；② 端口占用能立刻变成一行可读的 error 握手。
     """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        family = _resolve_listen_family(host)
+    except OSError as exc:
+        # 解析不了也走同一条错误路径（上层会把它变成一行 error 握手）
+        raise OSError(f"{host} 不是可用的监听地址（{exc}）") from exc
+    sock = socket.socket(family, socket.SOCK_STREAM)
     try:
         sock.bind((host, port))
     except OSError:
@@ -145,6 +172,8 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
     app.include_router(graph_router)
     app.include_router(profile_router)
     app.include_router(quiz_router)
+    # 学习档案（章节清单 / 学习报告 / 错题本）：只读聚合视图，
+    # 与 profile（画像+推荐，写入侧）分开成两个文件 —— 它们的变更原因不同。
     app.include_router(knowledge_router)
     app.include_router(study_router)
     # 学段自动推断（票 21）：前端没有选择器，这里是唯一的学段写路径
@@ -222,6 +251,23 @@ def main(argv: list[str] | None = None) -> int:
         "已设置" if cfg.token else "未设置",
     )
 
+    # ★★ 顺序有讲究：**先把 app 与 uvicorn.Config 建好，再发 ready 握手**。
+    # 曾经是「先发 ready、后 create_app」——若 create_app 抛异常（路由导入错、契约不匹配、
+    # 某个模块在 import 期就炸），Electron 已经收到 ready 然后进程消失，
+    # 上层只能显示「进程意外退出」，拿不到任何可读原因（这类事故排查成本极高）。
+    # 现在 create_app 在握手之前：失败就走 stderr 日志 + 进程非零退出，ready 一个字都没发过。
+    #
+    # log_config=None：不让 uvicorn 自建 handler，日志经根 logger 统一走 stderr。
+    # access_log=False：探活轮询每 300ms 一次，访问日志会淹没有用信息。
+    config = uvicorn.Config(
+        create_app(cfg),
+        host=cfg.host,
+        port=bound_port,
+        log_config=None,
+        access_log=False,
+        log_level=cfg.log_level,
+    )
+
     # ★ 唯一一次 stdout 输出。pid 是**本进程**的 pid —— Electron 必须用它杀进程树，
     #   因为 dev 态它 spawn 的是 `uv`，`uv` 的 pid 不是真正占端口的那个。
     emit_handshake(
@@ -234,16 +280,6 @@ def main(argv: list[str] | None = None) -> int:
         }
     )
 
-    # log_config=None：不让 uvicorn 自建 handler，日志经根 logger 统一走 stderr。
-    # access_log=False：探活轮询每 300ms 一次，访问日志会淹没有用信息。
-    config = uvicorn.Config(
-        create_app(cfg),
-        host=cfg.host,
-        port=bound_port,
-        log_config=None,
-        access_log=False,
-        log_level=cfg.log_level,
-    )
     uvicorn.Server(config).run(sockets=[sock])
     return 0
 

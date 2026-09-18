@@ -12,10 +12,13 @@
  *     一轮结束用 `agent_end` / `agent_settled`。写 `pi.on('session_end', ...)` 会静默不生效。
  *   - **`tool_execution_end` 是只读通知**：这里只能"看"，不能改结果。
  *     工具的重试/降级必须写在 Tool 的 `execute()` 内部（票 08）。
- *   - **`error` 对 UI 是终态**：渲染进程收到 `error` 会把本轮置为 `error` 并停止接收正文
- *     （见 `renderer/src/api/events.ts` 的 `applyChatEvent`）。所以**只有真正终止本轮**的
- *     失败才发 `error`；中途降级（如检索降级到 FTS5）随结果一起走 `payload`/`citation`，
- *     不能发 `error` —— 否则后半段正文会被 UI 丢掉。
+ *   - ★★ **`error` 的终态性由 `degraded` 决定**（跨端约定，渲染进程 `renderer/src/api/events.ts`
+ *     必须与这里逐字一致）：
+ *       `degraded === false` = **终态** —— 本轮不会再有正文，UI 收尾；
+ *       `degraded === true`  = **提示** —— 「能力受限但本轮可继续」，UI 显示一句可读说明
+ *                              后**继续接收正文**（工具失败后模型往往还会把这一轮讲完）。
+ *     所以：真正的终态失败（供应商错误、凭证缺失、装配故障）发 `degraded: false`；
+ *     可降级的能力受限（工具失败、检索降级）发 `degraded: true`，且**不得**因此终结本轮。
  *
  * ★ 映射表（与 §6.4 逐条对应）：
  *   | Pi 原生事件                                   | 条件                          | 契约事件 |
@@ -24,12 +27,12 @@
  *   | `message_update` + `assistantMessageEvent.error`      | 流中途失败且不在重试中 | `error`  |
  *   | `auto_retry_start`                            | 供应商失败、Pi 要重试         | （不发，记状态） |
  *   | `auto_retry_end` (success=false)              | 重试全部失败                  | `error`  |
- *   | `agent_end`（末条 assistant 带 `errorMessage`/`stopReason='error'`） | 以失败收尾 | `error` |
+ *   | `agent_end`（末条 assistant 带 `errorMessage`/`stopReason='error'`） | 以失败收尾 | `error`（`degraded:false`，终态） |
  *   | `agent_end`（正常收尾）                        | `willRetry !== true`         | `done`   |
  *   | `agent_settled`                               | 尚未发过终态                  | `done`   |
  *   | `tool_execution_end`（`rag_search`）          | 结果里有合法 citations        | `citation` |
  *   | `tool_execution_end`（Tool→kind 表内的 7 个工具） | 未失败                     | `payload` |
- *   | `tool_execution_end`                          | `isError` / 结果标记为失败    | `error`  |
+ *   | `tool_execution_end`                          | `isError` / 结果标记为失败    | `error`（`degraded:true`，**不终结本轮**） |
  *   | `session_shutdown`                            | 会话终结（非本轮）            | （不发） |
  *   | 其它任意事件                                   | —                             | （忽略，计数） |
  *
@@ -57,9 +60,6 @@ export const MESSAGE_ID_PREFIX = 'pi-message:'
 
 /** 供应商错误文案在 UI 里的统一前缀（面向学生可读，不暴露内部实现）。 */
 export const PROVIDER_ERROR_PREFIX = '云端模型暂时不可用'
-
-/** 学生侧文案：自动重试期间不打扰，只在最终失败时给一句可读提示。 */
-export const RETRY_EXHAUSTED_NOTICE = '云端模型连续几次没有响应'
 
 /** 无 Key 时的专用文案。**必须与「接线故障」区分开**（票 06 的 KEY_MISSING_MESSAGE）。 */
 export const MISSING_KEY_MESSAGE =
@@ -234,7 +234,11 @@ function mapToolExecutionEnd(event: PiNativeEvent, state: TurnMapperState): Turn
 
   const failure = readToolFailure(event)
   if (failure) {
-    // 工具失败**不静默**：给学生一句可读的降级说明（能力受限，但本轮对话还能继续）
+    // 工具失败**不静默**：给学生一句可读的降级说明（能力受限，但本轮对话还能继续）。
+    // ★ `degraded: true` 不是装饰：`isTerminalTurnEvent` 据此判定「本轮不终结」——
+    //   工具失败（`rag_search` / `get_student_profile` 在 sidecar 没起来时会失败）之后，
+    //   模型通常还会用文字把这一轮讲完，那两段正文必须继续送达（实测踩到过：
+    //   这里一发终态 error，UI 就停在半句话上，后半段正文一个字都进不去）。
     return [
       {
         name: 'error',
@@ -302,7 +306,8 @@ export function readAssistantFailure(messages: unknown): string | null {
 function terminalError(state: TurnMapperState, message: string): TurnEvent[] {
   if (state.errorEmitted) return []
   state.errorEmitted = true
-  return [{ name: 'error', data: { message, degraded: true } }]
+  // ★ `degraded: false` = **真终态**（见文件头的事件终态约定）：本轮到此为止，UI 收尾。
+  return [{ name: 'error', data: { message, degraded: false } }]
 }
 
 /* ------------------------------------------------------------------ *
@@ -321,9 +326,31 @@ export function planBlockedEvent(reason: string, safeText: string): TurnEvent {
   return { name: 'blocked', data: { reason, safeText } }
 }
 
-/** 契约里 `error` 与 `done` 都是终态：发过之后本轮不再有正文。 */
+/**
+ * ★★ 事件是否是**本轮终态**（`bindTurnStream` 据此 `sink.finish()`）。
+ *
+ * 判据（跨端约定，代理 H 的渲染进程必须逐字一致）：
+ *   - `done` 一律终态；
+ *   - `error` **只有 `degraded === false` 才是终态**；`degraded === true` 是「提示」——
+ *     工具失败之类的可降级失败，本轮对话还能继续，后续 `delta` 必须照常送达；
+ *   - 其余（`delta` / `citation` / `payload` / `blocked`）都不是终态。
+ *     ⚠️ `blocked` 不是终态：安全终审的撤回后面**一定**还跟着一条 `done`
+ *     （`safety/review.ts` 的 `runFinalize` 先发 `blocked` 再补 `done`），
+ *     反过来的话撤回会被「轮次已结束」挡掉。
+ *
+ * 为什么必须这么分：实测全链路（真实 registry + 门）里，工具失败发终态 `error` 之后，
+ * UI 停在半句话上，模型随后写的两段正文一个字都进不去 —— 学生看到的是「半句话 + 一条报错」。
+ *
+ * ★★ 不变式（改这里前先看懂，破坏它就是「UI 永远停在回答中」）：
+ *   凡是把 `state.errorEmitted` 置真的错误，**必须同时是终态**（`degraded === false`）。
+ *   因为 `agent_settled` 那条兜底 `done` 的门禁是「还没发过终态」——若一条错误置了
+ *   `errorEmitted` 却不是终态，`done` 永远不会来，`sink.finish()` 也就永远不会被调用。
+ *   所以：`terminalError()`（置位者）与 `bindTurnStream`（读 `isTerminalTurnEvent`）共享同一口径。
+ */
 export function isTerminalTurnEvent(event: TurnEvent): boolean {
-  return event.name === 'done' || event.name === 'error'
+  if (event.name === 'done') return true
+  if (event.name === 'error') return event.data.degraded === false
+  return false
 }
 
 /* ------------------------------------------------------------------ *
@@ -369,7 +396,16 @@ export interface TurnStreamOptions {
  *
  * 纪律：
  *   - 映射里的任何异常都**不许**冒进 Pi 的事件循环（Pi 与 UI 同在主进程，抛出去会同时带走两者）；
- *   - 收到 `done` / `error` 立即 `sink.finish()`，之后到达的迟到事件由 registry 丢弃（已有契约）。
+ *   - 收到**终态**事件（见 {@link isTerminalTurnEvent}：`done`，或 `degraded === false` 的 `error`）
+ *     才 `sink.finish()`；`degraded === true` 的 `error` 只是提示，本轮继续 —— 之后到达的
+ *     `delta` 照常送达（工具失败后模型还会把这一轮讲完）。
+ *
+ * ★ `done` 一定会到达（两条独立路径，任何一条成立即可）：
+ *     ① `agent_end`（正常收尾）→ `mapAgentEnd` 发 `done`；
+ *     ② 兜底：`agent_settled` —— Pi 在自动重试 / 压缩都结束之后一定会发它，
+ *        只要这一轮还没发过终态就由它补一条 `done`（`mapPiEvent` 的 `agent_settled` 分支）。
+ *   所以「有 degraded error 但整轮没有 done」不会发生；万一两条都缺席（Pi 内部异常），
+ *   `runtime.ts` 的 `binding.failWith()` 与安全门的 `settled()` 兜底会收尾，不让 UI 挂住。
  */
 export function bindTurnStream(
   session: PiEventSource,
@@ -527,6 +563,15 @@ export function readContentText(result: unknown): string | null {
  * ★ 只做「可读化」，**不吞掉关键信息**：401/额度/断网三类必须能被一眼区分，
  *   因为它们对应完全不同的处置动作（换 Key / 充值 / 检查网络）。
  *   ⚠️ 不把原始堆栈塞进去（渲染进程还会再折叠/截断一次）。
+ *
+ * ★★ 面向学生的文案**必须永远有中文**（实测踩到过）：Pi / undici 在断网时给的原文是
+ *   纯英文的 `Connection error.`（不是 `fetch failed`，也不是 `ECONNREFUSED`）——
+ *   旧实现认不出它，于是学生屏幕上直接出现一句英文，同时被归成「内部异常」。
+ *   所以这里做两件事：
+ *     ① 网络分支补上 `connection error` / `socket hang up` / `econnreset` /
+ *        `terminated` / `econnaborted` 这些**实测会出现**的形态（大小写不敏感）；
+ *     ② 兜底分支对**纯英文**（无中日韩字符）的原文，给中文前缀 + 原文括注，
+ *        保证读到的永远是一句中文，同时不丢掉排查线索。
  */
 export function describeProviderError(raw: string | undefined): string {
   const text = typeof raw === 'string' ? raw.trim() : ''
@@ -543,26 +588,48 @@ export function describeProviderError(raw: string | undefined): string {
   if (lower.includes('insufficient') || lower.includes('quota') || lower.includes('balance') || lower.includes('402')) {
     return `${PROVIDER_ERROR_PREFIX}：账户额度不足。请老师或家长在供应商后台充值后再试。`
   }
-  if (
+  if (looksLikeNetworkFailure(lower)) {
+    return `${PROVIDER_ERROR_PREFIX}：网络连接不上（可能断网或地址不可达）。可以先检查网络，或稍后重试。`
+  }
+  if (lower.includes('429') || lower.includes('rate limit')) {
+    return `${PROVIDER_ERROR_PREFIX}：请求过于频繁，稍等几秒再试一次。`
+  }
+  // ★ 兜底：原文是纯英文（没有中文可读信息）时补中文前缀 + 括注原文
+  if (!containsCjk(text)) {
+    return `${PROVIDER_ERROR_PREFIX}：（原文）${truncate(text, 120)}`
+  }
+  return `${PROVIDER_ERROR_PREFIX}：${truncate(text, 120)}`
+}
+
+/**
+ * 网络类失败的判据（大小写不敏感；**唯一一处**，`describeProviderError` 与
+ * `describeTurnException` 共用）。
+ *
+ * `'connection error'` / `'socket hang up'` / `'econnreset'` / `'terminated'` /
+ * `'econnaborted'` 是实测（离线探针跑真实 Pi + undici）真的会出现的形态，
+ * 旧名单只认 `econnrefused|enotfound|fetch failed|timeout|etimedout|network|offline`，
+ * 于是「断网」被误判成「内部异常」。
+ */
+function looksLikeNetworkFailure(lower: string): boolean {
+  return (
     lower.includes('econnrefused') ||
     lower.includes('enotfound') ||
     lower.includes('fetch failed') ||
     lower.includes('timeout') ||
     lower.includes('etimedout') ||
     lower.includes('network') ||
-    lower.includes('offline')
-  ) {
-    return `${PROVIDER_ERROR_PREFIX}：网络连接不上（可能断网或地址不可达）。可以先检查网络，或稍后重试。`
-  }
-  if (lower.includes('429') || lower.includes('rate limit')) {
-    return `${PROVIDER_ERROR_PREFIX}：请求过于频繁，稍等几秒再试一次。`
-  }
-  return `${PROVIDER_ERROR_PREFIX}：${truncate(text, 120)}`
+    lower.includes('offline') ||
+    lower.includes('connection error') ||
+    lower.includes('socket hang up') ||
+    lower.includes('econnreset') ||
+    lower.includes('econnaborted') ||
+    lower.includes('terminated')
+  )
 }
 
-/** 空 Key / 无凭证时的专用文案（runtime 在调 `prompt()` 之前就用它，不必等 Pi 抛错）。 */
-export function missingKeyMessage(): string {
-  return MISSING_KEY_MESSAGE
+/** 文本里是否含中日韩字符（用来判定「面向学生的文案有没有中文」）。 */
+function containsCjk(text: string): boolean {
+  return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/.test(text)
 }
 
 /**
@@ -573,6 +640,11 @@ export function missingKeyMessage(): string {
  *   - 供应商/网络 → `provider-error`：文案指向网络与额度；
  *   - 其余（我们自己的代码问题）→ `exception`：文案明确说这是内部异常，
  *     便于排查时一眼区分「模型连不上」与「代码写错了」。
+ *
+ * ★ 网络类判据与 `describeProviderError` **共用同一个** {@link looksLikeNetworkFailure}：
+ *   实测（断网跑真实 Pi）抛出的原文是纯英文的 `Connection error.`，
+ *   旧名单认不出它 → 学生看到英文原文，且这一轮被记成 `exception`（「内部异常」），
+ *   与「云端连不上」的处置动作完全相反。
  */
 export function describeTurnException(error: unknown): {
   message: string
@@ -584,10 +656,7 @@ export function describeTurnException(error: unknown): {
 
   if (looksLikeMissingKey(lower)) return { message: MISSING_KEY_MESSAGE, status: 'missing-key' }
   if (
-    lower.includes('econnrefused') ||
-    lower.includes('enotfound') ||
-    lower.includes('fetch failed') ||
-    lower.includes('timeout') ||
+    looksLikeNetworkFailure(lower) ||
     lower.includes('401') ||
     lower.includes('unauthorized') ||
     lower.includes('quota') ||

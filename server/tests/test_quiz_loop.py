@@ -156,10 +156,14 @@ class LoopCase(unittest.TestCase):
         return None
 
     def set_grade(self, grade_level: str) -> str:
-        """给当前学生**显式**设定学段（走真实的学生行，不是请求参数）。
+        """在测试夹具里**直接**把学生行的学段设成指定值（走真实的学生行，不是请求参数）。
 
         ★ 学段必须落在 ``learning.db`` 的学生行上：关卡路径与解锁判定都
-        **只认服务端的学生记录**（客户端自述不算数，见 AGENTS §5.1）。
+        **只认服务端的学生记录**（客户端自述不算数 —— 请求里根本没有学段字段，D-020）。
+
+        ⚠️ 这里绕过 ``app/grade/rules.py`` 的规则引擎只是**测试取巧**（步骤更快、确定性更好）。
+        真实运行下学段的唯一写路径是 ``POST /api/grade/turns`` 的自动推断
+        （自动生效、**没有人工选择入口**，学生端只有只读指示器）。
         """
         from app.routes.quiz import student_db_path  # noqa: PLC0415
 

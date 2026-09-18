@@ -252,6 +252,13 @@ def read_embedding_config(data_dir: str | Path | None) -> dict[str, str]:
     ``config.json`` 的写入归票 07（设置页）。这里只做一次容错读取：
     文件不存在 / 字段缺失 / JSON 坏了，都返回 ``mode=none``（=不启用云端降级），
     **绝不因为配置文件问题让检索失败**。
+
+    ★ **顺带把明文 Key 登记进日志脱敏名单**（``guard.register_secret``）：
+    这里是 ``app/`` 范围内**唯一**读得到云端嵌入明文凭据的地方，而「Key 绝不进日志」
+    是硬约束 —— 不登记的话，任何一条把 ``config`` 打进日志的代码都会漏出明文。
+    ⚠️ **LLM 的明文 Key 不经过本函数**（它在 ``app/routes/settings.py``）：那条线的登记
+    由 ``routes/settings.py`` 的 ``register_llm_secret`` 负责 —— **保存与加载两条路径都调它**
+    （读取统一走 ``load_settings(request)``，避免散在各个路由上漏掉一个）。
     """
     if not data_dir:
         return {"mode": "none"}
@@ -263,12 +270,18 @@ def read_embedding_config(data_dir: str | Path | None) -> dict[str, str]:
     cfg = data.get("embedding") or {}
     if not isinstance(cfg, dict):
         return {"mode": "none"}
-    return {
+    config = {
         "mode": str(cfg.get("mode") or "none"),
         "base_url": str(cfg.get("base_url") or cfg.get("baseUrl") or ""),
         "api_key": str(cfg.get("api_key") or cfg.get("apiKey") or ""),
         "model_id": str(cfg.get("model_id") or cfg.get("modelId") or ""),
     }
+    # 局部 import：避免 embedder ↔ guard 之间的模块级循环依赖（guard 不依赖 rag）。
+    if config["api_key"]:
+        from app.safety.guard import register_secret
+
+        register_secret(config["api_key"])
+    return config
 
 
 def build_cloud_embedder(embedding_config: dict[str, str] | None) -> CloudEmbedder | None:

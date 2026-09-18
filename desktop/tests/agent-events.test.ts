@@ -184,7 +184,7 @@ test('G1g payload：不在表内的 Tool（检索 / 画像 / 未知）不发 pay
   assert.deepEqual(Object.keys(TOOL_TO_KIND), [...PAYLOAD_TOOL_NAMES])
 })
 
-test('G1h error：provider 异常 → 可读 error（degraded=true），四类原因文案可分', () => {
+test('G1h error：provider 异常 → 可读 error（degraded=false 真终态），四类原因文案可分', () => {
   const cases: Array<[string, RegExp]> = [
     ['401 Unauthorized: invalid api key', /API Key 被拒绝/],
     ['402 Insufficient Balance', /额度不足/],
@@ -201,9 +201,13 @@ test('G1h error：provider 异常 → 可读 error（degraded=true），四类�
     assert.equal(events[0].name, 'error')
     if (events[0].name !== 'error') continue
     assert.match(events[0].data.message, pattern, `「${raw}」的文案应可区分`)
-    assert.equal(events[0].data.degraded, true, '云端模型不可用属「能力受限」= degraded')
+    // `degraded: false` = **真终态**（见事件终态约定）：本轮彻底失败、UI 收尾。
+    // 若这里写成 true，`isTerminalTurnEvent` 会判它非终态 → `finish()` 永不调用
+    // → UI 永远停在「回答中…」（`errorEmitted` 已置真，兜底 done 也不会来）。
+    assert.equal(events[0].data.degraded, false, 'provider 失败是本轮终态，不是「能力受限」')
     assert.ok(events[0].data.message.length <= 200, '文案必须短到能进气泡')
     assert.equal(state.errorEmitted, true)
+    assert.equal(isTerminalTurnEvent(events[0]), true, '置位 errorEmitted 的错误必须同时是终态')
   }
 })
 
@@ -304,7 +308,9 @@ test('G3d2 ★ 失败收尾的 agent_end 必须发 error 而不是 done（实测
   )
   if (events[0].name === 'error') {
     assert.match(events[0].data.message, /网络连接不上/, '供应商原文 fetch failed 要翻成可读文案')
-    assert.equal(events[0].data.degraded, true)
+    // 重试耗尽 = 本轮彻底失败 = **真终态**，所以必须是 `degraded: false`。
+    assert.equal(events[0].data.degraded, false)
+    assert.equal(isTerminalTurnEvent(events[0]), true, '重试耗尽的 error 必须终结本轮（否则 sink.finish() 永不调用）')
   }
 })
 
@@ -395,9 +401,17 @@ test('G3g 工具失败只认两种标记；结果里带 degraded（中途降级�
   assert.deepEqual(degraded, [], '降级信息随结果走，不单独发 error 事件')
 })
 
-test('G3h 终态判定：done / error 是终态，delta / citation / payload / blocked 不是', () => {
+test('G3h 终态判定：done 与「degraded=false 的 error」是终态；工具失败的 degraded error 与其余事件不是', () => {
   assert.equal(isTerminalTurnEvent({ name: 'done', data: { messageId: 'm' } }), true)
-  assert.equal(isTerminalTurnEvent({ name: 'error', data: { message: 'x', degraded: true } }), true)
+  assert.equal(isTerminalTurnEvent({ name: 'error', data: { message: 'x', degraded: false } }), true)
+  // ★ 工具失败发的 `degraded: true` 的 error **不是终态**：模型通常还会用文字把这一轮讲完，
+  //   那两段正文必须继续送达。若这里判成终态，`sink.finish()` 会立刻注销该轮，
+  //   后续 delta 全被丢弃 —— 学生只看到半句话 + 一条报错（已实测踩到）。
+  assert.equal(
+    isTerminalTurnEvent({ name: 'error', data: { message: 'x', degraded: true } }),
+    false,
+    'degraded=true 的 error 只作提示，不终结本轮'
+  )
   for (const event of [
     { name: 'delta', data: { delta: 'x' } },
     { name: 'citation', data: { citations: [] } },
@@ -406,6 +420,55 @@ test('G3h 终态判定：done / error 是终态，delta / citation / payload / b
   ] as TurnEvent[]) {
     assert.equal(isTerminalTurnEvent(event), false, `${event.name} 不是终态`)
   }
+})
+
+test('G3h2 ★ 工具失败后正文必须继续送达：degraded error 不终结本轮，finish 只在末尾发生一次', () => {
+  // 实测踩到的回归：`mapToolExecutionEnd` 对任何 Tool 失败都发 `error`，而 `bindTurnStream`
+  // 一见终态就 `sink.finish()` → 该轮注销 → 模型随后写出的正文全被丢弃。
+  // 学生实际看到的是「半句话 + 一条报错」，而 rag_search / get_student_profile 在 sidecar
+  // 没起来时**必然**会失败（属可降级失败，配置里明说「用文字把这一轮讲完」）。
+  const { session, push } = fakeSession()
+  const { sink, events, finishedCount } = fakeSink()
+  bindTurnStream(session, sink, CONTEXT)
+
+  push({
+    type: 'message_update',
+    assistantMessageEvent: { type: 'text_delta', delta: '我先查一下教材。' }
+  })
+  push({
+    type: 'tool_execution_end',
+    toolCallId: 'c1',
+    toolName: 'rag_search',
+    isError: true,
+    result: { content: [{ type: 'text', text: '本地数据服务不可用' }] }
+  })
+  push({
+    type: 'message_update',
+    assistantMessageEvent: { type: 'text_delta', delta: '不过我知道答案：循环是重复执行。' }
+  })
+  push({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop' }] })
+
+  assert.deepEqual(
+    events.map((event) => event.name),
+    ['delta', 'error', 'delta', 'done'],
+    '工具失败的 error 之后必须还能收到 delta（正文不丢）'
+  )
+  const degraded = events[1]
+  assert.equal(degraded.name === 'error' && degraded.data.degraded, true, '工具失败是「能力受限」提示')
+  assert.equal(finishedCount(), 1, '本轮只在末尾收尾一次（若中途 finish，后续 delta 会被 registry 丢掉）')
+
+  // 反面：真终态的 provider 失败必须**立刻**收尾（映射层照常投递迟到事件，
+  // 由 ChatStreamRegistry 按「终态后不再接受」丢弃 —— 这里只断言收尾与 closed 标志）
+  const terminal = fakeSession()
+  const second = fakeSink()
+  const terminalBinding = bindTurnStream(terminal.session, second.sink, CONTEXT)
+  terminal.push({
+    type: 'message_update',
+    assistantMessageEvent: { type: 'error', reason: 'error', error: { errorMessage: 'fetch failed' } }
+  })
+  assert.deepEqual(second.events.map((event) => event.name), ['error'], '真终态立刻可见')
+  assert.equal(second.finishedCount(), 1, '真终态必须收尾')
+  assert.equal(terminalBinding.closed, true, '真终态后本轮标记为已关闭（后续事件由 registry 丢弃）')
 })
 
 test('G3i blocked：安全终审的发射点已就位（票 22 只接判定，不改契约）', () => {

@@ -100,6 +100,15 @@ INLINE_LIBRARY_MARKER = 'anime=e()'
 INLINE_RUNTIME_MARKER = "window.Sandbox"
 #: `ready` 上报的标记（宿主 5s 内收不到它即判超时）。
 READY_MARKER = "Sandbox.ready("
+#: ★ `play` 注册的标记 —— 模板脚本必须**自己**调它。
+#:
+#: 为什么单独要这一条（审计发现）：``Sandbox.ready(`` 在**注入的 runtime.js 里本来就存在**，
+#: 所以它只证明「运行时在其中」；「这一段脚本有没有注册播放实现」从来没被判断过。
+#: 模型漏写 ``Sandbox.play()`` 时产物照样过全部校验 → 卡片建 iframe → 收到 ready →
+#: 播放指令到达时 ``playImpl`` 为 null（runtime.js 会回一条 ``error``）→
+#: 学生看到的是一张**永远静止的动画卡**，而不是「文字 + 静态图」的降级 ——
+#: 「校验 + 重试 ≤3 → 降级」这条硬链路在这一类失败上被完全绕过了。
+PLAY_MARKER = "Sandbox.play("
 #: `payload_id` 校验的标记（多卡片串台防线必须在产物里存在）。
 PAYLOAD_ID_MARKER = "payload_id"
 
@@ -184,6 +193,8 @@ def validate_animation_html(html: str) -> HtmlValidation:
     1. **结构**：非空、体积合理、有 ``<!doctype html>`` / ``<html`` / ``<script>``；
     2. **零外部引用**：命中 :data:`EXTERNAL_REFERENCE_RE` 即失败（断网演示的底线）；
     3. **库与运行时都内联了**：动画库标记 + ``window.Sandbox`` + ``Sandbox.ready(`` + ``payload_id``；
+       外加一条**脚本段**断言：脚本里必须出现 ``Sandbox.play(``（见 :data:`PLAY_MARKER`）——
+       ``Sandbox.ready(`` 在内联的 runtime.js 里本来就有，它证明不了「这段脚本注册了播放实现」；
     4. ★ **模板脚本本身没崩**：`<script>` 里出现顶层 `throw` / `</script>` 截断 / 依赖外部全局
        （`fetch(` / `XMLHttpRequest`）即失败 —— 这一条正是为了接住
        「模板里写个 `throw` → 自动重试 → 最终降级」这条验收演练（业务陷阱清单 §6 的验收口径）；
@@ -192,6 +203,8 @@ def validate_animation_html(html: str) -> HtmlValidation:
     ★ 第 4 条只扫**模板自己的脚本段**（`:data:`INLINE_RUNTIME_MARKER` 之后、`</body>` 之前），
     不扫内联的动画库与运行时：那两份是随包分发的库代码，判定标准不该由它们承担
     （真去扫整份 HTML 的话，任何库里的一个 `throw` 都会把好模板判死 —— 那是误报，不是安全）。
+    第 3 条的 ``Sandbox.play(`` 同样只认**脚本段**里自己的那一次调用；runtime.js 里的是定义，
+    位置在脚本段之外，天然不参与判定。
 
     返回的问题列表是**给重试与降级用的**：调用方（TS 侧 `generate_animation`）据此决定
     再渲染一次还是直接降级，而不是笼统地「失败了」。
@@ -260,6 +273,13 @@ def template_script_problems(html: str) -> list[str]:
         return ["模板脚本段是空的（没有注册任何播放实现）"]
 
     problems: list[str] = []
+    # ★ 必须自己注册播放实现：只报 ready 不注册 play 的产物会「加载成功但永远不动」。
+    #   `Sandbox.ready(` 在内联的 runtime.js 里本来就存在，所以整份 HTML 的标记检查抓不住它。
+    if PLAY_MARKER not in script:
+        problems.append(
+            f"模板脚本里没有 `{PLAY_MARKER}...`（没有注册播放实现）—— "
+            "产物会一直静止；必须调 Sandbox.play(function () { ... })"
+        )
     # `throw` 出现在模板脚本里 = 作者写崩了，动画一定跑不起来（验收演练的注入点）
     if re.search(r"(^|[^.\w])throw\b", script):
         problems.append("模板脚本里有 throw（脚本执行会中断，动画不可能播出来）")

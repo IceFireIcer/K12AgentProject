@@ -130,7 +130,10 @@ export const ANIMATION_TOOL_NAME = 'generate_animation'
  * ★ 重试硬上限（票 17：「重试无上限 = 死循环烧额度」）。
  *
  * 语义是「**额外**重试几次」：`0` = 只试一次；默认 `3` = 最多试 4 次（首次 + 3 次重试）。
- * 为什么要上限：每次重试都是一次真实的 HTTP + 渲染，没上限时一个坏模板能把额度烧穿。
+ * ★ 这是**模板路径与自由生成路径共用**的额度（F6）：最坏总尝试 = `MAX_RETRIES + 1`，
+ *   不是「每条路径各 4 次」——后者最坏 8 次真实渲染 / LLM 调用，与冻结口径不符。
+ * 为什么要上限：每次重试都是一次真实的 HTTP + 渲染（自由生成还要一次 LLM 调用），
+ * 没上限时一个坏模板能把额度烧穿。
  */
 export const MAX_RETRIES = 3
 
@@ -383,10 +386,10 @@ export type AnimationRequester = (path: string, init?: RequestInit) => Promise<R
 /**
  * 自由生成器（**补充路径**，仅当模板未命中时才会被调用）。
  *
- * 本票（16/17）**不实现**它：模板已经覆盖了教材里的主要知识点，自由生成是「模板未命中」
- * 时的兜底。留这个注入点是给演示 / 后续票接一个 LLM 生成器用 ——
  * ⚠️ 它的返回值必须过 {@link validateAnimationPayload} 与 Python 的 HTML 校验，
  * 不合格就继续重试，重试仍不合格就降级（**不是**「生成出来就直接用」）。
+ * ★ 重试**与模板路径共用同一个额度**（见 {@link produce} 的 `totalBudget`，F6）——
+ *   不是各给 3 次。
  */
 export interface AnimationGenerationRequest {
   concept: string
@@ -396,6 +399,12 @@ export interface AnimationGenerationRequest {
   attempt: number
   /** 上次失败的可读原因（让生成器知道该改什么）。 */
   previousReason?: string
+  /**
+   * ★ 卡片手里的那个 `payload_id`（与 `details.payloadId` **同一个值**）。
+   * 生成器必须把它原样送到 `/api/animation/compose` —— Python 会把它注入沙箱 HTML，
+   * 前端按它校验每条 postMessage；对不上时卡片永远收不到 `ready`，5 秒后必然降级（F2）。
+   */
+  payloadId: string
 }
 
 export interface AnimationExtensionOptions {
@@ -534,8 +543,10 @@ export function createAnimationExtension(
    * 主链路：**模板优先 → 自由生成（补充）→ 降级**。
    *
    * 重试的边界（票 17）：
-   *   - 模板路径的 422（校验不过）→ 重试，**硬上限 `maxRetries`**；
-   *   - 自由生成路径每次返回都过同一套校验 → 同样重试，共用同一个上限；
+   *   - 模板路径的 422（校验不过）→ 重试；自由生成路径每次返回都过同一套校验 → 同样可重试；
+   *   - ★ **两条路径共用同一个尝试额度**（{@link MAX_RETRIES} + 1 = 总尝试次数，F6）：
+   *     以前两条 `for` 各自 `0..maxRetries`，最坏是 4 次渲染 + 4 次 LLM 调用（8 次），
+   *     与执行文档「重试 ≤3 → 降级」的冻结口径不符，也白烧额度；
    *   - 重试耗尽 → **降级为非空 payload**，走 `payload` 事件，不发 `error`。
    */
   async function produce(input: {
@@ -557,18 +568,29 @@ export function createAnimationExtension(
     let attempts = 0
     let lastReason = ''
     const payloadId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+    /**
+     * ★ 模板路径与自由生成路径**共用**的尝试总量（F6）：
+     * `maxRetries = 3` → 最多 4 次尝试（首次 + 3 次重试），不论钱花在哪条路径上。
+     * 这里不是「每条路径各 4 次」—— 那是最坏 8 次真实渲染 / LLM 调用。
+     */
+    const totalBudget = maxRetries + 1
 
-    // ── 第一条路径：模板命中（首选） ─────────────────────────────
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    /** 记一次尝试（第 2 次起同时记一条重试日志）；两条路径共用，额度才不会各算一份。 */
+    const noteAttempt = (): void => {
       attempts += 1
-      if (attempt > 0) {
+      if (attempts > 1) {
         noteRetry(input.toolCallId)
         log(
-          `[animation] 第 ${attempt} 次重试（toolCallId=${input.toolCallId}，累计重试 ${retryCountOf(
+          `[animation] 第 ${attempts - 1} 次重试（toolCallId=${input.toolCallId}，累计重试 ${retryCountOf(
             input.toolCallId
           )} 次）：${lastReason}`
         )
       }
+    }
+
+    // ── 第一条路径：模板命中（首选） ─────────────────────────────
+    while (attempts < totalBudget) {
+      noteAttempt()
       const result = await renderOnce({
         templateId: input.templateId,
         kpId: input.kpId,
@@ -594,17 +616,23 @@ export function createAnimationExtension(
     }
 
     // ── 第二条路径：自由生成（**补充**，默认没接） ───────────────
+    //   ★ 只能用**模板路径没花完的**额度（`totalBudget - attempts`）；额度用尽直接去降级。
     if (generate) {
-      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-        attempts += 1
-        if (attempt > 0) noteRetry(input.toolCallId)
+      let generationAttempt = 0
+      while (attempts < totalBudget) {
+        const attempt = generationAttempt
+        generationAttempt += 1
+        noteAttempt()
         try {
           const raw = await generate({
             concept: input.concept,
             kpId: input.kpId,
             gradeLevel: input.gradeLevel,
             attempt,
-            previousReason: lastReason
+            previousReason: lastReason,
+            // ★ 卡片手里的那个 id（F2）：产物里的 payload_id 必须与 `details.payloadId` 一致，
+            //   否则 iframe-host 会把沙箱发来的每条消息都当成别人的（永远收不到 ready）。
+            payloadId
           })
           const payload = projectAnimationPayload(raw)
           if (payload === null) {
@@ -722,8 +750,9 @@ export function createAnimationExtension(
           const session = currentAgentSession()
           const kpId = readNonEmptyString(params?.kpId) ?? ''
           const templateId = readNonEmptyString(params?.templateId) ?? ''
-          // ★ 学段以**会话**为准（与 rag-search.ts / quiz.ts 同一口径，§10.1）；
-          //   模型填的那个只是「复述」。
+          // ★ 学段以**会话**为准（与 rag-search.ts / quiz.ts 同一口径）：
+          //   会话里那个值是**服务端推断**（`server/app/grade/rules.py`）出来的当前生效值，
+          //   前端不推断学段（手动指定走独立通道、由服务端写库）；模型填的那个只是「复述」。
           const gradeLevel =
             readNonEmptyString(session?.gradeLevel) ?? readNonEmptyString(params?.gradeLevel) ?? 'primary_high'
           const caption = readNonEmptyString(params?.caption)

@@ -204,20 +204,36 @@ class RagService:
         self._conn: sqlite3.Connection | None = None
         self._conn_mtime: float = -1.0
         self._vec_ready = False
+        #: true = 向量引擎曾被判定不可用（KNN 调用失败过）→ 用来看「是否已降级为 numpy」，
+        #: 并在重开连接探测成功时记一条「已恢复」的日志。**不是持久故障标记**。
+        self._vec_degraded = False
         self._load_vec = load_vec
         # SQLite 连接不是线程安全的：FastAPI 同步端点跑在线程池里，这里统一串行化
+        # （``_ensure_conn`` 也在这个锁里 —— 并发首访建多条连接那条实测故障就出在锁外判断上）
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ 连接 --
     def _ensure_conn(self) -> sqlite3.Connection:
-        if self._conn is not None and self.kb_path.exists():
-            mtime = self.kb_path.stat().st_mtime
-            if mtime == self._conn_mtime:
-                return self._conn
-            # 库被重建（build_kb 重跑）→ 重开连接，避免读到旧索引
-            logger.info("kb.sqlite 已更新，重开连接：%s", self.kb_path)
-            self._close()
-        if self._conn is None:
+        """取（必要时新建）只读连接。**整体在 ``self._lock`` 里**（double-checked 也不需要）。
+
+        两个曾经的真实故障（实测）：
+
+        1. **并发首访会建出多条连接**：判断与赋值都在锁外时，8 个线程同时首访会真的建出
+           **8** 条连接，``self._conn`` 只留最后一条，前 7 条既无引用也无 ``close()``
+           ——既泄漏句柄，也让「按 kb 路径一个服务一份连接」的假设失效。
+        2. **替换连接前必须先 ``close()`` 旧连接**（库被重建那条分支），否则旧连接连同它的
+           文件句柄一直悬着（Windows 上会让 ``build_kb`` 的下一次全量重写撞上文件占用）。
+        """
+        with self._lock:
+            if self._conn is not None:
+                if not self.kb_path.exists():
+                    # 库文件被搬走/改名：已打开的连接仍然可用，保持原行为（不要凭空断掉服务）
+                    return self._conn
+                if self.kb_path.stat().st_mtime == self._conn_mtime:
+                    return self._conn
+                # 库被重建（build_kb 重跑）→ 关掉旧连接再重开，避免读到旧索引
+                logger.info("kb.sqlite 已更新，重开连接：%s", self.kb_path)
+                self._close()
             if not self.kb_path.exists():
                 raise DatabaseMissing(
                     f"知识库不存在：{self.kb_path}（先跑 uv run python scripts/build_kb.py 建库）"
@@ -225,20 +241,28 @@ class RagService:
             conn = connect(self.kb_path, readonly=True, load_vec=self._load_vec)
             self._conn = conn
             self._conn_mtime = self.kb_path.stat().st_mtime
+            # ★ **每次重开连接都重新探测向量引擎**：上一次的失败可能只是瞬时的
+            #   （扩展加载竞争 / DLL 被占用），不该把整个进程永久钉在 numpy 兜底上。
+            was_degraded = self._vec_degraded
             self._vec_ready = vec_available(conn) if self._load_vec else False
-            if not self._vec_ready:
+            self._vec_degraded = False
+            if self._vec_ready and was_degraded:
+                logger.info("sqlite-vec 已恢复可用，向量路径重新走 KNN")
+            if not self._vec_ready and self._load_vec:
                 logger.warning("sqlite-vec 不可用，向量路径将走 numpy 暴力余弦兜底")
-        return self._conn
+            return self._conn
 
     def _close(self) -> None:
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except sqlite3.Error:  # pragma: no cover
-                pass
-        self._conn = None
-        self._vec_ready = False
-        self._conn_mtime = -1.0
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except sqlite3.Error:  # pragma: no cover
+                    pass
+            self._conn = None
+            self._vec_ready = False
+            self._vec_degraded = False
+            self._conn_mtime = -1.0
 
     def close(self) -> None:
         self._close()
@@ -255,7 +279,9 @@ class RagService:
     ) -> RetrievalResult:
         """**唯一入口**：一次调用跑完整条降级链。
 
-        :param grade_level: 学生当前学段（**显式选择为准**；自动推断只写建议）。
+        :param grade_level: 学生**当前生效**的学段 —— 由服务端推断引擎
+            （``app/grade/rules.py``）自动写入，调用方只是把它传进来做 SQL 层过滤；
+            学生端只读、没有选择入口（D-020 翻转，旧的「显式选择为准」口径已废止）。
         :param allow_compat: 允许「向上兼容」取用**更低学段**的内容（命中标 ``compat=true``）。
             **无论开关如何，都不会返回更高学段的内容** —— 关卡 C 的判据是
             「初中提问不得返回高中 chunk」，超纲没有「可选」这一说。
@@ -264,6 +290,21 @@ class RagService:
         attempts: list[LevelAttempt] = []
         allowed = compatible_grades(grade_level) if allow_compat else [grade_level]
         top_k = max(1, min(int(top_k), 20))
+
+        # ★ **空 / 纯空白 query 短路**（在打开连接、跑嵌入之前就返回）。
+        #   不拦的话每一次检索都会返回「分数为正的一堆无关片段」（向量对空串同样给出
+        #   一个确定的查询向量，于是 KNN 总是有 top-k 结果）——比返回空更糟：
+        #   模型会把它当教材讲。诚实降级到 outline（四级枚举内的取值），并留一条 WARNING。
+        if not query or not query.strip():
+            logger.warning("检索跳过：query 为空（返回空命中，不返回随机片段）")
+            return RetrievalResult(
+                hits=[],
+                degraded=DEGRADED_OUTLINE,
+                attempts=(LevelAttempt(DEGRADED_OUTLINE, False, "query 为空（纯空白）"),),
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+                grade_level=grade_level,
+                allow_compat=allow_compat,
+            )
 
         try:
             conn = self._ensure_conn()
@@ -341,14 +382,19 @@ class RagService:
             try:
                 rows = kb_repo.knn_rows(conn, query_vec, allowed, k=top_k * KNN_OVERFETCH)
             except sqlite3.Error as exc:
-                # 向量表坏了/扩展失效：本次及后续走 numpy，但**级别仍是 vector**
+                # 向量表坏了/扩展失效：本次走 numpy，并**记下已降级**（下一次重开连接时
+                # 会重新探测 —— 瞬时错误不该把进程永久钉在 numpy 上，见 `_ensure_conn`）。
                 self._vec_ready = False
+                self._vec_degraded = True
                 logger.warning("sqlite-vec KNN 失败，改用 numpy 暴力余弦：%s", exc)
             else:
-                hits = self._rows_to_hits(conn, rows, requested, top_k)
+                hits = self._rows_to_hits(conn, rows, requested)
                 if hits:
                     return hits, LevelAttempt(
-                        DEGRADED_VECTOR, True, "sqlite-vec KNN", len(hits)
+                        DEGRADED_VECTOR,
+                        True,
+                        "sqlite-vec KNN" if not self._vec_degraded else "sqlite-vec KNN（曾降级）",
+                        len(hits),
                     )
                 return [], LevelAttempt(DEGRADED_VECTOR, False, "sqlite-vec KNN 无命中（学段内无内容？）")
 
@@ -358,12 +404,17 @@ class RagService:
                 query_vec=query_vec,
                 grade_levels=allowed,
                 requested_grade=requested,
-                top_k=top_k,
+                # 过采样：numpy 路径后面还要按父块去重，先截到 top_k 会让去重后不足 top_k
+                top_k=top_k * KNN_OVERFETCH,
             )
         except Exception as exc:  # noqa: BLE001 - 兜底路径不允许把异常抛给调用方
             return [], LevelAttempt(DEGRADED_VECTOR, False, f"numpy 兜底失败：{exc}")
         if hits:
-            return hits, LevelAttempt(DEGRADED_VECTOR, True, "numpy 暴力余弦兜底", len(hits))
+            detail = "numpy 暴力余弦兜底"
+            if self._vec_degraded:
+                # ★ 让「向量引擎已降级为 numpy」可观测（轨迹/日志能直接看到原因）
+                detail = "numpy 暴力余弦兜底（sqlite-vec 本次不可用，已降级）"
+            return hits, LevelAttempt(DEGRADED_VECTOR, True, detail, len(hits))
         return [], LevelAttempt(DEGRADED_VECTOR, False, "numpy 兜底无命中")
 
     def _try_cloud(
@@ -382,7 +433,8 @@ class RagService:
                 query_vec=query_vec,
                 grade_levels=allowed,
                 requested_grade=requested,
-                top_k=top_k,
+                # 同向量路径：先过采样，父块去重后才由 `_to_hits` 截到 top_k
+                top_k=top_k * KNN_OVERFETCH,
             )
         except Exception as exc:  # noqa: BLE001
             return [], LevelAttempt(DEGRADED_CLOUD, False, f"云端向量检索失败：{exc}")
@@ -397,7 +449,9 @@ class RagService:
                 query=query,
                 grade_levels=allowed,
                 requested_grade=requested,
-                top_k=top_k,
+                # 同向量路径：FTS 命中的也是**子块**，父块去重同样会吃掉名额，
+                # 所以先过采样、由 `_to_hits` 在去重之后统一截到 top_k。
+                top_k=top_k * KNN_OVERFETCH,
             )
         except sqlite3.Error as exc:
             return [], LevelAttempt(DEGRADED_FTS, False, f"FTS5 不可用：{exc}")
@@ -419,12 +473,17 @@ class RagService:
 
     # --------------------------------------------------------------- 组装 --
     def _rows_to_hits(
-        self, conn, rows: Sequence[sqlite3.Row], requested: str, top_k: int
+        self, conn, rows: Sequence[sqlite3.Row], requested: str
     ) -> list[fallback.Hit]:
         """vec0 的 ``(rowid, distance)`` → Hit。
 
         单位向量下 vec0 的 L2 距离与余弦可换算：``cos = 1 - d²/2``
         （已实测：同向量 d=0、反向向量 d=2）。
+
+        ★ **这里不做 ``top_k`` 截断**（截断统一放在 :meth:`_to_hits` 的**父块去重之后**）。
+        在这里先截会把 KNN 的过采样（``top_k * KNN_OVERFETCH``）白做掉：
+        同一父块的多个子块排在前面时，去重后实际条数会**少于** ``top_k``
+        （实测同一夹具库 ``top_k=5`` 只剩 4 条）。
         """
         if not rows:
             return []
@@ -444,7 +503,7 @@ class RagService:
                 )
             )
         hits.sort(key=lambda h: -h.score)
-        return hits[:top_k]
+        return hits
 
     def _to_hits(
         self,
@@ -454,7 +513,12 @@ class RagService:
         requested: str,
         top_k: int,
     ) -> list[RagHit]:
-        """命中子块 → **父块完整内容** → ``RagHit``（同一父块只保留最高分的一条）。"""
+        """命中子块 → **父块完整内容** → ``RagHit``（同一父块只保留最高分的一条）。
+
+        ★ **``top_k`` 的截断只在这里做**（去重之后）—— 上游各级一律返回「候选」，
+        先截再去的路径会让同一父块的多个子块把名额占掉，最终条数少于 ``top_k``
+        （实测：``top_k=5`` 只剩 4 条，``KNN_OVERFETCH`` 的过采样等于白做）。
+        """
         if not hits:
             return []
         ordered = sorted(hits, key=lambda h: -h.score)

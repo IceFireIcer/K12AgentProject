@@ -329,7 +329,16 @@ export class AnimationSandboxHost {
    * 返回 `true` 表示这条消息被本卡片接受了（诊断/测试用）。
    */
   handleMessage(event: SandboxMessageEventLike): boolean {
-    if (this.iframe !== null && event.source !== this.iframe.contentWindow) {
+    // ★ 已经拆掉 iframe（卡片已降级 / 已卸载）之后，**什么都不收**。
+    //   不能只靠下面那道 `event.source` 校验：`dispose()` 把 `iframe` 置成 null 后，
+    //   `this.iframe !== null && …` 会整条短路成 false，来源校验被跳过 ——
+    //   届时一条迟到（或伪造）的同 id 消息就能把 `phase` 从降级态改回 `ready`，
+    //   于是头部冒出本该隐藏的时长 chip、状态文案也跟着错。
+    if (this.iframe === null) {
+      this.filteredCount += 1
+      return false
+    }
+    if (event.source !== this.iframe.contentWindow) {
       this.filteredCount += 1
       return false
     }
@@ -500,12 +509,55 @@ export function readAnimationPayload(raw: unknown): AnimationPayloadView {
     html: text(record.html),
     durationMs: typeof duration === 'number' && Number.isFinite(duration) && duration > 0 ? duration : 0,
     fallbackText: fallbackText || FALLBACK_TEXT_WHEN_EMPTY,
-    fallbackImage: typeof image === 'string' && image.trim().length > 0 ? image.trim() : null,
+    // ★ 静态图同样走白名单（见 `readFallbackImage`）：它会被放进 `<img :src>`，
+    //   一个被改过的载荷不该让降级视图替我们对外发请求
+    fallbackImage: readFallbackImage(image),
     source: record.source === 'generated' ? 'generated' : 'template',
     // 只认本机回环地址：一个被篡改的载荷不该让 iframe 去连别的机器
     resourceUrl: readLoopbackUrl(record.resourceUrl),
     degradeReason: reason.length > 0 ? reason : null
   }
+}
+
+/**
+ * ★ 降级静态图的 scheme 白名单（与 {@link readLoopbackUrl} 同一条纪律）。
+ *
+ * 允许三种形态：
+ *   ① **自包含的 base64 dataURL**（`data:image/…;base64,…`）—— 内置兜底 SVG 与后端产物都走这条，
+ *      它不可能产生任何外联请求；
+ *   ② **本机回环的静态资源地址**（`http://<回环>:<端口>/resources/…`）—— 与 iframe 托管同源同口径；
+ *   ③ **`assets/` 下的相对路径**（随渲染产物分发，vite `assets/` 目录）。
+ *
+ * 其余一律返回 `null` → 卡片退到自带的兜底 SVG（视图层 `v-if` 已经处理 null）。
+ *
+ * ★ 为什么必须有这条：`fallbackImage` 直接进 `AnimationCard.vue` 的 `<img :src>`。
+ *   只要载荷被改成 `https://evil.example/x.png`，这张卡片就会**对外发一次请求** ——
+ *   在一个宣称「全本地化、数据不出端」的产品里，这既是外联也是信息泄漏（Referer/IP）。
+ *   载荷来自模型生成的 Tool 结果，把它当可信输入是不成立的。
+ */
+export function readFallbackImage(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const image = value.trim()
+  if (image.length === 0) return null
+
+  // ① base64 dataURL（只认图片类型；`svg+xml`、`png`、`webp`… 都落在字符类里）
+  if (/^data:image\/[A-Za-z0-9.+-]+;base64,/i.test(image)) return image
+
+  // ② 本机回环的 /resources/ 静态资源（复用同一段回环主机名，避免第二套判据）
+  const loopback = new RegExp('^http://(?:' + LOOPBACK_HOST_SOURCE + '):[0-9]+' + RESOURCE_PATH_PREFIX)
+  if (loopback.test(image)) return image
+
+  // ③ `assets/` 下的相对路径：必须逐段检查，挡掉 `..` 穿越与任何带 scheme 的写法
+  const relative = /^(?:\.\/|\/)?assets\/(.+)$/.exec(image)
+  if (relative) {
+    const segments = relative[1].split('/')
+    const safe =
+      segments.length > 0 &&
+      segments.every((segment) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment) && segment !== '..')
+    if (safe) return image
+  }
+
+  return null
 }
 
 /**
@@ -524,6 +576,14 @@ export const LOOPBACK_HOST_SOURCE = ['127[.]0[.]0[.]' + '1', 'local' + 'host', '
 
 /** 动画资源托管的路径前缀（服务端 `routes/resources.py` 的固定路由）。 */
 export const ANIMATION_RESOURCE_PREFIX = '/resources/animation/'
+
+/**
+ * 静态资源托管的**总**前缀（`/resources/` 下的一切产物，含动画与降级静态图）。
+ *
+ * 为什么比 {@link ANIMATION_RESOURCE_PREFIX} 宽一档：降级静态图托管在 `/resources/images/`
+ * 一类的位置（与动画不同子目录），两者只在「是不是本机回环」这一点上必须同样严格。
+ */
+export const RESOURCE_PATH_PREFIX = '/resources/'
 
 /**
  * 只接受**本机回环地址 + 动画资源路径**的托管链接。

@@ -89,6 +89,13 @@ def connect(
 
     conn.row_factory = sqlite3.Row
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    # ★ 外键必须**每个连接**显式打开：``sqlite3`` 的默认值是 OFF，DDL 里那些
+    #   ``REFERENCES kp(kp_id)`` 不开这一条就只是一句注释 —— 悬空 ``from/to_kp_id``
+    #   会被静默写入（业务陷阱清单 §3 第 3 条要求的正是「报错而不是静默跳过」）。
+    #   PRAGMA 是连接级设置，且**不写库**：只读连接上也能设（``mode=ro`` 实测可行）。
+    #   ⚠️ 因此清表顺序有讲究：``knowledge_dependencies`` 必须先于 ``kp`` 清，
+    #      否则 DELETE 被引用方会直接 FK 报错（见 ``store/kb.py`` 的 clear_knowledge_tables）。
+    conn.execute("PRAGMA foreign_keys = ON")
     if not readonly and wal:
         # WAL：读多写少 + 允许读写并发；只在可写库上设
         conn.execute("PRAGMA journal_mode = WAL")

@@ -21,6 +21,11 @@
  * ★ 失败策略：sidecar 没起来 / 401 / 5xx 时**绝不抛**（Pi 与 UI 同进程），
  *   记一条可读日志 + 把该条记录留在有界队列里重试（指数退避，最多 200 条，超出丢最旧并计数）。
  *   对话必须能继续 —— 学习记录是辅助能力，不是主线。
+ *
+ * ★ 退出路径（F8）：`learningLogExtension.flush()` **在扩展对象上导出**，由
+ *   `runtime.ts` 的 `dispose()` 调用 —— 它忽略退避做一次尽力而为的排空，且**有等待上限**
+ *   （{@link FLUSH_TIMEOUT_MS}），不会把退出流程吊死。没有这个调用点，退避窗口里入队的
+ *   记录就白攒了（最多 200 条）。
  */
 
 import type { GradeLevel } from '@shared/ipc-events'
@@ -44,7 +49,7 @@ export interface LearningEventPayload {
   isCorrect?: boolean
   /** 固定口径的中文说明（**不是**学生原话）。 */
   detail?: string
-  /** 学段（冷启动时服务端据此建学生行；显式选择为权威）。 */
+  /** 学段（冷启动时服务端据此建学生行；**来自服务端推断的当前生效值，前端不推断学段（手动指定走独立通道、由服务端写库）**）。 */
   gradeLevel?: GradeLevel
 }
 
@@ -82,15 +87,48 @@ export interface LearningLogOptions {
   sessionProvider?: () => { studentId: string; sessionId: string; gradeLevel: GradeLevel } | null
 }
 
+/** `flush()` 的调用选项。 */
+export interface FlushOptions {
+  /**
+   * `true`（**默认**）= 忽略指数退避，立刻做一次尽力而为的排空。
+   *
+   * 为什么默认是它：`flush()` 的两个真实调用方是「测试」与「`runtime.ts` 的退出路径」
+   * （F8）—— 退出前那次是**最后一次机会**，若因为还处在退避等待期就直接返回，
+   * 队列里最多 200 条结构化学习记录会被静默丢掉。
+   * 内部的高频路径（`enqueue`）**不走这个默认**：它显式传 `force:false`，
+   * 照常受退避保护，不会把失败的 sidecar 打成重试风暴。
+   */
+  force?: boolean
+}
+
 /** `learning-log` 扩展 = 工厂 + 诊断入口（诊断只给测试与验收用，不进 LLM 上下文）。 */
 export interface LearningLogExtension {
   (pi: AgentExtensionApi): void
   stats(): LearningLogStats
-  /** 立刻把队列写出去（返回是否全部成功）；`agent_end` 与退出前都可调。 */
-  flush(): Promise<boolean>
+  /**
+   * 立刻把队列写出去（**有上限，绝不永久挂住**）。
+   *
+   * - 返回 `true` = 队列已排空；`false` = 没写完（队列里还有记录，或本次等待超过
+   *   {@link FLUSH_TIMEOUT_MS}）。**返回 `false` 不代表记录丢了** —— 它们仍在队列里。
+   * - 并发去重：同时调多次只会真的跑一次（后到的调用等同一份结果）。
+   * - 超时上限见 {@link FLUSH_TIMEOUT_MS}：一个卡死的 `poster` 不会把退出流程一起吊住
+   *   （超时后**不抛**，只记一行可读日志）。
+   * - `options.force`（默认 `true`）忽略退避等待，见 {@link FlushOptions}。
+   *
+   * 调用点：`agent_end` 之后（内部经 `enqueue`）、测试、以及 `runtime.ts` 的退出收尾。
+   */
+  flush(options?: FlushOptions): Promise<boolean>
   /** 清空统计与队列（换学生时用；**不会**删除已落库的数据）。 */
   reset(): void
 }
+
+/**
+ * 单次 `flush()` 的等待上限（F8）。
+ *
+ * 正常情况远不会走到这里（本机 HTTP 毫秒级）；它的作用是「**永不永久挂住**」：
+ * 退出流程（`runtime.dispose()`）里 `await flush()` 一次卡死的请求会让应用退不掉。
+ */
+export const FLUSH_TIMEOUT_MS = 10_000
 
 /* ------------------------------------------------------------------ *
  * 工具结果 → 学习记录（纯函数，可单测）
@@ -269,15 +307,24 @@ export function createLearningLogExtension(options: LearningLogOptions = {}): Le
         'warn'
       )
     }
-    void flush()
+    // ★ 内部高频路径**显式**关掉 force：它要受退避保护（sidecar 没起来时不能打成重试风暴）。
+    //   退出前那次 `flush()`（外部调用方）默认 `force: true`，见 `LearningLogExtension.flush`。
+    void flush({ force: false })
   }
 
-  const flush = async (): Promise<boolean> => {
-    if (flushing) return await flushing
-    if (queue.length === 0) return true
-    if (now() < nextAttemptAt) return false
+  /**
+   * 真正排空队列的那一段（**并发去重**在同一处）。
+   *
+   * `force = true` 时忽略退避等待；`false` 时照旧遵守 `nextAttemptAt`。
+   * 返回 `false` = 本次没排空（队列里还有记录）。
+   */
+  const runFlush = (force: boolean): Promise<boolean> => {
+    // ★ 并发去重：同一份队列同时只跑一个排空循环（两个调用方等同一份结果，语义一致）
+    if (flushing) return flushing
+    if (queue.length === 0) return Promise.resolve(true)
+    if (!force && now() < nextAttemptAt) return Promise.resolve(false)
 
-    flushing = (async (): Promise<boolean> => {
+    const task = (async (): Promise<boolean> => {
       while (queue.length > 0) {
         const head = queue[0]
         try {
@@ -302,10 +349,39 @@ export function createLearningLogExtension(options: LearningLogOptions = {}): Le
       return true
     })()
 
+    flushing = task
+    return task.finally(() => {
+      if (flushing === task) flushing = null
+    })
+  }
+
+  /**
+   * 带等待上限的 `flush()`（**永不永久挂住**：F8）。
+   *
+   * 超时只是「不再等」：记录仍在队列里，返回 `false`；**不抛异常**
+   * （退出路径上抛异常会把别的收尾步骤一起带走）。
+   */
+  const flush = async (options: FlushOptions = {}): Promise<boolean> => {
+    const task = runFlush(options.force !== false) // 默认 force：见 FlushOptions 的说明
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      return await flushing
+      return await Promise.race([
+        task,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => {
+            log(
+              `[learning-log] 本次 flush 超过 ${FLUSH_TIMEOUT_MS}ms 仍未完成（放弃等待；` +
+                `队列里还有 ${queue.length} 条，未被丢弃）。`,
+              'warn'
+            )
+            resolve(false)
+          }, FLUSH_TIMEOUT_MS)
+          // 计时器不该拖住进程退出
+          ;(timer as unknown as { unref?: () => void }).unref?.()
+        })
+      ])
     } finally {
-      flushing = null
+      if (timer !== undefined) clearTimeout(timer)
     }
   }
 
@@ -383,8 +459,13 @@ export function createLearningLogExtension(options: LearningLogOptions = {}): Le
  * ★ 默认导出：主 Agent 注册的那个单例（`extensions/index.ts` 的
  * `CORE_EXTENSION_FACTORIES['learning-log']` 引用的就是它）。
  *
- * 统计与手动 flush 通过函数上的附加属性暴露（`learningLogExtension.stats()`）——
- * Pi 只要求「是个工厂」，不需要它是个类。
+ * 统计与 `flush()` 通过函数上的附加属性暴露（`learningLogExtension.stats()` /
+ * `learningLogExtension.flush()`）—— Pi 只要求「是个工厂」，不需要它是个类。
+ *
+ * ★ F8：`flush()` **在扩展对象上导出、可 `await`、有明确的签名与上限**
+ * （{@link LearningLogExtension.flush} / {@link FLUSH_TIMEOUT_MS}）——
+ * `runtime.ts` 的 `dispose()` 靠它把退出前还在队列里的学习记录尽量写出去；
+ * 没有调用点时那条承诺（本文件头部与 `flush` 的注释都写着「退出前可调」）是空的。
  */
 const learningLogExtension = createLearningLogExtension()
 

@@ -64,7 +64,7 @@ from app.routes.students import (
     DEFAULT_COLD_START_GRADE,
     as_grade_level,
     open_learning_store,
-    resolve_student_data_root,
+    require_data_dir,
     to_contract_ms,
     validate_student_id,
 )
@@ -194,12 +194,12 @@ def _load_kb_connection(request: Request):
 
     kb_path = default_kb_path(request.app.state.config.data_dir)
     if not kb_path.exists():
-        logger.warning("知识库不存在（%s）：推荐降级为「按掌握度」", kb_path)
+        logger.warning("知识库不存在（%s）", kb_path)
         return None
     try:
         return connect(kb_path, readonly=True)
     except Exception as exc:  # noqa: BLE001 - 见 docstring
-        logger.warning("打开知识库失败（%s）：推荐降级为「按掌握度」", exc)
+        logger.warning("打开知识库失败（%s）", exc)
         return None
 
 
@@ -662,20 +662,25 @@ def update_preference(
     冷启动兜底与 ``POST /events`` **完全一致**（学生行不存在时建一条）——
     两条写路径必须同口径，否则学生会遇到「写记录能用、写偏好 404」这类无谓差异。
     """
-    if data_root is None:
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
 
+    store = open_learning_store(data_dir, student_id)
     try:
         student = store.get_student(student_id)
         if student is None:
             student = store.upsert_student(
                 student_id, nickname="", grade_level=DEFAULT_COLD_START_GRADE
             )
+            logger.info("冷启动：为 %s 自动建立学生行（学段 %s）", student_id, student.grade_level)
 
         try:
             store.set_preference(payload.key, payload.value)
         except sqlite3.Error as exc:
+            logger.exception("学习偏好写入失败：%s", student_id)
             raise HTTPException(status_code=503, detail=f"学习偏好写入失败（本地数据库异常）：{exc}") from exc
 
+        logger.info("已写入学习偏好：学生=%s key=%s", student_id, payload.key)
         return LearningEventAck(ok=True)
     finally:
         store.close()
@@ -751,7 +756,10 @@ def read_chapter(request: Request, student_id: str) -> ChapterStateOut:
       因此本端点对**全新学生**是「建行 + 读」，对已存在的学生才是纯读。
     - 读库失败 → 503（可读中文）。
     """
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
 
+    store = open_learning_store(data_dir, student_id)
     try:
         try:
             _ensure_student_level(store, student_id)
@@ -788,8 +796,11 @@ def write_chapter(
     ★ 学段一变，章节由 ``app/grade/rules.py`` 清空（那本教材已经不存在了）——
       本端点**不负责**这件事，也不要在读的时候「顺手修正」。
     """
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
     title = body.chapter_title.strip()
 
+    store = open_learning_store(data_dir, student_id)
     try:
         try:
             grade_level = _ensure_student_level(store, student_id)
@@ -818,10 +829,14 @@ def write_chapter(
         store.close()
 
 
+def _require_data_dir(request: Request) -> str:
     """取学生数据根；缺失时给**可读**的 503（而不是在别处抛 KeyError）。
 
+    ★ 实现归口在 :func:`app.routes.students.require_data_dir` —— 画像 / 练习 / 学段 / 动画
     四条轨必须**同一口径**（只认显式传入的 ``--data-dir``，理由见
+    `resolve_student_data_root` 的注释）。保留这个私有名字只是为了少改调用点。
     """
+    return require_data_dir(request)
 
 
 __all__ = [

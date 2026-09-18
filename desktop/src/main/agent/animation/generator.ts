@@ -54,6 +54,15 @@ export interface AnimationGenerateRequest {
   gradeLevel: string
   attempt: number
   previousReason?: string
+  /**
+   * ★ 卡片手里的那个 `payload_id`（由扩展生成、与 `details.payloadId` **同一个值**）。
+   *
+   * 必须原样送到 `/api/animation/compose`：Python 会把它注入沙箱 HTML
+   * （`window.__K12_PAYLOAD_ID__`），而前端 `iframe-host.ts` 丢弃
+   * `message.payloadId !== this.payloadId` 的一切消息 —— 两边对不上时**永远收不到 `ready`**，
+   * 每张卡片都会在 5 秒后走超时降级（F2）。
+   */
+  payloadId: string
 }
 
 /** 模型产出的**片段**（不含库、不含运行时；由 Python 拼装）。 */
@@ -154,12 +163,23 @@ export function createAnimationGenerator(
       concept: request.concept,
       kpId: request.kpId,
       gradeLevel: request.gradeLevel,
-      // 合流端点的 payload_id 由它自己生成（`validate_payload_id` 有兜底）；
-      // 这里不传随机串，避免「随机 id 与卡片手里的 id 对不上」那类串台问题。
-      payloadId: ''
+      // ★ **原样带上卡片手里的那个 id**：Python 会把它注入 HTML
+      //   （`compose.py:147` 只在它缺席时才随机兜底），前端按它校验每条 postMessage。
+      //   这里曾经写死空串，导致产物里的 id 与卡片手里的 id 对不上 ——
+      //   每张自由生成的卡片都收不到 `ready`，5 秒后必然降级（F2）。
+      payloadId: request.payloadId
     })
   }
 }
+
+/**
+ * 生成 prompt 的入参：**只挑提示词真正用得上的字段**。
+ *
+ * 为什么不直接用 {@link AnimationGenerateRequest}：`payloadId` 是**合流端点**才需要的
+ * 串台防线身份（见该字段的说明），与提示词一个字的关系都没有 ——
+ * 把它排除在外，`buildFragmentPrompt` 就能被单独调用与单测，不必凑一个假 id。
+ */
+export type FragmentPromptInput = Omit<AnimationGenerateRequest, 'payloadId'>
 
 /**
  * 生成用 prompt。
@@ -169,7 +189,7 @@ export function createAnimationGenerator(
  *   2. **必须调 `Sandbox.play(fn)`**（否则宿主永远等不到播放实现）；
  *   3. **不许访问宿主 DOM / 发网络请求**（沙箱里不存在，脚本会当场抛）。
  */
-export function buildFragmentPrompt(request: AnimationGenerateRequest): string {
+export function buildFragmentPrompt(request: FragmentPromptInput): string {
   const lines = [
     '你在为一个 K12 人工智能通识课的动画沙箱生成一段**页面片段与脚本**（不是完整 HTML）。',
     `概念：${request.concept}`,

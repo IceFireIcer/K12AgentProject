@@ -8,7 +8,8 @@
  *   G8-3  导出物是**合法 Mermaid**（`flowchart TD`、节点 id 唯一、标签已转义、边两端都有定义）
  *   G8-4  导出真的落盘（`.mmd` 纯图 + `.md` 带明细表），且**默认路径就是 `docs/tool-trace.mmd`**
  *   G9-7  学习记录提取：四类活动（qa / animation / coding / quiz）都覆盖，**不写对话正文**
- *   G9-8  learning-log 经 `bridge/client.ts` 打到 `POST /api/profile/{id}/events`（真 HTTP、真 token 头）
+ *   G9-8  learning-log 的 HTTP 出口：经 `bridge/client.ts` 打到 `POST /api/profile/{id}/events`
+ *         —— **真 HTTP 往返 + 真 token 头**（用本地假服务端，不需要 uvicorn / Pyodide）
  *   G8-5  六扩展注册表：缺哪几个扩展、缺哪几个 Tool 都要**点名**（不静默少能力），strict 模式直接抛
  *
  * 跑法：`npm test`。
@@ -16,11 +17,13 @@
 
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import { clearSidecarEndpoint, configureSidecarEndpoint } from '../src/main/bridge/client.ts'
 import {
   AGENT_EXTENSION_SPECS,
   AGENT_TOOL_NAMES,
@@ -38,6 +41,7 @@ import {
   extractCorrectness,
   extractKpId,
   extractLearningFromTool,
+  postLearningEvent,
   type LearningEventPayload
 } from '../src/main/agent/extensions/learning-log.ts'
 import {
@@ -46,6 +50,7 @@ import {
   demoRecorder,
   escapeMermaidLabel,
   exportToolTrace,
+  nextTurnFor,
   resolveTracePath,
   summarizeArgs,
   ToolTraceRecorder,
@@ -113,6 +118,27 @@ test('G8-1b Mermaid 标签转义：引号/尖括号/竖线不会把图渲染坏'
  * G8-2 轨迹记录
  * ------------------------------------------------------------------ */
 
+test('G8-2a 轮次换算：一条学生消息内的多个 sub-turn 归同一轮，新消息的 turnIndex 归零则 +1', () => {
+  // Pi 的真实 turnIndex 语义（`dist/core/agent-session.js:462-495`，已逐行核对）：
+  //   - `agent_start`（= 每条学生消息）把 `_turnIndex` 重置为 0；
+  //   - 该消息内每次 `turn_end` 让 `_turnIndex++`，所以同一条消息内是 0,1,2,…
+  // 因此「回退/重复的下标」才是新的一轮 —— 这正是 `nextTurnFor` 的判据。
+  let current = 0
+  let lastIndex = -1
+  const turns: number[] = []
+  const indexes = [0, 1, 2, 3, 0, 1, 2, 3, 0] // 三条学生消息，各含 4/4/1 个 sub-turn
+  for (const index of indexes) {
+    const next = nextTurnFor(current, lastIndex, index)
+    current = next.turn
+    lastIndex = next.lastIndex
+    turns.push(current)
+  }
+  assert.deepEqual(turns, [1, 1, 1, 1, 2, 2, 2, 2, 3], '每条新消息必须是一个新轮次')
+
+  // 缺 turnIndex（Pi 未给）时，保守地当成新一轮，绝不把两轮合并成一轮
+  assert.equal(nextTurnFor(3, 0, Number.NaN).turn, 4)
+})
+
 test('G8-2 轨迹记录：turn / toolName / 参数摘要 / ok / latencyMs / degraded 全部如实', () => {
   const recorder = new ToolTraceRecorder()
   const extension = createTraceExtension(recorder)
@@ -141,8 +167,13 @@ test('G8-2 轨迹记录：turn / toolName / 参数摘要 / ok / latencyMs / degr
   assert.ok(!first.argsSummary.includes('循环是什么'), '参数摘要不得含学生原文')
 
   // 第 2 轮 + 一次「自兜异常」（`details.error === true`，与 `runtime.ts` 的 safeToolExecute 同形态）
-  // + 一次被安全阀拦下
-  handlers.get('turn_start')?.({ turnIndex: 2 })
+  // + 一次被安全阀拦下。
+  //
+  // ⚠️ 这里必须是 `turnIndex: 0`，不是 `2` —— 按 Pi 0.85.1 的真实语义
+  //（`dist/core/agent-session.js:470`）：**每条学生消息的 `agent_start` 都会把 `_turnIndex` 重置为 0**，
+  // 它只在「同一条消息内的多次 LLM 往返」之间自增。所以「第 2 条学生消息」的真机形态就是 0。
+  // 用 `2` 会让测试通过一条现实中不存在的序列（既有版本就是这样，掩盖了轮次恒为 1 的缺陷）。
+  handlers.get('turn_start')?.({ turnIndex: 0 })
   handlers.get('tool_call')?.({ toolCallId: 'c2', toolName: 'get_student_profile', input: { student_id: 'student_001' } })
   handlers.get('tool_execution_start')?.({ toolCallId: 'c2', toolName: 'get_student_profile', args: {} })
   const second = recorder.noteToolEnd({
@@ -451,11 +482,12 @@ test('G9-8 learning-log：绑定学生后按事件写库（tool_execution_end + 
 })
 
 test('G9-8b ★ 回写路径的 HTTP 形状：`POST /api/profile/{id}/events` + camelCase 载荷', () => {
-  // ⚠️ 这里**不发真请求**：`bridge/client.ts` 里有一处缺 `.ts` 的导入（`'../sidecar/protocol'`），
-  //    Node 直跑 TS 时 `import('../../bridge/client.ts')` 必定 `ERR_MODULE_NOT_FOUND`。
-  //    真 HTTP 往返（真 uvicorn + 真 token 头 + 真落库）在票 09 的验收脚本里跑，
-  //    见报告里的「learning-log 写库证据」。本用例守住的是**载荷契约**：
-  //    字段名、类型、以及「不得出现对话正文字段」。
+  // ⚠️ 本用例只守**载荷契约**（字段名、类型、「不得出现对话正文字段」）。
+  //    真 HTTP 往返（真的发请求 / 真的带 X-Auth-Token）见下面 G9-8c ——
+  //    那条以前被一条**已失效**的技术理由压着没写：注释号称 `bridge/client.ts`
+  //    有一处缺 `.ts` 的导入会让 `node --test` 直接 `ERR_MODULE_NOT_FOUND`，
+  //    实测**已不成立**（`client.ts:18` 现在是 `from '../sidecar/protocol.ts'`，带扩展名；
+  //    全仓已无缺扩展名的相对导入），所以那条集成测试补得回来。
   const payloads: LearningEventPayload[] = [
     {
       activity: 'quiz',
@@ -482,16 +514,102 @@ test('G9-8b ★ 回写路径的 HTTP 形状：`POST /api/profile/{id}/events` + 
   }
 })
 
+test('★ G9-8c 真 HTTP 往返：learning-log 经 bridge/client.ts 发出带 X-Auth-Token 的 POST，并真读懂回执', async () => {
+  // 这一条把 G9-8 从「载荷形状」升级成**端到端**：起一个本地假服务端（不需要 uvicorn），
+  // 走**真的** `bridge/client.ts`（真的 token 注入、真的 URL 拼接、真的 JSON 响应解析）。
+  const received: Array<{ method: string; url: string; token: string | null; body: string; contentType: string | null }> = []
+  /** HTTP 头的值可能是数组（同名头多次出现）——这里只关心单值形态，非字符串一律记成 null。 */
+  const headerValue = (value: string | string[] | undefined): string | null =>
+    typeof value === 'string' ? value : null
+  const server = createServer((request, response) => {
+    let body = ''
+    request.on('data', (chunk) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      received.push({
+        method: request.method ?? '',
+        url: request.url ?? '',
+        token: headerValue(request.headers['x-auth-token']),
+        body,
+        contentType: headerValue(request.headers['content-type'])
+      })
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ ok: true, id: 7 }))
+    })
+  })
+
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+  const address = server.address()
+  assert.ok(address && typeof address === 'object', '假服务端必须拿到端口')
+  const port = (address as { port: number }).port
+
+  try {
+    // ★ 走生产路径配置端点：token 只在这一处进内存（`apiFetch` 注入 `X-Auth-Token`）
+    configureSidecarEndpoint(port, 'test-token-abc123')
+
+    // ★ 送的是契约里**有**的字段（`extra="forbid"` 会直接 422）
+    const payload: LearningEventPayload = {
+      activity: 'coding',
+      kpId: 'jr-py-loop',
+      sessionId: 'sess-99',
+      isCorrect: false,
+      detail: '运行学生代码',
+      gradeLevel: 'junior'
+    }
+    await postLearningEvent('student_001', payload)
+
+    assert.equal(received.length, 1, '必须真的发出一条 HTTP 请求')
+    assert.equal(received[0].method, 'POST')
+    assert.equal(
+      received[0].url,
+      '/api/profile/student_001/events',
+      'URL 必须是 `/api/profile/{id}/events`（且带着 token 头 —— 这条以前只有「报告里那句话」）'
+    )
+    assert.equal(received[0].token, 'test-token-abc123', '★ token 必须由 bridge/client.ts 注入（调用方拿不到它）')
+    assert.equal(received[0].contentType, 'application/json')
+    assert.deepEqual(JSON.parse(received[0].body), payload, '发出的正文必须是那个载荷本身（不多字段）')
+    // ★ 学生 id 走**路径段**（encodeURIComponent），不是请求体字段
+    assert.ok(!received[0].body.includes('student_001'), '学生 id 不该重复出现在请求体里（它在路径上）')
+
+    // 失败路径：非 2xx 必须抛**可读**错误（学习记录写入失败不能静默）
+    const failing = createServer((_request, response) => {
+      response.writeHead(422, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ detail: 'extra fields not permitted' }))
+    })
+    await new Promise<void>((done) => failing.listen(0, '127.0.0.1', done))
+    const failingAddress = failing.address() as { port: number }
+    try {
+      configureSidecarEndpoint(failingAddress.port, 'test-token-abc123')
+      await assert.rejects(
+        () => postLearningEvent('student_001', payload),
+        (error: unknown) => {
+          assert.ok(error instanceof Error)
+          assert.match(error.message, /学习记录写入失败：HTTP 422/)
+          assert.match(error.message, /extra fields not permitted/, '要把服务端的可读原因带出来（截断但不丢）')
+          return true
+        }
+      )
+    } finally {
+      await new Promise<void>((done) => failing.close(() => done()))
+    }
+  } finally {
+    clearSidecarEndpoint()
+    await new Promise<void>((done) => server.close(() => done()))
+  }
+})
+
 /* ------------------------------------------------------------------ *
  * G8-5 六扩展注册表
  * ------------------------------------------------------------------ */
 
-test('G8-5 扩展清单：六个扩展、九个冻结 Tool、事件落点与票 08 逐条一致', () => {
+test('G8-5 扩展清单：六个扩展、十个冻结 Tool、事件落点与票 08 逐条一致', () => {
   assert.deepEqual(
     AGENT_EXTENSION_SPECS.map((spec) => spec.name),
     ['animation', 'coding', 'quiz', 'profile', 'grade', 'learning-log']
   )
-  assert.equal(AGENT_TOOL_NAMES.length, 9)
+  // ★ 10 = 票 08 的 9 个 + 票 20 的 remember_preference（画像扩展的「写」那一端）
+  assert.equal(AGENT_TOOL_NAMES.length, 10)
   assert.deepEqual(auditToolCoverage(), { ok: true, violations: [] })
 
   const learningLog = AGENT_EXTENSION_SPECS.find((spec) => spec.name === 'learning-log')
@@ -534,8 +652,10 @@ test('G8-5b 注册器：核心扩展已注册；未落地的四个被点名；st
   assert.ok(logs.some((line) => line.includes('animation')), '缺哪个扩展要**点名**')
   assert.match(describeRegistryReport(report), /待落地 4 个/)
 
-  // 本文件自带的两个扩展真的注册了东西：profile 一个 Tool，learning-log 两个事件
-  assert.deepEqual(tools.map((tool) => tool.name), ['get_student_profile'])
+  // 本文件自带的两个扩展真的注册了东西：profile 两个 Tool（读画像 + 记偏好）、
+  // learning-log 两个事件。**顺序与 `profile.ts` 里 `registerTool` 的调用顺序一致**
+  // （`get_student_profile` 在前、`remember_preference` 在后）。
+  assert.deepEqual(tools.map((tool) => tool.name), ['get_student_profile', 'remember_preference'])
   assert.deepEqual(events.sort(), ['agent_end', 'tool_execution_end'])
 
   // 注入假的四个扩展后报告转绿

@@ -218,6 +218,50 @@ test('G9-3 assertSessionManagerIsolated：正确的 SessionManager 放行，Pi �
   )
 })
 
+// ── G9-3b ★ 生产接线：runtime.ts 真的把 sessionDir 传给了 Pi ──────────
+
+test('★ G9-3b 接线守卫：runtime.ts 建会话时传了 `paths.sessionDir` 且当场校验隔离', () => {
+  // 为什么必须有这条：上面 G9-3 把 `assertSessionManagerIsolated` 当**纯函数**测（喂假对象），
+  // 于是「生产里到底有没有调它、第二个参数有没有传」完全没有机器判据 ——
+  // 有人重构 `createChatRuntime` 时删掉这次调用（或删掉第二个参数让 Pi 退回
+  // `~/.pi/agent/sessions/--<cwd>--/`），单测全绿，只能靠现场手查 `~/.pi`。
+  // 这条守卫读的是**去注释后的源码**（注释里写 `SessionManager.create(a, b)` 说明纪律不算接线）。
+  const source = stripComments(
+    readFileSync(join(desktopRoot, 'src', 'main', 'agent', 'runtime.ts'), 'utf8')
+  )
+
+  // ① 必须真的创建 SessionManager，且 cwd 与 sessionDir **都**传了（两个实参）
+  const created = /SessionManager\.create\(\s*[^,]+,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)/.exec(source)
+  assert.ok(
+    created,
+    'runtime.ts 里必须出现 `SessionManager.create(<cwd>, <sessionDir>)`（两个实参都传）—— ' +
+      '只传 cwd（或整个调用被删掉）会让 Pi 把会话写进 ~/.pi/agent/sessions/，跨学生混放的合规硬伤'
+  )
+  assert.equal(
+    created[1],
+    'paths.sessionDir',
+    `SessionManager.create 的第二个实参必须是 paths.sessionDir，实际是 ${created[1]}`
+  )
+
+  // ② 紧接着必须**当场校验**（相信 Pi 会照做 = 没有防线）
+  const assertAt = source.indexOf('assertSessionManagerIsolated(')
+  assert.ok(
+    assertAt > 0,
+    'runtime.ts 必须调用 assertSessionManagerIsolated —— 它是「Pi 真的认了 sessionDir」的唯一防线'
+  )
+  // 第二次实参仍是 sessionDir（校验对象与建会话时传的是同一个目录）
+  const call = source.slice(assertAt, assertAt + 400)
+  assert.ok(
+    call.includes('paths.sessionDir'),
+    `assertSessionManagerIsolated 必须拿 paths.sessionDir 去校验：${call.slice(0, 160)}`
+  )
+  // ③ 顺序：先 create 再 assert（反过来没有意义）
+  assert.ok(
+    source.indexOf('SessionManager.create(') < assertAt,
+    '必须先建 SessionManager 再校验落盘目录'
+  )
+})
+
 // ── G9-4 磁盘扫描：越界的 .jsonl 一律不许出现 ──────────────────────────
 
 test('G9-4 ★ 越界会话必须让断言失败（演示：故意把会话放到学生目录之外）', () => {
@@ -359,9 +403,15 @@ test('G9-5 快照比对：created / modified / removed 三种变化都能抓到'
   })
 })
 
-test('G9-5b ★ 本机真实 ~/.pi：跑完一轮模拟工作后清单与 mtime 均未变化', () => {
+test('G9-5b ★ 本机真实 ~/.pi：跑完一轮模拟工作后清单与 mtime 均未变化', (t) => {
   const piHome = defaultPiHomeDir()
   const before = snapshotDir(piHome)
+  // 本机没装 Pi CLI（没有 ~/.pi）时**显式跳过**：那种环境下「清单未变化」是空集合比对，
+  // 恒真（没有任何条目可比），静默通过会让这条守卫伪装成有效证据。
+  if (before.size === 0) {
+    t.skip(`本机没有 ${piHome}（没装 Pi CLI）—— 清单为空时比对恒真，跳过而不是假装通过`)
+    return
+  }
   const userData = mkdtempSync(join(tmpdir(), 'k12-real-'))
   try {
     // 模拟「student_001 跑一轮 → 切换学生 student_002 再跑一轮 → 各自校验」这条真实路径
@@ -380,24 +430,27 @@ test('G9-5b ★ 本机真实 ~/.pi：跑完一轮模拟工作后清单与 mtime 
     rmSync(userData, { recursive: true, force: true })
   }
 
-  const report = comparePiHome(before, snapshotDir(piHome), piHome)
+  const after = snapshotDir(piHome)
+  const report = comparePiHome(before, after, piHome)
   assert.equal(
     report.ok,
     true,
-    `本应用绝不允许写用户自己的 Pi 目录：\n  ${report.violations.join('\n  ')}`
+    `本应用绝不允许写用户自己的 Pi 目录：\n  ${report.violations.join('\n  ')}\n` +
+      '（若你同时在用 pi CLI，请重跑一次：那次运行可能恰好落在两次快照之间，与本应用无关）'
   )
 
-  // 诊断信息（不作断言：用户自己的 Pi CLI 今天用过也可能改 mtime）
+  // 诊断信息（**不是断言**：用户自己的 Pi CLI 今天用过也会改 mtime）。
+  // 原来这里写成 `assert.ok(Array.isArray(touchedToday), …)` —— 返回的永远是数组，
+  // 恒真，但消息读起来像断言（典型的「假绿伪装成检查」）。改成一条明确的日志。
   const today = new Date()
   today.setHours(0, 0, 0, 0)
-  const touchedToday = entriesModifiedSince(snapshotDir(piHome), today.getTime())
-  assert.ok(
-    Array.isArray(touchedToday),
-    `本机 ~/.pi 条目 ${before.size} 个；其中今天被动过的 ${touchedToday.length} 个` +
+  const touchedToday = entriesModifiedSince(after, today.getTime())
+  console.log(
+    `[info] 本机 ~/.pi 条目 ${before.size} 个；其中今天被动过的 ${touchedToday.length} 个` +
       `（若有，属用户自己的 Pi CLI 行为，与本应用无关）`
   )
-  // 断言「已存在的目录不会被判成不存在」——判据必须建立在快照上，而不是 existsSync
-  if (before.size > 0) assert.equal(report.existedBefore, true)
+  // 真断言：已存在的目录不会被判成「不存在」——判据必须建立在快照上，而不是 existsSync
+  assert.equal(report.existedBefore, true, '快照非空 ⇒ existedBefore 必须为 true（判据建立在快照上）')
 })
 
 // ── G9-6 哨兵：全流程 ─────────────────────────────────────────────────

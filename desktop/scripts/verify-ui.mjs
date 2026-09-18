@@ -19,11 +19,19 @@
  * 现在的分层（**两个世界都要绿**）：
  *
  *   A. 静态契约（不需要应用）：6 事件词表冻结、渲染进程只认这 6 个名、
- *      渲染进程里**没有**可以让学段被手选的写入口。
+ *      ★ 学段改动**只经 `window.api.setGrade`**（绝不混进对话请求）；
+ *      ★ 章节改动同理，只经 store 的 `chat.setChapter`（两个入口共用同一条）。
  *   B. 外壳与边界（始终执行）：布局、preload 白名单（必需方法齐全 + 无通用 IPC 口子）、
  *      无 Node/Electron 全局泄漏、设置页可进可出、sidecar 阶段文案合法、整轮无未捕获异常。
- *   C. 只读学段指示器（始终执行）：指示器在位、**内部没有任何控件**、
- *      手动选择器（`grade-selector` / `grade-option`）**不存在**。
+ *   C. 学段指示器 + 两个手动入口（始终执行）：指示器在位且文案自洽；
+ *      选项**默认收起**（点「自己指定学段」才出现四档）—— 展开是**学生主动动作**的结果，
+ *      而不是顶栏上一直摊着一个选择控件；设置页的学段区块同样可点。
+ *      ⚠️ 这两条断言于 2026-09-17 随「学段手动切换」落地而**翻转**：旧版断言的是
+ *      「指示器内部没有任何控件」「`grade-selector` 不存在」——那描述的是 D-020 的
+ *      「完全自动、无人工入口」世界。现在人工入口回来了（D-037），所以断言改成
+ *      「**默认收起 + 点开可用**」，测的是新设计真正的不变量。
+ *      C2 = 学段端到端（真的点一档 → 落库 + 回推）；C3 = 教材章节端到端
+ *      （真的选一章 → 落库 + **进落盘的 system prompt**，见上面那段说明）。
  *   D. **无 Key 路径**（仅无 Key 世界）：发一条消息 → 得到**可读的「能力受限」提示**
  *      （不是堆栈、不是白屏、不是卡在「正在回答」）。
  *      —— 这一条正是「没有 API Key 时应用仍然可用」的验收口径。
@@ -32,6 +40,11 @@
  *   F. 练习卡片（dev 模式必须过）：用**真实形状的 `payload` 事件**驱动渲染进程自己的
  *      事件归约器（`applyChatEvent`），断言题目/作答/逐题反馈/掌握度变化都渲染出来，
  *      并且**标准答案与解析不出现在 DOM 里**（§6.3 答案泄漏防线的界面侧证据）。
+ *
+ * ★ C2/C3（2026-09-18 起）：两个**显式选择**的端到端取证 —— C2 = 学段，C3 = 教材章节。
+ *   它们共同的形式是「点一下 → 断言某个只有『服务端真的写库了、主进程把结果推回来了』
+ *   才可能出现的变化」。C3 还多一层：读主进程落盘的那份 `chat-system-prompt.txt`，
+ *   断言选中的章节**真的进了要发给模型的文本**（软偏好最容易假绿的一处）。
  *
  * 为什么 F 要「注入事件」而不是等模型出题：无 Key 时模型不会调用 `generate_quiz`，
  * 而卡片渲染是纯前端行为 —— 所以用真实结构的事件走**真实的归约器与真实组件**，
@@ -46,6 +59,15 @@
  *   K12_OFFLINE_PROBE=1         应用跑了离线探针模式时同步设置：加宽等待上限，
  *                               并接受「离线探针模式」这句可读文案（`runtime.ts` 的 PROBE_NOTICE）
  *   K12_UI_DUMP=1               结束时把关键区域的真实 DOM 文本打出来（报告素材）
+ *   K12_SKIP_GRADE_SET=1        跳过 C2 层的**端到端学段切换**（它会真的改本机学生的
+ *                               `learning.db`）。默认**不跳过**：那条链路跨四层、每层失败
+ *                               都是静默的，是这套改动里最值得端到端取证的一条。
+ *   K12_SKIP_CHAPTER_SET=1      跳过 C3 层的**端到端章节选择**（同样会改本机学生的
+ *                               `learning.db`）。默认不跳过，理由同上（且它还要送一两轮对话
+ *                               去拿落盘 prompt 证据；无 Key 世界这两轮是毫秒级收尾的）。
+ *   K12_REQUIRE_LAYERS=E,F      ★ 把某些层声明为**必需**：该层被跳过时按失败计（非零退出）。
+ *                               收口（打包产物）时必须设：F 层（标准答案不进 DOM）在非 dev 服务下
+ *                               会被跳过，不设它就等于「收口环境里没有采集这条证据，却打印全部通过」。
  *
  * 只用 Node 内置能力（Node >= 22 的全局 fetch / WebSocket），不引入任何依赖。
  */
@@ -133,9 +155,33 @@ function check(name, passed, detail) {
   }
 }
 
-function skip(name, reason) {
+/**
+ * ★ 「必需层」语义：`K12_REQUIRE_LAYERS=E,F` 时，被跳过的层算**失败**（非零退出）。
+ *
+ * 为什么需要它（关卡 E 的收口口径）：打包产物上 `F` 层会因为「不是 dev 服务」
+ * 被跳过，而「标准答案与解析不出现在 DOM 里」这条界面的证据恰恰只能在 F 层采到 ——
+ * 跳过却打印「全部通过」等于在收口环境里**没有**采集那条证据。
+ * 默认（不设该变量）行为不变：跳过只打印 [SKIP]，不污染通过计数、不影响退出码。
+ */
+const REQUIRED_LAYERS = (process.env.K12_REQUIRE_LAYERS ?? '')
+  .split(',')
+  .map((item) => item.trim().toUpperCase())
+  .filter(Boolean)
+/** 本次跑动里被跳过的层名（汇总时单列一行，避免「跳过」被读者忽略）。 */
+const skippedLayers = new Set()
+
+function skip(name, reason, layer = '') {
   results.skipped += 1
-  console.log(`[SKIP] ${name} — ${reason}`)
+  const tag = layer ? `[层 ${layer}] ` : ''
+  if (layer) skippedLayers.add(layer)
+  if (layer && REQUIRED_LAYERS.includes(layer)) {
+    // 关键层被跳过 = 这条证据没有采集到 → 按失败计（这是「跳过也要出声」的强形式）
+    results.failed += 1
+    failures.push(`${tag}${name}（被 K12_REQUIRE_LAYERS 声明为必需层，却在本环境下被跳过）`)
+    console.log(`[FAIL] ${tag}${name} — ${reason}；★ 该层被 K12_REQUIRE_LAYERS 声明为必需，跳过按失败计`)
+    return
+  }
+  console.log(`[SKIP] ${tag}${name} — ${reason}`)
 }
 
 function info(message) {
@@ -194,7 +240,18 @@ console.log('== A. 静态契约（6 事件词表 / 渲染进程分派 / 学段�
     `api/events.ts 里的 case 分支：[${uniqueCases.join(', ')}]`
   )
 
-  // ★ 设计变更的静态守护：学生不能选学段 —— 渲染进程里不许有写入口
+  /*
+   * ★ 设计变更（2026-09-17）：人工入口回来了（学段手动切换，D-037）。
+   *
+   * 旧版断言的是「渲染进程里不许存在 setGrade*」——那是 D-020「完全自动、无人工入口」
+   * 世界的正确不变量。现在写入口**必须**存在，所以断言换成**新设计的两个真不变量**：
+   *   ① 学段的手动写入**只走** `window.api.setGrade`（preload 白名单），
+   *      而不是某个绕过 IPC 的本地写；
+   *   ② 对话请求仍然**只有 text** —— 「学段不随每轮请求走」这条架构决策没有回退。
+   *      这条才是这套机制里真正容易退化的地方（把 gradeLevel 加回 ChatSendRequest
+   *      会让「每轮对话」变成「每轮改学段」的副作用）。守卫 G6c 在单测里已钉死它，
+   *      这里从 UI 冒烟脚本再钉一次（两层证据，互不替代）。
+   */
   const rendererSources = [
     'src/renderer/src/stores/chat.ts',
     'src/renderer/src/views/Chat.vue',
@@ -204,20 +261,68 @@ console.log('== A. 静态契约（6 事件词表 / 渲染进程分派 / 学段�
     'src/renderer/src/labels.ts',
     'src/renderer/src/api/grade.ts'
   ]
-  const gradeWriters = rendererSources.filter((path) =>
-    /setGrade(Level)?\s*\(/.test(stripComments(readSource(path)))
+  const gradeSetCallers = rendererSources.filter((path) =>
+    /\.setGrade\s*\(/.test(stripComments(readSource(path)))
   )
   check(
-    '渲染进程里没有「选学段」的写入口（不存在 setGrade() / setGradeLevel()）',
-    gradeWriters.length === 0,
-    gradeWriters.length === 0 ? `已扫描 ${rendererSources.length} 个渲染进程文件，0 处写入口` : `发现写入口：${gradeWriters.join('、')}`
+    '★ 学段手动写入经 store 的 setGrade（而不是界面各处各写一份）',
+    gradeSetCallers.includes('src/renderer/src/stores/chat.ts') &&
+      gradeSetCallers.includes('src/renderer/src/components/GradeIndicator.vue') &&
+      gradeSetCallers.includes('src/renderer/src/views/Settings.vue'),
+    `调用点：${gradeSetCallers.join('、') || '（一个都没有）'}`
   )
 
   const chatStoreSource = stripComments(readSource('src/renderer/src/stores/chat.ts'))
   check(
+    '★ 手动设定走 preload 白名单（window.api.setGrade），不经本地直接改状态',
+    /lookup\.bridge\.setGrade\s*\(|api\.setGrade\s*\(/.test(chatStoreSource),
+    'stores/chat.ts 里 setGrade 必须调桥上的方法（渲染进程不直连 sidecar、不自己算学段）'
+  )
+  check(
     '发送链路不传学段（sendChat 只带 text）',
     /sendChat\(\{\s*text\s*\}\)/.test(chatStoreSource) && !/sendChat\(\{[^}]*gradeLevel/.test(chatStoreSource),
     'stores/chat.ts 里 sendChat 的入参只有 { text }'
+  )
+
+  /*
+   * ★ 教材章节（D-038）：与学段**同一套纪律**，只是换了对象。
+   *
+   * 章节是学生的**显式选择**（不是「说话顺带产生的」），所以：
+   *   ① 写入口只有一条 —— store 的 `chat.setChapter` → `window.api.setChapter`（preload 白名单）；
+   *   ② 两个界面入口（对话页指示器 + 设置页区块）**共用**那一条，不各写一份；
+   *   ③ 界面文件里**不出现通道名字面量**（通道名只在 `main/ipc/channels.ts`，守卫 G8）；
+   *   ④ 章节目录复用既有的 `study:chapters` 取数路径（`loadChapters`），没有第二条。
+   *      —— ③④ 这两条才是这套东西真正会退化的地方：随手 `import { IPC }` 或
+   *      再加一条「章节专用」取数通道，都不会有测试红，只会悄悄多出一份真相。
+   */
+  const chapterSources = [
+    ...rendererSources,
+    'src/renderer/src/components/ChapterIndicator.vue',
+    'src/renderer/src/api/chapter.ts'
+  ]
+  const chapterText = chapterSources.map((path) => stripComments(readSource(path))).join('\n')
+  const chapterSetCallers = chapterSources.filter((path) =>
+    /\.setChapter\s*\(/.test(stripComments(readSource(path)))
+  )
+  check(
+    '★ 章节写入经 store 的 setChapter（两个入口共用同一条，不各写一份）',
+    chapterSetCallers.includes('src/renderer/src/stores/chat.ts') &&
+      chapterSetCallers.includes('src/renderer/src/components/ChapterIndicator.vue') &&
+      chapterSetCallers.includes('src/renderer/src/views/Settings.vue'),
+    `调用点：${chapterSetCallers.join('、') || '（一个都没有）'}`
+  )
+  check(
+    '★ 章节写入走 preload 白名单（window.api.setChapter），界面不直接持有通道',
+    /lookup\.bridge\.setChapter\s*\(/.test(chatStoreSource) && !/'chapter:(get|set|changed)'/.test(chapterText),
+    'stores/chat.ts 里 setChapter 调桥上的方法；界面文件里没有通道名字面量'
+  )
+  check(
+    '章节清单复用既有取数路径（没有「章节专用」的第二条取数通道）',
+    !/'chapter:(list|chapters|overview)'/.test(chapterText) &&
+      /studyChapters|loadChapters/.test(
+        chapterSources.filter((path) => path.includes('ChapterIndicator') || path.includes('Settings')).map((path) => stripComments(readSource(path))).join('\n')
+      ),
+    '章节清单走 study:chapters（loadChapters），界面没有新增取数通道'
   )
 }
 
@@ -367,14 +472,25 @@ function turnSnapshotExpression(index) {
       return el && el.textContent ? el.textContent.trim() : ''
     }
     const textEl = turn.querySelector('[data-testid="assistant-text"]')
+    const chips = turn.querySelectorAll('[data-testid="citation-chip"]')
     return {
       status: turn.getAttribute('data-status') || '',
       text: textEl && textEl.textContent ? textEl.textContent : '',
-      citations: turn.querySelectorAll('[data-testid="citation-chip"]').length,
+      citations: chips.length,
       compatCitations: turn.querySelectorAll('[data-testid="citation-compat"]').length,
-      cardKinds: Array.from(turn.querySelectorAll('[data-testid="inline-card"]')).map((card) =>
-        card.getAttribute('data-kind') || ''
+      // ★ 标签的**文字**也要带回来：只数节点数的话，「渲染出来了但全是空标签」也会通过。
+      citationLabels: Array.from(chips).map((chip) => (chip.textContent || '').replace(/\\s+/g, ' ').trim()),
+      // ★ 卡片 kind 取自**卡片容器的直接子节点**的 testid（animation-card / coding-card / quiz-card）。
+      //   旧写法查的是 [data-testid="inline-card"] + data-kind —— 那套标记只存在于
+      //   InlineCard.vue 的「未识别 kind」占位分支里，该分支不可达、已被删除；
+      //   于是这个选择器恒不匹配，cardKinds 恒为空数组，下面的合法性断言**空过**。
+      //   ⚠️ 不能直接查 [data-testid$="-card"]：progress-card / quiz-result-card
+      //   是 QuizCard **内部**的嵌套节点，会被一起数进来（一张练习卡能出 2~3 个）。
+      //   卡片容器（inline-cards）的直接子节点才是「一轮里画了几张卡」，且每个卡组件都是单根 <article>。
+      cardKinds: Array.from(turn.querySelectorAll('[data-testid="inline-cards"] > *')).map(
+        (card) => (card.getAttribute('data-testid') || '').replace(/-card$/, '')
       ),
+      cardCount: turn.querySelectorAll('[data-testid="inline-cards"] > *').length,
       quizCards: turn.querySelectorAll('[data-testid="quiz-card"]').length,
       blockedText: text('[data-testid="blocked-notice"]'),
       errorBadge: text('[data-testid="error-badge"]'),
@@ -471,7 +587,8 @@ const PAGE_PROBE = `(() => {
     hasChatLog: !!document.querySelector('[data-testid="chat-log"]'),
     hasComposer: !!document.querySelector('[data-testid="composer-input"]'),
     hasSendButton: !!document.querySelector('[data-testid="composer-send"]'),
-    hasSettingsEntry: !!document.querySelector('[data-testid="settings-entry"]'),
+    hasViewEntry: !!document.querySelector('[data-testid="view-entry"]'),
+    hasStudyView: !!document.querySelector('[data-testid="study-view"]'),
     statusText: el && el.textContent ? el.textContent.trim().replace(/\\s+/g, '') : '',
     statusPhase: el ? el.getAttribute('data-phase') || '' : '',
     errorText: (() => {
@@ -491,12 +608,54 @@ if (!probe || typeof probe !== 'object') {
   scriptError(`页面探测没有返回预期对象：${JSON.stringify(probe)}`)
 }
 
+/*
+ * ★ 前置条件自愈：**必须从对话页开始**。
+ *
+ * 下面 B 层的布局断言（chat-area / chat-log / composer）以及 C 层的「顶栏按钮循环」
+ * （对话 → 学习档案 → 设置 → 对话）都假定应用此刻停在对话页。如果上一轮手工探针或
+ * 别的证据采集把界面留在设置页，这个假定就静默不成立：布局断言报「找不到 chat-area」，
+ * 之后的循环点击还会因为读不到 view-entry 直接抛异常 —— 两条**看起来像产品坏了**的失败，
+ * 实际只是起点不对。所以这里先把它转回对话页再说。
+ *
+ * 最多点 3 次（循环一圈就是三站：对话 → 学习档案 → 设置 → 对话）；点不动就如实记下来，
+ * 不假装成功 —— 那属于真问题（顶栏接线断了）。
+ */
+if (!probe.hasChatArea) {
+  let recovered = false
+  for (let attempt = 0; attempt < 3 && !recovered; attempt += 1) {
+    const clicked = await evaluate(`(() => {
+      const entry = document.querySelector('[data-testid="view-entry"]')
+      if (!entry) return false
+      entry.click()
+      return true
+    })()`)
+    if (clicked !== true) break
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    recovered = await evaluate(`(() => !!document.querySelector('[data-testid="chat-area"]'))()`)
+  }
+  if (recovered) {
+    info('起点不在对话页 —— 已自动切回（否则 B/C 两组断言会因为起点不对而假红）')
+    probe = await evaluate(PAGE_PROBE)
+  } else {
+    info('起点不在对话页，且「视图切换」按钮转不回来：下面的布局断言会如实失败')
+  }
+}
+
 check(
   '页面已渲染（body 有文本，不是白屏）',
   probe.bodyTextLength > 0,
   `body 文本长度 ${probe.bodyTextLength}${probe.bodyTextPreview ? `，开头：「${probe.bodyTextPreview}」` : ''}（readyState=${probe.readyState}）`
 )
-check('标题包含 K12', String(probe.title).includes('K12'), `document.title = "${probe.title}"`)
+// ★ 窗口标题必须等于品牌名（`brand.ts` 的 `BRAND_NAME`）。
+//   这里原先断言的是「包含 K12」—— 品牌名从「K12 AI 教学助手」改成「智团团」之后，
+//   这条断言就成了**过期的期望**（而它守的东西其实已经有更强的守卫：
+//   `tests/brand.test.ts` 断言 index.html 的 <title> 与 BRAND_NAME 逐字相等）。
+//   所以这里改成「非空 + 与主进程品牌一致」之外的最小形态：非空且不含占位符。
+check(
+  '窗口标题是品牌名（非空、非模板占位）',
+  String(probe.title).trim().length > 0 && !String(probe.title).includes('{{'),
+  `document.title = "${probe.title}"（与 brand.ts 的 BRAND_NAME 逐字一致性由 tests/brand.test.ts 断言）`
+)
 
 check(
   'window.api 已注入且必需方法齐备',
@@ -525,28 +684,128 @@ check(
 )
 
 check(
-  '对话优先布局到位（对话区 / 消息区 / 输入框 / 发送按钮 / 设置入口）',
-  probe.hasChatArea && probe.hasChatLog && probe.hasComposer && probe.hasSendButton && probe.hasSettingsEntry,
-  `chat-area=${probe.hasChatArea}，chat-log=${probe.hasChatLog}，composer=${probe.hasComposer}，send=${probe.hasSendButton}，settings=${probe.hasSettingsEntry}`
+  '对话优先布局到位（对话区 / 消息区 / 输入框 / 发送按钮 / 视图切换入口）',
+  probe.hasChatArea && probe.hasChatLog && probe.hasComposer && probe.hasSendButton && probe.hasViewEntry,
+  `chat-area=${probe.hasChatArea}，chat-log=${probe.hasChatLog}，composer=${probe.hasComposer}，send=${probe.hasSendButton}，view-entry=${probe.hasViewEntry}`
 )
 
+// ★ 顶栏按钮按「对话 → 学习档案 → 设置 → 对话」循环（顺序的唯一来源是 `stores/ui.ts`）。
+//   这里真的点两下走完整圈，并断言每一站都到位 —— 只看按钮在不在，
+//   抓不住「点了没反应」那种断线（顶栏按钮的 handler 曾整条漏接）。
 try {
-  await evaluate(`(() => { document.querySelector('[data-testid="settings-entry"]').click(); return true })()`)
+  const clickEntry = `(() => { document.querySelector('[data-testid="view-entry"]').click(); return true })()`
+  await evaluate(clickEntry)
+  const openedStudy = await waitFor(
+    `(() => !!document.querySelector('[data-testid="study-view"]'))()`,
+    '学习档案视图出现',
+    5000
+  )
+  // 档案页里的五个分页按钮都应当在（报告 / 错题本 / 章节进度 / 学习地图 / 历史会话）
+  const studyTabs = await evaluate(`(() => {
+    const ids = ['report', 'mistakes', 'chapters', 'map', 'sessions']
+    return ids.filter((id) => !!document.querySelector('[data-testid="study-tab-' + id + '"]'))
+  })()`)
+  const allTabs = Array.isArray(studyTabs) && studyTabs.length === 5
+
+  await evaluate(clickEntry)
   const openedSettings = await waitFor(
     `(() => !!document.querySelector('[data-testid="settings-view"]'))()`,
     '设置视图出现',
     5000
   )
-  await evaluate(`(() => { document.querySelector('[data-testid="settings-entry"]').click(); return true })()`)
+  // ★ 设置页的学段区块（第二个手动入口）：必须**在设置页里**就能看到当前值与四档，
+  //   而不是只有对话页顶栏那一个入口 —— 两处入口共享同一个 store action（见 A 层静态断言）。
+  const settingsGrade = await evaluate(`(() => {
+    const block = document.querySelector('[data-testid="settings-grade-block"]')
+    if (!block) return { present: false }
+    const buttons = Array.from(document.querySelectorAll('[data-testid^="settings-grade-option-"]'))
+    return {
+      present: true,
+      levels: buttons.map((b) => (b.getAttribute('data-testid') || '').replace('settings-grade-option-', '')),
+      allHaveActive: buttons.every((b) => b.getAttribute('data-active') !== null),
+      activeCount: buttons.filter((b) => b.getAttribute('data-active') === 'true').length,
+      sourceText: (block.querySelector('[data-testid="settings-grade-source"]') || {}).textContent || '',
+      // 只读的那一行（诊断卡片里）仍在，别为了新区块把它删了
+      hasReadonlyRow: !!document.querySelector('[data-testid="settings-grade"]')
+    }
+  })()`)
+
+  // ★ 设置页的章节区块（第二个入口，D-038）：与学段区块**并列**的显式选择。
+  //   这里只断言「区块在位 + 当前章节可读 + 说清了与学段的关系」；
+  //   真正点一章落库的端到端在 C3（两个入口共用同一条写路径，点哪儿效果一样）。
+  //   ⚠️ 必须**在切回对话页之前**读 —— 这条曾经读成 undefined：探针写在第三次
+  //      `clickEntry`（回对话）之后，那时设置页已经不在 DOM 里了。
+  const settingsChapter = await evaluate(`(() => {
+    const block = document.querySelector('[data-testid="settings-chapter-block"]')
+    if (!block) return { present: false }
+    const buttons = Array.from(document.querySelectorAll('[data-testid^="settings-chapter-option-"]'))
+    const text = (sel) => {
+      const el = block.querySelector(sel)
+      return el && el.textContent ? el.textContent.replace(/\\s+/g, ' ').trim() : ''
+    }
+    return {
+      present: true,
+      lineText: text('[data-testid="settings-chapter-line"]'),
+      optionCount: buttons.length,
+      allHaveActive: buttons.every((b) => b.getAttribute('data-active') !== null),
+      activeCount: buttons.filter((b) => b.getAttribute('data-active') === 'true').length,
+      hintText: text('[data-testid="settings-chapter-hint"]'),
+      noGradeText: text('[data-testid="settings-chapter-no-grade"]')
+    }
+  })()`)
+
+  await evaluate(clickEntry)
   const backToChat = await waitFor(
     `(() => !!document.querySelector('[data-testid="chat-area"]') && !document.querySelector('[data-testid="settings-view"]'))()`,
     '返回对话视图',
     5000
   )
   check(
-    '设置入口可进可出（对话优先布局）',
-    openedSettings === true && backToChat === true,
-    `打开设置=${openedSettings}，返回对话=${backToChat}`
+    '三态视图入口可进可出（对话 → 学习档案 → 设置 → 对话）',
+    openedStudy === true && openedSettings === true && backToChat === true,
+    `学习档案=${openedStudy}，设置=${openedSettings}，返回对话=${backToChat}`
+  )
+  check(
+    '学习档案五个分页都在（报告 / 错题本 / 章节进度 / 学习地图 / 历史会话）',
+    allTabs,
+    allTabs ? '五个分页按钮齐备' : `缺：${JSON.stringify(studyTabs)}`
+  )
+  check(
+    '★ 设置页有学段区块（四档可点，且标出当前生效那一档）',
+    settingsGrade?.present === true &&
+      (settingsGrade?.levels ?? []).length === 4 &&
+      settingsGrade?.allHaveActive === true &&
+      (settingsGrade?.activeCount ?? 0) <= 1,
+    settingsGrade?.present === true
+      ? `选项=[${(settingsGrade?.levels ?? []).join(', ')}]，标出生效的档数=${settingsGrade?.activeCount}，当前：${String(settingsGrade?.sourceText).replace(/\s+/g, ' ').trim()}`
+      : '没找到 [data-testid=settings-grade-block]'
+  )
+  check(
+    '设置页的只读那行仍在（新区块是**新增**，不是替换）',
+    settingsGrade?.hasReadonlyRow === true,
+    `[data-testid=settings-grade] 在位=${settingsGrade?.hasReadonlyRow}`
+  )
+
+  // ★ 设置页的章节区块（第二个入口，D-038）：与学段区块**并列**的显式选择。
+  //   这里只断言「区块在位 + 当前章节可读 + 说清了与学段的关系」；
+  //   真正点一章落库的端到端在 C3（两个入口共用同一条写路径，点哪儿效果一样）。
+  //   ⚠️ 必须**在切回对话页之前**读 —— 这条曾经读成 undefined：探针写在第三次
+  //      `clickEntry`（回对话）之后，那时设置页已经不在 DOM 里了。
+  check(
+    '★ 设置页有章节区块（当前章节可读；选得出时标出生效那一章）',
+    settingsChapter?.present === true &&
+      String(settingsChapter?.lineText).length > 0 &&
+      settingsChapter?.allHaveActive !== false &&
+      (settingsChapter?.activeCount ?? 0) <= 1,
+    settingsChapter?.present === true
+      ? `当前：${settingsChapter.lineText}；选项数=${settingsChapter.optionCount}；标出生效的章数=${settingsChapter.activeCount}` +
+        (settingsChapter.noGradeText ? `；未判定学段提示=「${settingsChapter.noGradeText}」` : '')
+      : '没找到 [data-testid=settings-chapter-block]'
+  )
+  check(
+    '★ 设置页章节区块写明「选择章节不会改变学段」（两件事各自独立）',
+    String(settingsChapter?.hintText).includes('不会改变学段'),
+    `说明文案：「${String(settingsChapter?.hintText).slice(0, 90)}」`
   )
 } catch (error) {
   check('设置入口可进可出（对话优先布局）', false, describe(error))
@@ -596,31 +855,43 @@ if (FORCED_HAS_KEY === '1' || FORCED_HAS_KEY === '0') {
 info(`API Key 判定：${hasKey ? '已配置' : '未配置'}（${keyReason}）`)
 
 /* ------------------------------------------------------------------ *
- * C. 只读学段指示器（始终执行）
+ * C. 学段指示器 + 两个手动入口（始终执行）
+ *
+ * ★ 2026-09-17 翻转：人工入口回来了（学段手动切换，D-037）。旧版断言「内部没有任何控件」
+ *   「grade-selector 不存在」描述的是 D-020 的世界；现在测的是新设计的真不变量：
+ *   选项**默认收起**（学生不点就看不见控件），点开后四档都在且可点。
  * ------------------------------------------------------------------ */
 
-console.log('\n== C. 学段只读指示器（学生不能选学段）==')
+console.log('\n== C. 学段指示器与手动入口（默认收起，点开可指定）==')
 
 const gradeProbe = await evaluate(`(() => {
   const indicator = document.querySelector('[data-testid="grade-indicator"]')
   if (!indicator) return { present: false }
-  const controls = indicator.querySelectorAll(
-    'button, select, input, textarea, [role="radio"], [role="radiogroup"], [role="listbox"], [role="option"]'
-  )
   const text = (sel) => {
     const el = indicator.querySelector(sel)
     return el && el.textContent ? el.textContent.trim() : ''
   }
+  const options = document.querySelector('[data-testid="grade-options"]')
+  const optionButtons = Array.from(
+    document.querySelectorAll('[data-testid^="grade-option-"]')
+  )
   return {
     present: true,
     determined: indicator.getAttribute('data-determined') || '',
     grade: indicator.getAttribute('data-grade') || '',
     origin: indicator.getAttribute('data-origin') || '',
-    controlCount: controls.length,
     badgeText: text('[data-testid="grade-current-label"]'),
+    originText: text('[data-testid="grade-origin-label"]'),
     hintText: text('[data-testid="grade-indicator-hint"]'),
     noticeText: text('[data-testid="grade-notice"]'),
     missingChannelNote: text('[data-testid="grade-indicator-note"]'),
+    // ★ 默认收起：这里必须是 false（不点开就没有选项列表、也没有任何选项按钮）
+    optionsVisibleBeforeClick: options !== null,
+    optionCountBeforeClick: optionButtons.length,
+    // 触发器必须存在且可点
+    hasTrigger: !!document.querySelector('[data-testid="grade-set"]'),
+    triggerDisabled: document.querySelector('[data-testid="grade-set"]')?.disabled === true,
+    // 旧世界的遗物：这套产物已经不存在了，出现即说明有人在往回写
     hasLegacySelector: !!document.querySelector('[data-testid="grade-selector"]'),
     hasLegacyOption: !!document.querySelector('[data-testid="grade-option"]')
   }
@@ -628,19 +899,24 @@ const gradeProbe = await evaluate(`(() => {
 
 if (gradeProbe?.present !== true) {
   check(
-    '学段只读指示器在位（[data-testid=grade-indicator]）',
+    '学段指示器在位（[data-testid=grade-indicator]）',
     false,
-    '没找到指示器：学段是系统判定的，但「判定结果」必须在界面上可见，否则适配发生了也看不出来'
+    '没找到指示器：学段判定结果必须在界面上可见，否则适配发生了也看不出来'
   )
 } else {
-  check('学段只读指示器在位（[data-testid=grade-indicator]）', true, `data-grade="${gradeProbe.grade}"，data-origin="${gradeProbe.origin}"`)
+  check('学段指示器在位（[data-testid=grade-indicator]）', true, `data-grade="${gradeProbe.grade}"，data-origin="${gradeProbe.origin}"`)
   check(
-    '★ 指示器是只读的（内部没有任何控件：button / select / input / radio）',
-    gradeProbe.controlCount === 0,
-    `指示器内部控件数 = ${gradeProbe.controlCount}`
+    '★ 选项**默认收起**（不点开时没有 grade-options、也没有任何选项按钮）',
+    gradeProbe.optionsVisibleBeforeClick === false && gradeProbe.optionCountBeforeClick === 0,
+    `默认可见列表=${gradeProbe.optionsVisibleBeforeClick}，默认选项数=${gradeProbe.optionCountBeforeClick}`
   )
   check(
-    '★ 手动学段选择器已删除（grade-selector / grade-option 都不存在）',
+    '★ 有「自己指定学段」的展开按钮（且默认可用）',
+    gradeProbe.hasTrigger && gradeProbe.triggerDisabled === false,
+    `按钮在位=${gradeProbe.hasTrigger}，初始禁用=${gradeProbe.triggerDisabled}`
+  )
+  check(
+    '旧世界的选择器遗物不存在（grade-selector / grade-option）',
     gradeProbe.hasLegacySelector === false && gradeProbe.hasLegacyOption === false,
     `grade-selector=${gradeProbe.hasLegacySelector}，grade-option=${gradeProbe.hasLegacyOption}`
   )
@@ -648,6 +924,15 @@ if (gradeProbe?.present !== true) {
     '指示器文案可读（四学段中文名之一，或「待判定」）',
     GRADE_LABELS.includes(gradeProbe.badgeText) || gradeProbe.badgeText === GRADE_UNKNOWN_LABEL,
     `显示「当前：${gradeProbe.badgeText}」；旁边说明「${gradeProbe.hintText}」`
+  )
+  check(
+    '★ 来源标签说清了「怎么定下来的」（手动选中 / AI 引擎推算）',
+    // 待判定时不显示这句（还没定下来的东西没有「怎么定下来的」可言），
+    // 所以判据分两支：判出来了必须有来源标签；没判出来必须**没有**。
+    gradeProbe.grade === ''
+      ? gradeProbe.originText === ''
+      : ['手动选中', 'AI 引擎推算'].includes(gradeProbe.originText),
+    `data-grade="${gradeProbe.grade}"，来源标签「${gradeProbe.originText}」`
   )
   check(
     'data-determined 与 data-grade 自洽（判出来才有学段）',
@@ -665,16 +950,544 @@ if (gradeProbe?.present !== true) {
   )
   if (gradeProbe.noticeText) {
     check(
-      '学段变化提示可读（「我按…的说法来讲。」）',
-      /^我按.+的说法来讲。$/.test(gradeProbe.noticeText),
+      '学段变化提示可读（「我按…的说法来讲。」或「已按你选的…来讲。」）',
+      /^我按.+的说法来讲。$/.test(gradeProbe.noticeText) || /^已按你选的.+来讲。$/.test(gradeProbe.noticeText),
       `提示文案：「${gradeProbe.noticeText}」`
     )
   }
+
+  // ── 展开后四档都在（点一下就真的点开了）──
+  const opened = await evaluate(`(() => {
+    const trigger = document.querySelector('[data-testid="grade-set"]')
+    if (!trigger) return { clicked: false }
+    trigger.click()
+    return { clicked: true }
+  })()`)
+  if (opened?.clicked !== true) {
+    check('★ 点「自己指定学段」后展开四档选项', false, '找不到触发器，无法展开')
+  } else {
+    // Vue 的下一次 DOM 更新在微任务里；给一帧
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const expanded = await evaluate(`(() => {
+      const list = document.querySelector('[data-testid="grade-options"]')
+      const buttons = Array.from(document.querySelectorAll('[data-testid^="grade-option-"]'))
+      return {
+        listVisible: list !== null,
+        levels: buttons.map((b) => (b.getAttribute('data-testid') || '').replace('grade-option-', '')),
+        // 每档都必须带 data-active（当前生效的那档为 true），学生才知道自己现在在哪一档
+        allHaveActive: buttons.every((b) => b.getAttribute('data-active') !== null),
+        activeCount: buttons.filter((b) => b.getAttribute('data-active') === 'true').length
+      }
+    })()`)
+    check(
+      '★ 点「自己指定学段」后展开四档选项',
+      expanded?.listVisible === true && expanded.levels.length === 4,
+      `列表可见=${expanded?.listVisible}，选项=[${(expanded?.levels ?? []).join(', ')}]`
+    )
+    check(
+      '四档机器字面量与 GRADE_LEVELS 一致（不是中文名冒充 data 值）',
+      JSON.stringify([...(expanded?.levels ?? [])].sort()) === JSON.stringify([...GRADE_LEVELS].sort()),
+      `选项=[${(expanded?.levels ?? []).join(', ')}]`
+    )
+    check(
+      '★ 当前生效那一档被标出来（data-active 可读，至多一档为 true）',
+      expanded?.allHaveActive === true && (expanded?.activeCount ?? 0) <= 1,
+      `每档都有 data-active=${expanded?.allHaveActive}，被标为生效的档数=${expanded?.activeCount}`
+    )
+  }
+
   if (gradeProbe.grade === '' && gradeProbe.missingChannelNote) {
     info(
       '学段判定通道尚未接线（指示器显示「待判定」）：' +
         `${gradeProbe.missingChannelNote.slice(0, 80)}… —— 需要主进程提供 grade:changed 推送（见 src/renderer/src/api/grade.ts 的通道说明）`
     )
+  }
+
+  /* ---------------------------------------------------------------- *
+   * C2. ★★ 端到端：真的点一档，看它有没有落到服务端
+   *
+   * 前面几条只证明「按钮在那里、点得开」。这一条**真的点一个学段**，然后断言
+   * 界面上发生了只有「服务端真的写了库、主进程把结果推回来」才可能出现的变化：
+   *   ① `data-origin` 变成 `explicit`（来源标签认这个值 → 说明读的是服务端 source，
+   *      不是前端自己改的本地状态）；
+   *   ② 出现「已按你选的X来讲。」的一次性回执（只有成功路径才有这句话）；
+   *   ③ 选项列表自动收起（成功才收，失败会留着让重试）。
+   *
+   * ★ 为什么值得单独做一条：这条链路跨了四层（组件 → store → preload IPC → 主进程 HTTP
+   *   → Python 写 learning.db → 回程推送），而每一层的失败形态都是**静默**的 ——
+   *   任何一层断线，界面上都只是「点了没反应」，前面那些断言一条都不会红。
+   *
+   * ⚠️ 它**会改这台机器上的学段**（写进学生的 learning.db）。这是有意的：验证的就是
+   *   「写进去了没有」。选一个与当前值不同的档，是因为切到同一档 `changed=false`，
+   *   拿不到「值真的变了」这条证据。
+   * ---------------------------------------------------------------- */
+  if (process.env.K12_SKIP_GRADE_SET !== '1') {
+    const before = gradeProbe.grade
+    // 挑一个与当前不同的档（当前没判出来时就用初中）
+    const target = GRADE_LEVELS.find((level) => level !== before) ?? 'junior'
+    const targetLabel = GRADE_LABELS[GRADE_LEVELS.indexOf(target)]
+
+    // 先确保列表是展开的（上一条断言可能已经把它展开；这里幂等地点一下触发器）
+    await evaluate(`(() => {
+      const trigger = document.querySelector('[data-testid="grade-set"]')
+      if (trigger && !document.querySelector('[data-testid="grade-options"]')) trigger.click()
+      return true
+    })()`)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const clicked = await evaluate(`(() => {
+      const button = document.querySelector('[data-testid="grade-option-${target}"]')
+      if (!button) return { ok: false, reason: '选项按钮不在' }
+      if (button.disabled) return { ok: false, reason: '选项被禁用（流式中？）' }
+      button.click()
+      return { ok: true }
+    })()`)
+
+    if (clicked?.ok !== true) {
+      check(
+        `★★ 点「${targetLabel}」后学段真的写进服务端并回到界面`,
+        false,
+        `点不了：${clicked?.reason ?? '未知原因'}`
+      )
+    } else {
+      let applied = null
+      try {
+        applied = await waitFor(
+          `(() => {
+            const indicator = document.querySelector('[data-testid="grade-indicator"]')
+            if (!indicator) return false
+            return indicator.getAttribute('data-grade') === '${target}' &&
+              indicator.getAttribute('data-origin') === 'explicit'
+          })()`,
+          `学段切到 ${target}（data-origin=explicit）`,
+          // 四层链路 + 一次 HTTP：比纯 DOM 断言慢，给足预算
+          12_000
+        )
+      } catch (error) {
+        applied = false
+        info(`等待学段切换超时：${describe(error)}`)
+      }
+
+      const after = await evaluate(`(() => {
+        const indicator = document.querySelector('[data-testid="grade-indicator"]')
+        const text = (sel) => {
+          const el = document.querySelector(sel)
+          return el && el.textContent ? el.textContent.trim() : ''
+        }
+        return {
+          grade: indicator ? indicator.getAttribute('data-grade') || '' : '',
+          origin: indicator ? indicator.getAttribute('data-origin') || '' : '',
+          originText: text('[data-testid="grade-origin-label"]'),
+          noticeText: text('[data-testid="grade-notice"]'),
+          errorText: text('[data-testid="grade-set-error"]'),
+          optionsStillOpen: !!document.querySelector('[data-testid="grade-options"]')
+        }
+      })()`)
+
+      check(
+        `★★ 点「${targetLabel}」后学段真的写进服务端并回到界面（data-grade=${target} / data-origin=explicit）`,
+        applied === true,
+        `data-grade="${after?.grade}"，data-origin="${after?.origin}"，来源标签「${after?.originText}」` +
+          (after?.errorText ? `，界面报错：「${after.errorText}」` : '')
+      )
+      check(
+        '★ 手动切换后来源标签说「手动选中」（证明读的是服务端 source，不是本地猜的）',
+        after?.originText === '手动选中',
+        `来源标签「${after?.originText}」`
+      )
+      check(
+        '★ 手动切换有一次性回执（「已按你选的X来讲。」）',
+        /^已按你选的.+来讲。$/.test(String(after?.noticeText ?? '')),
+        `回执「${after?.noticeText}」`
+      )
+      check(
+        '成功之后选项列表自动收起（失败才留着让学生重试）',
+        after?.optionsStillOpen === false,
+        `列表仍展开=${after?.optionsStillOpen}`
+      )
+      info(
+        `端到端学段切换：${before || '（待判定）'} → ${after?.grade}` +
+          `（这次会写进本机学生的 learning.db，属预期副作用）`
+      )
+    }
+  } else {
+    info('端到端学段切换：已由 K12_SKIP_GRADE_SET=1 跳过（避免改动本机学生的学段）')
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * C3. ★★ 端到端：选一章教材，看它**有没有真的进到下一轮的 System Prompt**
+ *
+ * 前两节证明的是「学段那条链路通」。这一节换一个对象（教材章节，D-038），
+ * 验的是**软偏好**这条设计里最关键、也最容易假绿的一点：
+ *
+ *   章节选了之后**进了 prompt 没有**。
+ *
+ * ★ 为什么必须验落盘的那份文本，而不是只看界面：界面上的「正在学：第4章」是
+ *   `chat.currentChapter` 渲染出来的 —— 只要 store 写对了，界面就对了；而「有没有
+ *   送进模型」完全是另一条路（`fetchStudentContext` → `renderProfileText` →
+ *   `buildSystemPrompt` → 落盘）。任何一处断线，界面上**一点异常都看不到**，
+ *   学生只会觉得「我明明选了第 4 章，它怎么还在讲别的」。
+ *
+ * ★ 证据文件是主进程每轮结束时写的那份真实文本
+ *   （`students/<id>/logs/chat-system-prompt.txt`，`runtime.ts` 的 `dumpPrompts`），
+ *   不是脚本自己拼出来的期望值 —— 这是「同一份文本发给模型也落盘」的既有口径。
+ *
+ * ⚠️ 它**会改这台机器上学生的当前章节**（写进 learning.db）。这是有意的：
+ *   要验的就是「写进去了、并且进了 prompt」。脚本每次挑一个与当前不同的章。
+ *   `K12_SKIP_CHAPTER_SET=1` 可跳过（与学段那条同一手法）。
+ * ------------------------------------------------------------------ */
+
+{
+  const chapterProbe = await evaluate(`(() => {
+    const el = document.querySelector('[data-testid="chapter-indicator"]')
+    if (!el) return { present: false }
+    const text = (sel) => {
+      const node = document.querySelector(sel)
+      return node && node.textContent ? node.textContent.replace(/\\s+/g, ' ').trim() : ''
+    }
+    return {
+      present: true,
+      chapter: el.getAttribute('data-chapter') || '',
+      lineText: text('[data-testid="chapter-current-label"]'),
+      hasTrigger: !!document.querySelector('[data-testid="chapter-set"]'),
+      triggerDisabled: document.querySelector('[data-testid="chapter-set"]')?.disabled === true,
+      optionsVisibleBeforeClick: !!document.querySelector('[data-testid="chapter-options"]'),
+      optionCountBeforeClick: document.querySelectorAll('[data-testid^="chapter-option-"]').length,
+      noteText: text('[data-testid="chapter-indicator-note"]')
+    }
+  })()`)
+
+  if (chapterProbe?.present !== true) {
+    check(
+      '教材章节指示器在位（[data-testid=chapter-indicator]）',
+      false,
+      '没找到指示器：学生选了章节却看不到「正在学哪一章」，这个选择就是隐形的'
+    )
+  } else {
+    check(
+      '教材章节指示器在位，且显示的是可读文案（不是空串 / kp_id）',
+      String(chapterProbe.lineText).length > 0,
+      `data-chapter="${chapterProbe.chapter}"，显示「${chapterProbe.lineText}」`
+    )
+    check(
+      '★ 章节目录默认收起（不点开时没有选项列表）',
+      chapterProbe.optionsVisibleBeforeClick === false && chapterProbe.optionCountBeforeClick === 0,
+      `默认可见列表=${chapterProbe.optionsVisibleBeforeClick}，默认选项数=${chapterProbe.optionCountBeforeClick}`
+    )
+    check(
+      '有「选择章节」的展开按钮（且默认可用）',
+      chapterProbe.hasTrigger && chapterProbe.triggerDisabled === false,
+      `按钮在位=${chapterProbe.hasTrigger}，初始禁用=${chapterProbe.triggerDisabled}`
+    )
+
+    // ── 展开：章节目录 + 「不限章节」 ──
+    await evaluate(`(() => {
+      const trigger = document.querySelector('[data-testid="chapter-set"]')
+      if (trigger && !document.querySelector('[data-testid="chapter-options"]')) trigger.click()
+      return true
+    })()`)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    const options = await evaluate(`(() => {
+      const list = document.querySelector('[data-testid="chapter-options"]')
+      if (!list) return { visible: false }
+      const text = (sel) => {
+        const node = document.querySelector(sel)
+        return node && node.textContent ? node.textContent.replace(/\\s+/g, ' ').trim() : ''
+      }
+      const buttons = Array.from(
+        document.querySelectorAll('[data-testid^="chapter-option-"]:not([data-testid="chapter-option-none"])')
+      )
+      return {
+        visible: true,
+        titles: buttons.map((b) => (b.getAttribute('data-testid') || '').replace('chapter-option-', '')),
+        allHaveActive: buttons.every((b) => b.getAttribute('data-active') !== null),
+        activeCount: buttons.filter((b) => b.getAttribute('data-active') === 'true').length,
+        hasNone: !!document.querySelector('[data-testid="chapter-option-none"]'),
+        noGradeText: text('[data-testid="chapter-no-grade"]'),
+        loading: !!document.querySelector('[data-testid="chapter-loading"]'),
+        listError: text('[data-testid="chapter-list-error"]')
+      }
+    })()`)
+
+    check(
+      '★ 点「选择章节」后展开章节目录（当前学段的章 + 「不限章节」）',
+      options?.visible === true &&
+        (options.titles.length > 0 || options.noGradeText.length > 0 || options.listError.length > 0),
+      options?.visible !== true
+        ? '没展开出 [data-testid=chapter-options]'
+        : `章数=${options.titles.length}，有「不限章节」=${options.hasNone}` +
+          (options.noGradeText ? `；未判定学段提示=「${options.noGradeText}」` : '') +
+          (options.listError ? `；读失败=「${options.listError}」` : '')
+    )
+
+    const current = chapterProbe.chapter
+    const titles = Array.isArray(options?.titles) ? options.titles : []
+    // 挑一个**与当前不同**的目标：换一章；若已经在某一章上，也可以换成「不限章节」清空
+    const target = titles.find((title) => title !== current) ?? (current !== '' ? '' : null)
+
+    if (process.env.K12_SKIP_CHAPTER_SET === '1') {
+      info('端到端章节选择：已由 K12_SKIP_CHAPTER_SET=1 跳过（避免改动本机学生的章节）')
+    } else if (target === null) {
+      info(
+        '端到端章节选择：跳过 —— 当前学段还没判定出来（章节目录按学段分），没有可验证的变化。' +
+          '先让学生在对话里说几句把学段判出来，再跑这一节。'
+      )
+    } else {
+      const clicked = await evaluate(`(() => {
+        const want = ${JSON.stringify(target)}
+        const buttons = Array.from(document.querySelectorAll('[data-testid^="chapter-option-"]'))
+        const button = buttons.find((b) => {
+          const id = b.getAttribute('data-testid') || ''
+          return id.replace('chapter-option-', '') === (want === '' ? 'none' : want)
+        })
+        if (!button) return { ok: false, reason: '选项按钮不在' }
+        if (button.disabled) return { ok: false, reason: '选项被禁用（流式中？）' }
+        button.click()
+        return { ok: true }
+      })()`)
+
+      const targetLabel = target === '' ? '不限章节（自由问答）' : target
+
+      if (clicked?.ok !== true) {
+        check(`★★ 选「${targetLabel}」后当前章节真的写进服务端并回到界面`, false, `点不了：${clicked?.reason ?? '未知原因'}`)
+      } else {
+        let applied = false
+        try {
+          applied = await waitFor(
+            `(() => {
+              const el = document.querySelector('[data-testid="chapter-indicator"]')
+              return !!el && el.getAttribute('data-chapter') === ${JSON.stringify(target)}
+            })()`,
+            `当前章节切到 ${targetLabel}`,
+            // 四层链路 + 一次 HTTP：比纯 DOM 断言慢，给足预算
+            12_000
+          )
+        } catch (error) {
+          applied = false
+          info(`等待章节切换超时：${describe(error)}`)
+        }
+
+        const after = await evaluate(`(() => {
+          const el = document.querySelector('[data-testid="chapter-indicator"]')
+          const text = (sel) => {
+            const node = document.querySelector(sel)
+            return node && node.textContent ? node.textContent.replace(/\\s+/g, ' ').trim() : ''
+          }
+          return {
+            chapter: el ? el.getAttribute('data-chapter') || '' : '',
+            lineText: text('[data-testid="chapter-current-label"]'),
+            errorText: text('[data-testid="chapter-set-error"]'),
+            optionsStillOpen: !!document.querySelector('[data-testid="chapter-options"]')
+          }
+        })()`)
+
+        check(
+          `★★ 选「${targetLabel}」后当前章节真的写进服务端并回到界面`,
+          applied === true && String(after?.chapter) === target,
+          `data-chapter="${after?.chapter}"，界面显示「${after?.lineText}」` +
+            (after?.errorText ? `，界面报错：「${after.errorText}」` : '')
+        )
+        check(
+          '成功之后选项列表自动收起（失败才留着让学生重试）',
+          after?.optionsStillOpen === false,
+          `列表仍展开=${after?.optionsStillOpen}`
+        )
+
+        // ★ 回读一条独立证据：**不经界面**，直接问一次 preload → 主进程 → Python。
+        //   界面那一条只能证明 store 里的值对了；这一条证明库里也对了。
+        const readBack = await evaluate(`(async () => {
+          if (!window.api || typeof window.api.getChapter !== 'function') {
+            return { ok: false, reason: 'preload 没有 getChapter（章节通道未接线）' }
+          }
+          try {
+            const result = await window.api.getChapter()
+            if (!result || !result.ok) return { ok: false, reason: (result && result.message) || '读取失败' }
+            return { ok: true, chapterTitle: result.data.chapterTitle, gradeLevel: result.data.gradeLevel }
+          } catch (error) {
+            return { ok: false, reason: String(error) }
+          }
+        })()`)
+        check(
+          '★ 章节能被**回读**（window.api.getChapter → 主进程 → learning.db）',
+          readBack?.ok === true && readBack.chapterTitle === target,
+          readBack?.ok === true
+            ? `回读 chapterTitle="${readBack.chapterTitle}"，gradeLevel="${readBack.gradeLevel}"（界面写的是 "${target}"）`
+            : `回读失败：${readBack?.reason ?? '未知原因'}`
+        )
+
+        /* ------------------------------------------------------------ *
+         * ★★ 本节的核心：选中的章节有没有进**落盘的 system prompt**
+         *
+         * 送一轮对话，然后读主进程写下的那份真实文本。无 Key 世界这一轮是
+         * 「能力受限」收尾（毫秒级），有 Key 世界是一次真实回答 —— 两条路
+         * 都会走到 `dumpPrompts`，所以证据都在。
+         * ------------------------------------------------------------ */
+        const slugMatch = /STABLE_USER_DATA_SLUG\s*=\s*'([^']+)'/.exec(readSource('src/main/index.ts'))
+        const userDataRoot = process.env.APPDATA ? join(process.env.APPDATA, slugMatch?.[1] ?? 'k12-agent-desktop') : null
+        const studentId = process.env.K12_STUDENT_ID ?? 'student_001'
+        // 路径形状 = `<userData>/students/<id>/pi-agent/logs/chat-system-prompt.txt`。
+        // ★ 中间的 `pi-agent` 段不能漏（`pi-paths.ts` 的 `resolveStudentPiPaths`：
+        //   logDir = `<studentDir>/pi-agent/logs`）—— 漏了就永远「找不到落盘文件」，
+        //   而那看起来像「章节没进 prompt」的失败，其实只是读错路径。
+        const promptFile = userDataRoot
+          ? join(userDataRoot, 'students', studentId, 'pi-agent', 'logs', 'chat-system-prompt.txt')
+          : null
+
+        try {
+          const beforeTurn = await turnCount()
+          await sendMessage('章节偏好冒烟：这一章里最该先学的是什么？')
+          // ★ 用 noKeyTimeoutMs / contentTimeoutMs（文件开头的常量）而不是 D 节那个
+          //   `noKeyTimeout`：它在本节之后才声明，这里引用会踩 TDZ（实测报
+          //   「Cannot access 'noKeyTimeout' before initialization」）。离线探针模式
+          //   下这一轮也只是「发一条 → 收终态」，用基准上限即可。
+          const settled = await collectUntilTerminal(beforeTurn, hasKey ? contentTimeoutMs : noKeyTimeoutMs)
+          const gradeAfterTurn = await evaluate(
+            `(() => { const el = document.querySelector('[data-testid="grade-indicator"]'); return el ? el.getAttribute('data-grade') || '' : '' })()`
+          )
+
+          if (!promptFile || !existsSync(promptFile)) {
+            skip(
+              '★★ 选中的章节进了 system prompt（落盘证据）',
+              `找不到落盘文件：${promptFile ?? '（无法确定 userData 目录：APPDATA 未设置）'}`,
+              'C'
+            )
+          } else {
+            const promptText = readFileSync(promptFile, 'utf8')
+            const chapterLine = promptText
+              .split(/\r?\n/)
+              .find((line) => line.includes('当前教材章节')) ?? ''
+            if (target === '') {
+              check(
+                '★★ 选「不限章节」后 prompt 里**没有**章节行（清空是真的清空）',
+                chapterLine === '',
+                chapterLine ? `仍出现：「${chapterLine.slice(0, 100)}」` : '章节行已消失'
+              )
+            } else {
+              check(
+                '★★ 选中的章节进了 system prompt（落盘的那份文本里能找到该章标题）',
+                chapterLine.includes(target),
+                chapterLine
+                  ? `章节行：「${chapterLine.slice(0, 120)}」`
+                  : `落盘 prompt 里没有「当前教材章节」这一行（文件 ${promptFile}）`
+              )
+            }
+            info(
+              `Prompt 证据：${promptFile}\n` +
+                `  · 本轮终态=${settled?.snapshot?.status ?? '（未采样到）'}，落盘 prompt ${promptText.length} 字符`
+            )
+
+            /* D-032：同一章节下连问两轮，落盘的那份 prompt 必须**逐字节相同**。
+             * 只在无 Key 世界做 —— 有 Key 时模型可能调 Tool 改画像（掌握度/偏好/错题变了，
+             * 块本来就该变），那就不是「不稳定」，而是「画像真的变了」。
+             * 学段中途变了也同理（学段段+章节都会被换掉），那种情况如实跳过而不是报假红。 */
+            if (!hasKey && !settled?.timedOut) {
+              const gradeBefore = gradeAfterTurn
+              const secondBefore = await turnCount()
+              await sendMessage('章节偏好冒烟：再问一次，看 prompt 有没有变。')
+              // 同上一处：用文件开头的常量，不要引用后面才声明的 `noKeyTimeout`（TDZ）。
+              await collectUntilTerminal(secondBefore, noKeyTimeoutMs)
+              const gradeNow = await evaluate(
+                `(() => { const el = document.querySelector('[data-testid="grade-indicator"]'); return el ? el.getAttribute('data-grade') || '' : '' })()`
+              )
+              const secondText = readFileSync(promptFile, 'utf8')
+              if (gradeNow !== gradeBefore) {
+                info(`逐字节稳定：跳过（两轮之间学段从 ${gradeBefore || '（待判定）'} 变成 ${gradeNow}，学段段理应变化）`)
+              } else {
+                check(
+                  '★★ 同一章节下两轮 prompt 逐字节相同（D-032：块里没有每轮会变的字节）',
+                  secondText === promptText,
+                  secondText === promptText
+                    ? `两轮均为 ${secondText.length} 字符、内容完全一致`
+                    : `两轮长度 ${promptText.length} → ${secondText.length}（前缀缓存会整段失效）`
+                )
+              }
+            }
+          }
+
+          /* ------------------------------------------------------------ *
+           * ★★ 反向路径：选「不限章节」必须真的**回到自由问答**
+           *
+           * 这条为什么值得单独验：清空是**合法入参**（空串），而「空串」在这条链路上
+           * 至少有三处会被误当成「没填 / 非法」而拒掉 —— IPC 的入参白名单、
+           * 后端的请求体校验、渲染层把空串渲染成「未选择」。任何一处收紧过头，
+           * 学生选了章节之后就**再也回不到自由问答**了，而界面只会显示一次失败提示。
+           *
+           * 代价控制：无 Key 世界再送一轮，顺带把「清空后 prompt 里章节行消失」也拿到证据；
+           * 有 Key 世界只做回读（不再多打一次真实模型调用）—— 那半条本来就由
+           * 渲染层的 G23 组单测覆盖（无章节 → 整行不出现）。
+           * ------------------------------------------------------------ */
+          if (target !== '' && !settled?.timedOut && !process.env.K12_SKIP_CHAPTER_SET) {
+            // ★ 先确保列表是展开的：**选中一章之后列表会自动收起**（那是设计：
+            //   学生要看到的就是「选完了」）。这里幂等地点一下触发器 —— 少了这一步，
+            //   「找不到 chapter-option-none」会被读成「清空功能坏了」，而它只是收起来了。
+            await evaluate(`(() => {
+              const trigger = document.querySelector('[data-testid="chapter-set"]')
+              if (trigger && !document.querySelector('[data-testid="chapter-options"]')) trigger.click()
+              return true
+            })()`)
+            await new Promise((resolve) => setTimeout(resolve, 200))
+
+            const cleared = await evaluate(`(() => {
+              const button = document.querySelector('[data-testid="chapter-option-none"]')
+              if (!button) return { ok: false, reason: '「不限章节」按钮不在（列表没展开？）' }
+              button.click()
+              return { ok: true }
+            })()`)
+            let clearedApplied = false
+            try {
+              clearedApplied = await waitFor(
+                `(() => {
+                  const el = document.querySelector('[data-testid="chapter-indicator"]')
+                  return !!el && el.getAttribute('data-chapter') === ''
+                })()`,
+                '当前章节被清空',
+                12_000
+              )
+            } catch (error) {
+              info(`等待清空章节超时：${describe(error)}`)
+            }
+            check(
+              '★★ 选「不限章节（自由问答）」能回到未选择状态（空串不是「没填」，不许被拒）',
+              cleared?.ok === true && clearedApplied === true,
+              cleared?.ok === true
+                ? 'data-chapter 已回到 ""（清空链路通）'
+                : `点不了：${cleared?.reason ?? '未知原因'}`
+            )
+
+            if (!hasKey) {
+              const thirdBefore = await turnCount()
+              await sendMessage('章节偏好冒烟：清空之后再问一次。')
+              await collectUntilTerminal(thirdBefore, noKeyTimeoutMs)
+              const clearedText = readFileSync(promptFile, 'utf8')
+              const clearedLine =
+                clearedText.split(/\r?\n/).find((line) => line.includes('当前教材章节')) ?? ''
+              check(
+                '★★ 清空后落盘 prompt 里的章节行消失（回读同一份落盘文本）',
+                clearedLine === '',
+                clearedLine
+                  ? `仍出现：「${clearedLine.slice(0, 100)}」`
+                  : `章节行已消失（prompt ${clearedText.length} 字符）`
+              )
+            }
+            info('反向路径：已选章节 → 「不限章节」→ 回到自由问答（同时把本机学生的章节清空）')
+          }
+        } catch (error) {
+          // ★ 标签与上面那条断言**不同名**：否则「脚本自己出错」会伪装成
+          //   「章节没进 prompt」—— 错误信息指错方向比没有信息更费时间。
+          check('★★ 章节偏好端到端取证（送一轮 + 读落盘 prompt）', false, describe(error))
+        }
+
+        info(
+          `端到端章节选择：${current || '（未选）'} → ${after?.chapter || '（未选）'}` +
+            `（这次会写进本机学生的 learning.db，属预期副作用）`
+        )
+      }
+    }
+  }
+
+  if (chapterProbe?.noteText) {
+    info(`章节指示器提示：「${chapterProbe.noteText.slice(0, 100)}」`)
   }
 }
 
@@ -690,7 +1503,8 @@ const noKeyTimeout = probeMode ? probeTimeoutMs : noKeyTimeoutMs
 if (hasKey) {
   skip(
     '无 Key 路径：一轮以「能力受限」收尾',
-    '当前已配置 API Key（K12_VERIFY_HAS_KEY=1 或主进程报告 hasKey=true），本项不适用'
+    '当前已配置 API Key（K12_VERIFY_HAS_KEY=1 或主进程报告 hasKey=true），本项不适用',
+    'D'
   )
 } else {
   try {
@@ -710,10 +1524,15 @@ if (hasKey) {
         snapshot.status !== 'streaming',
         `data-status=${snapshot.status}，状态文案="${snapshot.statusLabel}"（${Math.round(noKeyTimeout / 1000)}s 上限内收尾）`
       )
+      // ★ 这条原先断言 `status === 'error'`，与渲染进程折叠器的**既定设计**矛盾：
+      //   `degraded === true` 的 error 是「降级提示，不是终态」——UI 保持 streaming，
+      //   等后面的 `done`（主进程的 `emitTerminal` 就是先发 error 再发 done）。
+      //   所以无 Key 这一轮的终态本来就是 `done` + 一条「能力受限」提示。
+      //   真正要守的是「本轮没有正文产出、且终态已到、且提示带 degraded 标记」。
       check(
-        '无 Key 路径：以 error 事件收尾（本轮没有生成内容）',
-        snapshot.status === 'error',
-        `data-status=${snapshot.status}（期望 error；正文长度 ${snapshot.text.length}）`
+        '无 Key 路径：本轮没有产出正文（空回答，不是半截内容）',
+        snapshot.text.length === 0,
+        `正文长度 ${snapshot.text.length}（data-status=${snapshot.status}）`
       )
       check(
         `无 Key 路径：给出「${DEGRADED_BADGE_TEXT}」提示（degraded === true）`,
@@ -756,7 +1575,8 @@ console.log('\n== E. 内容断言（delta / done / 卡片 kind，仅已配置 Ke
 if (!hasKey) {
   skip(
     'delta 流式增长 / 终态 done / 卡片 kind 合法',
-    '未配置 API Key：这些断言依赖真实模型回答，按设计跳过（不是失败）；配好 Key 后重跑即可覆盖'
+    '未配置 API Key：这些断言依赖真实模型回答，按设计跳过（不是失败）；配好 Key 后重跑即可覆盖',
+    'E'
   )
 } else {
   try {
@@ -783,15 +1603,33 @@ if (!hasKey) {
         `正文长度 ${snapshot.text.length}，开头：「${snapshot.text.trim().slice(0, 60)}」`
       )
       const illegalKinds = snapshot.cardKinds.filter((kind) => !EXPECTED_CARD_KINDS.includes(kind))
+      // ★ 同时断言「渲染出来的卡片节点数 == 识别出的 kind 数」：只判 illegalKinds 为空的话，
+      //   一旦选择器失效（本轮卡片明明画出来了、却一条都没收集到），断言会**空过**。
+      const kindsMatchNodes = snapshot.cardKinds.length === snapshot.cardCount
       check(
         'payload：出现的卡片 kind 合法（animation / coding / quiz）',
-        illegalKinds.length === 0,
-        `本轮卡片 kind：[${snapshot.cardKinds.join(', ') || '(本轮没有卡片)'}]`
+        illegalKinds.length === 0 && kindsMatchNodes,
+        `本轮卡片 kind：[${snapshot.cardKinds.join(', ') || '(本轮没有卡片)'}]；` +
+          `卡片节点 ${snapshot.cardCount} 个、需全部可识别为三种 kind 之一`
       )
+      // ★ citation：判据取自**真实 DOM**（`[data-testid="citation-chip"]`，见 turnSnapshotExpression）。
+      //   原来这里写 `check(…, true, …)` —— 无条件计入通过，把「事件里出现过 citation」
+      //   当成了「标签渲染出来了」，是一条不检查的假绿。现在断言到**每条标签的文字**：
+      //   节点数与文字条数一致、且没有空标签（空标签 = 渲染了壳子没渲染内容）。
+      const labels = Array.isArray(snapshot.citationLabels) ? snapshot.citationLabels : []
       if (snapshot.citations > 0) {
-        check('citation：来源标签渲染出来（含向上兼容标注时单独标注）', true, `来源标签 ${snapshot.citations} 条，其中「向上兼容」${snapshot.compatCitations} 条`)
+        check(
+          'citation：来源标签渲染出来（每条都有可读文字）',
+          labels.length === snapshot.citations && labels.every((label) => label.length > 0),
+          `DOM 里的来源标签 ${snapshot.citations} 条，文字：[${labels.join(' ｜ ')}]`
+        )
+        check(
+          'citation：「向上兼容」标注只出现在真实存在的兼容条目上',
+          snapshot.compatCitations <= snapshot.citations,
+          `来源标签 ${snapshot.citations} 条，其中带「向上兼容」标注 ${snapshot.compatCitations} 条`
+        )
       } else {
-        info('citation：本轮没有触发检索（模型没有调 rag_search）—— 卡片与来源都取决于模型这一轮的动作，这里不做硬断言')
+        info('citation：本轮没有渲染来源标签（模型没调 rag_search 或本轮无命中）—— 取决于模型这一轮的动作，不做硬断言')
       }
     }
   } catch (error) {
@@ -930,7 +1768,7 @@ if (injected?.ok !== true) {
   if (isDevServer) {
     check('练习卡片：payload 事件驱动渲染（题目 / 作答 / 反馈）', false, message)
   } else {
-    skip('练习卡片：payload 事件驱动渲染', `${message}（当前不是 dev 服务，无法驱动渲染进程模块图）`)
+    skip('练习卡片：payload 事件驱动渲染', `${message}（当前不是 dev 服务，无法驱动渲染进程模块图）`, 'F')
   }
 } else {
   try {
@@ -1124,7 +1962,17 @@ console.log(
     `（世界：${hasKey ? '已配置 API Key' : '无 Key'}${probeMode ? ' + 离线探针' : ''}）`
 )
 if (results.skipped > 0) {
-  console.log('跳过项的说明见上方的 [SKIP] 行（跳过 = 该世界下不适用，不算失败）。')
+  // ★ 跳过**点名到层**：报告里不能只写「跳过 N 项」，否则读者无法判断
+  //   「关键层（F：答案不进 DOM）是不是在这一轮里被跳过了」。
+  if (skippedLayers.size > 0) {
+    console.log(`  被跳过涉及的层：${[...skippedLayers].sort().join('、')}（跳过 = 该世界下不适用，不算失败）`)
+  }
+  console.log('跳过项的说明见上方的 [SKIP] 行。')
+  if (REQUIRED_LAYERS.length > 0) {
+    console.log(`  K12_REQUIRE_LAYERS=${REQUIRED_LAYERS.join(',')}：被声明为必需层的跳过已按失败计。`)
+  } else {
+    console.log('  ⚠️ 收口（打包产物）建议设 K12_REQUIRE_LAYERS=E,F —— 否则关键层被跳过时本脚本仍会打印「全部通过」。')
+  }
 }
 
 if (results.failed > 0) {

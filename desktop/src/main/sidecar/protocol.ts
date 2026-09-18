@@ -16,9 +16,12 @@
 import { join } from 'node:path'
 
 /**
- * 开发态常用端口（执行文档 §7.5：手工 `uv run uvicorn app.main:app --port 8756`）。
+ * 开发态常用端口（执行文档 §7.5 / AGENTS.md §7：手工 `uv run uvicorn app.main:app --port 8756`）。
  * ★ 它**不再用于握手**：Electron 拉起的 sidecar 一律 `--port 0`（系统分配），
- *   端口真实值从 stdout 握手取。这个常量只留给「手工起后端」的命令与文档引用。
+ *   端口真实值从 stdout 握手取。
+ * ★ **仅文档引用**：`desktop/src/**`、`tests/**`、`scripts/**` 与渲染进程都没有 import 它
+ *   （grep 零命中），保留它是为了给「手工起后端」这条命令与文档一个具名锚点 ——
+ *   免得有人看到散落的字面量 8756 就以为应用会连固定端口。**不要拿它去连 sidecar。**
  */
 export const DEV_PORT = 8756
 
@@ -61,7 +64,12 @@ export interface SidecarState {
    */
   pid: number | null
   mode: SidecarMode
-  /** 崩溃重启次数（票 02 使用）。 */
+  /**
+   * 崩溃重启次数（票 02 使用）。
+   * ★ 语义是「**自上次成功就绪以来**重启过几次」：`/health` 就绪时归零（见 `manager.ts` 的
+   *   `start()`），所以「崩溃 → 自愈成功 → 再崩溃」还能再自愈一次；但**一个崩溃周期内**
+   *   仍然最多重启 {@link MAX_RESTARTS} 次（这条上限语义不变）。
+   */
   restarts: number
   /** 最近一次可读错误（直接展示给学生/开发者，不要塞堆栈）。 */
   lastError: string | null

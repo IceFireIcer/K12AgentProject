@@ -224,6 +224,43 @@ class TestRedactHeadersRoute(unittest.TestCase):
         self.assertEqual(payload["headers"], {})
         self.assertEqual(payload["sensitiveKeys"], [])
 
+    def test_too_many_headers_is_rejected(self) -> None:
+        """``max_length=MAX_HEADERS`` 作用在 dict 上 → 限制的是**条目数**。"""
+        from app.safety.route import MAX_HEADERS
+
+        headers = {f"h{index}": "v" for index in range(MAX_HEADERS + 1)}
+        response = self.client.post("/api/safety/redact-headers", json={"headers": headers})
+        self.assertEqual(response.status_code, 422)
+
+    def test_single_header_length_limit_is_enforced(self) -> None:
+        """★★ 回归用例（审计发现，修复前**必红**）：``MAX_HEADER_CHARS`` 此前从未生效。
+
+        缺陷形态：常量只出现在定义与 ``__all__`` 里，没有任何地方用它 ——
+        而 ``headers`` 上的 ``max_length`` 限的是**条目数**，不是单头长度。
+        于是「一个 10MB 的请求头」会原样进脱敏结果与日志/审计。
+        现在由 ``RedactHeadersRequest`` 的 model_validator 逐值强制（超限 422 + 可读中文）。
+        """
+        from app.safety.route import MAX_HEADER_CHARS
+
+        response = self.client.post(
+            "/api/safety/redact-headers",
+            json={"headers": {"X-Long": "a" * (MAX_HEADER_CHARS + 1)}},
+        )
+        self.assertEqual(response.status_code, 422, "超长请求头必须被拒")
+        self.assertIn("请求头过长", response.text)
+        self.assertIn("X-Long", response.text, "拒因里要点名是哪个头")
+
+    def test_header_at_the_limit_still_passes(self) -> None:
+        """★ 边界：正好在上限上的头必须放行（限制不许被写成「大于等于」）。"""
+        from app.safety.route import MAX_HEADER_CHARS
+
+        response = self.client.post(
+            "/api/safety/redact-headers",
+            json={"headers": {"X-Long": "a" * MAX_HEADER_CHARS, "X-Short": "ok"}},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["headers"]["X-Short"], "ok")
+
 # --------------------------------------------------------------------------- #
 # 4. 路由元数据（不进 OpenAPI，理由见 route.py 文件头）
 # --------------------------------------------------------------------------- #

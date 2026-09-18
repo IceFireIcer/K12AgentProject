@@ -48,8 +48,14 @@ const mountIframe = ref<boolean>(shouldMountIframe(view.html) && (view.resourceU
 
 /** 是否已进入降级视图（文字 + 静态图）。 */
 const degraded = ref<boolean>(false)
-/** 降级的可读原因（**只在调试面板显示**，不摆给学生看 —— 学生只该看到「能动/不能动」）。 */
+/**
+ * 降级的可读原因（**只进 `data-*` 属性**，不摆给学生看 —— 学生只该看到「能动/不能动」）。
+ * 例：「沙箱在 5 秒内没有就绪（payloadId=xxxxx）」；这类内部细节（含 payloadId）留在这里，
+ * 由 CDP 脚本（`scripts/verify-ui.mjs` 一类）读 `[data-degrade-reason]` 做断言。
+ */
 const degradeReason = ref<string>('')
+/** 降级气泡上给学生看的**固定中文**（不随原因变化，也不含任何内部标识）。 */
+const DEGRADED_NOTICE_TEXT = '动画没能加载，已用文字讲解'
 /** 沙箱阶段（`loading` 时显示加载提示，而不是一块空白）。 */
 const phase = ref<'loading' | 'ready' | 'degraded'>('loading')
 const progress = ref<number>(0)
@@ -144,6 +150,14 @@ onMounted(() => {
   if (iframeEl.value) host.value.attach(iframeEl.value)
 })
 
+/**
+ * 卸载：移除 window 监听并拆掉宿主（**成对清理**，不留监听器与计时器）。
+ *
+ * ★ 本卡片处在 `App.vue` 的 `<KeepAlive>` 里（切到设置页再回来不该丢掉动画进度）：
+ *   切走触发的是 `onDeactivated`，这里**不处理**它 —— 正因为监听器与宿主一直活着，
+ *   切回来时进度与 ready 状态才还在；`onMounted` 也只跑一次，所以监听器不会重复注册。
+ *   真正的卸载（卡片被移除 / 应用退出）仍会走到这里。
+ */
 onBeforeUnmount(() => {
   window.removeEventListener('message', onWindowMessage)
   host.value?.dispose()
@@ -227,8 +241,13 @@ watch(iframeEl, (element) => {
         alt="概念静态示意图"
         data-testid="animation-fallback-image"
       />
-      <p v-if="degradeReason" class="anim__reason" data-testid="animation-degrade-reason">
-        本次没能播放动画：{{ degradeReason }}
+      <p
+        v-if="degraded"
+        class="anim__reason"
+        data-testid="animation-degrade-reason"
+        :data-degrade-reason="degradeReason || null"
+      >
+        {{ DEGRADED_NOTICE_TEXT }}
       </p>
     </div>
   </article>

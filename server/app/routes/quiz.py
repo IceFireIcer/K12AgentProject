@@ -56,8 +56,19 @@ from app.contracts import (
     QuizQuestionType,
     QuizResult,
 )
-from app.knowledge.library import GRADE_LEVELS, compatible_grades, grade_index, load_terminology
-from app.routes.students import DEFAULT_COLD_START_GRADE, as_grade_level
+from app.knowledge.library import (
+    GRADE_LEVELS,
+    compatible_grades,
+    grade_index,
+    load_terminology,
+)
+from app.routes.students import (
+    DEFAULT_COLD_START_GRADE,
+    as_grade_level,
+    open_learning_store,
+    require_data_dir,
+    student_learning_db_path,
+)
 from app.store.learning import GeneratedQuestionRecord, LearningStore, ProgressRecord
 
 logger = logging.getLogger(__name__)
@@ -545,27 +556,74 @@ def subjective_feedback(*, score: float, correct: bool, raw_feedback: str) -> st
 
 
 # ---------------------------------------------------------------- 超纲自检 --
-def out_of_scope_terms(text: str, grade_level: str) -> list[str]:
+def load_terminology_table() -> dict:
+    """读术语文表（``knowledge/terminology.json``）；不可用时返回空表并**告警一次**。
+
+    读失败不让取题/判分失败，只是失去超纲自检能力 —— 与 ``app.grade.signals``
+    对同一份表的处理口径一致。
+
+    ★ 之所以单独抽出来：``load_bank`` 要逐题自检，而 ``load_terminology`` 每次都读盘
+    （D5 实测：题库 81 题 → 一次取题就是 **81 次文件读**）。
+    调用方**每次遍历只读一次**，把结果当参数传下去。
+    """
+    try:
+        return load_terminology(KNOWLEDGE_DIR)
+    except Exception as exc:  # noqa: BLE001 - 表缺失不该让取题失败，只是失去自检能力
+        logger.warning("术语文表不可用，跳过超纲自检：%s", exc)
+        return {"terms": [], "tone_markers": []}
+
+
+#: 术语文表的进程内缓存：值是 ``(mtime, 表)``。按 ``(路径, mtime)`` 失效，
+#: 因此测试替换 ``KNOWLEDGE_DIR`` 或现场改表都会自动重读（不缓存「读不到」的空表，
+#: 否则一次启动期的失败会被永久记住）。
+_terminology_cache: tuple[float, dict] | None = None
+
+
+def default_terminology_table() -> dict:
+    """带 mtime 缓存的 :func:`load_terminology_table`（判分/取题这类高频路径用）。"""
+    global _terminology_cache
+    path = Path(KNOWLEDGE_DIR) / "terminology.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    if _terminology_cache is not None and _terminology_cache[0] == mtime and mtime >= 0:
+        return _terminology_cache[1]
+    table = load_terminology_table()
+    if mtime >= 0:
+        _terminology_cache = (mtime, table)
+    return table
+
+
+def reset_terminology_cache() -> None:
+    """清缓存（测试与「换了教材目录」的脚本用）。"""
+    global _terminology_cache
+    _terminology_cache = None
+
+
+def out_of_scope_terms(
+    text: str, grade_level: str, *, terminology: dict | None = None
+) -> list[str]:
     """题干里出现了**高于该学段**的术语 → 返回这些术语（空列表 = 合格）。
 
     术语文表就是教材自检用的那一份（``knowledge/terminology.json``，票 10），
     判据同 :func:`app.knowledge.checker.audit_library`：``min_grade`` 高于目标学段即超纲。
     小学低年级题干里的「算法」「特征向量」属于**明确点名**的验收口径（票 14）。
+
+    ``terminology`` 可显式传入（遍历场景下**由调用方读一次**再传进来，避免每题读盘一次，
+    见 :func:`load_bank`）；不传时退回带缓存的 :func:`default_terminology_table`，
+    因此**旧的单参调用照常工作**。
     """
     if grade_level not in GRADE_LEVELS:
         return []
-    try:
-        terminology = load_terminology(KNOWLEDGE_DIR)
-    except Exception as exc:  # noqa: BLE001 - 表缺失不该让取题失败，只是失去自检能力
-        logger.warning("术语文表不可用，跳过超纲自检：%s", exc)
-        return []
+    table = terminology if terminology is not None else default_terminology_table()
     try:
         rank = grade_index(grade_level)
     except (KeyError, ValueError):
         return []
 
     hits: list[str] = []
-    for entry in terminology.get("terms") or []:
+    for entry in table.get("terms") or []:
         if not isinstance(entry, dict):
             continue
         term = str(entry.get("term") or "")
@@ -617,15 +675,22 @@ def bank_dir_for(request: Request) -> Path:
 def load_bank(bank_dir: str | Path) -> BankReport:
     """读整个题库目录并逐题校验。
 
-    **坏题只跳过、不抛异常**：现场演示时题库里一条手滑的记录不该让「出题」整条链路挂掉；
+    **坏题只跳过、不抛异常**：现场演示时一条手滑的记录不该让「出题」整条链路挂掉；
     跳过的 qid 与原因都进日志。超纲（术语高于本学段）只记录、不剔除 ——
     题库是人工编写的，需要人看到报告去改；LLM 生成的题由票 15 在生成侧直接拒。
+
+    ★ 术语文表**在本函数里读一次**（D5），逐题自检时把同一份表传下去：
+    早先每题各读一次盘，题库 81 题 → 一次取题/一次判分就是 81 次文件读，
+    而判分路径每答一题都要调一次 —— 纯属浪费。
     """
     report = BankReport()
     root = Path(bank_dir)
     if not root.is_dir():
         logger.warning("题库目录不存在：%s（取题将全部落空）", root)
         return report
+
+    # 整趟遍历共用一份术语文表（带 mtime 缓存，表被改动会自动重读）
+    terminology = default_terminology_table()
 
     for path in sorted(root.glob("*.json")):
         report.files.append(path.name)
@@ -664,7 +729,9 @@ def load_bank(bank_dir: str | Path) -> BankReport:
     for entry in report.entries:
         # 题干 + 选项 + 解析都算「学生看得到的文本」，一起过超纲自检
         parts = [entry.question.stem, entry.question.explanation, *(entry.question.options or [])]
-        offending = out_of_scope_terms("\n".join(parts), entry.grade_level)
+        offending = out_of_scope_terms(
+            "\n".join(parts), entry.grade_level, terminology=terminology
+        )
         if offending:
             report.out_of_scope.append(f"{entry.question.qid}: {'、'.join(offending)}")
             logger.warning(
@@ -847,16 +914,25 @@ def student_db_path(data_dir: str | Path, student_id: str) -> Path:
     ``student_id`` 先过白名单再做路径拼接：这个值来自请求体，直接拼路径等于把
     「本机任意文件写入」的口子开在 HTTP 上。
 
-    ⚠️ 归口说明：票 09 落学生目录时若提供统一解析函数，这里应改为调用它，
-    不要留下第二套路径拼法（这是本文件唯一一处与 ``app/store/**`` 重叠的逻辑）。
+    ★ **归口已收拢**：真正拼路径的是 ``app.routes.students.student_learning_db_path``
+    （``open_learning_store`` 内部调它），本函数只是**保留的兼容别名**，测试与历史调用方
+    仍在用它。**新代码请直接调 ``open_learning_store`` / ``student_learning_db_path``** ——
+    路径拼两处，迟早有一处忘记做白名单校验。
+
+    ★ 数据根（第一个参数）**必须来自** ``require_data_dir(request)``（显式 ``--data-dir``），
+    路由里不得再用 ``config.data_dir`` 兜底（那会落到共享的 ``server/_data``，见 D4）。
     """
     if not STUDENT_ID_RE.match(student_id):
         raise HTTPException(status_code=422, detail="studentId 不合法（只允许字母、数字、下划线、连字符）")
-    return Path(data_dir) / "students" / student_id / "learning.db"
+    return student_learning_db_path(data_dir, student_id)
 
 
 def _student_grade(store: LearningStore, student_id: str) -> str:
-    """学生的学段（**解锁判定/关卡路径的唯一依据**，AGENTS §5.1：显式选择为权威）。
+    """学生的学段（**解锁判定/关卡路径的唯一依据**）。
+
+    学段来自**服务端推断**（``app.grade.rules`` 的规则引擎，D-020：自动推断、自动生效），
+    这里读到的就是学生当前**生效中**的值；学生端只读、**没有人工选择入口**，
+    所以调用方传入/读取的学段都不是「学生选的那个」。
 
     学生行不存在时退回 :data:`COLD_START_GRADE` —— 与 :func:`read_progress`、
     :func:`register_variants` 的冷启动兜底同一口径（「学生还没登录就先做题」不该丢数据，
@@ -975,8 +1051,10 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
             detail="studentId 不合法（只允许字母、数字、下划线、连字符）",
         )
 
-    config = request.app.state.config
-    store = LearningStore(student_db_path(config.data_dir, body.student_id))
+    # ★ D4：数据根必须走**显式 --data-dir**（拿不到就 503），与画像/学段/动画路由同源。
+    #   早先用 `config.data_dir` 兜底 → 没传参数时会静默写到共享的 `server/_data/students/`
+    #   下（单测、手工 curl、多次运行互相污染），而其它三条轨已经拒收了。
+    store = open_learning_store(require_data_dir(request), body.student_id)
     try:
         found = _locate_question(request, store, body.qid)
         if found is None:
@@ -1151,8 +1229,8 @@ def register_variants(
             detail="没有一道生成题通过校验：" + "；".join(rejected),
         )
 
-    config = request.app.state.config
-    store = LearningStore(student_db_path(config.data_dir, student))
+    # ★ D4：与画像/学段/动画路由同源 —— 只认显式 `--data-dir`，拿不到就 503
+    store = open_learning_store(require_data_dir(request), student)
     try:
         # 冷启动兜底（与 `POST /api/profile/{id}/events` 同一口径）：
         # 「学生还没登录就先开始做题」不该丢数据，也不该让之后的 `GET /api/profile` 回 404
@@ -1222,8 +1300,8 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
             detail="studentId 不合法（只允许字母、数字、下划线、连字符）",
         )
 
-    config = request.app.state.config
-    store = LearningStore(student_db_path(config.data_dir, body.student_id))
+    # ★ D4：与画像/学段/动画路由同源 —— 只认显式 `--data-dir`，拿不到就 503
+    store = open_learning_store(require_data_dir(request), body.student_id)
     try:
         generated = store.find_generated_question(body.qid)
         if generated is None:
@@ -1313,8 +1391,8 @@ def read_progress(
             detail="studentId 不合法（只允许字母、数字、下划线、连字符）",
         )
 
-    config = request.app.state.config
-    store = LearningStore(student_db_path(config.data_dir, student_id))
+    # ★ D4：与画像/学段/动画路由同源 —— 只认显式 `--data-dir`，拿不到就 503
+    store = open_learning_store(require_data_dir(request), student_id)
     try:
         # 冷启动：学生一行都没有时先建学生行（缺学段就按默认），否则种子路径无从谈起
         student = store.get_student(student_id)

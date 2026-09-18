@@ -187,7 +187,10 @@ test('A1 合流：生成器把片段交回 Python（我们不在 TS 侧拼 HTML�
     concept: '循环',
     kpId: 'jr-py-loop',
     gradeLevel: 'junior',
-    attempt: 0
+    attempt: 0,
+    // ★ `payloadId` 必须原样送到合流端点（Python 把它注入沙箱 HTML，前端按它校验每条
+    //    postMessage —— 两边对不上就永远收不到 ready，每张卡片 5 秒后必然超时降级（F2））
+    payloadId: 'payload-a1-fixed'
   })) as Record<string, unknown>
 
   assert.equal(calls.length, 1, '必须走合流端点（库内联与校验只有 Python 做得到）')
@@ -196,6 +199,11 @@ test('A1 合流：生成器把片段交回 Python（我们不在 TS 侧拼 HTML�
   assert.equal(calls[0].fallbackText, 'f')
   assert.equal(calls[0].concept, '循环')
   assert.equal(calls[0].gradeLevel, 'junior')
+  assert.equal(
+    calls[0].payloadId,
+    'payload-a1-fixed',
+    '★ payloadId 必须**原样**转发给合流端点（写死空串会让产物里的 id 与卡片手里的 id 对不上）'
+  )
   assert.equal(payload.source, 'generated')
 })
 
@@ -213,7 +221,7 @@ test('A1 合流 422 = 可重试（与模板路径的 422 同一语义）', async
     log: () => {}
   })
   await assert.rejects(
-    () => generate({ concept: 'c', kpId: '', gradeLevel: 'junior', attempt: 0 }),
+    () => generate({ concept: 'c', kpId: '', gradeLevel: 'junior', attempt: 0, payloadId: 'p-1' }),
     /未通过校验/
   )
 })
@@ -225,7 +233,7 @@ test('A1 模型没按 JSON 回 → 抛可重试错误（扩展会带着原因再
     log: () => {}
   })
   await assert.rejects(
-    () => generate({ concept: 'c', kpId: '', gradeLevel: 'junior', attempt: 0 }),
+    () => generate({ concept: 'c', kpId: '', gradeLevel: 'junior', attempt: 0, payloadId: 'p-2' }),
     /不是合法 JSON 片段/
   )
 })

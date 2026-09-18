@@ -258,8 +258,20 @@ export class BoundedText {
   private readonly chunks: string[] = []
   private length = 0
   private dropped = 0
+  /**
+   * ★ 上限写成**显式字段 + 构造函数赋值**，不用 TS 的「参数属性」简写
+   *   （`constructor(private readonly limit = 64 * 1024)`）。
+   *
+   * 为什么：本项目的纯逻辑单测走 `node --test` **直接跑 `.ts`**（Node 的类型擦除模式），
+   * 那个模式不支持参数属性，会当场报 `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`
+   * —— 给这个类补一条单测（既定做法）就会炸，而报错形态很像"环境坏了"，
+   * 极易被误判成工具链问题。
+   */
+  private readonly limit: number
 
-  constructor(private readonly limit = 64 * 1024) {}
+  constructor(limit = 64 * 1024) {
+    this.limit = limit
+  }
 
   push(text: string): void {
     if (text.length === 0) return

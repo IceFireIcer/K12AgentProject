@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -161,6 +163,53 @@ class TestVectorPathAndGradeIsolation(RagCase):
         parents = [h.parent_chunk_id or h.chunk_id for h in result.hits]
         self.assertEqual(len(parents), len(set(parents)), "同一父块只应出现一次")
 
+
+class TestTopKIsCountedAfterParentDedupe(RagCase):
+    """★★ 回归用例（审计发现，修复前**必红**）：``top_k`` 曾被两级各自截断一次。
+
+    缺陷形态：``_rows_to_hits`` 末尾先 ``hits[:top_k]``，``_to_hits`` 才做父块去重并**再截一次**。
+    同一父块的多个子块排在前列时，去重会把名额吃掉 —— KNN 的过采样
+    （``top_k * KNN_OVERFETCH``）**在去重之前就被切掉，等于白做**。
+
+    实测（修复前，同一夹具库）：``top_k=5`` 去重后只剩 **4** 条；``top_k=8`` 只剩 7 条。
+    修法：候选一律不截，截断只做一次 —— 在 ``_to_hits`` 的**去重之后**。
+    """
+
+    def test_direct_hits_reach_top_k(self) -> None:
+        for top_k in (1, 2, 3, 5, 8):
+            with self.subTest(top_k=top_k):
+                result = self.service().search(query=SHORT_QUERY, grade_level="junior", top_k=top_k)
+                direct = [h for h in result.hits if not h.expanded]
+                self.assertEqual(
+                    len(direct),
+                    top_k,
+                    f"top_k={top_k} 时去重后只有 {len(direct)} 条直接命中"
+                    "（截断发生在父块去重之前？）",
+                )
+
+    def test_vector_level_does_not_truncate_before_dedupe(self) -> None:
+        """结构断言：``_rows_to_hits`` 返回的是**候选**，条数可以超过 ``top_k``。"""
+        service = self.service()
+        conn = service._ensure_conn()
+        vector = service.embedder.embed_query(SHORT_QUERY)
+        rows = retriever.kb_repo.knn_rows(
+            conn, vector, ["junior", "primary_high", "primary_low"], k=5 * retriever.KNN_OVERFETCH
+        )
+        candidates = service._rows_to_hits(conn, rows, "junior")
+        self.assertGreater(
+            len(candidates), 5, "候选在父块去重之前就被截断了（过采样失效）"
+        )
+        parents = [h.chunk.parent_chunk_id or h.chunk.chunk_id for h in candidates]
+        self.assertGreater(
+            len(parents), len(set(parents)), "本夹具需要「同一父块的多个子块」才能照出缺陷"
+        )
+
+    def test_dedupe_still_removes_duplicate_parents(self) -> None:
+        """修完截断顺序后，去重本身不许被削弱。"""
+        result = self.service().search(query=SHORT_QUERY, grade_level="junior", top_k=10)
+        parents = [h.parent_chunk_id or h.chunk_id for h in result.hits]
+        self.assertEqual(len(parents), len(set(parents)))
+
     def test_latency_is_sub_second(self) -> None:
         """检索延迟必须百毫秒级（这里用夹具嵌入器测链路开销）。"""
         service = self.service()
@@ -205,8 +254,178 @@ class TestDependencyExpansion(RagCase):
 
 
 # --------------------------------------------------------------------------- #
-# 四级降级
+# 空 query 与连接生命周期
 # --------------------------------------------------------------------------- #
+class TestEmptyQueryShortCircuit(RagCase):
+    """★★ 回归用例（审计发现）：空 / 纯空白 query 曾被当**正常检索**处理。
+
+    实测（修复前）：``search(query='', grade_level='junior')`` 返回 ``degraded='vector'``
+    且 ``hits=7``（**比正常查询还多**），``'   '`` 同样 6 条 —— 向量对空串也给得出查询向量，
+    于是 KNN 永远有 top-k 结果。返回一堆分数为正的无关片段比返回空更糟：
+    模型会把它当教材讲。
+
+    修法：``RagService.search`` 开头短路 —— 空/纯空白 → 空 hits + ``degraded="outline"``
+    （**四级枚举内的取值**，诚实降级），并留一条 WARNING 供排查。
+    """
+
+    def test_blank_queries_return_empty_hits_with_outline(self) -> None:
+        for query in ("", "   ", "\t\n ", "\u3000"):
+            with self.subTest(query=query):
+                result = self.service().search(query=query, grade_level="junior", top_k=5)
+                self.assertEqual(result.hits, [], f"{query!r} 返回了无关片段")
+                self.assertEqual(result.degraded, "outline")
+                self.assertEqual(result.degraded in ("vector", "cloud", "fts", "outline"), True)
+
+    def test_outline_value_is_within_the_frozen_enum(self) -> None:
+        """★ ``degraded`` 只允许四级取值（TS 侧原样展示，多一个值就没人认）。"""
+        for attribute in ("DEGRADED_VECTOR", "DEGRADED_CLOUD", "DEGRADED_FTS", "DEGRADED_OUTLINE"):
+            self.assertIn(getattr(retriever, attribute), ("vector", "cloud", "fts", "outline"))
+
+    def test_short_circuit_does_not_open_a_connection(self) -> None:
+        """空 query 在**打开连接 / 跑嵌入之前**就返回（不该为一次空检索付嵌入代价）。"""
+        service = self.service()
+        result = service.search(query="   ", grade_level="junior")
+        self.assertIsNone(service._conn, "空 query 不该建立数据库连接")
+        self.assertEqual(result.degraded, "outline")
+        self.assertFalse(result.attempts[0].ok)
+        self.assertIn("query", result.attempts[0].detail)
+
+    def test_non_blank_query_still_works(self) -> None:
+        """反向：正常 query 不受短路影响。"""
+        self.assertTrue(self.service().search(query=SHORT_QUERY, grade_level="junior").hits)
+
+
+class TestEmbeddingConfigRegistersItsSecret(RagCase):
+    """★ 内容安全与数据层的接线（审计发现 ``register_secret`` 全仓 0 调用点）。
+
+    ``read_embedding_config`` 是 ``app/`` 范围内**唯一**读得到云端嵌入明文 Key 的地方
+    （LLM 的明文 Key 在 ``routes/settings.py``，那条线是**未接线项**，见报告）。
+    读出来的 Key 必须登记进日志脱敏名单，否则任何把 config 打进日志的代码都会漏出明文。
+    """
+
+    def test_cloud_api_key_is_registered_for_redaction(self) -> None:
+        from app.rag.embedder import read_embedding_config
+        from app.safety import guard
+
+        secret = "sk-embed-abcdef0123456789"
+        config_path = self.tmp / "config.json"
+        config_path.write_text(
+            json.dumps({"embedding": {"mode": "cloud_api", "api_key": secret}}),
+            encoding="utf-8",
+        )
+        self.addCleanup(guard.clear_secrets)
+
+        config = read_embedding_config(self.tmp)
+        self.assertEqual(config["api_key"], secret)
+        self.assertNotIn(secret, guard.redact_text(f"嵌入配置：{config}"))
+
+    def test_absent_key_does_not_register_anything(self) -> None:
+        """没有 Key 时不该往登记表里塞空串/短串（短串抹掉会造成大量误伤）。"""
+        from app.rag.embedder import read_embedding_config
+        from app.safety import guard
+
+        (self.tmp / "config.json").write_text(
+            json.dumps({"embedding": {"mode": "local_fastembed"}}), encoding="utf-8"
+        )
+        self.addCleanup(guard.clear_secrets)
+        config = read_embedding_config(self.tmp)
+        self.assertEqual(config["api_key"], "")
+        self.assertEqual(config["mode"], "local_fastembed")
+
+
+class TestConnectionLifecycle(RagCase):
+    """★★ 回归用例（审计发现）：``_ensure_conn`` 无锁 → 并发首访建多条连接且多余的永不关闭。
+
+    实测（修复前）：8 线程同时首访**真的建出 8 条连接**，``self._conn`` 只留最后一条，
+    前 7 条既无引用也无 ``close()``（句柄泄漏 + 「一个服务一份连接」的假设失效）。
+    """
+
+    def _counting_service(self) -> tuple[retriever.RagService, list]:
+        created: list = []
+        original = retriever.connect
+
+        def counting_connect(*args, **kwargs):  # noqa: ANN001
+            conn = original(*args, **kwargs)
+            created.append(conn)
+            return conn
+
+        retriever.connect = counting_connect  # type: ignore[assignment]
+        self.addCleanup(setattr, retriever, "connect", original)
+        service = retriever.RagService(self.kb_path, embedder=self.embedder)
+        self.addCleanup(service.close)
+        return service, created
+
+    def test_concurrent_first_access_opens_exactly_one_connection(self) -> None:
+        import threading
+
+        service, created = self._counting_service()
+        errors: list[BaseException] = []
+
+        def touch() -> None:
+            try:
+                service._ensure_conn()
+            except BaseException as exc:  # noqa: BLE001 - 线程里的异常要带回主线程
+                errors.append(exc)
+
+        threads = [threading.Thread(target=touch) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(created), 1, f"并发首访建立了 {len(created)} 条连接（应当只有 1 条）")
+
+    def test_rebuilt_kb_closes_the_old_connection(self) -> None:
+        """库被重建 → 关掉旧连接再重开（Windows 上旧句柄会让下一次全量重写撞上占用）。"""
+        service, created = self._counting_service()
+        first = service._ensure_conn()
+        self.assertEqual(len(created), 1)
+
+        stat = self.kb_path.stat()
+        os.utime(self.kb_path, (stat.st_atime, stat.st_mtime + 5))  # 模拟 build_kb 重跑
+        second = service._ensure_conn()
+        self.assertEqual(len(created), 2, "库更新后应当重开连接")
+        self.assertIsNot(first, second)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            first.execute("SELECT 1")  # 旧连接必须真的关掉了
+
+    def test_transient_vec_failure_is_recoverable(self) -> None:
+        """★ 一次瞬时 KNN 错误不该把进程**永久**钉在 numpy 兜底上。
+
+        失败时降级为 numpy（本次仍返回 ``degraded="vector"``），
+        但重开连接时会**重新探测**向量引擎；``LevelAttempt.detail`` 里看得到降级原因。
+        """
+        service = self.service()
+        conn = service._ensure_conn()
+        self.assertTrue(service._vec_ready, "夹具库应当能用上 sqlite-vec")
+
+        original = retriever.kb_repo.knn_rows
+
+        def boom(*args, **kwargs):  # noqa: ANN001
+            raise sqlite3.OperationalError("测试：模拟向量表损坏")
+
+        retriever.kb_repo.knn_rows = boom  # type: ignore[assignment]
+        self.addCleanup(setattr, retriever.kb_repo, "knn_rows", original)
+
+        degraded = service.search(query=SHORT_QUERY, grade_level="junior", top_k=3)
+        self.assertEqual(degraded.degraded, "vector", "numpy 兜底仍然算 vector 级")
+        self.assertTrue(degraded.hits)
+        self.assertFalse(service._vec_ready)
+        detail = next(a.detail for a in degraded.attempts if a.level == "vector" and a.ok)
+        self.assertIn("numpy", detail, "降级原因必须可观测")
+
+        # 下一次 _ensure_conn（例如库更新/重连）会重新探测 → 向量路径恢复
+        retriever.kb_repo.knn_rows = original  # type: ignore[assignment]
+        service._close()
+        service._ensure_conn()
+        self.assertTrue(service._vec_ready, "重开连接后向量引擎应当恢复（瞬时错误不该永久降级）")
+        recovered = service.search(query=SHORT_QUERY, grade_level="junior", top_k=3)
+        detail = next(a.detail for a in recovered.attempts if a.level == "vector" and a.ok)
+        self.assertIn("KNN", detail)
+        self.assertFalse(service._vec_degraded)
+
+
 class TestDegradationChain(RagCase):
     def _break_sqlite_vec(self) -> None:
         """②号演示手法：让 sqlite-vec 加载失败（等价于注释掉 sqlite_vec.load）。"""

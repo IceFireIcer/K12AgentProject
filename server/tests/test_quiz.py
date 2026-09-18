@@ -28,10 +28,16 @@ if str(ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.config import KNOWLEDGE_DIR, RESOURCES_DIR, build_runtime_config  # noqa: E402
+from app.config import (  # noqa: E402
+    KNOWLEDGE_DIR,
+    RESOURCES_DIR,
+    build_runtime_config,
+    resolve_data_dir,
+)
 from app.contracts import MASTERY_DELTA_LIMIT, QuizQuestion  # noqa: E402
 from app.knowledge.library import load_library  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.routes import quiz as quiz_module  # noqa: E402
 from app.routes.quiz import (  # noqa: E402
     MASTERY_GAIN_CORRECT,
     MASTERY_LOSS_WRONG,
@@ -182,6 +188,39 @@ class TestBankContent(unittest.TestCase):
         self.assertIn("算法", out_of_scope_terms("用算法帮小明分类", "primary_low"))
         self.assertIn("特征向量", out_of_scope_terms("特征向量的长度", "primary_low"))
         self.assertEqual(out_of_scope_terms("用算法帮小明分类", "junior"), [])
+
+    def test_d5_bank_load_reads_the_terminology_file_once(self) -> None:
+        """★ D5 回归：``load_bank`` 逐题自检时**只读一次**术语表（不是每题一次）。
+
+        修复前 ``out_of_scope_terms`` 内部每题都调 ``load_terminology(KNOWLEDGE_DIR)``：
+        一次取题（或一次判分查库）就是「题数」次文件读 —— 实测 82 次。
+        这里用**计数替身**盯住调用次数（比断言耗时稳，也不受磁盘缓存影响）。
+        """
+        calls = {"n": 0}
+        real_loader = quiz_module.load_terminology
+
+        def counting_loader(path: object) -> dict:
+            calls["n"] += 1
+            return real_loader(path)
+
+        quiz_module.load_terminology = counting_loader
+        quiz_module.reset_terminology_cache()
+        try:
+            report = load_bank(BANK_DIR)
+        finally:
+            quiz_module.load_terminology = real_loader
+            quiz_module.reset_terminology_cache()
+
+        self.assertGreater(len(report.entries), 1, "题库得有题，这条断言才有意义")
+        self.assertLessEqual(calls["n"], 1, f"逐题自检却读了 {calls['n']} 次术语表")
+
+    def test_d5_out_of_scope_terms_accepts_an_injected_table(self) -> None:
+        """显式传入术语文表时**不读盘**，且判定结果与默认路径一致（向后兼容）。"""
+        table = {"terms": [{"term": "算法", "min_grade": "junior"}], "tone_markers": []}
+        self.assertEqual(out_of_scope_terms("用算法帮小明分类", "primary_low", terminology=table), ["算法"])
+        self.assertEqual(out_of_scope_terms("用算法帮小明分类", "junior", terminology=table), [])
+        # 不传 = 走默认路径，结果一样（旧调用方照常工作）
+        self.assertIn("算法", out_of_scope_terms("用算法帮小明分类", "primary_low"))
 
 
 # --------------------------------------------------------------------------- #
@@ -526,6 +565,69 @@ class TestHttpBoundary(QuizCase):
         self.assertFalse(payload["correct"])
         self.assertIn("再", payload["feedback"])
         self.assertTrue(payload["feedback"].strip())
+
+
+class TestQuizRoutesRequireExplicitDataDir(unittest.TestCase):
+    """★ D4 回归：**没有显式 ``--data-dir`` 时练习路由必须 503**，不得写进共享兜底目录。
+
+    修复前四处 ``LearningStore(student_db_path(config.data_dir, ...))`` 直接用
+    ``config.data_dir``（兜底 = ``server/_data``）→ 单测/手工 curl/多次运行会把学生数据
+    混进仓库里的**共享**目录；而画像 / 学段 / 动画三条轨早已按
+    ``resolve_student_data_root`` 拒收（503）。四条轨必须同一个口径。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.app = create_app(build_runtime_config())  # ★ 故意不传 data_dir
+        self.app.include_router(quiz_router)
+        self.client = TestClient(self.app)
+
+    def test_grade_returns_503_instead_of_writing_to_the_shared_dir(self) -> None:
+        response = self.client.post(
+            "/api/quiz/grade",
+            json={"studentId": "student_999", "qid": "jr-py-loop-q2", "answer": "+="},
+        )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertIn("data-dir", response.json()["detail"])
+        self.assertFalse(
+            (resolve_data_dir(None) / "students" / "student_999").exists(),
+            "共享兜底目录不该出现本用例的学生",
+        )
+
+    def test_variants_subjective_and_progress_all_return_503(self) -> None:
+        """四条写库路径**全部**同源：漏掉任何一条就等于留了一个共享目录的口子。"""
+        variants = self.client.post(
+            "/api/quiz/variants",
+            params={"student_id": "student_999"},
+            json={
+                "gradeLevel": "junior",
+                "questions": [
+                    {
+                        "qid": "v-1",
+                        "kpId": "jr-py-loop",
+                        "type": "blank",
+                        "stem": "1 到 5 用什么函数？",
+                        "referenceAnswer": "range",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(variants.status_code, 503, variants.text)
+
+        subjective = self.client.post(
+            "/api/quiz/grade-subjective",
+            json={"studentId": "student_999", "qid": "v-1", "score": 0.9, "feedback": "不错"},
+        )
+        self.assertEqual(subjective.status_code, 503, subjective.text)
+
+        progress = self.client.get("/api/quiz/progress/student_999")
+        self.assertEqual(progress.status_code, 503, progress.text)
+
+        self.assertFalse(
+            (resolve_data_dir(None) / "students" / "student_999").exists(),
+            "共享兜底目录不该出现本用例的学生",
+        )
 
 
 class TestSharedResourcesAreReachable(unittest.TestCase):

@@ -40,8 +40,12 @@ TRIGRAM_MIN_CHARS = 3
 # 命中其中 2 个（循环 + 累加）就已经是可靠的相关片段，不该被判掉。
 MIN_FTS_COVERAGE = 0.33
 
-_CJK_RUN = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]+")
-_LATIN = re.compile(r"[A-Za-z0-9_]+")
+#: 词条切分的字符类：**中文连续片段** 或 **拉丁/数字词条**。
+#: ★ 这是分词依据的**唯一一份**正则：此前模块里另有两个定义了却没人用的常量
+#: （``_CJK_RUN`` / ``_LATIN``，除定义处 0 命中），而 ``query_terms`` 自己内联了一份同形正则
+#: —— 「看起来有约束其实没有」的死常量，审计发现。现在删掉它们、统一用这一个名字，
+#: 改字符范围（例如把 CJK 扩展区纳入）只需动一处。
+_TERM_TOKEN_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]+|[A-Za-z0-9_]+")
 
 # 提问里的疑问/语气成分：不删掉的话，「什么是循环」会变成一个 5 字词条，
 # 关键词检索直接废掉（中文没有分词器，只能靠这种低成本启发式）。
@@ -103,7 +107,7 @@ def query_terms(query: str) -> list[str]:
             break
 
     terms: list[str] = []
-    for match in re.finditer(r"[\u4e00-\u9fff\u3400-\u4dbf]+|[A-Za-z0-9_]+", text):
+    for match in _TERM_TOKEN_RE.finditer(text):
         token = match.group(0).strip()
         if len(token) < 2:
             continue

@@ -10,7 +10,7 @@
  * 本文件提供三样东西：
  *   1. **清单**（{@link AGENT_EXTENSION_SPECS}）：六个扩展各自的文件、归属票、注册的 Tool 与订阅的事件；
  *   2. **注册器**（{@link createAgentExtensionRegistry} + {@link registerAgentExtensions}）：
- *      把工厂挂到 Pi 上，并给出「谁没落地 / 谁注册失败 / 9 个冻结 Tool 缺哪几个」的报告；
+ *      把工厂挂到 Pi 上，并给出「谁没落地 / 谁注册失败 / 10 个冻结 Tool 缺哪几个」的报告；
  *   3. **会话上下文**（{@link bindAgentSession}）：当前学生的身份与轮次上下文。
  *
  * ★ 并行开发说明：`animation.ts` / `coding.ts` / `quiz.ts` / `grade.ts` 由票 14–19 各自落地，
@@ -79,7 +79,7 @@ export interface AgentSessionContext {
   studentId: string
   /** Pi 的 JSONL 会话 id（写 `learning_history.session_id` 用，关联对话与学习记录）。 */
   sessionId: string
-  /** 当前生效学段（**显式选择为权威**，§10.1）。 */
+  /** 当前生效学段（**来自服务端推断**（`server/app/grade/rules.py`）的当前生效值，前端不推断学段（手动指定走独立通道、由服务端写库））。 */
   gradeLevel: GradeLevel
 }
 
@@ -98,7 +98,11 @@ export function bindAgentSession(context: AgentSessionContext | null): void {
     return
   }
   if (!context.studentId) throw new Error('bindAgentSession: studentId 不能为空')
-  if (!context.gradeLevel) throw new Error('bindAgentSession: gradeLevel 不能为空（显式选择为权威）')
+  if (!context.gradeLevel) {
+    throw new Error(
+      'bindAgentSession: gradeLevel 不能为空（学段来自服务端推断的当前生效值，前端不推断学段（手动指定走独立通道、由服务端写库））'
+    )
+  }
   activeSession = { ...context }
 }
 
@@ -108,7 +112,7 @@ export function currentAgentSession(): AgentSessionContext | null {
 }
 
 /* ------------------------------------------------------------------ *
- * 清单（六扩展 + 九个冻结 Tool）
+ * 清单（六扩展 + 十个冻结 Tool）
  * ------------------------------------------------------------------ */
 
 export type AgentExtensionName = 'animation' | 'coding' | 'quiz' | 'profile' | 'grade' | 'learning-log'
@@ -162,7 +166,7 @@ export const AGENT_EXTENSION_SPECS: readonly AgentExtensionSpec[] = [
     name: 'profile',
     ticket: '08',
     file: './profile.ts',
-    tools: ['get_student_profile'],
+    tools: ['get_student_profile', 'remember_preference'],
     events: [],
     dependsOn: ['GET /api/profile/{student_id}（Python 侧一人一库）']
   },
@@ -191,10 +195,11 @@ export const AGENT_EXTENSION_SPECS: readonly AgentExtensionSpec[] = [
 ]
 
 /**
- * ★ 九个冻结 Tool 名（票 08 第二项：**全部**要注册）。
+ * ★ 十个冻结 Tool 名（票 08 第二项：**全部**要注册）。
  *
  * 其中 7 个会发 `payload` 事件（映射表在 `ipc/tool-kinds.ts`，**全仓唯一一处**）；
- * `rag_search`（票 13，走 `citation` 事件）与 `get_student_profile`（画像只影响 Prompt）**不发** payload。
+ * `rag_search`（票 13，走 `citation` 事件）、`get_student_profile` 与
+ * `remember_preference`（画像：一个只影响 Prompt、一个是写回偏好）**不发** payload。
  */
 export const AGENT_TOOL_NAMES = [
   'generate_animation',
@@ -205,16 +210,17 @@ export const AGENT_TOOL_NAMES = [
   'submit_quiz',
   'generate_variants',
   'get_student_profile',
+  'remember_preference',
   'rag_search'
 ] as const
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number]
 
 /**
- * 九个冻结 Tool 里**不属于六个扩展**的那些：`rag_search`（票 13）。
+ * 十个冻结 Tool 里**不属于六个扩展**的那些：`rag_search`（票 13）。
  *
  * 它由 RAG 轨单独注册（检索结果走 `citation` 事件，不发 `payload`），所以不在
- * {@link AGENT_EXTENSION_SPECS} 里；但「9 个全部要注册」是票 08 的验收口径，缺了就少一条能力，
+ * {@link AGENT_EXTENSION_SPECS} 里；但「10 个全部要注册」是票 08 的验收口径，缺了就少一条能力，
  * 因此这里显式登记，缺它同样会被 {@link auditToolCoverage} 报出来。
  */
 export const AGENT_TOOL_NAMES_OUTSIDE_EXTENSIONS = ['rag_search'] as const
@@ -441,10 +447,12 @@ export interface ToolFailureDetails {
 /**
  * 组装「可读错误」的 Tool 返回值（**各扩展统一用它，别各写一遍**）。
  *
- * ⚠️ 形状必须与 `quiz.ts` / `rag-search.ts` 的 `failed()` 逐字一致：
+ * ⚠️ 形状必须与 `quiz.ts` / `rag-search.ts` / `coding.ts` 的失败结果逐字一致
+ * （那三处现在**就是** `toolFailure` 的别名，不再各写一份，F11）：
  *   - `events.ts` 的 `readToolFailure()` 只认 `details.error === true`（**布尔**）——
  *     曾把 `error` 写成字符串，结果 `profile.ts` 的失败**永远不发 `error` 事件**（静默成功）；
- *   - `trace.ts` 的 `toolResultOk()` 认 `ok === false` 或 `error === true`，两者都给最稳。
+ *   - `trace.ts` 的 `toolResultOk()` 认 `ok === false` 或 `error === true`，两者都给最稳；
+ *   - 两个读取方口径不同：轨迹取 `message`，事件层优先取 `errorMessage` —— 两个字段都要给。
  */
 export function toolFailure(text: string, error?: unknown): {
   content: Array<{ type: 'text'; text: string }>

@@ -408,6 +408,60 @@ class TestHtmlValidation(unittest.TestCase):
         without_id = self.good.replace(R.PAYLOAD_ID_MARKER, "nothing")
         self.assertFalse(R.validate_animation_html(without_id).ok)
 
+    def test_模板路径同样要求脚本注册播放实现(self) -> None:
+        """★★ 回归用例（审计发现，修复前**必红**）：模板路径的校验器只认四个**标记串**。
+
+        ``Sandbox.ready(`` 在**内联的 runtime.js 里本来就存在**，所以它证明不了
+        「模板脚本自己调过 ``Sandbox.play()``」。抹掉模板脚本里的 ``Sandbox.play(`` 之后，
+        四个旧标记一个不少 → 修复前整份产物 ``ok = True``（实测），
+        于是模型/模板漏写播放实现时会产出**永远静止**的卡片，而不是降级成文字 + 静态图。
+
+        修法：校验器（经 :func:`app.routes.resources.template_script_problems`）在**脚本段**里
+        断言出现 ``Sandbox.play(``。8 个内置模板 + runtime.js 都含该标记，所以收紧不误伤。
+        """
+        self.assertIn(R.PLAY_MARKER, self.good, "前提：正常产物里本就有 Sandbox.play")
+        bad = self.good.replace(R.PLAY_MARKER, "Sandbox.nothing(")
+        self.assertNotEqual(bad, self.good, "替换失败：产物里没有 Sandbox.play")
+
+        # 四个旧标记一个都没少 —— 这就是「只查标记」抓不住坏片段的原因
+        for marker in (
+            R.INLINE_LIBRARY_MARKER,
+            R.INLINE_RUNTIME_MARKER,
+            R.READY_MARKER,
+            R.PAYLOAD_ID_MARKER,
+        ):
+            self.assertIn(marker, bad, f"构造坏产物时误删了旧标记「{marker}」")
+
+        verdict = R.validate_animation_html(bad)
+        self.assertFalse(verdict.ok, "抹掉 Sandbox.play 的产物竟然通过了校验")
+        self.assertTrue(
+            any("播放实现" in problem for problem in verdict.problems),
+            f"拒因必须是可读中文且点名播放实现：{verdict.problems}",
+        )
+
+    def test_每个内置模板的脚本都注册了播放实现(self) -> None:
+        """★ 收紧后的**正向**证据：8 个模板都含 `Sandbox.play(`（否则上面那条会误伤它们）。"""
+        for template in R.load_templates(TEMPLATES_DIR):
+            with self.subTest(template=template.id):
+                self.assertIn(
+                    R.PLAY_MARKER,
+                    template.script,
+                    f"模板 {template.id} 的脚本里没有注册播放实现",
+                )
+                payload = R.render_animation(template, payload_id="unit")
+                self.assertIn(R.PLAY_MARKER, R.extract_template_script(payload.html))
+
+    def test_运行时里的定义不算脚本段自己的调用(self) -> None:
+        """★ 边界：runtime.js 里的 ``Sandbox.play`` 是**定义**，位于脚本段之外，不参与判定。"""
+        runtime = R.read_shared(TEMPLATES_DIR, R.RUNTIME_FILENAME)
+        self.assertIn("Sandbox.play", runtime, "前提：运行时里有该名字（否则这条边界不存在）")
+        segment = R.extract_template_script(self.good)
+        self.assertNotIn(
+            "window.Sandbox",
+            segment,
+            "脚本段不该包含内联运行时（否则运行时的定义会被当成模板自己调的 play）",
+        )
+
     def test_运行时在暂停后不再上报进度(self) -> None:
         """★ 回归用例（实测踩到）：模板的进度多是 `setInterval` 按「过了多少毫秒」算的，
         定时器**不认识「暂停」** —— 点暂停后动画停了、进度条却继续爬，学生会以为按钮坏了。

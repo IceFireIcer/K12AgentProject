@@ -11,7 +11,8 @@
  *    本文件**只读**结果里的 `degraded` 并原样透传 —— 不判断、不排序、不重试降级，
  *    连向量表名、关键词检索实现这类词都不会出现在编排层（验收：那条 grep 在 `src/main` 下零命中）。
  * 2. **学段由主进程注入，不是模型填的**：Tool 参数里那个 `gradeLevel` 只是"转述"，
- *    真正发出去的学段取自 {@link currentAgentSession}（显式选择为权威，§10.1）。
+ *    真正发出去的学段取自 {@link currentAgentSession}（**学段来自服务端推断
+ *    （`server/app/grade/rules.py`）的当前生效值，前端不推断学段（手动指定走独立通道、由服务端写库）**，§10）。
  *    模型就算填了 `senior`，也不会让它替初中生取高中内容 —— 这与「WHERE 由 Python 强制」
  *    是同一件事的两道门。
  * 3. **不登记进 §9.3 的「Tool 名 → kind」映射表**：检索结果走 `citation` 事件而不是 `payload`
@@ -23,7 +24,12 @@
 
 import { Type, type Static } from '@sinclair/typebox'
 import { apiFetch } from '../../bridge/client.ts'
-import { currentAgentSession, SIDECAR_UNAVAILABLE_TEXT, type AgentExtensionApi } from './index.ts'
+import {
+  currentAgentSession,
+  SIDECAR_UNAVAILABLE_TEXT,
+  toolFailure,
+  type AgentExtensionApi
+} from './index.ts'
 
 /** Tool 名（冻结；事件层用它分流到 `citation`，见 `agent/events.ts` 的 `RAG_SEARCH_TOOL`）。 */
 export const RAG_SEARCH_TOOL_NAME = 'rag_search'
@@ -64,7 +70,7 @@ export const RagSearchParams = Type.Object({
   kpId: Type.Optional(
     Type.String({
       maxLength: 64,
-      description: '已知的知识点 id（如 jr-py-loop）；不确定就不要填'
+      description: '仅用于你自己定位知识点，不会发送给后端（后端按 query + 学段检索）；不确定就不要填'
     })
   ),
   topK: Type.Optional(
@@ -151,7 +157,7 @@ export function readDegraded(value: unknown): Degraded {
 }
 
 /**
- * 学段解析：**会话学段为权威**（显式选择优先，§10.1）。
+ * 学段解析：**会话学段为权威**（会话里那个值是服务端推断出来的当前生效值，前端不推断学段（手动指定走独立通道、由服务端写库））。
  *
  * 模型填的 `gradeLevel` 只可能被用来「确认」，永远不会覆盖会话值 ——
  * 这是「学段隔离不交给模型」这条约束在编排层的落点（Python 侧还有一道 SQL 过滤）。
@@ -237,25 +243,13 @@ async function readSnippet(response: Response): Promise<string> {
 }
 
 /**
- * 失败结果的形状。
+ * 失败结果的形状：**统一用 `extensions/index.ts` 的 {@link toolFailure}**（F11）。
  *
- * ⚠️ 这里**刻意多带两个字段**，因为两个读取方口径不同（都是既有实现，改它们不属本票）：
- *   - `agent/trace.ts`：`details.ok === false` 记失败，错误正文取 `details.error`（字符串）或 `details.message`；
- *   - `agent/events.ts` 的 `readToolFailure`：只认 `details.error === true`，正文取 `details.errorMessage`。
- * 于是同时给 `error: true`（布尔，给事件层）+ `message`（给轨迹）就能两边都正确识别成失败，
- * **且不破坏 `toolFailure()` 的 `ok/degraded` 约定**。
+ * ⚠️ 这里不再各写一份：四份逐字同构的私有 `failed()` 一旦漂移，
+ * 事件层（`agent/events.ts` 的 `readToolFailure`）与轨迹（`agent/trace.ts` 的 `toolResultOk`）
+ * 会分别认不出失败，表现为**静默成功**。别名只是为了少改调用点，语义一字不变。
  */
-function failed(text: string, error?: unknown): {
-  content: Array<{ type: 'text'; text: string }>
-  details: { ok: false; error: true; errorMessage: string; message: string; degraded: true }
-} {
-  const reason = error instanceof Error ? error.message : error === undefined ? '' : String(error)
-  const message = reason ? `${text}（${reason}）` : text
-  return {
-    content: [{ type: 'text', text: `⚠️ ${message}` }],
-    details: { ok: false, error: true, errorMessage: message, message, degraded: true }
-  }
-}
+const failed = toolFailure
 
 /** 组装成功结果（与 `extensions/index.ts` 的 `toolSuccess` 同形状，只是 details 有具体类型）。 */
 function succeeded(
@@ -315,10 +309,11 @@ export function createRagSearchExtension(
             ? Math.max(1, Math.min(20, Math.trunc(params.topK)))
             : DEFAULT_TOP_K
 
+        // ★ **请求体只放契约里有的四个字段**（query / gradeLevel / topK + 契约默认的兼容开关）。
+        //   `kpId` 是模型给自己用的定位线索（进轨迹/调试），**绝不上送** ——
+        //   `RagSearchRequest` 是 `extra="forbid"` 的 CamelModel（`contracts.py:541`），
+        //   多一个 `kpId` 键就是 422：模型只要顺手填了它，RAG 主路径整条挂掉（F1）。
         const body: Record<string, unknown> = { query, gradeLevel, topK }
-        if (typeof params?.kpId === 'string' && params.kpId.trim()) {
-          body.kpId = params.kpId.trim()
-        }
 
         try {
           const timeout = AbortSignal.timeout(timeoutMs)

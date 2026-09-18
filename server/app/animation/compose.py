@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import re
+import secrets
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
@@ -46,6 +47,7 @@ from app.routes.resources import (
     ANIME_LIB_FILENAME,
     BASE_CSS_FILENAME,
     MAX_HTML_BYTES,
+    PLAY_MARKER,
     RUNTIME_FILENAME,
     build_fallback_svg,
     compose_animation_html,
@@ -83,7 +85,8 @@ class ComposeFragmentRequest(CamelModel):
     payload_id: str = Field(default="", max_length=64)
     #: 页面片段（HTML 片段，不含 ``<html>`` / ``<script>``）
     body: str = Field(min_length=1, max_length=MAX_FRAGMENT_CHARS)
-    #: 注册播放实现的脚本（不含 ``<script>`` 标签）
+    #: 注册播放实现的脚本（不含 ``<script>`` 标签）。**必须含 ``Sandbox.play(``** ——
+    #: 缺了它产物会「加载成功但永远静止」，比降级成文字 + 静态图更糟（见 `_fragment_problems`）。
     script: str = Field(min_length=1, max_length=MAX_FRAGMENT_CHARS)
     #: 降级文案（动画失败时就用它讲；**必须非空**）
     fallback_text: str = Field(min_length=1, max_length=MAX_FALLBACK_TEXT_CHARS)
@@ -91,13 +94,38 @@ class ComposeFragmentRequest(CamelModel):
     duration_ms: int = Field(gt=0, le=120_000)
     title: str = Field(default="", max_length=120)
 
-def _fragment_problems(fragment: str) -> list[str]:
-    """片段级预检：命中即 422（附带可读原因，生成器下一轮带着它重试）。"""
+def _fallback_payload_id() -> str:
+    """缺省时的**随机** payload_id（防御性兜底，正常路径不会走到）。
+
+    ★ 为什么不能回落成固定串「generated」：``payload_id`` 是**同屏多张卡片防串台**的身份，
+    固定串意味着所有自由生成的卡片共用一个 id —— 后开的那张卡片的 ``play`` 指令会被
+    先开的那张一起执行（或者反过来把自己的消息当成别人的丢掉）。违反
+    「``postMessage`` 必须校验 ``payload_id``」这条硬约束。
+
+    字符集与长度与 :func:`app.routes.resources.validate_payload_id`
+    （``^[A-Za-z0-9_-]{1,64}$``）一致，所以它能安全地拼进文件名与 URL query。
+    """
+    return "gen-" + secrets.token_hex(8)  # 16 个小写十六进制字符，含前缀共 20 < 64
+
+
+def _fragment_problems(fragment: str, *, script: str) -> list[str]:
+    """片段级预检：命中即 422（附带可读原因，生成器下一轮带着它重试）。
+
+    ``script`` 单列一个参数是为了让「注册了播放实现」这条判在**脚本**上，
+    而不是被页面片段里偶然出现的同名字符串蒙混过关。
+    """
     problems: list[str] = []
     for label, pattern in _FRAGMENT_FORBIDDEN:
         found = pattern.search(fragment)
         if found:
             problems.append(f"{label}：{found.group(0)[:40]}")
+    # ★ 「注册了播放实现」必须在这里就判：整份 HTML 的 ``Sandbox.ready(`` 标记抓不住它
+    #   （那是内联 runtime.js 自带的），漏写 play 的片段会一路通过到沙箱里白屏/静止。
+    if PLAY_MARKER not in script:
+        problems.append(
+            f"缺少播放实现：脚本里没有 `{PLAY_MARKER}...`"
+            "（必须调 Sandbox.play(function () { ... }) 注册播放，否则卡片永远不动）"
+        )
     return problems
 
 @router.post(
@@ -109,13 +137,17 @@ def compose_animation_route(request: Request, body: ComposeFragmentRequest) -> A
     """拼装 + 校验 → ``AnimationPayload(source="generated")``。
 
     - 片段里出现外部引用 / 完整文档标签 / 网络请求 / 宿主访问 / 顶层 ``throw`` → **422**；
+    - 脚本里没有 ``Sandbox.play(`` → **422**（漏写播放实现 = 卡片永远静止，这一条必须在
+      拼装前就判；整份 HTML 的 ``Sandbox.ready(`` 标记是内联运行时自带的，抓不住它）；
     - 拼装后的整份 HTML 过 ``validate_animation_html()`` → 不过也是 **422**；
     - 两者都是**可重试**语义（TS 侧的生成器会带着原因重试，≤3 次后降级为文字 + 静态图）。
     """
-    payload_id = body.payload_id.strip() or "generated"
+    # ★ payload_id 的**正常来源是 TS 侧**（卡片手里那个 id，经 `payloadId` 传来）——
+    #   这里只在它缺席时生成一个随机 id 兜底（绝不回落成固定串，理由见 `_fallback_payload_id`）。
+    payload_id = body.payload_id.strip() or _fallback_payload_id()
 
     # ① 片段级预检：先给出**具体**原因（整份 HTML 的校验失败时，原因会笼统得多）
-    problems = _fragment_problems(f"{body.body}\n{body.script}")
+    problems = _fragment_problems(f"{body.body}\n{body.script}", script=body.script)
     if problems:
         detail = "；".join(problems)
         logger.warning("自由生成的片段未通过预检：%s", detail)

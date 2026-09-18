@@ -52,8 +52,14 @@ const chat = useChatStore()
 const view = computed(() => readCodingCard(props.card.payload))
 const kpId = computed(() => (view.value.kind === 'unknown' ? '' : view.value.kpId))
 
-/** 整段对话里的卡片（提示与评估结果都可能在别的轮次里）。 */
-const allCards = computed(() => chat.turns.flatMap((turn) => turn.cards))
+/**
+ * 整段对话里的卡片（提示与评估结果都可能在别的轮次里）。
+ *
+ * ★ 取 store 的 `cards`（**只在卡片增删时换引用**）而不是自己 `flatMap(turns)`：
+ *   逐字增量会让 `turns` 每帧换引用，于是 `collectHints` / `collectResult` 会对
+ *   全部卡片做一遍白名单投影，流式期间每秒上百次（见 `stores/chat.ts` 的说明）。
+ */
+const allCards = computed(() => chat.cards)
 /** 该知识点已给出的分级提示（1→2→3 累积显示）。 */
 const hints = computed(() => (kpId.value ? collectHints(allCards.value, kpId.value) : []))
 /** 该知识点最新一次评估结果（跨轮回来；本地运行的结果优先显示）。 */
@@ -159,7 +165,14 @@ onMounted(() => {
   })
 })
 
-/** 卸载：释放编辑器与订阅（Worker 是窗口级共享的，交给整页卸载时统一收）。 */
+/**
+ * 卸载：释放编辑器与订阅（Worker 是窗口级共享的，交给整页卸载时统一收）。
+ *
+ * ★ 本卡片处在 `App.vue` 的 `<KeepAlive>` 里：切到设置页再回来时**编辑器内容与本地运行结果
+ *   都还在**（正是 KeepAlive 的目的）。切走走的是 `onDeactivated`，这里只在真正卸载时执行；
+ *   `onMounted` 也只跑一次，所以订阅不会重复注册。Monaco 在隐藏期间尺寸变 0、
+ *   切回来后 ResizeObserver 会再报一次真实尺寸并触发 `layout()`，不会留下空白编辑器。
+ */
 onBeforeUnmount(() => {
   stopResizeObserver?.()
   stopResizeObserver = null

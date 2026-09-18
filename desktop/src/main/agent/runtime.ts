@@ -4,27 +4,24 @@
  * 职责（一条链，缺一不可）：
  *   1. 目录隔离：`ModelRuntime.create({ authPath, modelsPath })` + `DefaultResourceLoader({ agentDir })`
  *      + `SessionManager.create(cwd, sessionDir)` 全部钉在 `<userData>/pi-agent/`，**不读不写 `~/.pi/agent`**。
- *   2. system prompt 两道覆盖：`systemPromptOverride`（资源加载器层）+
- *      `before_agent_start` 每轮改写（★ 最后一道改写点，学段语气就落在这里）。
- *      两道都走**同一个出口**：`gradeExtension.systemPromptFor()` —— 同一份文本，
- *      不会出现「第一轮不带权威段、后面带」的不一致。
- *   3. 学段：**由推断系统决定**（`agent/extensions/grade.ts` 是唯一权威来源）。
+ *   2. system prompt 三道覆盖：`systemPromptOverride`（资源加载器层）+
  *      `before_agent_start` 每轮改写（★ 最后一道改写点，学段语气就落在这里）+ 三条早退路径的
  *      落盘证据。**三道都走同一个出口** {@link createChatRuntime} 里的 `buildSystemPrompt()`：
  *      学段权威段（`gradeExtension.systemPromptFor`）+ 学生情况块（每轮预取的画像）—— 同一份文本，
+ *      不会出现「第一轮不带权威段 / 后面带」「落盘的那份和发出去的那份不一样」这类不一致。
  *      ★ 另一道是**剥尾巴**：Pi 会在 `buildSystemPrompt()` 末尾无条件追加
+ *      `\nCurrent working directory: <绝对路径>`（实测 0.85.1，`systemPromptOverride` 管不住它），
  *      所以在进那个出口**之前**先过 `stripPiCwdBlock()`（见下方接线处的注释）。
  *   3. 学段：**由推断系统决定**（`agent/extensions/grade.ts` 是唯一权威来源），
  *      **学生情况**：由画像预取决定（`extensions/profile.ts` 的 `fetchStudentContext`）。
  *      ★ 两件事都由本文件**显式驱动**，不挂 Pi 事件（返工原因见 `grade.ts` 文件头）：
  *        - 观察：每轮开始调 `gradeExtension.observeTurn(text)`（**在无 Key 早退之前**，
  *          否则无 Key 世界里学段永远不动）；
- *        - prompt：`chatFactory` 的 `before_agent_start` 调 `systemPromptFor()`。
- *      运行时**不读**渲染进程传来的学段 —— `ChatSendRequest.gradeLevel` 只是历史字段，
- *      已不再权威（手动选学段的 UI 已取消，见 `ipc/channels.ts` 的字段注释）。
  *        - prompt：`chatFactory` 的 `before_agent_start` 调 `buildSystemPrompt()`。
  *      运行时**不读**渲染进程传来的学段 —— `ChatSendRequest` 里根本没有学段字段
+ *      （字段集合被守卫 G6c 钉死为 `['text']`）。
  *      ★ 学段的写入口**只有一条**：{@link ChatRuntime.setGradeLevel}（学生显式设定，
+ *      经独立通道 `grade:set`）—— **绝不借道「发一条消息」**：那样每一轮对话都会顺带写一次
  *      学段，而「发消息」与「改学段」是两件不同的事（一个失误就可能把学生的选择冲掉）。
  *   4. Pi → 6 事件：事件流交给 `events.ts` 的 `bindTurnStream()`，本文件只管会话与生命周期。
  *   5. provider 边界脱敏审计（§12）：`before_provider_request` 里把**真正要发出去的** system prompt
@@ -59,6 +56,7 @@ import {
 } from './events.ts'
 import {
   bindAgentSession,
+  CORE_EXTENSION_FACTORIES,
   describeRegistryReport,
   registerAgentExtensions,
   type AgentExtensionApi
@@ -73,7 +71,10 @@ import quizExtension from './extensions/quiz.ts'
 //   学段替换整段 prompt），并自兜异常。工厂是「可调用 + `.refresh()/.useJudge()` 诊断入口」的形态。
 import gradeExtension, {
   GRADE_OVERRIDE_HEADING,
+  buildJudgePrompt,
+  parseProposal,
   postGradeOverride
+} from './extensions/grade.ts'
 // ★ 学生情况（画像）的每轮注入（票 20 的对话侧落点）：取值在 profile 扩展
 //   （`fetchStudentContext`，失败降级为空串），拼装在 `prompts/student-context.ts`（纯函数，幂等）。
 //   本文件只把它们接在 `buildSystemPrompt()` 这一个出口上 —— 6 个 prompt 落点共用它。
@@ -129,11 +130,14 @@ export interface ChatRuntimeOptions {
    * `<userData>/students/<id>/pi-agent/`。**未经校验的 id 不许进来**（会被拼进路径）。
    */
   studentId: string
-  /** Key 解析链第一档（CLI `--api-key`）；其余档位由 `resolveCredentials` 处理。 */
+  /** ★ 设置页的 Key（第一档）；其余档位由 `resolveCredentials` 处理。 */
   apiKey?: string
+  /** `apiKey` 来源标签（设置页 vs CLI），只影响 `credentials.source` 诊断。 */
   apiKeySource?: 'settings' | 'flag'
+  /** ★ Pi 的 provider id（设置里的那一项）；不传则用内置默认。 */
   providerId?: string
   /** 供应商显示名（只写进 `models.json` 的 `name`）。 */
+  providerName?: string
   modelId?: string
   baseUrl?: string
   /** 会话工作目录（决定 Pi 的项目级资源发现范围）。 */
@@ -187,15 +191,33 @@ export interface ChatRuntime {
   readonly extensionReport: { registered: string[]; missing: string[]; missingTools: string[] }
   /** 工具调用轨迹（`docs/tool-trace.mmd` 的数据来源；退出时由 `dispose()` 导出）。 */
   readonly trace: ToolTraceRecorder
-  setGradeLevel(grade: GradeLevel | string | undefined): GradeLevel
+  /**
+   * ★★ **保存设置后热切换 LLM 配置**（「设置改完即生效」，不必重启应用）。
+   *
+   * 为什么需要它：`models.json` 只在**建会话时**读一次，`model` 也只在建会话时解析一次。
+   * 不重切的话，设置页保存后当前会话仍用旧配置 —— 演示现场极易被误判成「设置没保存」。
+   *
+   * 步骤（顺序不能乱）：
+   *   ① 重写 `models.json`（由新配置派生）；
    *   ② `modelRuntime.refresh({ providers: [id] })` 让 Pi 重新组装这个 provider
+   *      （**只刷新这一个**：全量 rebuild 会把其它 provider 也重建一遍，没有必要）；
    *   ③ Key 同步到内存：有新 Key `setRuntimeApiKey()`，**没有就 `removeRuntimeApiKey()`**
+   *      （清空 Key 必须真的撤掉，见实现里的注释）；
    *   ④ 重新解析 model，`session.setModel()` 热切换 —— **会话与对话历史都保留**
    *      （`setModel` 只改 `agent.state.model` 并往会话里追一条 model_change）。
+   *
+   * 失败时**抛可读异常**，由调用方决定降级（`handlers.ts` 会销毁会话让下一条消息按新配置重建）。
+   */
   applyLlmConfig(config: LlmConfigForPi & { apiKey?: string }): Promise<void>
+  /**
    * ★ 学生手动设定学段（走 `grade:set` 这条独立通道；**绝不混进对话请求**）。
+   *
+   * 步骤：① POST `/api/grade/override/{studentId}` 落库（服务端是唯一写库方）；
    * ② `gradeExtension.adoptOverride()` **立即生效**并作废在途的推断结论；
    * ③ 重新把学生上下文绑进扩展层，让 `learning-log` 等每轮用到的那份学段也立刻是新值。
+   *
+   * 失败**抛可读异常**，由 `handlers.ts` 翻成可读中文回执（绝不抛过 IPC）。
+   */
   setGradeLevel(gradeLevel: GradeLevel): Promise<{ changed: boolean; cooldownRemainingTurns: number }>
   /** 跑一轮：事件经 `sink` 投递（`sink` 就是 `ChatStreamRegistry` 的 `TurnHandle`）。 */
   runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome>
@@ -218,8 +240,6 @@ export interface ChatTurnSink extends TurnSink {
   readonly requestId: string
 }
 
-/** 供应商 / 模型默认值来自 `pi-bootstrap`（单一来源，别在这里再写一份）。 */
-const PROBE_API_KEY = 'offline-probe-no-real-key'
 /** 供应商 / 模型默认值来自 `pi-bootstrap`（单一来源，别在这里再写一份）。
  * ★ 离线探针的两个常量（假 Key / 不可达地址）同样来自 `pi-bootstrap`（`PROBE_API_KEY` /
  *   `PROBE_BASE_URL`）：两处各写一份字面量会漂移，探针就不指向同一个不可达地址了。 */
@@ -237,6 +257,26 @@ export const BUSY_MESSAGE = '上一条回答还没说完，请等它结束再发
  * 连同退出流程一起拖住。超时 → `judge_error` → 本轮只用第一层（学段照常能改），代价可接受。
  */
 export const JUDGE_TIMEOUT_MS = 8_000
+
+/**
+ * 退出前冲洗**学习记录队列**的上限（毫秒）。
+ *
+ * 为什么要有上限：`learning-log.ts` 的 `flush()` 逐条 POST，失败时按指数退避（封顶 30s），
+ * 一次全队重试能把 `before-quit` 拖到 Windows 认为「程序没响应」。退出流程里
+ * **宁可丢队列也不能卡住退出**（数据已经丢不回来了，卡住还会连带 sidecar 杀不干净）。
+ */
+export const LEARNING_LOG_FLUSH_TIMEOUT_MS = 3_000
+
+/**
+ * 学习记录扩展的**诊断面**（`learning-log.ts` 的 `LearningLogExtension` 结构子集）。
+ *
+ * 只声明 `flush` / `stats` 两个成员：本文件不去静态 import 那个模块（会产生循环导入边，
+ * 见 `flushLearningLog()` 的注释），所以这里用结构化类型描述「退出前要用的那两件事」。
+ */
+interface LearningLogDiagnostics {
+  flush(): Promise<boolean>
+  stats(): { written: number; failed: number; queued: number; dropped: number; lastError?: string }
+}
 
 /** 诊断开关：把 Pi 原生事件名按顺序打到 stderr（**只打事件名，见 `tracePiEvent`**）。 */
 const tracePiEvents = process.env.K12_PI_TRACE === '1'
@@ -281,16 +321,26 @@ interface PiModelRuntimeLike {
   getProviders(): Array<{ id: string }>
   checkAuth(providerId: string): Promise<{ type: 'api_key' | 'oauth' } | undefined>
   setRuntimeApiKey(providerId: string, apiKey: string): Promise<void>
+  /**
+   * ★ 抹掉**内存里**的 runtime Key（实测 0.85.1 `model-runtime.d.ts:83` 存在，
    *   实现见 `model-runtime.js:401`：`credentials.removeRuntimeApiKey(id)` +
    *   `synchronizeCredentialState(…, "removeRuntimeApiKey", …)`）。
+   *
+   * 为什么必须有它：用户清空设置页里的 Key 之后，只看 `setRuntimeApiKey` 是**撤不掉**的 ——
+   * 内存里那把旧 Key 仍然被 `checkAuth` 认成 `{"type":"api_key","source":"stored credential"}`，
    * 于是内容安全自审 / 学段第二层 / 动画自由生成**继续用已删除的 Key 发请求**
+   * （用户以为已经撤销了）。这里只动内存，不碰 `auth.json`（合规：Key 不落盘）。
+   */
   removeRuntimeApiKey(providerId: string): Promise<void>
+  /** ★ 保存设置后重新组装 provider（`models.json` 改了必须调它才生效）。 */
+  refresh(options?: { providers?: readonly string[]; allowNetwork?: boolean }): Promise<unknown>
 }
 
 interface PiSessionLike {
   systemPrompt: string
   subscribe(listener: (event: PiNativeEvent) => void): () => void
   prompt(text: string): Promise<void>
+  /** ★ 热切换模型（保留会话与对话历史）；无 Key / 未配置时会抛。 */
   setModel(model: unknown, options?: { persist?: boolean }): Promise<void>
   dispose(): void
 }
@@ -319,24 +369,25 @@ interface PiSessionManagerLike {
  * 会话装配
  * ------------------------------------------------------------------ */
 
-/** 会话内部的可变状态（用闭包而不是类字段，避免 Pi 对象在类实例上被长期持有）。 */
+/**
+ * 会话内部的可变状态（用闭包而不是类字段，避免 Pi 对象在类实例上被长期持有）。
+ *
+ * ⚠️ 只保留**真有读取方**的字段（读过一遍全仓 grep）：
+ *   - `lastPrompt` / `wirePrompt` / `wireLeaks` / `providerRequests` → `ChatRuntime` 的诊断 getter
+ *     与 `dumpPrompts()` 的证据文件；
+ *   - `headerAudits` → 头 hook 的「第 N 次触发」日志（「hook 真的挂上了」的可观测证据）。
+ *   已删掉 6 个**只写不读**的字段：`basePromptSeen` / `redactedHeaderKeys` / `headerAuditSource` /
+ *   `inputBlocks` / `finalizations` / `retractions`。它们的读取方一个都不存在，
+ *   而「写了没人看」的状态最容易被误当成验收证据 —— 真要审计这些数，
+ *   日志里已经有同口径的行（`[safety] 本轮内容安全：…` / `provider 头审计（第 N 次）…`）。
+ */
 interface RuntimeState {
-  /** `before_agent_start` 看到的基座 prompt（未覆盖时长什么样，证据用）。 */
-  basePromptSeen?: string
   lastPrompt?: string
   wirePrompt?: string
   wireLeaks: string[]
   providerRequests: number
-  /** ★ provider 边界（`before_provider_headers`）审计：命中并脱敏掉的敏感头名（去重）。 */
-  redactedHeaderKeys: Set<string>
   /** ★ 该钩子被调用的次数（验收证据：hook 真的挂上了）。 */
   headerAudits: number
-  /** ★ 脱敏数据的来源（`sidecar` = Python 的 `redact_provider_headers`；`fallback` = 本地名单）。 */
-  headerAuditSource: 'sidecar' | 'fallback' | 'none'
-  /** ★ 内容安全：输入侧拦截次数 / 生成侧终审撤回次数（验收与轨迹的证据）。 */
-  inputBlocks: number
-  finalizations: number
-  retractions: number
 }
 
 /**
@@ -354,13 +405,20 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   //    绝不可能把 `../../` 拼进路径。**应用级那份 `resolvePiPaths` 不在这条链上。**
   const paths = resolveStudentPiPaths(options.userDataDir, options.studentId)
   ensureStudentPiDirs(paths)
-  ensureModelsJson(paths, options.baseUrl, options.modelId)
+
   // ★ `models.json` 由**设置**派生（见 `pi-bootstrap.ts` 的 `writeModelsJson` 语义说明）。
+  //   拿不到内置目录（极端情况）时退化成「只写 provider 级 baseUrl + 声明 modelId」，不影响可用性。
   const catalog = await builtinCatalog(options.userDataDir).catch(() => [])
   writeModelsJson(
+    paths,
+    {
       providerId: options.providerId?.trim() || DEFAULT_PROVIDER_ID,
+      providerName: options.providerName?.trim() || '',
       baseUrl: options.baseUrl?.trim() || DEFAULT_BASE_URL,
       modelId: options.modelId?.trim() || DEFAULT_MODEL_ID
+    },
+    catalog
+  )
 
   const credentials = resolveCredentials(paths, {
     apiKey: options.apiKey,
@@ -370,9 +428,17 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     baseUrl: options.baseUrl
   })
 
+  /**
    * ★ **当前生效的 LLM 配置**（可变：`applyLlmConfig()` 会就地更新）。
+   *
+   * 为什么不直接用 `credentials` 常量：热切换之后 `credentials` 已经不是事实了，
+   * 而工具调用轨迹的 `meta.model` 与诊断日志必须反映**真正在用**的那一对。
+   */
   const activeLlm = {
     providerId: credentials.providerId,
+    modelId: credentials.modelId
+  }
+
   const probeRequested = options.offlineProbe === true || process.env.K12_OFFLINE_PROBE === '1'
   const useProbe = probeRequested && !credentials.apiKey
 
@@ -380,16 +446,20 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   const state: RuntimeState = {
     wireLeaks: [],
     providerRequests: 0,
-    redactedHeaderKeys: new Set<string>(),
-    headerAudits: 0,
-    headerAuditSource: 'none',
-    inputBlocks: 0,
-    finalizations: 0,
-    retractions: 0
+    headerAudits: 0
   }
 
+  /**
    * ★★ **当前生效的 Key**（可变；与 `credentialState` 同处维护）。
+   *
+   * 为什么不能用建会话时那份 `credentials`（那是个快照）：用户在设置页换了一把新 Key
+   * 之后，`credentials.apiKey` 就过期了 —— 而它正好是「审计副本里绝不允许原样出现明文 Key」
+   * （`before_provider_headers`）与「提示词落盘前抹掉 Key」（`before_provider_request`）
+   * 这两条自证断言**唯一**的比对基准。用旧值去比，新 Key 真漏进 prompt/header 时断言会静默通过
    * —— 那正是它要拦的那类泄漏。所以这里只在 `applyLlmConfig()` 成功之后更新它。
+   */
+  let activeApiKey: string | undefined = credentials.apiKey
+
   /**
    * ★★ 模型文本补全的**单一接线点**（三个用途共用：内容安全自审 / 学段第二层 / 动画自由生成）。
    *
@@ -424,19 +494,36 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     refreshOnCreate: false
   })
 
+  /**
    * ★★ 学生情况（画像）的**每轮快照**：由 `runTurn()` 的预取写入，由 {@link buildSystemPrompt} 读取。
+   *
    * 为什么是「先预取、后拼装」而不是在 `buildSystemPrompt` 里现取：拼装点有 6 个，
+   * 其中 `systemPromptOverride` 是**建会话时同步求值**的（不能是 async），
+   * 而 `before_agent_start` 也不该在 Pi 的回调里发 HTTP（它每轮都被调用）。
+   * 所以本文件在**每轮开始**取一次（见 `runTurn()` 里的预取），其余点只读这份快照 ——
+   * 一份文本、一个出口，第一轮 / 后续轮 / 落盘证据三者不会不一致。
+   */
   let studentContextBlock = ''
+
+  /**
    * ★★ **唯一的 system prompt 组装出口**：学段（权威）+ 学生情况（画像），6 个落点都走它。
+   *
    * 顺序有意义（**不要对调**）：`withStudentContext` 把学生情况块插在**学段权威段之前**，
    * 于是学段那句「本轮按哪个学段作答」始终排在最后、离生成最近 —— 它是不可协商的指令，
    * 而画像只是背景（且它排前面也让 `grade.ts` 的 `stripGradeOverride` 不会每轮把它切掉）。
+   *
+   * 调用点（6 处，逐一核对过，**新增 prompt 落点时也必须走这里**）：
+   *   ① `before_agent_start`（每轮覆盖，`:511` 那个位置）；② `systemPromptOverride`（建会话一次）；
    *   ③ 学段装配自检；④⑤⑥ 三条早退路径（输入拦截 / 无 Key / 凭证未过）落盘的 `state.lastPrompt`。
+   *
    * ⚠️ 建会话时 `studentContextBlock` 还是空串（第一轮还没预取），所以
    *   `systemPromptOverride` 的产物等于「纯学段模板」—— 这是**预期**的：每轮都会由
    *   `before_agent_start` 用它覆盖，而 `withStudentContext` 对空块是原样返回（幂等）。
+   */
   function buildSystemPrompt(incoming: string | undefined): string {
     return withStudentContext(gradeExtension.systemPromptFor(incoming), studentContextBlock)
+  }
+
   /**
    * ② ★ prompt 基座 + 学段落点 + provider 边界审计（同一个工厂，注册顺序即执行顺序）。
    *
@@ -457,14 +544,21 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   const chatFactory = (extensionApi: PiExtensionLike): void => {
     extensionApi.on('before_agent_start', (event: unknown) => {
       const base = (event as { systemPrompt?: unknown }).systemPrompt
-      if (typeof base === 'string') state.basePromptSeen = base
-      // ★ 单一入口：学段的替换/权威段全在 grade 扩展里（这里只负责接上链条）
-      const prompt = gradeExtension.systemPromptFor(typeof base === 'string' ? base : undefined)
+      /**
        * ★★ E1：**先把 Pi 无条件追加的 cwd 尾巴剥掉**，再交给学段出口。
+       *
        * 根因（实测 0.85.1）：`buildSystemPrompt()` 在 `customPrompt` 分支的最后无条件执行
+       *   `prompt += "\nCurrent working directory: " + cwd.replace(...)`
+       * （`node_modules/@earendil-works/pi-coding-agent/dist/core/system-prompt.js:33`）——
+       * `systemPromptOverride` 只管默认 prompt，管不住这一行。结果是会话状态里
        * `systemPrompt = "四学段模板…\nCurrent working directory: C:/Users/<用户名>/…"`，
+       * 而这份 prompt 会**真的发给云端模型**（违背 Pi issue #6308 的硬约束）。
+       *
        * ⚠️ 学段扩展（`extensions/grade.ts` 的 `buildGradeSystemPrompt`）在「认不出别的模板」
+       *   时的分支是**原样保留** incoming —— 所以尾巴得在**调用它之前**就剥掉，
+       *   否则它会被原样带进 `state.lastPrompt` → 下一轮再被 Pi 追加一次 → 层层累积。
        *   学段扩展本身**不需要改**（它是通用拼装器，不认识 cwd 这种 Pi 内部产物）。
+       */
       const cleaned = typeof base === 'string' ? stripPiCwdBlock(base) : undefined
       // ★ 单一出口：学段（权威段）+ 学生情况（画像快照）都在 buildSystemPrompt 里拼
       const prompt = buildSystemPrompt(cleaned)
@@ -479,7 +573,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       state.providerRequests += 1
       const wire = extractWireSystemPrompt((event as { payload?: unknown }).payload)
       if (wire === undefined) return
-      const redacted = redactSecret(wire, credentials.apiKey)
+      // ★ 用 `activeApiKey`（可变：热切换会换新 Key），不是建会话时的快照
+      const redacted = redactSecret(wire, activeApiKey)
       state.wirePrompt = redacted
       state.wireLeaks = findHostPathLeaks(redacted, [options.userDataDir, process.execPath])
     })
@@ -521,7 +616,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         // ★ 兜底审计：hook 看不到头时，**能审计的就剩「凭据本身」** —— 而它才是敏感度的源头。
         //   判定可执行：密钥必须能被 `redactSecret` 完整抹掉（日志侧唯一实现）。
         //   抹不掉的密钥 = 一旦进了任何日志就再也清不掉，这是必须当场发现的问题。
-        const key = credentials.apiKey
+        //   ★ 读 `activeApiKey`（热切换后是新 Key），不是建会话时的快照。
+        const key = activeApiKey
         if (key && key.length >= 6 && redactSecret(key, key) !== '***') {
           console.error('[safety] 凭据脱敏断言失败：API Key 无法被完整抹除（不得进入任何日志）')
         }
@@ -529,13 +625,14 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       }
       void auditProviderHeaders(headers as Record<string, string | null>)
         .then((audit) => {
-          state.headerAuditSource = audit.source
-          for (const key of audit.sensitiveKeys) state.redactedHeaderKeys.add(key.toLowerCase())
           // ★ 审计断言（自证清白）：脱敏副本里绝不允许原样出现真实 Key。
           //   与 `findHostPathLeaks` 同一性质 —— 把「应该做到的事」写成可判定的检查，
           //   而不是只在注释里声明。失败时**只说结论**（不打印任何值）。
-          if (credentials.apiKey && credentials.apiKey.length >= 6) {
-            const leaked = Object.values(audit.headers).some((value) => value.includes(credentials.apiKey!))
+          //   ★ 比对基准是 `activeApiKey`（**当前生效**那把，热切换后跟着变）：
+          //   拿旧 Key 去比等于把这条断言变成永远通过的空壳（那正是它要拦的泄漏）。
+          const key = activeApiKey
+          if (key && key.length >= 6) {
+            const leaked = Object.values(audit.headers).some((value) => value.includes(key))
             if (leaked) {
               console.error('[safety] provider 头脱敏断言失败：审计副本里仍有明文 Key（脱敏实现有缺口）')
             }
@@ -625,9 +722,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     agentDir: paths.agentDir,
     // 第一道：不让 Pi 拼默认 prompt（默认那份会列出 readme/docs 的绝对路径）。
     // ★ 学段是**推断**出来的（`extensions/grade.ts`），所以这里也走同一个出口 ——
-    //   两道覆盖（这里 + `before_agent_start`）必须给出**同一份**文本，否则第一轮
-    //   与后续轮次的提示词会不一致（前者带权威段、后者不带）。
-    systemPromptOverride: () => gradeExtension.systemPromptFor(undefined),
+    //   三道覆盖（这里 + `before_agent_start` + 三条早退落盘）必须给出**同一份**文本，
+    //   否则第一轮与后续轮次的提示词会不一致（前者带权威段、后者不带）。
     //   ⚠️ 建会话时学生情况块还是空串（每轮预取才填上），这里因此只出学段模板 —— 见
     //   `buildSystemPrompt` 的注释（每轮由 `before_agent_start` 覆盖，是预期行为）。
     systemPromptOverride: () => buildSystemPrompt(undefined),
@@ -662,6 +758,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    * 契约是「**每次建会话 / 切学生时都要调用**」：Tool 里的 `currentAgentSession()` 只可能拿到
    * 主进程写进来的这份 —— 学段推断（`grade.ts`）、画像、学习记录都靠它，而学生身份**不是**
    * Tool 参数（模型连表达「读别人」的能力都没有）。建会话时先绑一次，每轮再绑一次刷新会话 id。
+   *
    * ★ 它同时是**手动设学段之后的重新绑定入口**（`setGradeLevel` 里调用）：
    *   学段一旦换了，扩展层里那份 `AgentSessionContext.gradeLevel` 也必须跟着换，
    *   否则 `learning-log` 这类每轮读上下文的地方还按旧学段记账。
@@ -683,15 +780,31 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   //   sidecar 还没起来时只记一条 warn（干净降级 —— 第一轮用默认学段，第二轮回正）。
   void gradeExtension.refresh()
 
-  const model =
-    modelRuntime.getModel(credentials.providerId, credentials.modelId) ??
-    modelRuntime.getModels(credentials.providerId)[0]
-  if (!model) {
+  /**
+   * ★ 解析 provider 下要用的模型，**按优先级回落到该 provider 的第一个可用模型**。
+   *
+   * 为什么必须回落而不是直接抛：设置里存的 ModelID 可能是一个**该 provider 不认识的名字**
+   * （典型来源：旧版默认值 `deepseek-chat`，它不在 Pi 内置 deepseek 目录里；
+   * 或用户手填错）。此时直接抛「Pi 里找不到模型」会让**整个对话不可用**，
+   * 而回落成「同一 provider 的另一个模型」至少还能聊 —— 并且打一条可读日志说清楚发生了什么。
+   *
+   * ⚠️ 模型**查表**（`getModel` / `getModels`）与凭证无关，所以这里可以在 `setRuntimeApiKey`
+   * 之前调用；真正依赖凭证的是紧随其后的 `checkAuth`（它决定 `authReady`，进而决定三个降级分支）。
+   */
   const resolveModelForProvider = (providerId: string, modelId: string): unknown => {
     const exact = modelRuntime.getModel(providerId, modelId)
+    if (exact) return exact
+
     const first = modelRuntime.getModels(providerId)[0]
+    if (first) {
+      console.warn(
         `[agent] 设置的模型 ${providerId}/${modelId} 不在 Pi 的模型目录里，` +
           `已回落到 ${providerId}/${(first as { id?: string }).id ?? '(未知)'}。` +
+          '请在设置页点「拉取模型」确认可用的模型名。'
+      )
+      return first
+    }
+    // 该 provider 一个模型都没有：这才是真正的装配失败（自定义 provider 没写 models[] 就是这种形态）
     throw new Error(
       `Pi 里找不到模型 ${providerId}/${modelId}，且 provider「${providerId}」没有报出任何模型。` +
         '自定义供应商需要至少一个模型定义（models.json 的 models[]），请检查设置页的 ModelID。'
@@ -699,16 +812,35 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   }
 
   const model = resolveModelForProvider(credentials.providerId, credentials.modelId)
+
   // Key 只进内存（`setRuntimeApiKey`），**不写 auth.json**（合规：凭证仅本地且不落日志）
   const runtimeKey = credentials.apiKey ?? (useProbe ? PROBE_API_KEY : undefined)
   if (runtimeKey) await modelRuntime.setRuntimeApiKey(credentials.providerId, runtimeKey)
   const effectiveModel = useProbe ? { ...(model as object), baseUrl: PROBE_BASE_URL } : model
 
+  /**
    * ★★ **当前凭证状态**（可变：`applyLlmConfig()` 会就地更新）。
+   *
+   * ⚠️ 为什么不能直接用 `credentials` / 建会话时算出来的 `authReady` 常量：
+   * 热切换（保存设置后补上 Key）之后，那两个值就是**过期的快照**了。
+   * 用它做每轮的门禁会出现「Key 明明配好了，还是回你『没有配置 API Key』」——
+   * 实测踩到过：会话在 sidecar 就绪前降级建出来，随后热切换成功，但每轮仍被旧快照挡下。
+   *
+   * 所以门禁一律读这一份，不再读 `credentials`。
+   */
   const credentialState = {
+    /**
+     * 当前 provider 是否有可用 Key（**每次应用配置时按本次配置重算**，不用 `||` 累积）。
+     *
      * 旧实现写的是 `Boolean(config.apiKey) || credentialState.hasKey` —— 只增不减，
      * 于是「清空 Key」或「切到没有 Key 的新供应商」之后它卡在 `true`，
      * 三道门禁（每轮对话 / 自审 / 判学段）全部拿它当「有 Key」，继续发请求。
+     */
+    hasKey: Boolean(credentials.apiKey),
+    /** Pi 的 `checkAuth` 是否通过（Key 形态不对时会在补录时更新）。 */
+    authReady: false
+  }
+
   // ★ 凭证就绪判定必须在**填充补全器之前**做完（它是三处降级分支的共同判据）
   const auth = await modelRuntime.checkAuth(credentials.providerId)
   credentialState.authReady = auth !== undefined
@@ -717,7 +849,6 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    * ★★ 模型通道的**填充**（`lazyComplete` 的芯；三个用途共用，见文件上方 `completerHolder` 的说明）。
    *
    * 三个必要条件缺一不可（这就是「无 Key 世界干净降级」的判据）：
-   *   1. `credentials.apiKey` 存在 —— 才有真的凭证；
    *   1. `credentialState.hasKey` 存在 —— 才有真的凭证；
    *   2. `credentialState.authReady` —— Pi 的 `checkAuth` 也认了（Key 形态不对时这里就挡下）；
    *   3. **不是离线探针** —— 探针用的假 Key 指向不可达地址，拿它去跑自审/判学段毫无意义，
@@ -728,12 +859,21 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    *   - 学段第二层：`grade.ts` 报 `no_llm`（服务端出参里也标 `degraded`），第一层照常改学段；
    *   - 动画自由生成：`generate` 抛「没有 API Key」→ 扩展降级为文字 + 静态 SVG。
    */
-  if (credentials.apiKey && authReady && !useProbe) {
-    completerHolder = createModelCompleter(modelRuntime as never, effectiveModel, {
+  /**
+   * ★ 填充补全器（三个用途共用的模型通道；判据见上方那段注释）。
+   *
+   * 抽成函数而不是内联，是因为**热切换后要能重新填**：启动时没有 Key 的会话
+   * （或 sidecar 还没起来、配置还没读进来的会话）在补上 Key 之后，
    * 自审 / 判学段 / 动画生成这三条链路都应当恢复可用。
+   */
   const fillCompleter = (modelForCompleter: unknown): void => {
     if (!credentialState.hasKey || !credentialState.authReady || useProbe) {
+      // ★ 反向也要做对：判据不满足时**必须清掉**已有的补全器。
+      //   否则「热切换把 Key 清空」之后，`completerHolder` 还是旧连接 → 三个用途继续用
       //   已删除的 Key 发请求（与 `removeRuntimeApiKey` 同一条纪律，见 `applyLlmConfig`）。
+      completerHolder = null
+      return
+    }
     completerHolder = createModelCompleter(modelRuntime as never, modelForCompleter, {
       // 自审/判学段/生成片段都是**纯文本任务**：不给工具（模型能调用工具就会去调，
       // 而那些工具会改学生数据）。`maxTokens` 给够写一段片段，不追求长输出。
@@ -767,31 +907,32 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    * 判定 prompt 的模板与响应解析都复用 `grade.ts` 的导出（`buildJudgePrompt` / `parseProposal`）——
    * **不在这里另写一份**，否则「模型该怎么答」与「我们怎么读」会各改一半。
    *
-   * ★ 无 Key 时传 `null`（`useJudge(null)`）：扩展会把第二层标成 `no_llm` 并**大声说一次**，
-   *   第一层规则引擎照常工作（四类信号照常提取、照常能改学段），绝不静默、绝不崩。
+   * ★ **总是接线**，由闭包在**调用时**判定有没有可用的模型通道：
+   *   会话初建时可能没有 Key（或 sidecar 还没起来、配置还没读进来），
+   *   而 `useJudge()` 只建会话时调一次 —— 传 `null` 就等于「第二层永久关闭」，
+   *   那些启动期没 Key 的会话即便后来补上了 Key 也再不会做判定（实测踩到过）。
+   *   所以这里传一个「调用时再判」的函数：没通道就返回 `null`，扩展照常把状态标成
+   *   `no_llm` / `judge_error`，第一层规则引擎完全不受影响。
    */
-  gradeExtension.useJudge(
-    credentials.apiKey && authReady && !useProbe
-      ? async ({ turns, currentGrade }) => {
-          try {
-            const raw = await lazyComplete({
-              prompt: buildJudgePrompt(turns, currentGrade),
-              timeoutMs: JUDGE_TIMEOUT_MS
-            })
-            return parseProposal(raw)
-          } catch (error) {
-            // 判定失败 = 这一轮只用第一层（`grade.ts` 会把状态标成 `judge_error` 并记日志）
-            console.warn(
-              `[grade] 第二层 LLM 判定调用失败（本轮只用第一层规则信号）：${
-                error instanceof Error ? error.message : String(error)
-              }`
-            )
-            return null
-          }
-        }
-      : null
   gradeExtension.useJudge(async ({ turns, currentGrade }) => {
+    // 没有可用通道（无 Key / 探针）→ 交给扩展走它的降级分支（它会说清楚是哪一种）
     if (!credentialState.hasKey || !credentialState.authReady || useProbe) return null
+    try {
+      const raw = await lazyComplete({
+        prompt: buildJudgePrompt(turns, currentGrade),
+        timeoutMs: JUDGE_TIMEOUT_MS
+      })
+      return parseProposal(raw)
+    } catch (error) {
+      // 判定失败 = 这一轮只用第一层（`grade.ts` 会把状态标成 `judge_error` 并记日志）
+      console.warn(
+        `[grade] 第二层 LLM 判定调用失败（本轮只用第一层规则信号）：${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+      return null
+    }
+  })
 
   /**
    * ★ 学段装配自检（**常驻**，但只在异常时出声）：建完会话当场验证 prompt 出口能用。
@@ -821,8 +962,11 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     studentId: paths.studentId,
     sessionId,
     credentials: useProbe ? { ...credentials, offlineProbe: true, source: 'offline-probe', apiKey: undefined } : credentials,
-    authReady,
+    // ★ 读**当前**凭证状态（可变）：热切换补上 Key 之后这里要跟着变，
+    //   否则调用方会一直以为「还没配好」（实测踩到过）。
+    get authReady() {
       return credentialState.authReady
+    },
     get gradeLevel() {
       return gradeExtension.appliedGrade()
     },
@@ -849,49 +993,117 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     trace,
 
     /**
-     * ★ 学段**由推断系统独占**：本方法已不再是「写入点」。
+     * ★★ 保存设置后热切换 LLM 配置（见接口注释；「设置改完即生效」的落地）。
      *
-     * 保留签名只是为了不破坏 `ChatRuntime` 的既有调用面；它现在**只回读**当前生效的学段
-     * （`gradeExtension.appliedGrade()`），任何传入值都不会写回去 —— 否则调用方就能把
-     * 推断结果顶掉，而「学段只由推断决定」是 §10 的硬约束（渲染进程连表达这个意图的能力都
      * ⚠️ 离线探针模式（`useProbe`）下**不切换**：探针的意义是「不碰真实供应商」，
+     *   给它换上真实 Key 会当场破坏这个前提。直接返回即可（那种形态本来就只在排查时开启）。
      */
-    setGradeLevel(_grade) {
     async applyLlmConfig(config: LlmConfigForPi & { apiKey?: string }) {
+      if (useProbe) {
         console.warn('[agent] 离线探针模式忽略 LLM 配置热切换（探针不接触真实供应商）')
+        return
+      }
+      if (disposed) throw new Error('会话已关闭，无法切换 LLM 配置。')
+
       const providerId = config.providerId.trim() || credentials.providerId
       const nextCatalog = await builtinCatalog(options.userDataDir).catch(() => [])
       writeModelsJson(
+        paths,
+        {
           providerId,
+          providerName: config.providerName,
+          baseUrl: config.baseUrl,
+          modelId: config.modelId
+        },
+        nextCatalog
+      )
+
+      // ★ 只刷新这一个 provider：全量 rebuild 会把另外 39 个也重建一遍，没有必要。
       await modelRuntime.refresh({ providers: [providerId], allowNetwork: false })
+      /**
+       * ★★ Key 只进内存（与建会话时同一条纪律：绝不写 `auth.json`），并且**两个方向都要做**：
+       *
+       *   - 有新 Key → `setRuntimeApiKey()`；
        *   - **没有新 Key（用户清空/换到没配 Key 的供应商）→ `removeRuntimeApiKey()`**。
+       *
+       * 为什么后者不能省（实测真机 `ModelRuntime`）：清空 Key 之后 `checkAuth` 仍然报
+       *   `{"type":"api_key","source":"stored credential"}` —— 内存里那把旧 Key 还活着，
        *   于是内容安全自审 / 学段第二层 / 动画自由生成**继续用用户以为已经撤销的 Key 发请求**。
        *   `removeRuntimeApiKey` 是 Pi 的真实 API（`model-runtime.d.ts:83`），只动内存。
+       *
+       * ⚠️ 顺序：必须在 `checkAuth` **之前**做完，否则 `authReady` 算的是旧状态。
+       */
       if (config.apiKey) await modelRuntime.setRuntimeApiKey(providerId, config.apiKey)
       else await modelRuntime.removeRuntimeApiKey(providerId)
+      // ★ 记账同步：`activeApiKey` 是两条脱敏自证断言（prompt / header）唯一的比对基准，
+      //   不更新它 = 拿旧 Key 去比 → 新 Key 泄漏时断言静默通过。
+      activeApiKey = config.apiKey
+
       const nextModel = resolveModelForProvider(providerId, config.modelId)
       await session.setModel(nextModel)
+      // 切换成功后**才**更新「当前生效」的记账（失败时保持原样，诊断不会说谎）
       activeLlm.providerId = providerId
       activeLlm.modelId = config.modelId
+
+      /**
+       * ★★ 同步刷新**凭证状态**（这是「热切换后能不能真的聊起来」的关键一步）。
+       *
+       * 为什么必须重算：`hasKey` / `authReady` 是每轮门禁的判据（见 `runTurn` 里那两处早退）。
+       * 不重算的话，「启动时没 Key → 后来配上了」这条路会一直回「缺少 API Key」，
+       * 而 Pi 那边其实已经拿到 Key 了 —— 用户看到的是「配置明明存住了却没用上」。
        * `checkAuth` 读的是 runtime 覆盖层（`setRuntimeApiKey` / `removeRuntimeApiKey` 刚改过的那把），
+       * 所以这里直接查得到。
+       *
+       * ★ **按本次配置重算，不用 `||` 累积**：`hasKey` 只增不减会让「清空 Key」与
        *   「切到没 Key 的供应商」两条路都卡在 `true`（门禁全放行，继续发请求）。
+       */
       credentialState.hasKey = Boolean(config.apiKey)
       credentialState.authReady = (await modelRuntime.checkAuth(providerId)) !== undefined
+      // ★ 补上 Key 之后要把模型通道**重新填上**：启动时没 Key 的会话，
       //   自审 / 判学段 / 动画生成这三条链路都要跟着恢复（否则「配好了也只有对话能用」）；
       //   反过来清掉 Key 时 `fillCompleter` 会把通道清空（同一条纪律的另一半）。
       fillCompleter(nextModel)
+
+      // 诊断（`K12_PI_TRACE=1`）：只打结构性字段，**绝不打印 Key**
+      if (tracePiEvents) {
+        console.warn(
           `[pi] 已热切换 LLM 配置：provider=${providerId} model=${config.modelId} baseUrl=${config.baseUrl}` +
             ` authReady=${credentialState.authReady}`
+        )
+      }
+    },
+
+    /**
      * ★ 学生手动设定学段（`grade:set` 通道的唯一实现，见接口上的注释）。
+     *
+     * 顺序不能乱：
+     *   ① **先写库**（服务端是唯一写库方）：失败就此为止，进程内状态一点都不动
+     *      （绝不能出现「界面上显示初中、库里还是小学高年级」这种两套真值）；
+     *   ② `adoptOverride()` —— 立即生效 + 清 `pendingGrade` + bump epoch（作废在途推断）；
+     *   ③ `bindCurrentSession()` —— 让扩展层那份 `AgentSessionContext.gradeLevel` 立刻跟上，
      *      否则 `learning-log` 等每轮读上下文的地方还按旧学段记账（**只在成功后**重新绑，
+     *      不放在 ① 之前：那会让「写库失败」也留下一次无意义的上下文写入）。
+     *
+     * ⚠️ 与 `runTurn` 里的两次 `bindCurrentSession()` 一样，它**不碰** `busy` 门禁：
      *   设定学段是控制面的动作，不该被「上一条回答还没说完」挡住（学生改学段的时刻
+     *   完全可能正在流式输出中，而那正是他最想改的时刻）。
+     */
     async setGradeLevel(
       gradeLevel: GradeLevel
+    ): Promise<{ changed: boolean; cooldownRemainingTurns: number }> {
       if (disposed) throw new Error('会话已关闭，无法设定学段。')
       const result = await postGradeOverride(paths.studentId, gradeLevel)
       gradeExtension.adoptOverride(result.gradeLevel, result.cooldownRemainingTurns)
+      bindCurrentSession()
       // 结构性日志：只有学段与轮数，**不含任何凭证、不含学生原话**
+      console.warn(
         `[grade] 学生手动设定学段：${result.previousLevel} → ${result.gradeLevel}` +
+          `（冷却 ${result.cooldownRemainingTurns} 轮内不再自动调整，changed=${result.changed}）`
+      )
+      return {
+        changed: result.changed,
+        cooldownRemainingTurns: result.cooldownRemainingTurns
+      }
     },
 
     async runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome> {
@@ -928,9 +1140,18 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         bindCurrentSession()
 
         // ★★ 画像预取（票 20 的对话侧落点）：**必须在三条早退路径之前**
+        //    （输入拦截 / 无 Key / 鉴权未过），否则那三条路径落盘的 `state.lastPrompt`
         //    与真正发出去的那一份不一致（它们都要走 `buildSystemPrompt`，读的就是这份快照）。
+        //    用 `await`（不是 fire-and-forget）：本轮就要用它拼 prompt。
         //    失败降级为空串（绝不阻断对话）—— 见 `extensions/profile.ts` 的 `fetchStudentContext`。
+        //    ⚠️ `busy` 已在上方置位，异常由本函数的 `finally` 兜住（不会漏掉 busy=false）。
+        //
+        //    ★ **为什么不清空**：下一轮的预取会覆盖它，清空只会多出「预取失败于是连上一轮的
+        //      有效块也一起丢掉」这个纯损失的分支；而残留旧值的风险是有限的 ——
+        //      切换学生走的是**新建会话**（`ipc/handlers.ts` 的 ensureChatRuntime → createChatRuntime），
+        //      新的 `ChatRuntime` 自带一个空块，跨学生复用同一个 runtime 的路径不存在。
         studentContextBlock = await fetchStudentContext(paths.studentId)
+
         // ★★ 内容安全【第一道：输入侧检查】（票 22 / §12）——**在发起模型调用之前**。
         //
         //    为什么放在这里而不是 Pi 的 `input` 事件里：`input` 只在真的调 `session.prompt()`
@@ -940,10 +1161,10 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         //    ⚠️ 判定在 Python（`guard.check_input`），这里只投递 —— **绝不在 TS 侧另写词表**。
         const inputVerdict = await reviewInput(input.text, { gradeLevel: gradeExtension.appliedGrade() })
         if (inputVerdict && !inputVerdict.allowed) {
-          state.inputBlocks += 1
-          state.lastPrompt = gradeExtension.systemPromptFor(undefined)
+          // 证据：本轮**没有**经过 `before_agent_start`（没调 prompt），所以这里自己拼一份
           // 「本轮按哪个学段作答」的 prompt 落盘（同一个出口 `buildSystemPrompt`，不是另写一份；
           // 画像预取已在上面完成，所以这份证据与真正会发出去的那份**逐字一致**）。
+          // 拦截计数不在这里单独存 —— 下面那行 `[safety]` 日志与 `blocked` 事件本身就是证据。
           state.lastPrompt = buildSystemPrompt(undefined)
           dumpPrompts(paths, state)
           emitBlockedTurn(sink, inputVerdict)
@@ -978,16 +1199,15 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         // 无 Key：**不调 prompt()**，直接给可读结论（Pi 在 prompt() 最开头就会因缺凭证抛错，
         // 且那时连 `before_agent_start` 都不会触发 —— 所以在这里前置判定，文案才不会退化成异常）
         // ★ 判定读的是 `credentialState`（可变）而不是 `credentials`（建会话时的快照）：
+        //   热切换补上 Key 之后，这里必须放行，否则会出现「Key 配好了还说没配」（实测踩到过）。
         if (!credentialState.hasKey && !useProbe) {
           // ★ 无 Key 也要把「本轮按哪个学段作答」拼出来：它是 `chat-system-prompt.txt` 的证据来源，
-          //   与真正发出去的那份**同一个函数**（`systemPromptFor`），不是另写一份。
           //   与真正发出去的那份**同一个函数**（`buildSystemPrompt`：学段 + 本轮画像快照），不是另写一份。
           state.lastPrompt = buildSystemPrompt(undefined)
           dumpPrompts(paths, state)
           emitTerminal(sink, MISSING_KEY_MESSAGE)
           return { ok: false, status: 'missing-key', detail: `key来源=${credentials.source}` }
         }
-        if (!authReady) {
         if (!credentialState.authReady) {
           state.lastPrompt = buildSystemPrompt(undefined)
           dumpPrompts(paths, state)
@@ -1021,12 +1241,12 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         // 紧接着 `flushGrades()` + 读学段 —— 而 `blocked` 与 `done` 可能在那之后才到。
         // `settled()` 内部有兜底（没有终态事件也会 resolve），所以这里**不会挂住**。
         await gate.settled()
-        state.finalizations += gate.finalizations
-        state.retractions += gate.retractions
         // ★ 每轮一条结构性审计行（验收与排查的落点）：证明「生成侧终审」在这条真实回合上
         //   被装配过、跑了几次、撤回过没有。**只有结构字段与计数，绝无正文**（§12）。
         //   `finalizations=0` 的两种正常含义：① 本轮以失败收尾（没有正文要撤）；
         //   ② 本轮还没产生任何正文。都不是故障。
+        //   ⚠️ 计数只在这里打日志，**不另存进 state**：以前那份 `state.finalizations/retractions`
+        //   没有任何读取方（写了没人看的状态最容易被误当成验收证据），已删。
         console.warn(
           `[safety] 本轮内容安全：输入侧检查=通过 生成侧终审=${gate.finalizations} 次 ` +
             `撤回=${gate.retractions} 次（正文 ${gate.bufferedChars} 字符）`
@@ -1062,8 +1282,9 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
      * ★ 幂等：`before-quit` 与窗口销毁都可能触发（Pi 的 JSONL 必须在进程退出前 flush）。
      *
      * 顺序：① 等学段队列走完（**最后一个 `/api` 调用方**，必须排在 sidecar 停之前）
-     *       ② 导出工具调用轨迹（**读内存**）
-     *       ③ `session.dispose()` 把 JSONL flush 干净。
+     *       ② 把学习记录队列也写出去（同样是 `/api` 调用方，见下方注释）
+     *       ③ 导出工具调用轨迹（**读内存**）
+     *       ④ `session.dispose()` 把 JSONL flush 干净。
      * 每一步都在 try/catch 里：收尾失败不该把退出流程卡住（调用方是 `before-quit`）。
      */
     async dispose() {
@@ -1077,6 +1298,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       } catch {
         // 学段队列收尾失败不影响退出
       }
+      await flushLearningLog()
       exportTrace()
       try {
         session.dispose()
@@ -1086,13 +1308,57 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     }
   }
 
+  /**
+   * ★★ 退出前把**学习记录队列**写出去（票 09 的欠账：`learning-log.ts` 的模块头与
+   * `flush()` / `stats()` 都承诺「`agent_end` 与退出前都可调」，但退出那条路径**此前不存在**）。
+   *
+   * 不 flush 的后果：sidecar 短暂不可用期间入队的结构化学习记录（最多 200 条）在退出时被丢，
+   * 而这些正是个性化闭环与「重启后数据延续」验收的输入；`stats().dropped` 也没人看，
+   * 丢数据是**无声**的。
+   *
+   * ★ 为什么从 `CORE_EXTENSION_FACTORIES` 取而不是 `import learningLogExtension from …`：
+   *   本文件已经 import 了 `extensions/index.ts`，再去**静态 import 那个单例**会新增一条
+   *   循环导入边（`index.ts` ↔ `learning-log.ts` 本来就互相 import），而循环导入里谁先求值
+   *   取决于**源码里的 import 顺序** —— 顺序一变就是启动期 TDZ 崩溃（`Cannot access
+   *   'learningLogExtension' before initialization`）。从注册表里取同一个对象则完全没有这条边：
+   *   运行时（不带 `coreFactories` 覆盖）注册的就是这个单例，**取的是「实际注册的那个」**，
+   *   语义还更准。
+   *
+   * ★ 加 `Promise.race` 上限：`flush()` 会逐条 POST，退避最长 30s，不能让它把退出流程拖死
+   *   （超时只记一条日志，剩下的记录留在队列里 —— 应用已经要退出了，宁可丢队列也不卡住退出）。
+   */
+  async function flushLearningLog(): Promise<void> {
+    try {
+      const extension = CORE_EXTENSION_FACTORIES['learning-log'] as unknown as LearningLogDiagnostics | undefined
+      if (!extension || typeof extension.flush !== 'function' || typeof extension.stats !== 'function') {
+        // 注册表被换过（测试注入）或缺这个扩展：干净跳过，绝不在退出路径上抛
+        return
+      }
+      const stats = extension.stats()
+      if (stats.queued === 0) return
+      const flushed = await Promise.race([
+        extension.flush(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), LEARNING_LOG_FLUSH_TIMEOUT_MS))
+      ])
+      const after = extension.stats()
+      console.warn(
+        `[learning-log] 退出前冲洗队列：${flushed === null ? '超时' : flushed ? '全部写入' : '部分写入（已入队重试）'}` +
+          `｜本次写入 ${after.written - stats.written} 条，剩余 ${after.queued} 条，累计丢弃 ${after.dropped} 条`
+      )
+    } catch (error) {
       // 学习记录是辅助能力：收尾失败绝不能拦住退出（与 `gradeExtension.flush` 同一条纪律）
+      console.warn(
+        `[learning-log] 退出前冲洗失败（已忽略）：${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  }
+
   /**
    * 轨迹落盘（票 08：`docs/tool-trace.mmd`）。
    *
    * 落点分两种，都不是「随便写一个地方」：
    *   - **开发态**：仓库根的 `docs/tool-trace.mmd`（`repoRoot`，与 `npm run trace:export` 同一处，
-   *     直接进报告与答辩 PPT）；
+   *     直接进报告与汇报 PPT）；
    *   - **打包态**：仓库不存在，写到本学生的 `pi-agent/logs/tool-trace.mmd`
    *     （`<userData>/students/<id>/…`，与其它诊断证据同处，绝不写到安装目录）。
    * `K12_TRACE_OUT` 可覆盖落点（人工验收时把证据收到指定路径）。
@@ -1100,9 +1366,9 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   function exportTrace(): void {
     try {
       const options: TraceExportOptions = {
-        // `meta` 必须是完整对象（`generatedAt` / `turns` 由采集器补齐），所以经 `trace.meta()` 取
-        meta: trace.meta({ model: `${credentials.providerId}/${credentials.modelId}` })
+        // `meta` 必须是完整对象（`generatedAt` / `turns` 由采集器补齐），所以经 `trace.meta()` 取。
         // ★ 用 `activeLlm`（可变）而不是 `credentials`（建会话时的快照）：
+        //   热切换过 LLM 配置之后，轨迹里记录的必须是**真正在用**的那一对。
         meta: trace.meta({ model: `${activeLlm.providerId}/${activeLlm.modelId}` })
       }
       const override = process.env.K12_TRACE_OUT

@@ -50,7 +50,15 @@ export interface BlockedNotice {
   retractedText: string
 }
 
-/** 出错 / 降级提示。`degraded === true` 表示「能力受限但仍可用」，不是崩溃。 */
+/**
+ * 出错 / 降级提示。`degraded === true` 表示「能力受限但仍可用」，不是崩溃。
+ *
+ * ★ 两种 `degraded` 的**轮次语义**不同（跨进程约定，主进程与本文件的判据必须一致）：
+ *   - `degraded === true`：**只提示，不终结本轮** —— 主进程仍会把这一轮的回答生成完
+ *     （典型场景：某个 Tool 没成功，模型接着用已有信息把话讲完），
+ *     所以后续 `delta` 必须照常进入正文，`done` 也还要能收尾；
+ *   - `degraded === false`：真正的崩溃式失败，本轮到此为止（终态 `error`）。
+ */
 export interface ErrorNotice {
   message: string
   degraded: boolean
@@ -208,8 +216,20 @@ function reduceTurn(turn: ChatTurn, event: IpcEvent): ChatTurn {
     case 'delta':
       return { ...turn, text: turn.text + event.data.delta }
 
-    case 'citation':
-      return { ...turn, citations: [...turn.citations, ...event.data.citations] }
+    case 'citation': {
+      // ★ 同一轮里模型可能多次调 `rag_search`，同一个 `chunkId` 会**重复到达**；
+      //   而来源标签拿 `chunkId` 当 `v-for` 的 key（`SourceChips.vue`）——
+      //   不去重就会出现「Duplicate keys found」与标签重复/错位。
+      //   按首次出现的顺序保留（后面的同 id 条目直接丢弃）。
+      const seen = new Set(turn.citations.map((citation) => citation.chunkId))
+      const fresh = event.data.citations.filter((citation) => {
+        if (seen.has(citation.chunkId)) return false
+        seen.add(citation.chunkId)
+        return true
+      })
+      if (fresh.length === 0) return turn
+      return { ...turn, citations: [...turn.citations, ...fresh] }
+    }
 
     case 'payload':
       return {
@@ -241,15 +261,18 @@ function reduceTurn(turn: ChatTurn, event: IpcEvent): ChatTurn {
     case 'done':
       return { ...turn, status: 'done', messageId: event.data.messageId.length > 0 ? event.data.messageId : null }
 
-    case 'error':
-      return {
-        ...turn,
-        status: 'error',
-        error: {
-          message: sanitizeNotice(event.data.message),
-          degraded: event.data.degraded
-        }
+    case 'error': {
+      const notice: ErrorNotice = {
+        message: sanitizeNotice(event.data.message),
+        degraded: event.data.degraded
       }
+      // ★ `degraded === true` = **降级提示，不是终态**：主进程还会把这一轮讲完
+      //   （Tool 失败但模型接着用已有信息作答），所以这里只记提示 + 保持 `streaming`，
+      //   让后续 `delta` / `done` 照常进来。置成终态会把后半段正文整段丢掉。
+      if (notice.degraded) return { ...turn, error: notice }
+      // `degraded === false` = 真正的失败：本轮到此为止。
+      return { ...turn, status: 'error', error: notice }
+    }
   }
 }
 

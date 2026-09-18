@@ -201,6 +201,16 @@ export class SidecarManager {
     })
     this.lineBuffer = ignoredLines
 
+    /**
+     * ★ 本次启动**是否已经拿到过结论**（`ready` / `error`）。
+     *
+     * stdout 是保留通道（票 02 的验收口径：只允许一行握手 JSON）。第二条能解析出结论的行
+     * 以前会**静默消失**（Promise 的第二次 `resolve` 是 no-op，`start()` 也早就离开了
+     * `awaitHandshake`），于是 `ignoredStdoutLines` 兑现不了它注释里的承诺
+     * （「非 0 说明有东西往保留通道里打印」）。
+     */
+    let handshakeSettled = false
+
     child.stdout?.on('data', (chunk: string) => {
       // ★ stale-child 守卫：被替换掉的进程不许改新状态
       if (this.child !== child) return
@@ -210,6 +220,15 @@ export class SidecarManager {
           this.noteIgnoredStdoutLine(child, result.line)
           continue
         }
+        if (handshakeSettled) {
+          // ★ 第二行「合法握手 JSON」：计数 + 记日志，**但不判失败**。
+          //   取舍：已就绪的 sidecar 因为多打一行就被放弃属于**误杀**（票 02 的原意是
+          //   「stdout 不得当日志通道」，不是「多一行即不可用」）；而完全不留痕又会让
+          //   这条验收口径形同虚设。所以这里留痕（计数 + 日志），真出问题看这两个信号。
+          this.noteSupersededHandshakeLine(child, line)
+          continue
+        }
+        handshakeSettled = true
         settleHandshake(result)
       }
     })
@@ -281,7 +300,13 @@ export class SidecarManager {
 
     this.wasUsable = true
     this.writeLog(`[manager] /health 就绪：${JSON.stringify(health)}`)
-    this.setState({ phase: 'ready', lastError: null })
+    // ★★ 重启额度在**真正就绪**时归还（G3b）。
+    //   不归还的话额度是**终生一次**：`start()` 清了 `shuttingDown` / `intentionalKill` / `wasUsable`，
+    //   唯独没清 `restarts`，于是「崩溃 → 自愈成功 → 又崩溃」时 `decideRestart` 直接判
+    //   `restarts(1) < maxRestarts(1)` 为假，走 `restart-exhausted` —— 自愈第二次就永久失效。
+    //   `restarts` 的语义明确为「**自上次成功就绪以来**重启过几次」，所以这里归零；
+    //   「一个崩溃周期内最多重启 {@link MAX_RESTARTS} 次」这个上限语义**不变**。
+    this.setState({ phase: 'ready', lastError: null, restarts: 0 })
   }
 
   /**
@@ -573,6 +598,22 @@ export class SidecarManager {
     this.setState({ ignoredStdoutLines: this.state.ignoredStdoutLines + 1 })
   }
 
+  /**
+   * 第二条**能解析出结论**的 stdout 行（重复 `ready` / 后到的 `error`）。
+   *
+   * 与 {@link noteIgnoredStdoutLine} 一样计数与留痕，只是日志措辞点明「这是第二行握手结论」——
+   * 排查时一眼能看出是「后端往保留通道多打了一行」而不是「日志跑错了通道」。
+   */
+  private noteSupersededHandshakeLine(child: ChildProcess, line: string): void {
+    const trimmed = line.trim()
+    this.writeLog(
+      `[stdout] WARNING：第 2 行握手结论被忽略（pid=${String(child.pid ?? '?')}）：` +
+        `${trimmed === '' ? '(空行)' : trimmed} —— stdout 只允许一行握手 JSON，` +
+        '这次不计入启动结论（sidecar 继续按第一行运行）'
+    )
+    this.countIgnoredStdoutLine()
+  }
+
   private fail(message: string): void {
     this.writeLog(`[manager] ${message}`)
     this.setState({ phase: 'failed', lastError: message, pid: null, port: null })
@@ -602,7 +643,18 @@ export class SidecarManager {
     try {
       const logDir = join(this.userDataDir, 'logs')
       mkdirSync(logDir, { recursive: true })
-      this.logStream = createWriteStream(this.logPath(), { flags: 'a' })
+      const stream = createWriteStream(this.logPath(), { flags: 'a' })
+      // ★★ 上面的 try/catch **只兜得住同步段**（`mkdirSync`）。`createWriteStream` 的 open 是
+      //    **异步**的：EPIPE / EPERM / ENOSPC（只读安装介质、磁盘满、杀软或另一个实例锁住文件）
+      //    会以 `'error'` 事件的形式冒出来 —— 没有监听器时 EventEmitter 直接把它抛成
+      //    **主进程未捕获异常**（Electron 弹「A JavaScript error occurred in the main process」或直接崩）。
+      //    那与本函数「日志开不起来不能阻断启动」的意图正好相反，所以这里必须挂监听。
+      stream.on('error', (error: NodeJS.ErrnoException) => {
+        console.warn(`[sidecar] 日志文件不可用（已停用文件日志，不影响运行）：${errorMessage(error)}`)
+        // 只在还是当前流时断开引用：避免把后来重新打开的新流误清（进而漏掉它的错误）
+        if (this.logStream === stream) this.logStream = null
+      })
+      this.logStream = stream
     } catch (error) {
       // 日志开不起来不能阻断启动，只在控制台提示
       console.warn(`[sidecar] 日志文件不可用：${errorMessage(error)}`)
@@ -611,13 +663,24 @@ export class SidecarManager {
 
   /** ★ 所有落盘日志都过一遍脱敏：日志可能被整段贴进缺陷报告，token 与 API Key 不许活着写进去。 */
   private writeLog(line: string): void {
-    if (!this.logStream) return
+    const stream = this.logStream
+    // ★ `'error'` 监听是异步的，中间存在「流已被销毁但我们还没处理完事件」的窗口；
+    //   此时再 `write` 会抛 `ERR_STREAM_DESTROYED`。另外 `closeLog()` 之后 `end()` 过的流也不能写。
+    //   **日志写不进去绝不能打崩主进程**，所以两处都挡一下。
+    if (!stream || stream.destroyed || stream.writableEnded) return
     const safe = redactLogLine(line, this.token === null ? [] : [this.token])
-    this.logStream.write(`[${new Date().toISOString()}] ${safe}\n`)
+    try {
+      stream.write(`[${new Date().toISOString()}] ${safe}\n`)
+    } catch {
+      // 同步抛出（极端情况）：丢弃这一行日志即可，不影响业务
+    }
   }
 
   private closeLog(): void {
-    this.logStream?.end()
+    const stream = this.logStream
     this.logStream = null
+    if (!stream || stream.destroyed) return
+    // `end()` 之后仍可能有 'error'（未 flush 完就失败）；监听器还在，且已按引用判断过，不会再动状态
+    stream.end()
   }
 }

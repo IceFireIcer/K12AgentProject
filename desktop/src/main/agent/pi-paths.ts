@@ -22,7 +22,7 @@
  * 符号链接**不跟随**（`~/.pi/agent/skills/*` 指向 `~/.agents/skills/*`，跟进去会扫一大片无关目录）。
  */
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, normalize, relative, resolve, sep } from 'node:path'
 
@@ -54,7 +54,7 @@ export interface PiPaths {
   agentDir: string
   /** `authPath`：API Key 落盘位置（只存本应用自己的 Key，绝不碰用户全局 `auth.json`）。 */
   authPath: string
-  /** `modelsPath`：自定义 provider / BaseURL / ModelID 的配置文件（赛题硬要求）。 */
+  /** `modelsPath`：自定义 provider / BaseURL / ModelID 的配置文件（需求硬性要求）。 */
   modelsPath: string
   /** `sessionDir`：Pi JSONL 会话树落盘位置（一人一份）。 */
   sessionDir: string
@@ -744,17 +744,13 @@ export function isolationShellHints(userDataDir: string, studentId: string): str
   ]
 }
 
-/** 目录是否可写（诊断用；不写入任何东西）。 */
-export function isWritableDir(dir: string): boolean {
-  try {
-    const stat = statSync(dir)
-    return stat.isDirectory()
-  } catch {
-    return false
-  }
-}
-
-/** 归一化路径（供外部打印/比对；Windows 下统一成 `/` 分隔，便于写进报告）。 */
+/**
+ * 归一化路径（供外部打印/比对；Windows 下统一成 `/` 分隔，便于写进报告）。
+ *
+ * ⚠️ 删掉过一个 `isWritableDir()`（零引用）：目录写权限的判定在本项目里由
+ *   `ensurePiDirs` / `ensureStudentPiDirs` 的**实际 mkdir** 承担（那才是真的判据），
+ *   一个只做 `statSync().isDirectory()` 的「可写」探针既没用也会给人错误印象。
+ */
 export function prettyPath(value: string): string {
   return normalize(value).replace(/\\/g, '/')
 }

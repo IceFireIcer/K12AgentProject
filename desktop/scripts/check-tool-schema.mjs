@@ -8,8 +8,18 @@
  * 两边各自演化就会**静默漂移**：pydantic 改了字段名/类型，Tool 还在按老形状收参数，
  * 模型填进来的东西要么被后端拒（学生看到 error），要么被悄悄忽略（更糟）。
  *
- * 做法：**真的 import 主进程里那 4 个导出的 schema 常量**（不复制、不解析文本），
- *       逐字段与 `openapi.json` 的同名契约模型对比。
+ * 做法：**真的 import 主进程里那些导出的 schema 常量**（不复制、不解析文本），
+ *       逐个与 `openapi.json` 的同名契约模型（或该端点的参数面）对比。
+ *
+ * ---------------------------------------------------------------------------
+ * 三种对照模式（每个 Tool 按自己的形状选一种）
+ * ---------------------------------------------------------------------------
+ *   ① `contract: 'XxxRequest'`  —— 有请求体模型：逐字段比类型 / 枚举 / 必填 / 边界（**最严**）。
+ *   ② `paramsFrom: {path, method}` —— GET 端点没有请求体模型：比**参数名集合**
+ *      （Tool 的 camelCase 归一成 snake 后，与 OpenAPI 里这条操作的 `parameters` 对照）。
+ *   ③ `bodyKeysFrom: {...}` —— 端点 `include_in_schema=False`（不进 OpenAPI，如动画渲染）：
+ *      从 **Python 路由源码**里抽出它接受的请求体键（`body.get("x")`），
+ *      断言 Tool 的每个参数都被端点接受（单向：端点还有别的路径共用，反向是噪声）。
  *
  * ---------------------------------------------------------------------------
  * 对比规则（不是「大致一样就行」，是逐字段的硬比对）
@@ -25,6 +35,10 @@
  * ★★ 「允许清单」不是「把检查放松」：清单是**逐字段**的（字段名 + 差异种类 + 理由），
  *    没有登记的差异一律报错；清单里**已经失效**的条目也会报错（防止清单腐烂成一句空话）。
  *    这是执行文档 §6.3 要求的「TypeBox 与 pydantic 一致性断言」，不是「跳过」。
+ *
+ * ★ 工具清单（`TOOLS`）的完整性**不再自我比对**：清单从**真实注册表**派生 ——
+ *   `AGENT_TOOL_NAMES`（六个扩展实际注册的 10 个 Tool）与 `PAYLOAD_TOOL_NAMES`
+ *   （`kindForTool` 表里的 7 个 payload Tool）。新增一个 Tool 但没登记进本脚本 → 退出码 1。
  *
  * 用法：node scripts/check-tool-schema.mjs     （`npm run check:tool-schema`）
  * 退出码：0 = 一致；1 = 有漂移（含清单失效）；2 = 脚本自身出错（读不到文件 / import 失败）。
@@ -70,6 +84,8 @@ function scriptError(message) {
  *   `required-contract`契约侧必填、Tool 侧可选
  *   `bounds-tool`      只有 Tool 侧声明了边界（更严的输入约束）
  *   `bounds-contract`  只有契约侧声明了边界
+ *   `params-tool-only`     ★ 参数名集合模式：Tool 有这个参数，端点不接受（本地用 / 映射后换个键发）
+ *   `params-contract-only` ★ 参数名集合模式：端点接受这个参数，Tool 不暴露（由主进程注入）
  */
 const ALLOWED_DIFFS = [
   {
@@ -193,6 +209,86 @@ const ALLOWED_DIFFS = [
     reason:
       'Tool 侧规定多空作答每个分支的合理上限（非空字符串 + 最多 8 个空的数组），' +
       '契约层的 answer 只区分 string / string[]（不限长，因为判分只按 qid 查库）。'
+  },
+
+  /* ── evaluate_code ⇄ CodeRunRequest（POST /api/code/run-hint，逐字段比对）────── */
+  {
+    tool: 'evaluate_code',
+    field: 'kpId',
+    kind: 'bounds-tool',
+    reason: '同 generate_quiz 的 kpId：Tool 侧限长 64（知识点 id 的实际长度），契约层不限长。'
+  },
+  {
+    tool: 'evaluate_code',
+    field: 'code',
+    kind: 'bounds-tool',
+    reason: 'Tool 侧规定学生代码的合理上限（非空 + 最多 2 万字符），契约层不限长（后端不猜代码长度）。'
+  },
+  {
+    tool: 'evaluate_code',
+    field: 'studentId',
+    kind: 'contract-only',
+    reason:
+      '★ 安全边界（同 submit_quiz）：学生 id 由主进程注入（`currentAgentSession()`），' +
+      '**绝不允许模型填** —— 一旦成为模型参数，就能构造出「把运行记录写进别人档案」的调用。'
+  },
+  {
+    tool: 'evaluate_code',
+    field: 'stdout',
+    kind: 'contract-only',
+    reason: '运行结果由渲染进程的 Pyodide Worker 回传（Tool 只把结果转发给 Python），不是模型入参。'
+  },
+  {
+    tool: 'evaluate_code',
+    field: 'stderr',
+    kind: 'contract-only',
+    reason: '同上：traceback 是 Worker 里的真实运行产物，模型编不出来、也不该编。'
+  },
+  {
+    tool: 'evaluate_code',
+    field: 'attempt',
+    kind: 'contract-only',
+    reason: '「同一知识点第几次」由扩展的本地失败计数决定（按学生 + kp 隔离），不让模型左右帮助级别。'
+  },
+
+  /* ── GET 端点：参数名集合模式（contracts 里没有请求体模型，对照操作参数面）──── */
+  {
+    tool: 'get_coding_hint',
+    field: 'reason',
+    kind: 'params-tool-only',
+    reason:
+      '学生困难描述只用于扩展内部选提示落点（再决定 `level`），不是端点参数 —— ' +
+      '端点只认 `kp_id` + `level`（server/app/routes/code.py 的 get_coding_hint）。'
+  },
+  {
+    tool: 'get_coding_hint',
+    field: 'level',
+    kind: 'params-contract-only',
+    reason:
+      '★ 级别由扩展按「该生在该 kp 上已给过的最高级 +1」决定（不跳级），**绝不暴露给模型** —— ' +
+      '模型一旦能填就会出现「直接要第 3 级」绕开引导。'
+  },
+  {
+    tool: 'get_student_profile',
+    field: 'max_mastery',
+    kind: 'params-tool-only',
+    reason: '掌握度条目上限是给模型的 Prompt 预算旋钮；端点没有这个查询参数（画像一次返回，由扩展裁剪）。'
+  },
+  {
+    tool: 'get_student_profile',
+    field: 'student_id',
+    kind: 'params-contract-only',
+    reason: '★ 学生 id 是主进程注入的路径参数，模型不能指定读谁的画像（读别人 = 跨学生越权）。'
+  },
+
+  /* ── generate_animation：端点不进 OpenAPI，对照 Python 路由接受的请求体键 ──── */
+  {
+    tool: 'generate_animation',
+    field: 'caption',
+    kind: 'params-tool-only',
+    reason:
+      '模型写的一句话讲解在扩展里被映射成 `fallbackText` 发出（produce() 的 ' +
+      '`...(input.caption ? { fallbackText: input.caption } : {})`），端点没有 `caption` 这个键。'
   }
 ]
 
@@ -230,17 +326,89 @@ const TOOLS = [
     module: 'src/main/agent/extensions/quiz.ts',
     contract: 'QuizPayload',
     contractNote: '出题载荷（变式题与出题同一形态）'
+  },
+  {
+    tool: 'get_code_template',
+    exportName: 'GetCodeTemplateParams',
+    module: 'src/main/agent/extensions/coding.ts',
+    /** GET 端点：契约里没有请求体模型，对照物是这条操作的**参数面**。 */
+    paramsFrom: {
+      path: '/api/code/templates/{kp_id}',
+      method: 'get',
+      note: 'GET /api/code/templates/{kp_id} 的路径/查询参数（Tool 真正发出的那个请求）'
+    }
+  },
+  {
+    tool: 'get_coding_hint',
+    exportName: 'GetCodingHintParams',
+    module: 'src/main/agent/extensions/coding.ts',
+    paramsFrom: {
+      path: '/api/code/hint/{kp_id}',
+      method: 'get',
+      note: 'GET /api/code/hint/{kp_id}?level=… 的参数（级别由扩展算，不由模型填）'
+    }
+  },
+  {
+    tool: 'evaluate_code',
+    exportName: 'EvaluateCodeParams',
+    module: 'src/main/agent/extensions/coding.ts',
+    contract: 'CodeRunRequest',
+    contractNote: 'POST /api/code/run-hint 的请求体（Tool 真正发出的形状）'
+  },
+  {
+    tool: 'generate_animation',
+    exportName: 'GenerateAnimationParams',
+    module: 'src/main/agent/extensions/animation.ts',
+    /**
+     * ★ 该端点 `include_in_schema=False`（`server/app/routes/resources.py` 的
+     *   `render_animation_route`）—— 契约里**没有**它的请求体模型，所以第三种模式：
+     *   从 Python 路由源码里抽出它接受的键，断言 Tool 的每个参数都被端点接受。
+     *   方向是**单向**的：同一个路由还给「自由生成」路径用（那里发 html/payloadId），
+     *   反向比对（端点有、Tool 没有）只会得到一堆噪声。
+     */
+    bodyKeysFrom: {
+      file: 'server/app/routes/resources.py',
+      functionName: 'render_animation_route',
+      note: 'POST /api/animation/render 接受的请求体键（从 Python 路由源码抽出，该端点不进 OpenAPI）'
+    }
+  },
+  {
+    tool: 'get_student_profile',
+    exportName: 'GetStudentProfileParams',
+    module: 'src/main/agent/extensions/profile.ts',
+    paramsFrom: {
+      path: '/api/profile/{student_id}',
+      method: 'get',
+      note: 'GET /api/profile/{student_id} 的路径参数（这个 Tool 不发 payload，只影响 Prompt）'
+    }
+  },
+  {
+    tool: 'remember_preference',
+    exportName: 'RememberPreferenceParams',
+    module: 'src/main/agent/extensions/profile.ts',
+    contract: 'PreferenceUpdateRequest',
+    contractNote: '写学习偏好的请求体（key 是封闭词表，值限长 40 且拒换行）'
   }
 ]
 
-/** 必须出现在工具清单里的 Tool 名（新增 Tool 时要同步加进来，缺一个就是漂移）。 */
-const EXPECTED_TOOLS = ['rag_search', 'generate_quiz', 'submit_quiz', 'generate_variants']
+/**
+ * 工具清单的**完整性判据从真实注册表派生**（不再自我引用）。
+ *
+ * ⚠️ 这里曾经是一份与 `TOOLS` 平行的硬编码数组（`EXPECTED_TOOLS`）—— 两边永远是同一份，
+ * 于是「工具清单本身也要完整」那条断言只是在跟自己比，少登记一个 Tool 也发现不了。
+ * 现在改从两个**有生产意义**的来源读：
+ *   ① `AGENT_TOOL_NAMES`：六个扩展**实际注册**的 10 个 Tool（`extensions/index.ts`）；
+ *   ② `PAYLOAD_TOOL_NAMES`：`kindForTool` 表里的 7 个会发 `payload` 事件的 Tool。
+ * 少登记任何一个 → 退出码 1（这才是防「清单漏项」的机器判据）。
+ */
+const REGISTERED_TOOLS_MODULE = 'src/main/agent/extensions/index.ts'
+const PAYLOAD_TOOLS_MODULE = 'src/main/ipc/tool-kinds.ts'
 
 /** 逐个字段比对的边界键（`description` / `title` 是散文，不参与比对）。 */
 const BOUND_KEYS = ['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minLength', 'maxLength', 'minItems', 'maxItems', 'default']
 
 /* ------------------------------------------------------------------ *
- * 3. 真 import 那 4 个 schema（借 Node 的类型擦除 + 一个补扩展名/别名的 hook）
+ * 3. 真 import 那些 schema 常量（借 Node 的类型擦除 + 一个补扩展名/别名的 hook）
  * ------------------------------------------------------------------ */
 
 registerHooks({
@@ -525,6 +693,122 @@ function compareTool(entry, toolSchema, contractSchema) {
 }
 
 /* ------------------------------------------------------------------ *
+ * 5b. 参数名集合模式（GET 端点没有请求体模型；动画端点不进 OpenAPI）
+ * ------------------------------------------------------------------ */
+
+/** camelCase → snake_case（Tool 参数是 camelCase，OpenAPI 的 parameters 是 snake_case）。 */
+function toSnakeCase(name) {
+  return name.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
+}
+
+/**
+ * 从 OpenAPI 的某条操作里取出参数名集合（路径参数 + 查询参数，都归一成 snake_case）。
+ *
+ * 没有请求体模型的 GET 端点只能用这个判据：契约里不存在一个「请求体模型」可对照，
+ * 而「Tool 把参数发到哪里去」这件事必须被机器钉住（否则改个查询参数名没人发现）。
+ */
+function endpointParamNames(entry) {
+  const operation = spec?.paths?.[entry.paramsFrom.path]?.[entry.paramsFrom.method]
+  if (operation === undefined) {
+    failures.push(`${entry.tool}：openapi.json 里没有 ${entry.paramsFrom.method.toUpperCase()} ${entry.paramsFrom.path}`)
+    console.log(`\n── ${entry.tool} / ${entry.exportName} ⇄ ${entry.paramsFrom.note ?? entry.paramsFrom.path}`)
+    console.log(`      ✗ [漂移] openapi.json 里没有这条操作（端点改名或没生成？）`)
+    return null
+  }
+  const names = new Set()
+  for (const parameter of operation.parameters ?? []) names.add(toSnakeCase(String(parameter.name)))
+  return names
+}
+
+/** 比对 Tool 参数名集合 ⇄ 端点参数名集合（差异逐条登记，未登记即漂移）。 */
+function compareParamNames(entry, toolSchema, endpointNames) {
+  console.log(
+    `\n── ${entry.tool} / ${entry.exportName} ⇄ ${entry.paramsFrom.method.toUpperCase()} ` +
+      `${entry.paramsFrom.path}（${entry.paramsFrom.note ?? '参数名集合比对'}）`
+  )
+  const toolProps = typeof toolSchema.properties === 'object' && toolSchema.properties !== null ? toolSchema.properties : {}
+  const toolNames = new Set(Object.keys(toolProps).map(toSnakeCase))
+  if (toolNames.size === 0) {
+    failures.push(`${entry.tool}：参数 schema 是空对象（模型没有任何可填的东西，大概率是写错了）`)
+    console.log('      ✗ [漂移] Tool 参数 schema 没有任何属性')
+    return
+  }
+
+  for (const name of toolNames) {
+    if (endpointNames.has(name)) {
+      console.log(`      ✓ ${name}：端点接受这个参数`)
+      continue
+    }
+    diff(entry.tool, name, 'params-tool-only', `Tool 有、端点 ${entry.paramsFrom.path} 不接受`)
+  }
+  for (const name of endpointNames) {
+    if (toolNames.has(name)) continue
+    diff(entry.tool, name, 'params-contract-only', `端点 ${entry.paramsFrom.path} 接受、Tool 没暴露给模型`)
+  }
+}
+
+/**
+ * 从 Python 路由源码里抽出它接受的**请求体键**（`body.get("x")` / `body["x"]`）。
+ *
+ * 用于 `include_in_schema=False` 的端点（动画渲染）：它不进 OpenAPI，但主进程真的在发请求，
+ * 所以「Tool 的参数能不能被端点接受」必须有机器判据 —— 从**路由源码**抽，而不是再写一份清单。
+ */
+function readBodyKeys(entry) {
+  const absolute = resolve(ROOT, '..', entry.bodyKeysFrom.file)
+  if (!existsSync(absolute)) {
+    failures.push(`${entry.tool}：读不到 ${entry.bodyKeysFrom.file}（端点源码路径变了？）`)
+    console.log(`\n── ${entry.tool} / ${entry.exportName} ⇄ ${entry.bodyKeysFrom.note}`)
+    console.log(`      ✗ [漂移] 读不到 ${entry.bodyKeysFrom.file}`)
+    return null
+  }
+  const source = readFileSync(absolute, 'utf8')
+  const start = source.indexOf(`def ${entry.bodyKeysFrom.functionName}(`)
+  if (start < 0) {
+    failures.push(`${entry.tool}：${entry.bodyKeysFrom.file} 里找不到 def ${entry.bodyKeysFrom.functionName}(`)
+    console.log(`\n── ${entry.tool} / ${entry.exportName} ⇄ ${entry.bodyKeysFrom.note}`)
+    console.log(`      ✗ [漂移] 找不到路由函数 ${entry.bodyKeysFrom.functionName}`)
+    return null
+  }
+  // 取到下一个顶层 def / 文件末尾（路由函数体）
+  const nextDef = source.indexOf('\ndef ', start + 10)
+  const body = source.slice(start, nextDef < 0 ? undefined : nextDef)
+  const keys = new Set([
+    ...[...body.matchAll(/body\.get\(\s*"([^"]+)"/g)].map((match) => match[1]),
+    ...[...body.matchAll(/body\[\s*"([^"]+)"\s*\]/g)].map((match) => match[1])
+  ])
+  if (keys.size === 0) {
+    failures.push(`${entry.tool}：${entry.bodyKeysFrom.functionName} 里没抽出任何请求体键（解析规则失效了？）`)
+    console.log(`\n── ${entry.tool} / ${entry.exportName} ⇄ ${entry.bodyKeysFrom.note}`)
+    console.log('      ✗ [漂移] 没有抽到任何 body 键 —— 别让它变成一条恒真的空断言')
+    return null
+  }
+  return keys
+}
+
+/**
+ * 比对 Tool 参数 ⇄ 端点接受的请求体键（**单向**：Tool 的每个参数都必须被端点接受）。
+ *
+ * 不反向比对的原因：同一个路由还被「自由生成」路径复用（那里发 html / payloadId，
+ * 是模型产出的产物而不是工具参数），反向比对会得到一堆永远需要登记的假差异。
+ */
+function compareBodyKeys(entry, toolSchema, bodyKeys) {
+  console.log(`\n── ${entry.tool} / ${entry.exportName} ⇄ ${entry.bodyKeysFrom.note}`)
+  const toolProps = typeof toolSchema.properties === 'object' && toolSchema.properties !== null ? toolSchema.properties : {}
+  if (Object.keys(toolProps).length === 0) {
+    failures.push(`${entry.tool}：参数 schema 是空对象`)
+    console.log('      ✗ [漂移] Tool 参数 schema 没有任何属性')
+    return
+  }
+  for (const field of Object.keys(toolProps)) {
+    if (bodyKeys.has(field)) {
+      console.log(`      ✓ ${field}：端点接受这个请求体键`)
+      continue
+    }
+    diff(entry.tool, field, 'params-tool-only', `Tool 有、端点的请求体里不接受（未在 ${entry.bodyKeysFrom.functionName} 里读到）`)
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * 6. 主流程
  * ------------------------------------------------------------------ */
 
@@ -547,14 +831,68 @@ if (typeof schemas !== 'object' || schemas === null) {
 console.log('Tool 参数（TypeBox）⇄ 契约（pydantic → OpenAPI）一致性断言')
 console.log(`契约来源：${OPENAPI_PATH}`)
 
-// 工具清单本身也要完整：少登记一个 Tool，这条防线就有个洞
-const missingTools = EXPECTED_TOOLS.filter((name) => !TOOLS.some((entry) => entry.tool === name))
-if (missingTools.length > 0) {
-  failures.push(`工具清单缺少：${missingTools.join('、')}`)
-  console.log(`\n✗ [漂移] 本脚本没有登记这些 Tool：${missingTools.join('、')}`)
+/**
+ * ★ 工具清单本身也要完整：判据从**真实注册表**派生，不再拿同一份硬编码列表跟自己比。
+ *
+ *   - `AGENT_TOOL_NAMES`：六个扩展实际注册的全部 10 个 Tool（含不发 payload 的三个）；
+ *   - `PAYLOAD_TOOL_NAMES`：`kindForTool` 表里的 7 个 payload Tool（少一个前端会收到未知 kind）。
+ *
+ * 两个来源都会真的 import（不是读文本 grep）：表被改名 / 被删都会在这里报错。
+ */
+let registeredTools = []
+let payloadTools = []
+try {
+  const indexModule = await import(pathToFileURL(resolve(ROOT, REGISTERED_TOOLS_MODULE)).href)
+  registeredTools = [...(indexModule.AGENT_TOOL_NAMES ?? [])]
+  const kindsModule = await import(pathToFileURL(resolve(ROOT, PAYLOAD_TOOLS_MODULE)).href)
+  payloadTools = [...(kindsModule.PAYLOAD_TOOL_NAMES ?? [])]
+} catch (error) {
+  scriptError(
+    `读注册表失败（${REGISTERED_TOOLS_MODULE} / ${PAYLOAD_TOOLS_MODULE}）：` +
+      `${error instanceof Error ? error.message : String(error)}`
+  )
+}
+if (registeredTools.length === 0 || payloadTools.length === 0) {
+  scriptError('注册表里没读到任何 Tool 名 —— 别让「清单完整性」变成一条空断言')
+}
+
+console.log(
+  `Tool 清单来源：${registeredTools.length} 个已注册 Tool（${REGISTERED_TOOLS_MODULE}）、` +
+    `${payloadTools.length} 个 payload Tool（${PAYLOAD_TOOLS_MODULE}）`
+)
+
+const registered = new Set(TOOLS.map((entry) => entry.tool))
+const missingRegistered = registeredTools.filter((name) => !registered.has(name))
+if (missingRegistered.length > 0) {
+  failures.push(`工具清单缺少（已注册但本脚本未登记）：${missingRegistered.join('、')}`)
+  console.log(`\n✗ [漂移] 本脚本没有登记这些**已注册**的 Tool：${missingRegistered.join('、')}`)
+  console.log('      （在 TOOLS 里补一条，并选好对照模式：contract / paramsFrom / bodyKeysFrom）')
+}
+const missingPayload = payloadTools.filter((name) => !registered.has(name))
+if (missingPayload.length > 0) {
+  failures.push(`工具清单缺少（payload Tool 未登记）：${missingPayload.join('、')}`)
+  console.log(`\n✗ [漂移] 会发 payload 事件的 Tool 没被登记：${missingPayload.join('、')}`)
+}
+/** 反向：登记了但**没有**注册（清单腐烂的另一半 —— 表里留着已经不存在的 Tool）。 */
+const staleEntries = registeredTools.length > 0 ? TOOLS.map((entry) => entry.tool).filter((name) => !registeredTools.includes(name)) : []
+if (staleEntries.length > 0) {
+  failures.push(`工具清单里有已不存在的 Tool（注册表里没有）：${staleEntries.join('、')}`)
+  console.log(`\n✗ [漂移] 清单里有注册表里**不存在**的 Tool（请删掉或改名）：${staleEntries.join('、')}`)
 }
 
 for (const entry of TOOLS) {
+  if (entry.paramsFrom) {
+    const endpointNames = endpointParamNames(entry)
+    if (endpointNames === null) continue
+    compareParamNames(entry, await loadSchema(entry.module, entry.exportName), endpointNames)
+    continue
+  }
+  if (entry.bodyKeysFrom) {
+    const bodyKeys = readBodyKeys(entry)
+    if (bodyKeys === null) continue
+    compareBodyKeys(entry, await loadSchema(entry.module, entry.exportName), bodyKeys)
+    continue
+  }
   const contractSchema = schemas[entry.contract]
   if (contractSchema === undefined) {
     failures.push(`${entry.tool}：契约里没有模型 ${entry.contract}`)
@@ -591,5 +929,5 @@ if (failures.length > 0) {
   process.exit(1)
 }
 
-console.log('\n结果：4 个 Tool 参数与契约一致（未登记的差异 = 0）')
+console.log(`\n结果：${TOOLS.length} 个 Tool 参数与契约一致（未登记的差异 = 0）`)
 process.exit(0)

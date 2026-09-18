@@ -5,6 +5,10 @@
  *   - 本文件只负责「创建窗口 → 启动 sidecar → 把状态推给渲染进程 → 退出时杀干净」。
  *   - Pi Agent 运行时接线点在 `src/main/agent/`（票 03 建立底座，票 06/08 全面接入）。
  *
+ * ★ **单实例**：`requestSingleInstanceLock()` 在模块作用域早期就调用（必须在 `whenReady` 之前），
+ *   第二个实例直接退出、第一个实例收到 `second-instance` 时聚焦主窗口 ——
+ *   否则两个进程会同时写同一份 `students/<id>/`（一人一库变成一库两写）。
+ *
  * ⚠️ **本文件是 ESM**（构建产物 `out/main/index.mjs`，见 `electron.vite.config.ts` 的注释）：
  *    - **没有 `__dirname`**，一律用 `import.meta.dirname`；
  *    - 相对导入**必须带 `.ts` 后缀**（ESM 不做扩展名补全）——这也是 `scripts/pi-smoke.mjs`
@@ -178,79 +182,125 @@ function applyPortableDataDir(): boolean {
   }
 }
 
-// ★ 便携改道必须早于 whenReady（见函数注释）。返回值这里不用，
-//   但**绝不能省掉这次调用** —— 它决定了 userData 落在哪。
 // ★ 便携改道必须早于 whenReady（见函数注释）。返回值决定要不要再钉 slug（见下）。
 const portableDataDirApplied = applyPortableDataDir()
 
-void app.whenReady().then(async () => {
-  electronApp.setAppUserModelId(APP_ID)
+/**
  * ★★ 把 `userData` 的目录名**钉死**，与品牌名解耦。
+ *
+ * 为什么必须显式钉：Electron 默认用 `productName`（打包后）/ `package.json` 的 `name`（开发态）
  * 作为 `%APPDATA%` 下的目录名。本项目的品牌名会改（例如「智团团」），
  * 一改 `userData` 就换了目录 —— **学生的 config.json / learning.db / Pi 会话 JSONL
+ * 会留在旧目录里「凭空消失」**，而应用看起来像新装的一样（合规与演示双重事故）。
+ *
  * 所以：品牌名只用于**界面展示**，存储目录名用固定的 slug。
+ * ⚠️ 这个 slug **不要在后续版本里再改**；确需变更时必须写迁移逻辑
+ *   （把旧目录整体搬过去），不能只是改字符串。
  * ⚠️ 与便携模式的关系：便携模式把 userData 指到 exe 同级 `data/`（**显式路径**），
+ *   那是另一套形态、不受本函数影响，所以这里直接跳过（用返回值判断，不要自己再读一遍环境变量 ——
  *   `applyPortableDataDir()` 还认 `portable.marker`，只看 env 会漏掉 marker 那条路径）。
+ */
 const STABLE_USER_DATA_SLUG = 'k12-agent-desktop'
 
-  // ★ 关卡 B₁：打包态冒烟模式。走完就退，不建窗口、不动 sidecar。
-  if (smokeMode) {
-    const lines: string[] = []
-    const result = await runPiSmoke({
-      userDataDir: app.getPath('userData'),
-      packaged: app.isPackaged,
-      log: (line) => {
-        lines.push(line)
-        // Windows GUI 进程的 stdout 不一定接得到管道，所以**同时落盘**一份作为证据
-        console.log(line)
-      }
-    })
-    try {
-      const { writeFileSync, mkdirSync } = await import('node:fs')
-      const dir = join(app.getPath('userData'), 'pi-agent', 'logs')
-      mkdirSync(dir, { recursive: true })
-      writeFileSync(join(dir, 'smoke-packaged.log'), `${lines.join('\n')}\n`, 'utf8')
-    } catch {
-      // 落盘失败不影响退出码
-    }
-    app.exit(result.exitCode)
 function applyStableUserDataSlug(): void {
   if (portableDataDirApplied) return
   const current = app.getPath('userData')
   const stable = join(dirname(current), STABLE_USER_DATA_SLUG)
+  if (current === stable) return
+  try {
     app.setPath('userData', stable)
+  } catch (error) {
     // 改道失败不能让应用起不来：退回 Electron 默认值（仍是可用状态，只是目录名随品牌）
     console.error('[main] 固定 userData 目录名失败，沿用默认值：', error)
   }
+}
 
-  // 开发态：F12 开 DevTools、忽略菜单快捷键等
-  app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
-  })
-
-  sidecar = new SidecarManager({
-    userDataDir: app.getPath('userData'),
-    onStateChanged: () => pushSidecarState()
-  })
 applyStableUserDataSlug()
 
-  mainWindow = createWindow()
 
-  // 窗口先起来（不白屏），sidecar 的状态经 `sidecar:changed` 推给渲染进程
-  void sidecar.start().catch((error: unknown) => {
-    console.error('[main] sidecar 启动流程异常：', error)
+/**
+ * ★★ 单实例锁（必须在 `whenReady` 之前，见下面的注释）。
+ *
+ * 为什么**必须**有它：双击两次 exe（或 exe + 快捷方式）会让两个实例各自 spawn 一个 sidecar
  * （各自随机端口/token），但 `--data-dir` 是**同一个** `userData` —— 两个进程同时打开
+ * `students/<id>/learning.db`、同时 append 同一份 `students/<id>/pi-agent/` 与
+ * `logs/sidecar.log`、同时重写 `config.json` / `models.json`。后果是 SQLite `SQLITE_BUSY`、
+ * 设置互相覆盖、Pi 目录被两个进程交叉改写 ——「一人一库、不跨学生复用」在双开下变成「一库两写」。
+ *
+ * 位置要求在 `whenReady` **之前**：第二个实例必须**在起 sidecar / 建窗口之前**就退出，
+ * 否则它已经把 sidecar 拉起来、已经开始写那份共享数据了，锁也就白拿了。
+ * 退出走的是 `app.quit()`：**第二个实例从不 `registerIpcHandlers()`**，因此本文件的
+ * `before-quit` 清理不会被触发（那是对的 —— 那个实例没有 sidecar 也没有会话要收尾）。
+ *
+ * 拿不到锁的实例**不会**继续往下走：`whenReady` 与它的全部接线都放在 `else` 分支里，
+ * 所以「第二个实例起 sidecar / 建窗口」在设计上就不可能发生（不是靠一个 early return 挡着）。
+ */
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  // 第二个实例：立刻退出（不建窗口、不起 sidecar、不碰任何数据目录）
+  app.quit()
+} else {
+  // 已被第一个实例占位：用户再次双击时，把那个窗口拉到前台（而不是让新实例悄悄起来）
+  app.on('second-instance', () => {
+    const window = mainWindow
+    if (!window || window.isDestroyed()) return
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
   })
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      mainWindow = createWindow()
+  void app.whenReady().then(async () => {
+    electronApp.setAppUserModelId(APP_ID)
+
+    // ★ 关卡 B₁：打包态冒烟模式。走完就退，不建窗口、不动 sidecar。
+    if (smokeMode) {
+      const lines: string[] = []
+      const result = await runPiSmoke({
         userDataDir: app.getPath('userData'),
+        packaged: app.isPackaged,
+        log: (line) => {
+          lines.push(line)
+          // Windows GUI 进程的 stdout 不一定接得到管道，所以**同时落盘**一份作为证据
+          console.log(line)
+        }
+      })
+      try {
+        const { writeFileSync, mkdirSync } = await import('node:fs')
         const dir = join(app.getPath('userData'), 'pi-agent', 'logs')
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(join(dir, 'smoke-packaged.log'), `${lines.join('\n')}\n`, 'utf8')
+      } catch {
+        // 落盘失败不影响退出码
+      }
+      app.exit(result.exitCode)
+      return
     }
+
+    // 开发态：F12 开 DevTools、忽略菜单快捷键等
+    app.on('browser-window-created', (_, window) => {
+      optimizer.watchWindowShortcuts(window)
+    })
+
+    sidecar = new SidecarManager({
       userDataDir: app.getPath('userData'),
+      onStateChanged: () => pushSidecarState()
+    })
+    registerIpcHandlers(sidecar)
+
+    mainWindow = createWindow()
+
+    // 窗口先起来（不白屏），sidecar 的状态经 `sidecar:changed` 推给渲染进程
+    void sidecar.start().catch((error: unknown) => {
+      console.error('[main] sidecar 启动流程异常：', error)
+    })
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        mainWindow = createWindow()
+      }
+    })
   })
-})
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

@@ -18,6 +18,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -30,19 +31,26 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from app.config import EMBEDDING_DIM  # noqa: E402
+from app.contracts import MASTERY_DELTA_LIMIT as CONTRACT_DELTA_LIMIT  # noqa: E402
 from app.rag import chunker  # noqa: E402
 from app.store import kb as kb_repo  # noqa: E402
+from app.store import learning as learning_store  # noqa: E402
 from app.store.connections import connect, load_sqlite_vec, vec_available  # noqa: E402
 from app.store.kb import pack_vector, unpack_vector  # noqa: E402
 from app.store.migrations import (  # noqa: E402
     KB,
     LEARNING,
     KB_MIGRATIONS,
+    Migration,
+    _apply_kb_v1,
+    _apply_learning_v1,
+    applied_versions,
     current_version,
     ensure_kb,
     ensure_migrated,
     ensure_vec_table,
 )
+from app.store.learning import LearningStore  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # 夹具
@@ -230,11 +238,19 @@ class TestMigrations(SqliteCase):
         conn = self.connect_kb()
         ensure_migrated(conn, KB_MIGRATIONS, set_name=KB, vec_ready=True)
         ensure_migrated(conn, LEARNING_MIGRATIONS, set_name=LEARNING, vec_ready=False)
-        versions = {
-            str(r["set_name"]): int(r["version"])
+        # ★ 按 (set_name, version) 逐行看**账本**（不是「每个 set 取一行」）：
+        #   同一组里多版本并存是正常的 —— learning 的 v2 是「学生当前教材章节列」，
+        #   它**不该**让 kb 的账本多出一行（那才是本用例真正防的事）。
+        rows = {
+            (str(r["set_name"]), int(r["version"]))
             for r in conn.execute("SELECT set_name, version FROM schema_version")
         }
-        self.assertEqual(versions, {KB: 1, LEARNING: 1})
+        self.assertEqual(rows, {(KB, 1), (LEARNING, 1), (LEARNING, 2)})
+        self.assertEqual(
+            {str(r["set_name"]) for r in conn.execute("SELECT set_name FROM schema_version WHERE version > 1")},
+            {LEARNING},
+            "只有 learning 组有 v2；kb 组不该出现多版本",
+        )
         self.assertTrue(kb_repo.table_exists(conn, "student"))
 
     def test_vec_table_dimension_guard(self) -> None:
@@ -249,6 +265,304 @@ class TestMigrations(SqliteCase):
         conn = self.connect_kb()
         self.assertTrue(ensure_vec_table(conn, dim=EMBEDDING_DIM))
         self.assertTrue(ensure_vec_table(conn, dim=EMBEDDING_DIM))
+
+    def test_failed_migration_rolls_back_and_records_nothing(self) -> None:
+        """★ 迁移中途报错 → **整体回滚**：半截的表不留、版本号不前进。
+
+        修复前为什么是红的：``apply`` 里用 ``conn.executescript``，而它会**先隐式 COMMIT**
+        （``sqlite3`` 的既有行为），脚本第二条语句报错时第一张表已经落盘 ——
+        于是库里留下一张没人认领的表，``schema_version`` 却是空的（「半应用且不记账」）。
+        """
+        conn = self.connect_kb()
+
+        def broken(conn: sqlite3.Connection) -> None:
+            conn.execute("CREATE TABLE probe_partial_a(x INTEGER)")
+            conn.execute("CREATE INDEX probe_idx_a ON probe_partial_a(x)")
+            conn.execute("CREATE TABLE probe_partial_b(x INTEGER)")
+            conn.execute("THIS IS NOT VALID SQL")
+
+        with self.assertRaises(sqlite3.OperationalError):
+            ensure_migrated(conn, (Migration(version=1, name="故意失败的迁移", apply=broken),), set_name="probe")
+
+        self.assertEqual(applied_versions(conn, "probe"), {}, "失败的迁移绝不能记账")
+        self.assertEqual(current_version(conn, "probe"), 0)
+        self.assertFalse(kb_repo.table_exists(conn, "probe_partial_a"), "半截的表必须回滚掉")
+        self.assertFalse(kb_repo.table_exists(conn, "probe_partial_b"))
+        # 回滚之后库还能正常用（不会卡在「有未提交事务」的状态里）
+        self.assertEqual(ensure_migrated(conn, KB_MIGRATIONS, set_name=KB, vec_ready=True), 1)
+
+    def test_real_ddl_is_rollbackable_inside_a_transaction(self) -> None:
+        """★ 真 DDL 必须能在显式事务里被回滚 —— 这条钉住「不许再用 ``executescript``」。
+
+        ``executescript`` 会隐式提交，连调用方自己开的 ``BEGIN`` 都会被它提交掉
+        （实测：``BEGIN`` → ``_apply_kb_v1`` → ``ROLLBACK`` 之后 ``kp`` 还在）。
+        """
+        conn = self.connect_kb()
+        conn.execute("BEGIN")
+        _apply_kb_v1(conn)
+        _apply_learning_v1(conn)
+        self.assertTrue(kb_repo.table_exists(conn, "kp"))
+        self.assertTrue(kb_repo.table_exists(conn, "chunk_fts"))
+        self.assertTrue(kb_repo.table_exists(conn, "student"))
+        conn.rollback()
+        for table in ("kp", "chunk", "chunk_fts", "knowledge_dependencies", "student", "mastery"):
+            self.assertFalse(
+                kb_repo.table_exists(conn, table), f"{table} 没被回滚 —— 迁移又用回 executescript 了？"
+            )
+
+    def test_migration_inside_a_callers_transaction_does_not_break_it(self) -> None:
+        """★ 调用方已有写事务时，迁移既不能崩、也不能把调用方的事务吃掉。
+
+        ``ensure_quiz_tables()`` 就是这类「被别人顺手调用」的迁移入口：
+        裸 ``BEGIN`` 在这种情况下会抛 ``cannot start a transaction within a transaction``；
+        迁移用 SAVEPOINT 则只是把自己那一段圈起来 —— 调用方未提交的行、以及调用方
+        自己后续的提交都不受影响。
+        """
+        conn = self.connect_kb()
+        ensure_migrated(conn, KB_MIGRATIONS, set_name=KB, vec_ready=True)
+
+        def add_probe(conn: sqlite3.Connection) -> None:
+            conn.execute("CREATE TABLE probe_in_tx(x INTEGER)")
+
+        conn.execute("BEGIN")
+        conn.execute("INSERT INTO kp(kp_id, grade_level, name) VALUES('kp-tx','junior','事务里的行')")
+        self.assertTrue(conn.in_transaction, "前提：调用方确实开着事务")
+
+        version = ensure_migrated(
+            conn, (Migration(version=1, name="在调用方事务里加表", apply=add_probe),), set_name="probe_tx"
+        )
+        self.assertEqual(version, 1)
+        self.assertTrue(conn.in_transaction, "迁移不该动调用方的事务边界")
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM kp WHERE kp_id='kp-tx'").fetchone()[0],
+            1,
+            "调用方未提交的行必须还在",
+        )
+        conn.commit()
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM kp WHERE kp_id='kp-tx'").fetchone()[0], 1
+        )
+        self.assertTrue(kb_repo.table_exists(conn, "probe_in_tx"), "迁移自己那一段被提交了")
+
+        # 失败路径：只有迁移那一段回滚，调用方未提交的行不受牵连
+        def broken(conn: sqlite3.Connection) -> None:
+            conn.execute("CREATE TABLE probe_in_tx_fail(x INTEGER)")
+            conn.execute("THIS IS NOT VALID SQL")
+
+        conn.execute("INSERT INTO kp(kp_id, grade_level, name) VALUES('kp-tx2','junior','第二行')")
+        with self.assertRaises(sqlite3.OperationalError):
+            ensure_migrated(
+                conn, (Migration(version=1, name="故意失败", apply=broken),), set_name="probe_tx_fail"
+            )
+        self.assertFalse(kb_repo.table_exists(conn, "probe_in_tx_fail"))
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM kp WHERE kp_id='kp-tx2'").fetchone()[0],
+            1,
+            "迁移失败不能连带回滚调用方的事务",
+        )
+        conn.commit()
+
+    def test_concurrent_first_migration_does_not_blow_up(self) -> None:
+        """★ 两个连接同时做「首次迁移」时，落选的那个**不许抛** ``database is locked``。
+
+        现象（2026-09-18 实测，属 P-063）：一人一库的打开方式是**每次请求现开现关**
+        （``routes/students.py`` 的 ``open_learning_store``），界面挂载时几乎同时发出的
+        两条请求就是两个连接、两条连接同时看到「v2 还没应用」。实测 36 次并发里有 11 次
+        直接把 ``HTTP 500`` 抛给学生。
+
+        根因不是「等得不够久」：WAL 下迁移**先读后写**（``PRAGMA table_info`` 判列 → ``ALTER``），
+        读那一步就把连接推进了一个读快照；等它要升级为写事务时赢家已经提交，SQLite 只能返回
+        ``SQLITE_BUSY_SNAPSHOT`` —— **这种失败不等 ``busy_timeout``**。所以修法是
+        「先拿写锁（``BEGIN IMMEDIATE``，它会正常等锁）再读账本」。
+
+        这条用例锁住的就是那个行为：无论跑多少次、无论谁赢，两边都必须成功且版本一致。
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        from app.store.migrations import LEARNING_MIGRATIONS
+
+        # 造一个「老库」：只跑到 v1，把 v2（章节列）留成待应用 —— 竞争就发生在这一版上。
+        path = self.tmp / "learning.db"
+        seed = connect(path, load_vec=False)
+        try:
+            ensure_migrated(seed, LEARNING_MIGRATIONS[:1], set_name=LEARNING)
+        finally:
+            seed.close()
+
+        def open_and_migrate(_index: int) -> int:
+            store = LearningStore(path)
+            try:
+                return current_version(store.conn, LEARNING)
+            finally:
+                store.conn.close()
+
+        # 三轮、每轮三个并发连接：单轮偶发过了不算数，这个竞争本来就是概率性的。
+        for round_index in range(3):
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                versions = [f.result() for f in [pool.submit(open_and_migrate, i) for i in range(3)]]
+            self.assertEqual(
+                versions,
+                [2, 2, 2],
+                f"第 {round_index + 1} 轮：并发首迁必须全部成功且都到 v2，实际 {versions}",
+            )
+
+        # 收尾：账本上这一版**只有一行**（落选连接不许重复记账）
+        check = connect(path, load_vec=False)
+        try:
+            rows = check.execute(
+                "SELECT COUNT(*) FROM schema_version WHERE set_name=? AND version=2", (LEARNING,)
+            ).fetchone()[0]
+            columns = {str(r["name"]) for r in check.execute("PRAGMA table_info(student)")}
+        finally:
+            check.close()
+        self.assertEqual(rows, 1, "并发迁移不该把同一版记两次")
+        self.assertIn("current_chapter", columns)
+
+    def test_execute_script_splits_on_real_statement_boundaries(self) -> None:
+        """★ 逐条执行：同一行的两条语句也要拆开，注释与字符串里的分号不能当边界。
+
+        修复前为什么是红的：迁移走 ``conn.executescript``（隐式提交，见上一条），
+        而按 ``sqlite3.complete_statement`` 逐行累加的替代实现会把
+        「同一行两条语句」整行交给 ``conn.execute`` →
+        ``ProgrammingError: You can only execute one statement at a time``。
+        """
+        from app.store.migrations import execute_script, split_sql_statements
+
+        conn = self.connect_kb()
+        script = (
+            "-- 行注释里的分号; 不算边界\n"
+            "CREATE TABLE sp_one(a TEXT DEFAULT 'x;y'); CREATE INDEX idx_sp_one ON sp_one(a);\n"
+            "/* 块注释里的分号; 也不算 */ CREATE TABLE sp_two(b);\n"
+            'CREATE TABLE "sp;three"(c);\n'
+        )
+        self.assertEqual(len(split_sql_statements(script)), 4)
+        execute_script(conn, script)
+        for table in ("sp_one", "sp_two", "sp;three"):
+            self.assertTrue(kb_repo.table_exists(conn, table), f"{table} 没建出来")
+
+        # 真 DDL 的条数固定下来（写死的 DDL 一旦被合并/拆散，这条会先响）
+        from app.store import learning as learning_module
+        from app.store.migrations import _KB_FTS, _KB_V1, _LEARNING_V1
+
+        self.assertEqual(len(split_sql_statements(_KB_V1)), 8)
+        self.assertEqual(len(split_sql_statements(_KB_FTS)), 1)
+        self.assertEqual(len(split_sql_statements(_LEARNING_V1)), 9)
+        self.assertEqual(len(split_sql_statements(learning_module._QUIZ_V1)), 2)
+
+    def test_foreign_keys_are_enforced(self) -> None:
+        """★ ``REFERENCES`` 必须真的生效。
+
+        ``sqlite3`` 默认 ``foreign_keys=OFF``，``connect()`` 不显式打开的话，
+        DDL 里的外键就只是一句注释：``knowledge_dependencies`` 的悬空 ``kp_id``
+        会被静默写入（业务陷阱清单 §3 第 3 条）。
+        """
+        conn = self.connect_kb()
+        self.assertEqual(
+            int(conn.execute("PRAGMA foreign_keys").fetchone()[0]), 1, "连接必须显式打开外键"
+        )
+        ensure_migrated(conn, KB_MIGRATIONS, set_name=KB, vec_ready=True)
+        kb_repo.insert_kp(
+            conn,
+            kb_repo.KpRecord(
+                kp_id="kp-ok",
+                grade_level="junior",
+                name="循环",
+                chapter_title="第1章",
+                section_title="第1节",
+                summary="测试用",
+            ),
+        )
+        # 合法边：正常写入
+        conn.execute(
+            "INSERT INTO knowledge_dependencies(from_kp_id, to_kp_id, relation, weight) "
+            "VALUES('kp-ok','kp-ok','related',1.0)"
+        )
+        # 悬空边：必须**当场报错**，不能静默入库
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO knowledge_dependencies(from_kp_id, to_kp_id, relation, weight) "
+                "VALUES('kp-ok','kp-404','prerequisite',1.0)"
+            )
+        rows = conn.execute("SELECT COUNT(*) FROM knowledge_dependencies").fetchone()[0]
+        self.assertEqual(rows, 1, "悬空那条不该留下任何痕迹")
+
+
+# --------------------------------------------------------------------------- #
+# 掌握度：并发不丢更新 + 限幅只有一处来源
+# --------------------------------------------------------------------------- #
+class TestMasteryStore(SqliteCase):
+    KP = "kp-concurrent"
+
+    def open_store(self) -> LearningStore:
+        store = LearningStore(self.tmp / "learning.db")
+        self.addCleanup(store.close)
+        return store
+
+    def test_concurrent_correct_answers_do_not_lose_updates(self) -> None:
+        """★ 两条连接（两个线程）同时答对同一知识点 → attempts/correct/score 都必须涨两次。
+
+        修复前为什么是红的：``apply_mastery`` 是「先 ``mastery()`` 读、再
+        ``INSERT ... ON CONFLICT`` 写」两步，两个请求各自读到同一个旧值再各自写回，
+        **后写的覆盖先写的** —— 实测结果是 ``(score=0.2, attempts=1, correct=1)``，
+        不报错、不回滚，而调用方还以为自己那一次已经记上了。
+        """
+        first = self.open_store()
+        second = self.open_store()
+        barrier = threading.Barrier(2)
+        results: list[float] = []
+        errors: list[BaseException] = []
+        lock = threading.Lock()
+
+        def answer(store: LearningStore) -> None:
+            try:
+                barrier.wait(timeout=10)  # 两个线程同时冲线，最大化交错概率
+                value = store.apply_mastery(self.KP, 0.2, correct=True)
+                with lock:
+                    results.append(value)
+            except BaseException as exc:  # noqa: BLE001 - 线程里的异常必须带回主线程断言
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=answer, args=(store,)) for store in (first, second)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertEqual(errors, [], f"并发调用抛异常：{errors}")
+        self.assertEqual(len(results), 2)
+        score, attempts, correct_cnt = first.mastery(self.KP)
+        self.assertEqual(attempts, 2, "并发两次答对必须记两次尝试（丢更新 = attempts 只涨一次）")
+        self.assertEqual(correct_cnt, 2)
+        self.assertAlmostEqual(score, 0.4, places=6)
+        # 返回值必须就是库里的那两个值（不是各算各的）
+        self.assertEqual(sorted(results), [0.2, 0.4])
+        self.assertEqual(second.mastery(self.KP), first.mastery(self.KP))
+
+    def test_delta_limit_has_a_single_source(self) -> None:
+        """★ ``MASTERY_DELTA_LIMIT`` 只允许有一处定义（契约），store 必须 import 它。
+
+        各写一份 ``= 0.2`` 的话，只改一处就会让「返回给前端的 delta」与
+        「实际写进 ``mastery`` 的分数变化」对不上。``assertIs`` 断言的是同一个对象，
+        而不是数值恰好相等。
+        """
+        self.assertIs(learning_store.MASTERY_DELTA_LIMIT, CONTRACT_DELTA_LIMIT)
+        self.assertEqual(CONTRACT_DELTA_LIMIT, 0.2)
+        self.assertIn("MASTERY_DELTA_LIMIT", learning_store.__all__)
+
+    def test_apply_mastery_clamps_with_the_contract_limit(self) -> None:
+        """限幅用契约那个常量，且**冷启动那一行也要钳**（0.2 而不是 5.0）。"""
+        store = self.open_store()
+        self.assertAlmostEqual(
+            store.apply_mastery("kp-new", 5.0, correct=True), CONTRACT_DELTA_LIMIT, places=6
+        )
+        self.assertEqual(store.mastery("kp-new"), (CONTRACT_DELTA_LIMIT, 1, 1))
+        self.assertAlmostEqual(store.apply_mastery("kp-new", 5.0, correct=True), 0.4, places=6)
+        self.assertAlmostEqual(store.apply_mastery("kp-new", -5.0, correct=False), 0.2, places=6)
+        self.assertEqual(store.mastery("kp-new"), (0.2, 3, 2))
+        # 空库上的新知识点：负数不会让分数掉到 0 以下
+        self.assertAlmostEqual(store.apply_mastery("kp-empty", -5.0, correct=False), 0.0, places=6)
+        self.assertEqual(store.mastery("kp-empty"), (0.0, 1, 0))
 
 
 # --------------------------------------------------------------------------- #

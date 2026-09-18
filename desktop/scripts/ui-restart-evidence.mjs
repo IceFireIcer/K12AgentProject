@@ -6,8 +6,11 @@ if (!port || !token) {
   process.exit(2)
 }
 const STUDENT = process.env.K12_EVIDENCE_STUDENT ?? 'student_gate_d_fresh'
+// ★ CDP 端口读 `K12_DEBUG_BASE`（与 verify-ui.mjs 同一口径，默认 9333）——
+//   写死端口会让本脚本只在作者的启动参数下可跑。
+const DEBUG_BASE = process.env.K12_DEBUG_BASE ?? '9333'
 
-const page = (await (await fetch('http://127.0.0.1:9333/json/list')).json()).find((t) => t.type === 'page')
+const page = (await (await fetch(`http://127.0.0.1:${DEBUG_BASE}/json/list`)).json()).find((t) => t.type === 'page')
 const ws = new WebSocket(page.webSocketDebuggerUrl)
 let id = 0
 const pending = new Map()

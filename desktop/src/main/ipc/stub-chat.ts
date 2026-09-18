@@ -57,7 +57,7 @@ export const STUB_PAYLOAD_NOTES: Record<PayloadKind, string> = {
 /** 撤回后给学生的替代文案（真实终审会给自己的安全提示，见票 22）。 */
 export const STUB_SAFE_TEXT = '我们换个话题吧：我可以讲讲人工智能是怎么学习认出一只猫的。'
 
-/** 撤回原因（面向开发者/答辩，不展示给学生的细节放这里）。 */
+/** 撤回原因（面向开发者/汇报，不展示给学生的细节放这里）。 */
 export const STUB_BLOCKED_REASON = '示例：内容安全终审判定为不适合展示（票 05 假数据源）。'
 
 /** 撤回前的那段「违规草稿」——只用于演示「先流式输出、再整段撤回」。 */

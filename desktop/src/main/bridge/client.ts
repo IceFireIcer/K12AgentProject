@@ -47,10 +47,19 @@ export function clearSidecarEndpoint(): void {
   endpoint = null
 }
 
-/** 是否已经拿到可用端点（诊断/测试用，**不返回 token**）。 */
-export function hasSidecarEndpoint(): boolean {
-  return endpoint !== null
-}
+/**
+ * `/api/*` 请求的**默认超时**（调用点没显式给 `signal` 时的兜底）。
+ *
+ * 为什么必须有兜底 —— sidecar「**在监听但不回话**」（SQLite 锁等待 / 进程被暂停 / handler 卡住）
+ * 时，裸 `fetch` 会一直吊到 Node 的默认 `headersTimeout`（**300s**）。而退出流程是
+ * 「先 `disposeChatRuntime()`（其中会等学段上交队列的最后一个 `/api` 调用）→ 再 `taskkill` sidecar」，
+ * 于是关窗后进程最长可挂约 5 分钟、sidecar 也迟迟杀不掉（用户只能去任务管理器）。
+ * 8s 与设置域的超时同量级：本机回环毫秒级返回，8s 已经等于「对面卡死了」。
+ *
+ * ⚠️ 需要更长预算的调用点（比如真的要走一次外呼的探测）**必须显式传自己的 `signal`** ——
+ * 有了它这个兜底就不生效（`??` 只在缺省时接管）。
+ */
+export const DEFAULT_API_TIMEOUT_MS = 8_000
 
 /**
  * 对 sidecar 发**带鉴权**的请求（除 `/health` 外的所有 `/api/*`）。
@@ -66,8 +75,10 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
 
   const headers = new Headers(init.headers)
   headers.set('X-Auth-Token', endpoint.token)
+  // ★ 兜底超时（见 {@link DEFAULT_API_TIMEOUT_MS}）：显式传了 signal 的调用点原样透传，不受影响
+  const signal = init.signal ?? AbortSignal.timeout(DEFAULT_API_TIMEOUT_MS)
 
-  return await fetch(`http://127.0.0.1:${endpoint.port}${path}`, { ...init, headers })
+  return await fetch(`http://127.0.0.1:${endpoint.port}${path}`, { ...init, headers, signal })
 }
 
 /**

@@ -42,6 +42,7 @@ import {
   auditProviderHeaders,
   createSafetyGateSink,
   decideGate,
+  emitBlockedTurn,
   extractCompletionText,
   finalizeTurn,
   readSafetyVerdict,
@@ -115,6 +116,32 @@ function wordlistBlock(category = 'adult'): SafetyVerdict {
 
 /** 事件序列里的名字（断言顺序用）。 */
 const names = (events: TurnEvent[]): string[] => events.map((event) => event.name)
+
+/**
+ * 去掉注释，只留**可执行代码**（S7 接线守卫一律在 strip 之后的文本上匹配）。
+ *
+ * 为什么必须去（`architecture-guards.test.ts` 的同一条口径）：接线守卫的本质是
+ * 「这行调用真的在生产路径上」。拿**原文**做 `includes`，那么「注释掉调用再写一行
+ * `// TODO: 恢复 await gate.settled()`」也能满足守卫 —— 守卫当场变成装饰。
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/.*$/gm, '$1')
+}
+
+/** 读 runtime.ts 的**可执行代码**（去注释）。 */
+function runtimeCode(): string {
+  return stripComments(readFileSync(join(DESKTOP_ROOT, 'src', 'main', 'agent', 'runtime.ts'), 'utf8'))
+}
+
+/**
+ * 取「从 `startIndex` 到下一个顶层声明之前」的那一段（在 strip 后的文本上取）。
+ * 替代 `slice(at, at + 600)` 这种定长窗口：窗口落点会随代码挪动而漂。
+ */
+function snippetUntilNextDeclaration(source: string, startIndex: number): string {
+  const rest = source.slice(startIndex)
+  const match = /\n(?:export\s|async\s+function\s|function\s|const\s|let\s|var\s)/.exec(rest.slice(1))
+  return match ? rest.slice(0, match.index + 1) : rest
+}
 
 /* ================================================================== *
  * S1 撤回门：delta 立刻转发 + done 被扣住 + blocked 先于 done
@@ -353,17 +380,48 @@ test('S3 输入侧：判定服务不可用时**放行**（不能因为审核挂�
   assert.match(logs[0], /输入侧检查不可用/)
 })
 
-test('S3 输入侧拦截的完整回合：blocked + done，且**不含任何 delta**（没发过请求）', () => {
+test('★ S3 输入侧拦截的完整回合：blocked + done（且**不含任何 delta** —— 一个字都没发给模型）', () => {
+  // ★★ 这条以前是**同义反复**：测试体只有 `assert.equal(gate.deltas, 0)`，而 `gate` 是刚
+  //    `createSafetyGateSink` 出来的、从未 emit 过任何事件的新对象 —— `deltas` 必然是 0。
+  //    结果是 `emitBlockedTurn()`（输入侧命中时 runtime 真正走的那个发射器，见 runtime.ts
+  //    的 `emitBlockedTurn(sink, inputVerdict)`）**零覆盖**：
+  //    它若被改成只发 `blocked` 不发 `done`（界面卡在「回答中…」）、或 `safeText` 传空
+  //    （气泡变空），全套测试仍然全绿。现在改成对发射器的**真断言**。
   const inner = recordingSink()
+  const hit = wordlistBlock('jailbreak')
+
+  emitBlockedTurn(inner, hit)
+
+  assert.deepEqual(
+    names(inner.events),
+    ['blocked', 'done'],
+    '输入侧命中必须发「blocked 然后 done」：done 是终态（渲染进程据此收尾），' +
+      '少了 done 界面会一直停在「回答中…」'
+  )
+  const blocked = inner.events[0]
+  assert.equal(blocked.name, 'blocked')
+  if (blocked.name === 'blocked') {
+    assert.equal(blocked.data.safeText, hit.safeText, 'safeText 必须来自判定（TS 不自己编文案）')
+    assert.ok(blocked.data.reason.length > 0, 'reason 必须非空（轨迹与调试要看它）')
+  }
+  assert.equal(inner.finishes, 1, '必须收尾一次（不收尾 = 轮次登记不清，下一条消息会顶掉它）')
+
+  // ★ 反面：输入侧命中的回合**不许有任何 delta** —— 命中就不该把正文送到界面
+  assert.deepEqual(
+    names(inner.events).filter((name) => name === 'delta'),
+    [],
+    '输入侧拦截的回合不该出现 delta（一个字都不该发给模型，更不该流回来）'
+  )
+  // 没有正文要撤 → 门本身也没被打开过（终审不该为这一轮再跑一次）
   const gate = createSafetyGateSink({
-    inner,
+    inner: recordingSink(),
     finalize: async () => {
       throw new Error('输入侧已经拦下，不该再跑生成侧终审')
     },
     log: () => {}
   })
-  // 输入侧命中时 runtime 不会调 prompt()：直接发 blocked + done（走 emitBlockedTurn 的等价序列）
-  assert.equal(gate.deltas, 0)
+  assert.equal(gate.deltas, 0, '门从未收到 delta（这就是「一个字都没发出去」的机器判据）')
+  assert.equal(gate.finalizations, 0, '没有正文的回合不触发终审')
 })
 
 /* ================================================================== *
@@ -608,7 +666,8 @@ test('S6 路径常量与超时：端点是相对路径（base 由 bridge/client 
  * ================================================================== */
 
 test('★ S7 接线守卫：runtime.ts 在真实回合里调用了输入检查 / 终审 / 头脱敏', () => {
-  const source = readFileSync(join(DESKTOP_ROOT, 'src', 'main', 'agent', 'runtime.ts'), 'utf8')
+  // ★ stripComments：注释里写「这里会调 reviewInput(」不算接线（这条以前是原文 includes，可被注释满足）
+  const source = runtimeCode()
   // 这几个名字必须在生产文件里出现（防止「实现好了但没接上」再次发生）
   for (const needle of [
     'reviewInput(',
@@ -631,16 +690,15 @@ test('★ S7 接线守卫：runtime.ts 在真实回合里调用了输入检查 /
 })
 
 test('★ S7 接线守卫：动画扩展拿到的是「接了 generate 的」工厂（默认导出没接）', () => {
-  const runtimeSource = readFileSync(join(DESKTOP_ROOT, 'src', 'main', 'agent', 'runtime.ts'), 'utf8')
+  const runtimeSource = runtimeCode()
   assert.ok(
     /createAnimationExtension\(\s*\{\s*\n?\s*generate:/.test(runtimeSource),
     'runtime.ts 必须用 createAnimationExtension({ generate }) —— 默认导出没接生成器，' +
       '那会让「模板未命中 → 自由生成」这条链路在生产里不可达'
   )
   // 而扩展本身仍然保留「不接 generate 就降级」的行为（默认导出保持原样）
-  const animationSource = readFileSync(
-    join(DESKTOP_ROOT, 'src', 'main', 'agent', 'extensions', 'animation.ts'),
-    'utf8'
+  const animationSource = stripComments(
+    readFileSync(join(DESKTOP_ROOT, 'src', 'main', 'agent', 'extensions', 'animation.ts'), 'utf8')
   )
   assert.ok(
     animationSource.includes('export default createAnimationExtension()'),
@@ -649,10 +707,10 @@ test('★ S7 接线守卫：动画扩展拿到的是「接了 generate 的」工
 })
 
 test('★ S7 接线守卫：学段第二层的注入点在生产路径上被调用（否则永远 no_llm）', () => {
-  const source = readFileSync(join(DESKTOP_ROOT, 'src', 'main', 'agent', 'runtime.ts'), 'utf8')
+  const source = runtimeCode()
   const at = source.indexOf('gradeExtension.useJudge(')
   assert.ok(at > 0, 'runtime.ts 必须调用 gradeExtension.useJudge —— 否则第二层永远报 no_llm')
-  const snippet = source.slice(at, at + 600)
+  const snippet = snippetUntilNextDeclaration(source, at)
   assert.ok(snippet.includes('buildJudgePrompt('), '判定 prompt 必须复用 grade.ts 的 buildJudgePrompt（不另写一份）')
   assert.ok(snippet.includes('parseProposal('), '响应解析必须复用 grade.ts 的 parseProposal')
 })

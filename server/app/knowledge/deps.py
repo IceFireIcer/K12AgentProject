@@ -266,25 +266,35 @@ def _cte_walk(
     max_depth: int,
     relation: str | None = None,
 ) -> list[sqlite3.Row]:
-    """递归 CTE 走图。★ ``depth`` 上限是必须的 —— 有环时没有它就是死循环。"""
+    """递归 CTE 走图。★ ``depth`` 上限是必须的 —— 有环时没有它就是死循环。
+
+    ★ **``relation`` 过滤必须同时作用于 ``seed`` 与 ``step``**（两处都拼 ``rel_filter``）。
+    只过滤 ``step`` 是一个**静默错误**：学生问「循环」时，只有 ``related`` 边的知识点
+    （例如「神经网络」）会以「前置知识点」的身份被补进检索上下文 —— 图看着完全正常，
+    但补进来的内容根本不是讲授前提（实测：``A --related--> B`` 的 A 会被当成 B 的前置）。
+    两个方向（prerequisite / successor）都受同一条约束。
+    """
     depth_cap = max(1, min(int(max_depth), MAX_DEPTH_LIMIT))
+    # seed 侧的过滤条件：seed 的列别名就是 `relation`（没有 d. 前缀），step 侧是 `d.relation`。
+    # 注意别把 d. 前缀套到 seed 上 —— seed 里没有 `d` 这个别名，SQL 会直接报错。
+    seed_filter = " AND relation = :relation" if relation else ""
+    step_filter = " AND d.relation = :relation" if relation else ""
     if direction == "successor":
         seed = ("SELECT to_kp_id AS kp_id, 1 AS depth, weight, relation "
-                "FROM knowledge_dependencies WHERE from_kp_id = :kp_id")
+                f"FROM knowledge_dependencies WHERE from_kp_id = :kp_id{seed_filter}")
         step = ("SELECT d.to_kp_id, s.depth + 1, d.weight, d.relation "
                 "FROM knowledge_dependencies d JOIN walk s ON d.from_kp_id = s.kp_id")
     else:
         seed = ("SELECT from_kp_id AS kp_id, 1 AS depth, weight, relation "
-                "FROM knowledge_dependencies WHERE to_kp_id = :kp_id")
+                f"FROM knowledge_dependencies WHERE to_kp_id = :kp_id{seed_filter}")
         step = ("SELECT d.from_kp_id, s.depth + 1, d.weight, d.relation "
                 "FROM knowledge_dependencies d JOIN walk s ON d.to_kp_id = s.kp_id")
 
-    rel_filter = "AND d.relation = :relation" if relation else ""
     sql = (
         "WITH RECURSIVE walk(kp_id, depth, weight, relation) AS ("
         f"  {seed}"
         f"  UNION"  # UNION（不是 ALL）+ depth 上限：环不会无限展开
-        f"  {step} WHERE s.depth < :depth_cap {rel_filter}"
+        f"  {step} WHERE s.depth < :depth_cap{step_filter}"
         ") "
         "SELECT w.kp_id, MIN(w.depth) AS depth, MAX(w.weight) AS weight, "
         "       MIN(w.relation) AS relation, k.name, k.grade_level "
@@ -390,37 +400,50 @@ def expansion_kp_ids(
 
     ★ ``grade_levels`` 是**硬过滤**：依赖边是跨学段的，若不卡学段，
     初中生问「循环」会把高中才讲的「变量」内容补进来 —— 直接违反关卡 C 的学段隔离。
+
+    ★ **一次 CTE 拿全部深度的候选，再按 ``(depth, weight, kp_id)`` 排序取前 ``limit`` 个**。
+    不要写成「外层 for depth：每轮把结果全写进字典」——那样 depth=1 的邻居会先占满名额，
+    更深的前置永远拿不到，``max_depth`` 这个参数就被吞掉了（实测：2 级链上
+    ``limit=2`` 只返回 1 条，第 2 条深度的前置被吃掉）。
+
+    三条不变量：① ``grade_levels`` 硬过滤；② 跳过 ``seeds`` 自身；③ 结果有数量上限。
     """
     allowed = set(grade_levels)
     adjacency = load_adjacency(conn)
     seeds = {k for k in kp_ids if k}
-    picked: dict[str, int] = {}
+    if not seeds:
+        return []
+    depth_cap = max(1, min(int(max_depth), MAX_DEPTH_LIMIT))
+
+    # 每个 seed 一次 CTE，只走 prerequisite 边（related 只表示「相关」，
+    # 不该被当成讲授某个知识点的前提条件 —— 过滤写在 CTE 的 seed 与 step 两侧）。
+    picked: dict[str, tuple[int, float]] = {}
     for kp in sorted(seeds):
-        for depth in range(1, max(1, min(max_depth, MAX_DEPTH_LIMIT)) + 1):
-            # 只走 prerequisite 边：检索扩展补的是**前置**，
-            # related 只表示「相关」，不该被当成讲授某个知识点的前提条件。
-            for row in _cte_walk(
-                conn, kp, direction="prerequisite", max_depth=depth, relation="prerequisite"
-            ):
-                kp_id = str(row["kp_id"])
-                if kp_id in seeds:
-                    continue
-                meta = adjacency.kp_meta.get(kp_id)
-                grade = meta[1] if meta else str(row["grade_level"])
-                if grade not in allowed:
-                    continue
-                prev = picked.get(kp_id)
-                if prev is None or int(row["depth"]) < prev:
-                    picked[kp_id] = int(row["depth"])
-    ordered = sorted(picked.items(), key=lambda item: (item[1], item[0]))
-    return [kp for kp, _ in ordered[:limit]]
+        for row in _cte_walk(
+            conn, kp, direction="prerequisite", max_depth=depth_cap, relation="prerequisite"
+        ):
+            kp_id = str(row["kp_id"])
+            if kp_id in seeds:
+                continue
+            meta = adjacency.kp_meta.get(kp_id)
+            grade = meta[1] if meta else str(row["grade_level"])
+            if grade not in allowed:
+                continue
+            candidate = (int(row["depth"]), -float(row["weight"]))
+            kept = picked.get(kp_id)
+            # 同一个 kp 从不同 seed 走到时保留「更近 / 权重更大」的那条
+            if kept is None or candidate < kept:
+                picked[kp_id] = candidate
+
+    ordered = sorted(picked.items(), key=lambda item: (item[1][0], item[1][1], item[0]))
+    return [kp for kp, _ in ordered[: max(0, int(limit))]]
 
 
 # --------------------------------------------------------------------------- #
 # 图规模 / 自检
 # --------------------------------------------------------------------------- #
 def graph_stats(conn: sqlite3.Connection) -> dict[str, int | bool]:
-    """图规模（知识点数 / 边数 / 是否成环），报告与答辩一行可查。"""
+    """图规模（知识点数 / 边数 / 是否成环），报告与汇报一行可查。"""
     adjacency = load_adjacency(conn)
     edges = [
         DepEdge(e.from_kp_id, e.to_kp_id, e.relation, e.weight)

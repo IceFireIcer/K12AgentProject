@@ -61,7 +61,12 @@
 
 import { Type, type Static } from '@sinclair/typebox'
 import { apiFetch } from '../../bridge/client.ts'
-import { currentAgentSession, SIDECAR_UNAVAILABLE_TEXT, type AgentExtensionApi } from './index.ts'
+import {
+  currentAgentSession,
+  SIDECAR_UNAVAILABLE_TEXT,
+  toolFailure,
+  type AgentExtensionApi
+} from './index.ts'
 
 /* ------------------------------------------------------------------ *
  * ★ 唯一的具名阈值常量（票 19 明确要求：不许散落字面量）
@@ -72,7 +77,7 @@ import { currentAgentSession, SIDECAR_UNAVAILABLE_TEXT, type AgentExtensionApi }
  *
  * 为什么是**常量**而不是散落的 `3`：这个数字是产品决策（「学生卡住了」的判定线），
  * 不是实现细节。它出现在三处（计数比较、提示级别、文案），散落就会悄悄漂移
- * ——「提示到 3 级了但介入是 5 次」这种不一致，答辩现场很难解释。
+ * ——「提示到 3 级了但介入是 5 次」这种不一致，演示现场很难解释。
  *
  * 改这一个值，计数、介入、文案一起变。
  */
@@ -198,7 +203,8 @@ export const GetCodingHintParams = Type.Object({
   reason: Type.Optional(
     Type.String({
       maxLength: 200,
-      description: '学生遇到的困难（可填报错摘要或学生的原话），用于选择提示的落点'
+      description:
+        '仅用于你自己的判断（可填报错摘要或学生的原话），不会发送给后端：提示的级别与内容都由服务端按知识点 + 当前级别决定'
     })
   )
 })
@@ -276,6 +282,13 @@ function codingStateKey(studentId: string, kpId: string): string {
   return `${studentId}::${kpId}`
 }
 
+/**
+ * 状态表容量上限（F12）：键是「学生 + 知识点」，一学期下来会攒出几百个键。
+ * 到顶就丢最旧的一半（Map 保持插入序），与 `animation.ts` 的 `MAX_TRACKED_CALLS` 同一手法。
+ * 单会话内真正在用的键是个位数，上限只是**防长会话无限攒**。
+ */
+export const MAX_CODING_STATE_ENTRIES = 256
+
 /** 建一份状态表（工厂闭包持有；`clear()` 供测试与「切学生」时清空）。 */
 export function createCodingSessionState(): {
   failures: (studentId: string, kpId: string) => number
@@ -289,6 +302,8 @@ export function createCodingSessionState(): {
   noteSuccess: (studentId: string, kpId: string) => CodingSessionState
   snapshot: (studentId: string, kpId: string) => CodingSessionState
   clear: () => void
+  /** 当前表里有几条（诊断/单测用，用于断言「有上限」）。 */
+  size: () => number
 } {
   const table = new Map<string, CodingSessionState>()
 
@@ -300,7 +315,13 @@ export function createCodingSessionState(): {
     }
 
   const write = (studentId: string, kpId: string, next: CodingSessionState): CodingSessionState => {
-    table.set(codingStateKey(studentId, kpId), next)
+    const key = codingStateKey(studentId, kpId)
+    // ★ 容量上限（F12）：新键且已满 → 丢最旧的一半，绝不无限攒
+    if (table.size >= MAX_CODING_STATE_ENTRIES && !table.has(key)) {
+      const keys = [...table.keys()].slice(0, MAX_CODING_STATE_ENTRIES / 2)
+      for (const stale of keys) table.delete(stale)
+    }
+    table.set(key, next)
     return next
   }
 
@@ -345,7 +366,8 @@ export function createCodingSessionState(): {
     },
 
     snapshot: (studentId, kpId) => ({ ...read(studentId, kpId) }),
-    clear: () => table.clear()
+    clear: () => table.clear(),
+    size: () => table.size
   }
 }
 
@@ -353,18 +375,15 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
-/** 失败结果的统一形状（必须与 `quiz.ts` 的 `failed()` / `index.ts` 的 `toolFailure()` 逐字一致）。 */
-function failed(text: string, error?: unknown): {
-  content: Array<{ type: 'text'; text: string }>
-  details: { ok: false; error: true; errorMessage: string; message: string; degraded: true }
-} {
-  const reason = error instanceof Error ? error.message : error === undefined ? '' : String(error)
-  const message = reason ? `${text}（${reason}）` : text
-  return {
-    content: [{ type: 'text', text: `⚠️ ${message}` }],
-    details: { ok: false, error: true, errorMessage: message, message, degraded: true }
-  }
-}
+/**
+ * 失败结果的统一形状：**就是 {@link toolFailure}**（F11）。
+ *
+ * 以前这里另有一份逐字同构的私有 `failed()`：四份拷贝一旦有一份漂移，
+ * 事件层（`agent/events.ts` 只认 `details.error === true`）与轨迹（`agent/trace.ts`
+ * 认 `details.ok === false`）就会各认一半，失败会**静默变成成功**。
+ * 别名只是为了少改调用点，语义一字不变。
+ */
+const failed = toolFailure
 
 /** 成功结果：`details` 就是事件层的 `payload`（`events.ts` 会把 details 展开成 payload）。 */
 function ok<TDetails extends object>(
@@ -635,6 +654,24 @@ export function createCodingExtension(
   // ★ 单轮临时态落在这里（**不进 State** —— `tool_execution_end` 是只读通知，见文件头）
   const state = createCodingSessionState()
 
+  /**
+   * 上一次见到的学生（F12：切学生时把状态表整张清掉）。
+   *
+   * 键里虽然已经带了 `studentId`（跨学生本来就不会串），但「上一个学生的失败计数与
+   * 已给到的提示级别」对新学生毫无价值 —— 留着只会在长会话里白占内存。
+   * **判据就是每次 `execute` 开头的 `currentAgentSession()`**：本文件不订阅任何全局事件
+   * （见文件头「不自建事件总线」那条纪律），所以边界识别放在工具入口。
+   */
+  let trackedStudentId = ''
+
+  /** 换学生 → 清空临时态（同一学生会话内不动它）。 */
+  function noteStudentBoundary(studentId: string | undefined): void {
+    const next = studentId ?? ''
+    if (next === trackedStudentId) return
+    state.clear()
+    trackedStudentId = next
+  }
+
   /** 一次带超时的 sidecar 请求（超时/网络异常由调用方收敛成可读错误）。 */
   async function call(path: string, init?: RequestInit): Promise<Response> {
     return await request(path, { ...init, signal: AbortSignal.timeout(CODING_TIMEOUT_MS) })
@@ -739,13 +776,16 @@ export function createCodingExtension(
       parameters: GetCodeTemplateParams,
       execute: async (_toolCallId: string, params: GetCodeTemplateParamsType) => {
         const session = currentAgentSession()
+        // ★ 换学生就在入口清掉临时态（F12；本文件不订阅全局事件，边界在工具入口识别）
+        noteStudentBoundary(session?.studentId)
         const kpId = readNonEmptyString(params?.kpId)
         if (kpId === null) {
           return failed('取代码模板需要知识点 id（例如 jr-py-loop）。请先确认要练哪个知识点。')
         }
 
         const query = new URLSearchParams()
-        // ★ 学段**以会话为准**（显式选择为权威 → 现在是系统推断的结果，前端说了不算）。
+        // ★ 学段**以会话为准**（会话里那个值是**服务端推断**（`server/app/grade/rules.py`）
+        //   出来的当前生效值，前端不推断学段（手动指定走独立通道、由服务端写库），模型也说了不算）。
         //   带上它 = 让服务端按「只取不高于本学段」检查（服务端把这条做成显式开关，
         //   见 routes/code.py 的 template_grade_ok）。会话没有学段时不带 = 不过滤。
         if (session?.gradeLevel) query.set('gradeLevel', session.gradeLevel)
@@ -798,6 +838,8 @@ export function createCodingExtension(
       parameters: GetCodingHintParams,
       execute: async (_toolCallId: string, params: GetCodingHintParamsType) => {
         const session = currentAgentSession()
+        // ★ 换学生就在入口清掉临时态（F12）；**必须在读「已给到的级别」之前**
+        noteStudentBoundary(session?.studentId)
         if (!session) {
           return failed(
             '还没有绑定当前学生，无法按他的进度给提示。请先直接回应学生，用对话引导他。'
@@ -864,6 +906,8 @@ export function createCodingExtension(
       parameters: EvaluateCodeParams,
       execute: async (toolCallId: string, params: EvaluateCodeParamsType) => {
         const session = currentAgentSession()
+        // ★ 换学生就在入口清掉临时态（F12）；**必须在读 attempt 之前**
+        noteStudentBoundary(session?.studentId)
         if (!session) {
           return failed('还没有绑定当前学生，无法记录这次练习（学习记录要记到具体学生名下）。')
         }
@@ -897,9 +941,18 @@ export function createCodingExtension(
           ? state.noteSuccess(session.studentId, kpId)
           : state.noteFailure(session.studentId, kpId)
 
+        // ★★ F7：**服务端随失败一起给的 `nextHint` 也要写回「已给到的级别」**。
+        //   服务端按 `attempt`（= 连续失败次数 + 1）定级，不施加「最多 +1」护栏；
+        //   所以连续失败 3 次后自动提示已经到了 level 3。若这里不记，
+        //   学生随后点「求助」时 `nextHintLevel = 已给过最高级 + 1` 会算出 **1** ——
+        //   给出**更低**一级的提示，与「只升不降」（见 `noteHint`）的设计口径正相反。
+        if (!evaluation.ok && evaluation.nextHint) {
+          state.noteHint(session.studentId, kpId, evaluation.nextHint.level)
+        }
+
         const shouldIntervene = !evaluation.ok && snapshot.consecutiveFailures >= maxFailures
 
-        // 计数与介入的**服务端日志**（面向排查：答辩时「连续失败 3 次」这条要能拿出证据）
+        // 计数与介入的**服务端日志**（面向排查：汇报时「连续失败 3 次」这条要能拿出证据）
         log(
           `[coding] ${session.studentId} 在 ${kpId} 上第 ${attempt} 次尝试：` +
             `${evaluation.ok ? '成功（计数已清零）' : `失败（连续 ${snapshot.consecutiveFailures} 次）`}` +

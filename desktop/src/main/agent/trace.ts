@@ -9,7 +9,7 @@
  * 三条纪律（都不是「好看」，是硬要求）：
  *
  * 1. **参数只记摘要，绝不落原文**。`get_student_profile` 这类 Tool 的参数里可能带学生输入、
- *    代码片段、昵称；轨迹图是要进答辩 PPT 与报告的文件，落原文等于把数据合规问题写进交付物。
+ *    代码片段、昵称；轨迹图是要进汇报 PPT 与报告的文件，落原文等于把数据合规问题写进交付物。
  *    {@link summarizeArgs} 按「键名分类 → 值分类」产出 `kp_id=jr-py-loop, query=«文本 12 字»`
  *    这样的摘要，并且**默认丢弃**敏感键（key/token/secret…）与个人信息键（name/student/…）。
  * 2. **不改任何东西**。三个事件全部是**只读通知**：`tool_execution_end` 不能回写结果，
@@ -237,6 +237,42 @@ interface PendingBlock {
 }
 
 /**
+ * ★★ **轮次推进规则（纯函数，唯一的实现处，可直接单测）**。
+ *
+ * 为什么不能直接用 Pi 的 `turnIndex`（实测 0.85.1，读 `dist/core/agent-session.js` +
+ * `@earendil-works/pi-agent-core/dist/agent-loop.js`）：
+ *   - 每条学生消息都会重跑 `agent_start`，而它的分支里有一句 **`_turnIndex = 0`**；
+ *   - 同一条学生消息里，模型每次发起工具调用之后还会再来一轮推理，每次都发 `turn_start`
+ *     并把 `_turnIndex` 加一（0 → 1 → 2 …）。
+ *   也就是说 `turnIndex` 是「**本条消息内的第几个 LLM 往返**」，**不是「第几次学生提问」**。
+ *   旧实现直接采信它（还叠了个 `Math.max(1, index)`），于是两次 `session.prompt()` 之后
+ *   `recorder.turn = 1`、`meta.turns = 1` —— 这份「设计合理性 25%」的核心证据**看不出
+ *   「第 1 轮问了什么 → 调了 rag_search → 第 2 轮又调了什么」**（仓库里已导出的
+ *   `docs/tool-trace.mmd` 正是「轮数：1｜调用：2 次」）。
+ *
+ * 规则（**回退/重复即新轮**，严格单调）：
+ *   1. 第一次调用（`currentTurn === 0`）→ 第 1 轮；
+ *   2. `index` **回退或与上次相同**（= 新一轮 `agent_start` 把下标重置回 0）→ `currentTurn + 1`；
+ *   3. `index` **正常推进**（同一条学生消息里的第 2、3 个子回合）→ **轮次不变**，
+ *      只更新下标 —— 这样「一次提问、两次工具调用」仍然画在同一块里；
+ *   4. `index` 缺失 / 非有限数 → 按新的一轮算（信息不足时宁可多分块，也不能两张牌子叠在一起）。
+ *
+ * 返回值是两个数（`turn` 与新的 `lastIndex`），提醒调用方：**下标与轮次是两份状态**，
+ * 混成一个字段就会退回「子回合被当成新轮」的老问题。
+ */
+export function nextTurnFor(
+  currentTurn: number,
+  lastTurnIndex: number,
+  index: number
+): { turn: number; lastIndex: number } {
+  const numeric = Number.isFinite(index) ? Math.max(0, Math.trunc(index)) : undefined
+  if (currentTurn === 0) return { turn: 1, lastIndex: numeric ?? 0 }
+  if (numeric === undefined) return { turn: currentTurn + 1, lastIndex: lastTurnIndex }
+  if (numeric <= lastTurnIndex) return { turn: currentTurn + 1, lastIndex: numeric }
+  return { turn: currentTurn, lastIndex: numeric }
+}
+
+/**
  * 轨迹采集器。**纯内存**，没有任何副作用，随时可单测：
  * 灌入事件 → {@link records} / {@link toMermaid} / {@link renderMarkdown}。
  *
@@ -256,6 +292,8 @@ export class ToolTraceRecorder {
   private readonly pending = new Map<string, PendingCall>()
   private readonly blocks = new Map<string, PendingBlock>()
   private currentTurn = 0
+  /** 上一次看到的 Pi `turnIndex`（**子回合下标**，见 {@link nextTurnFor}）。 */
+  private lastTurnIndex = -1
   private maxTurn = 0
   /** 记录序号（**落一条加一**，所以 Mermaid 的节点 id 天然唯一）。 */
   private recordSeq = 0
@@ -270,11 +308,19 @@ export class ToolTraceRecorder {
     return this.currentTurn
   }
 
-  /** 轮次切换（`turn_start`）。**只影响后续记录的 turn 字段**，不产生记录。 */
+  /**
+   * 轮次切换（`turn_start`）。**只影响后续记录的 turn 字段**，不产生记录。
+   *
+   * 语义全在纯函数 {@link nextTurnFor} 里（可单测）：**回退/重复的 `turnIndex` 才算新的一轮
+   * 学生提问**，同一轮里的第 2、3 个子回合（工具调用之后的再次推理）保持同一个轮号。
+   * 这正是「轮次」在本文件里的含义 —— 轨迹图的每一块是**一次学生提问**，
+   * 不是一次 LLM 往返。
+   */
   noteTurn(index: number): void {
-    const turn = Number.isFinite(index) ? Math.max(1, Math.trunc(index)) : this.currentTurn + 1
-    this.currentTurn = turn
-    this.maxTurn = Math.max(this.maxTurn, turn)
+    const next = nextTurnFor(this.currentTurn, this.lastTurnIndex, index)
+    this.currentTurn = next.turn
+    this.lastTurnIndex = next.lastIndex
+    this.maxTurn = Math.max(this.maxTurn, next.turn)
   }
 
   /**
@@ -390,6 +436,7 @@ export class ToolTraceRecorder {
     this.pending.clear()
     this.blocks.clear()
     this.currentTurn = 0
+    this.lastTurnIndex = -1
     this.maxTurn = 0
     this.recordSeq = 0
   }
@@ -495,8 +542,11 @@ function truncate(text: string, max: number): string {
 export function createTraceExtension(recorder: ToolTraceRecorder): (pi: TracePiApi) => void {
   return (pi: TracePiApi): void => {
     pi.on('turn_start', (event: unknown) => {
+      // ★ 原样把 `turnIndex` 交进去：**不能在调用点做「取 max」** ——
+      //   它每轮都从 0 重开，回退本身就是「新的一轮学生提问」的信号（见 `noteTurn` 的说明）。
+      //   `typeof index === 'number'` 只是把「缺字段」这一种形态交给 noteTurn 兜底。
       const index = (event as TurnStartLikeEvent).turnIndex
-      recorder.noteTurn(typeof index === 'number' ? index : recorder.turn + 1)
+      recorder.noteTurn(typeof index === 'number' ? index : Number.NaN)
     })
     pi.on('tool_call', (event: unknown) => {
       recorder.noteToolCall(event)
@@ -569,7 +619,7 @@ function nodeId(prefix: string, ...parts: Array<string | number>): string {
  *
  * 之所以不是「一张汇总表」：这条链路的存在意义就是**展示 LLM 的路由决策**，
  * 所以图里必须能看出「第 1 轮问了什么 → 调了 rag_search → 又调了 generate_quiz → 回复」，
- * 以及每次调用是否失败 / 耗时 / 降级 —— 这正是答辩现场要指给评委看的东西。
+ * 以及每次调用是否失败 / 耗时 / 降级 —— 这正是演示现场要指给验收方看的东西。
  */
 export function renderMermaid(records: ToolTraceRecord[], meta: ToolTraceMeta): string {
   const lines: string[] = []
@@ -630,7 +680,7 @@ export function renderMarkdownReport(records: ToolTraceRecord[], meta: ToolTrace
   )
   lines.push(
     '> 参数只记摘要：键名 + 规模（`«文本 12 字»`），密钥与个人信息类键一律省略 —— ' +
-      '轨迹图是要进报告与答辩 PPT 的，不落原始输入是数据合规要求。'
+      '轨迹图是要进报告与汇报 PPT 的，不落原始输入是数据合规要求。'
   )
   lines.push('')
   lines.push(`- 生成时间：${meta.generatedAt}`)
@@ -704,7 +754,11 @@ export function exportToolTrace(
  */
 export function demoRecorder(): ToolTraceRecorder {
   const recorder = new ToolTraceRecorder()
-  recorder.noteTurn(1)
+  // ⚠️ 参数是 Pi 的 `turnIndex`（**一条学生消息内的 sub-turn 下标**），不是「第几轮」。
+  //    它每条消息都从 0 重开，所以「第二次传 0」才是「第二条学生消息」的真机形态
+  //    （`dist/core/agent-session.js:470` 在 `agent_start` 里重置它）。
+  //    这里照真机传，样例图的轮次才是产品里真实会出现的样子。
+  recorder.noteTurn(0)
   recorder.noteToolCall({
     toolCallId: 'c1',
     toolName: 'rag_search',
@@ -721,7 +775,8 @@ export function demoRecorder(): ToolTraceRecorder {
   recorder.noteToolStart({ toolCallId: 'c2', toolName: 'generate_quiz', args: { kp_id: 'jr-py-loop', count: 2 } })
   recorder.noteToolEnd({ toolCallId: 'c2', toolName: 'generate_quiz', isError: false, result: {} })
 
-  recorder.noteTurn(2)
+  // 第二条学生消息：Pi 把 `turnIndex` 重置回 0
+  recorder.noteTurn(0)
   recorder.noteToolCall({ toolCallId: 'c3', toolName: 'get_student_profile', input: { student_name: '小明' } })
   recorder.noteToolStart({ toolCallId: 'c3', toolName: 'get_student_profile', args: { student_name: '小明' } })
   recorder.noteToolEnd({
@@ -731,11 +786,6 @@ export function demoRecorder(): ToolTraceRecorder {
     result: 'sidecar 尚未就绪（无端口与 token）'
   })
   return recorder
-}
-
-/** @see demoRecorder 的记录列表（便利函数）。 */
-export function demoRecords(): ToolTraceRecord[] {
-  return demoRecorder().records()
 }
 
 function isMainModule(): boolean {

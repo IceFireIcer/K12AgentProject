@@ -32,7 +32,8 @@ def rag_search(request: Request, body: RagSearchRequest) -> RagSearchResult:
     """按学段检索教材片段。
 
     :param body: ``{query, gradeLevel, topK?, allowCompat?, includeExpansion?}``
-        - ``gradeLevel``：学生当前学段（**显式选择优先**），学段隔离在 SQL 层按它执行；
+        - ``gradeLevel``：学生**当前生效**的学段（由服务端推断，见 ``app/grade/rules.py``；
+          学生端只读、**没有人工选择入口**），学段隔离在 SQL 层按它执行；
         - ``allowCompat``：是否允许取用更低学段的内容（命中标 ``compat=true``）；
         - ``includeExpansion``：是否把依赖图里的前置知识点补进上下文（有数量上限）。
 

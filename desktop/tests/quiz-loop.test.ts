@@ -13,7 +13,10 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import {
   buildSubjectiveGradingPrompt,
@@ -35,6 +38,14 @@ import {
 /** ★ 哨兵：只可能来自题目的标准答案。它一旦出现在**给前端的**载荷里就是泄漏。 */
 const SENTINEL_ANSWER = '哨兵标准答案-ZX91-不得出现在前端载荷里'
 const SENTINEL_RUBRIC = '哨兵评分细则-ZX92-不得出现在前端载荷里'
+
+const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const quizSourceFile = join(desktopRoot, 'src', 'main', 'agent', 'extensions', 'quiz.ts')
+
+/** 去掉注释，只留可执行代码（与 architecture-guards.test.ts 同一口径）。 */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/.*$/gm, '$1')
+}
 
 /* ------------------------------------------------------------------ *
  * 1. ★★ 变式题：登记含答案、展示不含答案
@@ -335,10 +346,52 @@ test('readCompletionContext：认不出返回 undefined（不猜）', () => {
  * ------------------------------------------------------------------ */
 
 test('★ registerVariants 只走 bridge/client.ts（token 注入的唯一出口）', () => {
-  // 静态断言：本模块不自己拼 URL、不碰 fetch（架构守卫 G5 的同一条口径）
-  // 这里用「函数存在且是 async」做冒烟，真正的 HTTP 断言在 verify-ui 与架构守卫里。
+  // ★ 这条以前是**空转**：测试体只有 `assert.equal(typeof registerVariants, 'function')`，
+  //   注释里那句「真正的 HTTP 断言在 verify-ui 与架构守卫里」也不成立 ——
+  //   `grep -rn "registerVariants|api/quiz/variants" desktop/scripts/verify-ui.mjs` → 0 命中，
+  //   而架构守卫 G5 只扫 `src/main/**` 里有没有 fetch，证明不了这条路径的 URL/头正确。
+  //   现在改成与同类守卫一致的**两条真断言**：
+  //     ① 本模块不自己拼 URL/不碰 fetch（token 只能由 client.ts 注入）；
+  //     ② 这个函数确实经 `bridge/client.ts` 发请求，且发的是那个冻结路径。
+  const code = stripComments(readSource(quizSourceFile))
+
+  assert.ok(
+    !/\bfetch\s*\(/.test(code),
+    'quiz.ts 不得自己调 fetch —— 那会绕过 bridge/client.ts 的 token 注入与唯一出口纪律'
+  )
+  assert.ok(
+    !/127\.0\.0\.1|localhost|https?:\/\//.test(code),
+    'quiz.ts 不得出现主机名/协议 —— 端点由 bridge/client.ts 的握手结果注入'
+  )
+  assert.ok(
+    /await\s+import\(\s*['"][^'"]*bridge\/client\.ts['"]\s*\)/.test(code),
+    'registerVariants 必须经 `bridge/client.ts`（token 注入的唯一出口）'
+  )
+
+  // ② 发出去的路径必须是冻结的那个（这条是 verify-ui 与架构守卫都没覆盖的那一段）
+  const at = code.indexOf('export async function registerVariants')
+  assert.ok(at > 0, 'quiz.ts 必须有 registerVariants')
+  const snippet = code.slice(at, code.indexOf('\nexport ', at + 10) > 0 ? code.indexOf('\nexport ', at + 10) : undefined)
+  assert.ok(
+    snippet.includes('/api/quiz/variants?student_id='),
+    `registerVariants 必须发 POST /api/quiz/variants?student_id=…（实际片段：${snippet.slice(0, 200)}）`
+  )
+  assert.ok(
+    /method:\s*'POST'/.test(snippet),
+    'registerVariants 必须是 POST（题库登记是写操作）'
+  )
+  assert.ok(
+    /Content-Type['"]?\s*:\s*['"]application\/json['"]/.test(snippet),
+    'registerVariants 必须声明 JSON 内容类型（否则 FastAPI 收不到结构体）'
+  )
+  // ★ 而且它真的把函数导出出去了（空转形态的另一半：函数存在但没被任何地方用）
   assert.equal(typeof registerVariants, 'function')
 })
+
+/** 读源码（helper：与 `read` 分开命名，避免和上面导入的纯函数混淆）。 */
+function readSource(file: string): string {
+  return readFileSync(file, 'utf8')
+}
 
 /* ------------------------------------------------------------------ *
  * 6. 闯关进度投影（前端只读后端结果）

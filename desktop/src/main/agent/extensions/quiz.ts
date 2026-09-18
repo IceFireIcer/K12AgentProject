@@ -17,7 +17,7 @@
  *   - 本文件对所有**外部来源**的题目一律走 {@link projectQuestion} 的**白名单投影**：
  *     只挑 `qid/kpId/type/stem/options/explanation` 六个字段，
  *     LLM 生成的题即使多带了 `answer`/`solution`/`hint` 也**进不了**下发给前端的载荷；
- *   - {@link validateGeneratedQuiz} 里**故意**保留 `answer`（后端判分要它），
+ *   - {@link prepareVariants} 里**故意**保留 `answer`（后端判分要它），
  *     但那是**登记给后端**用的：它经 `POST /api/quiz/variants` 直接进 Python，
  *     在投影后的 `payload` 里一个字段都不留。
  *   - 前端从不发送、也从不接收标准答案。
@@ -38,7 +38,12 @@
 
 import { Type, type Static } from '@sinclair/typebox'
 import { apiFetch } from '../../bridge/client.ts'
-import { currentAgentSession, SIDECAR_UNAVAILABLE_TEXT, type AgentExtensionApi } from './index.ts'
+import {
+  currentAgentSession,
+  SIDECAR_UNAVAILABLE_TEXT,
+  toolFailure,
+  type AgentExtensionApi
+} from './index.ts'
 
 /* ------------------------------------------------------------------ *
  * 与契约对应的 TS 形状（`contracts.py` 出参的 camelCase 形态）
@@ -325,13 +330,19 @@ export function projectQuestion(raw: unknown): QuizQuestionOutShape | null {
 }
 
 /**
- * 校验 LLM 生成的一组题（票 14 的「pydantic 校验 + 重试」在 TS 侧的对等物）。
+ * 校验 LLM 生成的一组题，只产出**对外载荷**（不带答案的那一份）。
  *
  * 通过时返回**已投影**的载荷（多一个字段都不会带出去）；
  * 不通过时给出可读原因，调用方据此重试，重试仍失败则退回题库。
  *
  * 另外要求每题**带有答案**（`answer`）—— 那是给后端判分登记的，
  * {@link projectQuestion} 会把它丢掉，所以它永远不会出现在下发给前端的载荷里。
+ *
+ * ⚠️ **生产的两条出题路径都不再直接用它**（F4）：`generate_quiz`（题库缺题时）与
+ *   `generate_variants` 都走 {@link prepareVariants} + {@link registerVariantsFn} ——
+ *   因为「只投影不给答案」的题在后端判不了分（学生一提交就是 404）。
+ *   保留本函数是因为它是**纯投影**的那一半（可单测、可复用），语义与
+ *   `prepareVariants` 的投影口径逐条相同。
  */
 export function validateGeneratedQuiz(
   raw: unknown,
@@ -366,7 +377,12 @@ export function validateGeneratedQuiz(
   return { ok: true, payload: { kpId: expect.kpId, questions: projected, source: 'generated' } }
 }
 
-/** 学段解析：**会话学段为权威**（与 `rag-search.ts` 同一口径，显式选择优先 §10.1）。 */
+/**
+ * 学段解析：**会话学段为权威**（与 `rag-search.ts` 同一口径）。
+ *
+ * 会话里那个值是**服务端推断**（`server/app/grade/rules.py`）出来的当前生效值，
+ * 前端不推断学段（手动指定走独立通道、由服务端写库）；模型填的只是「复述」。
+ */
 export function resolveGradeLevel(requested: unknown, sessionGrade: unknown): string {
   const levels = ['primary_low', 'primary_high', 'junior', 'senior'] as const
   for (const value of [sessionGrade, requested]) {
@@ -542,7 +558,10 @@ export async function completeViaContext(
       // 判分/出题都要「同一份输入给同一个结论」：关掉思考预算的随机性来源，
       // 并显式不带缓存（同一道题连判三次必须各自真跑一次，票 15 的证据要求）
       cacheRetention: 'none',
-      ...(input.signal ? { signal: input.signal } : {})
+      // ★ 调用方没给 signal 时必须自己兜一个超时（F10）：`execute()` 的第 3 个入参
+      //   在某些调用形态下是 `undefined`，没有这一行就等于**没有超时**——
+      //   一次外呼卡住会让本 Tool 永久 pending（学生只看到转圈）。
+      signal: input.signal ?? AbortSignal.timeout(LLM_TIMEOUT_MS)
     }
   )
   const parts = Array.isArray(response?.content) ? response.content : []
@@ -556,14 +575,16 @@ export async function completeViaContext(
 
 export interface QuizExtensionOptions {
   /**
-   * ★ **票 15 的接入点**：LLM 变式生成器。
+   * ★ **票 15 的接入点**：LLM 变式生成器（`generate_quiz` 与 `generate_variants` 共用）。
    *
    * 缺省时只用本地题库 —— 断网、无 Key 都能出题。
-   * 生成器返回的东西会被 {@link validateGeneratedQuiz} 校验，校验不过就重试，
+   * 生成器返回的东西会被 {@link prepareVariants} 校验，校验不过就重试，
    * 重试仍不过就**退回题库**（`source` 回到 `"bank"`），不抛错、不空题。
    *
    * ⚠️ 生成器的返回值里**必须**含每题的标准答案（`answer`）与可选的评分细则（`rubric`），
    * 它们会被 {@link registerVariants} 登记到后端（判分只认后端库里的答案）。
+   * ★ 两条出题路径**都是先登记再下发**（F4）：`generate_quiz` 以前跳过登记，
+   * 学生做完必然判分 404。
    */
   generateQuestions?: (request: GenerateQuestionsRequest) => Promise<unknown>
   /** 请求出口（默认 `apiFetch`）。 */
@@ -609,18 +630,15 @@ export type SubmitSubjectiveGradeFn = (input: {
  * 小工具
  * ------------------------------------------------------------------ */
 
-/** 失败结果的统一形状（与 `rag-search.ts` 同一口径，两边都要被 events 与 trace 正确识别）。 */
-function failed(text: string, error?: unknown): {
-  content: Array<{ type: 'text'; text: string }>
-  details: { ok: false; error: true; errorMessage: string; message: string; degraded: true }
-} {
-  const reason = error instanceof Error ? error.message : error === undefined ? '' : String(error)
-  const message = reason ? `${text}（${reason}）` : text
-  return {
-    content: [{ type: 'text', text: `⚠️ ${message}` }],
-    details: { ok: false, error: true, errorMessage: message, message, degraded: true }
-  }
-}
+/**
+ * 失败结果的统一形状：**就是 {@link toolFailure}**（F11）。
+ *
+ * 以前这里另有一份逐字同构的私有 `failed()`：四份拷贝一旦有一份漂移，
+ * 事件层（`agent/events.ts` 只认 `details.error === true`）与轨迹（`agent/trace.ts`
+ * 认 `details.ok === false`）就会各认一半，失败会**静默变成成功**。
+ * 别名只是为了少改调用点，语义一字不变。
+ */
+const failed = toolFailure
 
 /** 成功结果：`details` 就是事件层的 `payload`（`events.ts` 会把 details 展开成 payload）。 */
 function ok<TDetails extends object>(
@@ -1009,8 +1027,41 @@ export function createQuizExtension(
    * 据，不能给学生）。所以登记变式题时顺手在内存里留一份，判分时按 qid 取回。
    * **落库的那一份在 Python 侧**（`generated_question.rubric`）—— 这里只是本会话的缓存，
    * 进程重启后为空，此时 `submit_quiz` 会返回可读错误让学生重新出题（不静默瞎判）。
+   *
+   * ★ 两条边界（F12）：
+   *   ① **有容量上限**（{@link RUBRIC_CACHE_LIMIT}，LRU 式丢最旧一半，同 `animation.ts`
+   *      的 `MAX_TRACKED_CALLS` 手法）—— 它只增不减的写法在长会话里会一直攒；
+   *   ② **换学生时整表清掉**（键里虽然有 qid，但 qid 是随机的、不含学生身份）——
+   *      不清理就等于把上一个学生的主观题细则留在下一个学生的会话里。
+   *      **学生切换的判据是每次 `execute` 开头比对的 `currentAgentSession()`**
+   *      （不在本文件里订阅任何全局事件，见文件头的「不自建事件总线」纪律）。
    */
   const rubricCache = new Map<string, { stem: string; rubric: string }>()
+  /** rubricCache 的容量上限（同屏题目是个位数，64 已经非常宽裕）。 */
+  const RUBRIC_CACHE_LIMIT = 64
+
+  /** 写一条细则进缓存（带上限：满了就丢最旧的一半，Map 保持插入序）。 */
+  function noteRubric(qid: string, stem: string, rubric: string): void {
+    if (rubricCache.size >= RUBRIC_CACHE_LIMIT && !rubricCache.has(qid)) {
+      const keys = [...rubricCache.keys()].slice(0, RUBRIC_CACHE_LIMIT / 2)
+      for (const key of keys) rubricCache.delete(key)
+    }
+    rubricCache.set(qid, { stem, rubric })
+  }
+
+  /** 上一次见到的学生（临时态清理的判据，见 {@link noteStudentBoundary}）。 */
+  let trackedStudentId = ''
+
+  /** 换学生 → 清掉本会话的临时态（细则缓存）。同学生会话内不动它（判分还要用）。 */
+  function noteStudentBoundary(studentId: string | undefined): void {
+    const next = studentId ?? ''
+    if (next === trackedStudentId) return
+    if (trackedStudentId !== '' || next !== '') {
+      // 只在**真的换了一个人**时清理；首次绑定（''→X）没有旧数据可清，清一次也无害
+      rubricCache.clear()
+    }
+    trackedStudentId = next
+  }
 
   /** 一次带超时的请求（超时 / 网络异常都由调用方收敛成可读错误）。 */
   async function call(path: string, init?: RequestInit): Promise<Response> {
@@ -1020,8 +1071,17 @@ export function createQuizExtension(
   /**
    * 出题：**题库优先**（断网兜底的根），题库没有才走 LLM 生成（票 15），
    * 生成失败重试 ≤2 → 仍失败就如实报错（**不返回空题**：空题会让前端渲染一张空卡片）。
+   *
+   * ★ **LLM 生成的那一批必须先登记到后端**（F4，与 `generateVariants` 同一条链）：
+   *   题卡先发给学生，标准答案留在 Python —— 判分只查「该学生生成题表 → 随包题库」，
+   *   不登记的话学生做完 `submit_quiz` 必然 404，整轮练习白做（题卡看起来完全正常）。
    */
-  async function generate(kpId: string, gradeLevel: string, count: number) {
+  async function generate(
+    kpId: string,
+    gradeLevel: string,
+    count: number,
+    session: { studentId: string; sessionId: string } | null
+  ) {
     const path = `/api/quiz/bank/${encodeURIComponent(kpId)}?gradeLevel=${encodeURIComponent(
       gradeLevel
     )}&count=${count}`
@@ -1040,7 +1100,7 @@ export function createQuizExtension(
       const payload = projectBankPayload(await bank.json(), kpId)
       if (payload !== null) {
         // 出题时也带上进度：学生在做题前就能看到「我在第几关」
-        return ok(renderQuizText(payload), await withProgress(payload, currentAgentSession()?.studentId ?? ''))
+        return ok(renderQuizText(payload), await withProgress(payload, session?.studentId ?? ''))
       }
     } else if (bank.status !== 404) {
       const snippet = await readSnippet(bank)
@@ -1059,6 +1119,15 @@ export function createQuizExtension(
           '来临时出题。请换成题库里已有的知识点出题，或先用对话把这个概念讲清楚。'
       )
     }
+    // ★ 生成题必须登记到**具体学生**名下（答案的去向），所以这里要身份；
+    //   身份仍然只来自主进程（`currentAgentSession()`），不是 Tool 参数。
+    if (!session) {
+      return failed(
+        `本地题库里还没有「${kpId}」这个知识点的题目，而当前没有绑定学生，` +
+          '临时出的题没法把标准答案登记到具体学生名下（否则批改时会查不到这道题）。' +
+          '请先直接回应学生，或换成题库里已有的知识点出题。'
+      )
+    }
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
@@ -1070,11 +1139,34 @@ export function createQuizExtension(
           ...(toolContext ? { context: toolContext } : {}),
           ...(toolSignal ? { signal: toolSignal } : {})
         })
-        const validated = validateGeneratedQuiz(raw, { kpId, maxQuestions: count })
-        if (validated.ok) {
-          return ok(renderQuizText(validated.payload), validated.payload)
+        // ★ 与变式题**同一条登记链**（F4）：校验（含答案的那一份）→ 登记进 Python
+        //   → 只有登记成功才把**不含答案**的载荷发给学生。
+        const prepared = prepareVariants(raw, { kpId, gradeLevel, maxQuestions: count })
+        if (!prepared.ok) {
+          log(`[quiz] LLM 出题校验未通过（第 ${attempt + 1} 次）：${prepared.reason}`)
+          continue
         }
-        log(`[quiz] LLM 出题校验未通过（第 ${attempt + 1} 次）：${validated.reason}`)
+        const registered = await registerVariantsFn({
+          studentId: session.studentId,
+          gradeLevel,
+          questions: prepared.questions
+        })
+        if (registered === null) {
+          // ★ 登记失败时**绝不把题发给学生**（后端判不了分），如实降级到下一轮重试/退回题库
+          log(
+            `[quiz] LLM 出题登记失败（第 ${attempt + 1} 次）：后端未接受（校验不通过或服务不可用）`
+          )
+          continue
+        }
+        // 主观题的细则留在本会话内存里（判分用；**绝不进载荷**）
+        for (const question of prepared.subjective) {
+          noteRubric(question.qid, question.stem, question.rubric)
+        }
+        log(
+          `[quiz] 题库缺「${kpId}」，已用模型出题并登记 ${registered.questions.length} 道` +
+            (prepared.subjective.length > 0 ? `（含 ${prepared.subjective.length} 道主观题）` : '')
+        )
+        return ok(renderQuizText(registered), await withProgress(registered, session.studentId))
       } catch (error) {
         log(
           `[quiz] LLM 出题失败（第 ${attempt + 1} 次）：${
@@ -1159,9 +1251,9 @@ export function createQuizExtension(
           continue
         }
 
-        // 主观题的细则留在本会话内存里（判分用；**绝不进载荷**）
+        // ★ 主观题的细则留在本会话内存里（判分用；**绝不进载荷**）
         for (const question of prepared.subjective) {
-          rubricCache.set(question.qid, { stem: question.stem, rubric: question.rubric })
+          noteRubric(question.qid, question.stem, question.rubric)
         }
         log(
           `[quiz] 变式题已登记 ${registered.questions.length} 道` +
@@ -1245,12 +1337,20 @@ export function createQuizExtension(
 
       if (!complete && !toolContext) {
         // ★ 无 API Key = 判不了就说不判（**不瞎判**：主观题乱判直接污染掌握度）
+        //
+        // ⚠️ `details` 里**必须带 `text`**（F5）：事件层（`agent/events.ts` 的 `readPayload`）
+        //   把 details 原样展开成 payload，而渲染侧的 `cards/quiz.ts` 需要一个能认出的形状 ——
+        //   它只认 `questions[]` 或 `qid` + `correct`。这里既没有题目也没有对错，
+        //   所以**只靠 `details.text` 落入 unknown 分支**（卡片显示这句话）。
+        //   没有 `text` 时学生看到的是「练习卡片的内容格式不对」—— 一个设计好的降级
+        //   会被呈现成「系统坏了」。
         return ok(SUBJECTIVE_UNAVAILABLE_TEXT, {
           ok: true,
           qid,
           scoredBy: 'llm',
           degraded: true,
-          note: SUBJECTIVE_UNAVAILABLE_TEXT
+          note: SUBJECTIVE_UNAVAILABLE_TEXT,
+          text: SUBJECTIVE_UNAVAILABLE_TEXT
         })
       }
 
@@ -1345,6 +1445,8 @@ export function createQuizExtension(
         toolContext = readCompletionContext(ctx)
         toolSignal = signal
         const session = currentAgentSession()
+        // ★ 换学生就清掉本会话的临时态（评分细则，F12）—— 不在本文件订阅任何全局事件
+        noteStudentBoundary(session?.studentId)
         const kpId = readNonEmptyString(params?.kpId)
         if (kpId === null) {
           return failed('出题需要知识点 id（例如 jr-py-loop）。请先确认要练哪个知识点。')
@@ -1354,7 +1456,9 @@ export function createQuizExtension(
           typeof params?.count === 'number' && Number.isFinite(params.count)
             ? Math.max(1, Math.min(MAX_QUIZ_QUESTIONS, Math.trunc(params.count)))
             : DEFAULT_QUIZ_QUESTIONS
-        return await generate(kpId, gradeLevel, count)
+        // ★ 把身份**快照**传下去（F4 起 LLM 生成题也要登记答案，需要 studentId）；
+        //   函数内不再读全局，避免中途切学生把答案登记到别人名下。
+        return await generate(kpId, gradeLevel, count, session)
       }
     })
 
@@ -1381,6 +1485,8 @@ export function createQuizExtension(
         toolContext = readCompletionContext(ctx)
         toolSignal = signal
         const session = currentAgentSession()
+        // ★ 换学生就清掉本会话的临时态（评分细则，F12）；**必须在读 rubricCache 之前**
+        noteStudentBoundary(session?.studentId)
         if (!session) {
           return failed(
             '还没有绑定当前学生，无法批改（掌握度需要记到具体学生名下）。请先直接回应学生。'
@@ -1459,6 +1565,8 @@ export function createQuizExtension(
         const kpId = readNonEmptyString(params?.kpId)
         if (kpId === null) return failed('生成变式题需要知识点 id。')
         const session = currentAgentSession()
+        // ★ 换学生就清掉本会话的临时态（评分细则，F12）
+        noteStudentBoundary(session?.studentId)
         if (!session) {
           return failed('还没有绑定当前学生，无法登记生成题（答案要存到具体学生名下）。')
         }

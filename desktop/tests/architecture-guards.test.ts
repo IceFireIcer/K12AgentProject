@@ -19,12 +19,13 @@
  *   G11 ★ 6 事件载荷字段与契约逐字一致（`shared/ipc-events.ts`）
  *   G12 ★ 渲染进程接事件是**订阅回调**：不存在解析层（无 `TextDecoder` / `EventSource`）
  *   G13 ★ 明文 LLM 配置只有主进程能取；`shared/provider-catalog.ts`（唯一的契约例外）
+ *       也被扫，且对它单独启用凭证禁词表
  *
  * 跑法：`npm test`。全部用 fs 读源码做静态断言，失败信息里带上具体文件路径。
  */
 
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -504,8 +505,9 @@ const EXPECTED_API_METHODS = [
   'onChapterChanged',
   // 票 18：代码执行桥（主进程只**下发**代码，渲染进程在 Pyodide Worker 里跑，结果回传）
   'onCodeExecute',
-  'sendCodeResult'
+  'sendCodeResult',
   // 学习档案（章节 / 报告 / 错题本 / 学习地图）：**纯转发**，聚合全在 Python 侧。
+  // ★ 四条都不接受 `studentId`：学生身份由主进程决定（否则等于允许读别人的记录）。
   'readStudyReport',
   'readStudyMistakes',
   'readStudyChapters',
@@ -515,6 +517,8 @@ const EXPECTED_API_METHODS = [
   'listSessions',
   'readSessionTranscript',
   'searchSessions',
+  // 导出：回执**只有文件名**（完整路径不进渲染进程）
+  'exportMarkdown'
 ]
 
 /** preload 里绝不允许出现的通用转发方法名。 */
@@ -562,11 +566,97 @@ test('G9: preload 只暴露白名单方法，不暴露通用 ipcRenderer 转发'
   assert.deepEqual(valueUses, [], `ipcRenderer 被当成值传出去了（渲染进程会拿到通用 IPC 能力）：${valueUses.join(' / ')}`)
 })
 
+// ── G13 明文 LLM 配置绝不进渲染进程 ──────────────────────────────────
+
+/**
+ * ★★ 「设置 → Pi」这条链路需要**明文 Key**（Pi 必须拿到它才能发请求），
+ * 而它的载体是 sidecar 的 `GET /api/settings/runtime`。
+ *
+ * 这条守卫把「明文只留给主进程」钉成**可判定的断言**（而不是只写在注释里）：
+ *   - 渲染进程 / preload 里**不出现** `settings/runtime` 这个后端路径；
+ *   - 渲染进程 / preload 的可执行代码里**不出现** `apiKey` 之外的明文配置字段名
+ *     （`RuntimeLlmConfig` 是主进程独有的类型）；
+ *   - preload 暴露的方法集合里没有「取明文配置」那一类方法；
  *   - ★ **`src/shared/provider-catalog.ts` 也被扫**（它是架构里唯一被批准的契约例外，
+ *     也是唯一一份跨进程共享、可能被塞进凭证字段的类型集合；该文件自己写着
+ *     「有架构守卫（G13）盯着凭证字段」—— 原来扫描集合不含 `shared/`，那条承诺是空的），
+ *     并且对它单独启用**禁词表**（`apiKey|api_key|token|secret|Bearer|Authorization`，
+ *     在 `stripComments` 之后的文本上判）。
+ *
+ * ⚠️ 为什么对 renderer/preload 用「后端路径 + 类型名」而不是「禁止 apiKey 字样」：
+ *    设置页**本来就要**提交明文 Key（`LlmConfigIn.apiKey`，那是用户刚敲进去的），
+ *    所以那两处用禁词表会把正常功能一起打死。
+ *    真正要守的是「**读回**明文」这条路径 —— 它唯一的入口就是那个后端路径与那份配置类型。
  *    而 `provider-catalog.ts` 的性质不同：它**只承载界面展示用的候选清单**，
+ *    本来就没有任何理由出现凭证字段，所以那里用禁词表是**正当的**（不是误伤）。
+ */
+test('G13: 明文 LLM 配置（含 API Key）只有主进程能取，渲染进程与 preload 都没有入口', () => {
+  const runtimeConfigPath = 'settings/runtime'
+  const runtimeConfigType = 'RuntimeLlmConfig'
+
+  // ① 渲染进程与 preload 都不得直接引用后端那条路径
+  const frontFacing = [...listFiles(rendererDir), ...listFiles(preloadDir)]
+  const pathHits = frontFacing.filter((file) => readSource(file).includes(runtimeConfigPath)).map(show)
+  assert.deepEqual(
+    pathHits,
+    [],
+    `以下文件引用了 ${runtimeConfigPath}（那是**含明文 Key** 的配置接口，只允许主进程调用）：\n  ` +
+      pathHits.join('\n  ')
+  )
+
+  // ② 主进程独有的配置类型不得被前端引用（含它的字段名组合）
+  const typeHits = frontFacing.filter((file) => readSource(file).includes(runtimeConfigType)).map(show)
+  assert.deepEqual(
+    typeHits,
+    [],
+    `以下文件引用了 ${runtimeConfigType}（主进程独有的含明文配置类型）：\n  ` + typeHits.join('\n  ')
+  )
+
+  // ③ 正向断言：主进程侧**确实**有这条链路（否则上面两条会因为「功能被删掉」而空过）
+  const mainRuntimeConfig = readSource(join(mainDir, 'settings', 'runtime-config.ts'))
+  assert.ok(
+    mainRuntimeConfig.includes(runtimeConfigPath),
+    `${show(join(mainDir, 'settings', 'runtime-config.ts'))} 里看不到 ${runtimeConfigPath}：` +
+      '主进程必须自己拉那份配置，否则「设置改完 Pi 不生效」的故障会回来。'
+  )
+  assert.ok(
+    mainRuntimeConfig.includes('parseRuntimeLlmConfig'),
+    'runtime-config.ts 必须做回执形状校验（不信任网络回执，缺字段要回落默认值）'
+  )
+
   // ④ ★ `shared/provider-catalog.ts` 也被扫：它是架构里**唯一被批准的契约例外**
+  //    （TS 手写类型，理由见文件头），也是唯一可能被塞进 `apiKey` 的**跨进程**类型集合。
+  //    该文件自己声明「里面有架构守卫（G13）盯着凭证字段」—— 而原来的扫描集合只有
+  //    renderer/ + preload/，**不含 `src/shared/`**，那条承诺的守卫根本不存在。
   const sharedCatalogFile = join(desktopRoot, 'src', 'shared', 'provider-catalog.ts')
+  assert.ok(existsSync(sharedCatalogFile), `${show(sharedCatalogFile)} 必须存在（设置页的预设/拉取模型靠它）`)
+
+  //    这两条路径/类型也**不许**出现在这份跨进程文件里（它不该成为取明文配置的后门）
+  const catalogSource = readSource(sharedCatalogFile)
+  assert.ok(
+    !catalogSource.includes(runtimeConfigPath),
+    `${show(sharedCatalogFile)} 引用了 ${runtimeConfigPath} —— 跨进程共享的文件不得碰含明文 Key 的接口`
+  )
+  assert.ok(
+    !catalogSource.includes(runtimeConfigType),
+    `${show(sharedCatalogFile)} 引用了 ${runtimeConfigType} —— 那是主进程独有的含明文配置类型`
+  )
+
+  //    ★ 显式**禁词**断言（stripComments 之后：注释里解释「这里不许出现 apiKey」不算违规）。
+  const credentialWords = /\b(apiKey|api_key|token|secret|Bearer|Authorization)\b/
+  const credentialLines = stripComments(catalogSource)
+    .split('\n')
+    .map((line, index) => ({ line: line.trim(), number: index + 1 }))
+    .filter((entry) => credentialWords.test(entry.line))
+  assert.deepEqual(
+    credentialLines.map((entry) => `L${entry.number}: ${entry.line}`),
+    [],
     `provider-catalog.ts 的可执行代码里出现凭证字段名（该文件承诺「不允许任何凭证字段」）：\n  ` +
+      credentialLines.map((entry) => `L${entry.number}: ${entry.line}`).join('\n  ') +
+      '\n这份类型只承载「界面展示用的候选清单」，不应该有、也不需要任何 Key / token 字段。'
+  )
+})
+
 // ── G10 Tool → payload.kind 映射表 ───────────────────────────────────
 
 test('G10: TOOL_TO_KIND 只有一处定义；7 个 Tool 在表内，画像/检索不在表内', () => {

@@ -9,9 +9,14 @@
  */
 import { spawn, execFileSync } from 'node:child_process'
 import net from 'node:net'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const DESKTOP = 'E:/FolderForVibeCoding/Zcode/K12Agent/desktop'
-const CDP = 'http://127.0.0.1:9222'
+// ★ 路径与端口都从**本脚本的位置**推出来（换目录 / 换机器照样能跑）：
+//   DESKTOP = 本脚本的上一级；CDP 端口读 `K12_DEBUG_PORT`（默认 9222，与 verify-ui 同一口径）。
+const DESKTOP = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const DEBUG_PORT = process.env.K12_DEBUG_PORT ?? '9222'
+const CDP = `http://127.0.0.1:${DEBUG_PORT}`
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 let failures = 0
@@ -104,7 +109,7 @@ async function runCycle(n) {
   // 否则直接 EINVAL。带 shell 后 npm.pid 是 cmd.exe，用 taskkill /T 收整棵树。
   const npm = spawn('npm run dev', {
     cwd: DESKTOP,
-    env: { ...process.env, K12_DEBUG_PORT: '9222' },
+    env: { ...process.env, K12_DEBUG_PORT: DEBUG_PORT },
     stdio: 'ignore',
     detached: true,
     shell: true,

@@ -261,6 +261,151 @@ class TestExpansion(GraphCase):
         )
 
 
+# --------------------------------------------------------------------------- #
+# ★ 回归：``related`` 边不得以「前置」身份出现（relation 过滤漏在 seed 侧）
+# --------------------------------------------------------------------------- #
+class TestRelationFilterOnSeed(GraphCase):
+    """回归用例（审计发现，修复前**必红**）。
+
+    ``_cte_walk`` 的 ``relation`` 过滤此前只拼在递归 ``step`` 上，
+    **seed 那一半没有过滤** —— 于是「只有 ``A --related--> B`` 一条边」的 A
+    会以**前置知识点**的身份被补进检索上下文（``prerequisites(B)`` 里能看到它）。
+    这会让学生问「循环」时收到一段根本不是讲授前提的内容，而且图看起来完全正常。
+
+    每个用例先把夹具自带的两条边清掉，只留本用例要验的那几条 ——
+    否则断言会被夹具图的传递闭包淹没。
+    """
+
+    def _only(self, *edges: DepEdge) -> None:
+        self.conn.execute("DELETE FROM knowledge_dependencies")
+        self.conn.commit()
+        insert_dependencies(self.conn, list(edges))
+
+    def test_prerequisites_do_not_leak_related_edges(self) -> None:
+        """A --related--> B、C --prerequisite--> B：前置只能是 C，不能是 A。"""
+        self._only(
+            DepEdge(LOW, MID, relation="related"),
+            DepEdge(HIGH, MID, relation="prerequisite"),
+        )
+        rows = prerequisites(self.conn, MID, relation="prerequisite")
+        self.assertEqual(
+            [r.kp_id for r in rows],
+            [HIGH],
+            "只有 related 边的知识点被当成前置补了进来（relation 过滤漏在 seed 侧）",
+        )
+        for row in rows:
+            self.assertEqual(row.relation, "prerequisite")
+
+    def test_successors_do_not_leak_related_edges(self) -> None:
+        """successor 方向同一条约束：`A --related--> B` 问 A 时不该说 B 是后继。"""
+        self._only(DepEdge(LOW, MID, relation="related"))
+        self.assertEqual(successors(self.conn, LOW, relation="prerequisite"), [])
+        self.assertEqual([r.kp_id for r in successors(self.conn, LOW)], [MID])
+
+    def test_deep_hops_also_filtered(self) -> None:
+        """第 2 跳同样要过滤（只修 seed 而 step 漏掉的话这条会红）。
+
+        LOW --related--> MID --related--> HIGH：问 HIGH 时两个 related 节点都不该出现。
+        """
+        self._only(
+            DepEdge(LOW, MID, relation="related"),
+            DepEdge(MID, HIGH, relation="related"),
+        )
+        self.assertEqual(prerequisites(self.conn, HIGH, relation="prerequisite"), [])
+        # 反过来，把最外那条换成 prerequisite 就必须找得到它
+        self._only(
+            DepEdge(LOW, MID, relation="related"),
+            DepEdge(MID, HIGH, relation="prerequisite"),
+        )
+        self.assertEqual(
+            [r.kp_id for r in prerequisites(self.conn, HIGH, relation="prerequisite")], [MID]
+        )
+
+    def test_without_relation_filter_all_edges_are_returned(self) -> None:
+        """不给 ``relation`` 时行为不变（两个方向的所有边都要能查出来）。"""
+        self._only(DepEdge(LOW, MID, relation="related"))
+        self.assertEqual([r.kp_id for r in prerequisites(self.conn, MID)], [LOW])
+        self.assertEqual([r.relation for r in prerequisites(self.conn, MID)], ["related"])
+
+
+class TestExpansionDepth(GraphCase):
+    """回归用例（审计发现）：``expansion_kp_ids`` 的 depth 扫描此前每轮都把结果全写进字典，
+    等于对同一个 seed 反复整树递归（``max_depth`` 次查询），并丢掉 ``weight`` 排序键。
+    修复后一次 CTE 拿全部深度，再按 ``(depth, weight, kp_id)`` 取前 ``limit`` 个。
+
+    这条断言用 **SQL 计数**钉住「一个 seed 一次查询」——只断言结果集的话，
+    退回「N 次冗余扫描」也能全绿（结果集本来就等价）。
+    """
+
+    def _only(self, *edges: DepEdge) -> None:
+        self.conn.execute("DELETE FROM knowledge_dependencies")
+        self.conn.commit()
+        insert_dependencies(self.conn, list(edges))
+
+    def _chain(self) -> None:
+        """LOW --prereq--> MID --prereq--> HIGH（问 HIGH 时 1 跳=MID、2 跳=LOW）。"""
+        self._only(
+            DepEdge(LOW, MID, relation="prerequisite"),
+            DepEdge(MID, HIGH, relation="prerequisite"),
+        )
+
+    def test_deeper_prerequisites_are_returnable(self) -> None:
+        self._chain()
+        all_grades = ["senior", "junior", "primary_high", "primary_low"]
+        two = expansion_kp_ids(self.conn, [HIGH], grade_levels=all_grades, max_depth=2, limit=2)
+        self.assertEqual(two, [MID, LOW], "1 跳的前置应排在 2 跳之前，且两个都要能返回")
+        one = expansion_kp_ids(self.conn, [HIGH], grade_levels=all_grades, max_depth=1, limit=2)
+        self.assertEqual(one, [MID], "max_depth=1 不得越过 1 跳")
+
+    def test_tighter_hop_wins_even_when_the_deeper_one_has_higher_weight(self) -> None:
+        """排序键是 ``(depth, weight)``：更近的前置一定排在更远的前面。
+
+        夹具 graph 里 LOW→MID→HIGH 是链，再加一条 LOW→HIGH 的直接边（权重给大），
+        问 HIGH 时 1 跳应包含 LOW 与 MID（按 kp_id 排序），2 跳结果不参与竞争。
+        """
+        self._only(
+            DepEdge(LOW, MID, relation="prerequisite"),
+            DepEdge(MID, HIGH, relation="prerequisite"),
+            DepEdge(LOW, HIGH, relation="prerequisite", weight=5.0),
+        )
+        picked = expansion_kp_ids(
+            self.conn,
+            [HIGH],
+            grade_levels=["senior", "junior", "primary_high", "primary_low"],
+            max_depth=2,
+            limit=1,
+        )
+        self.assertEqual(len(picked), 1)
+        self.assertIn(picked[0], (LOW, MID), "1 跳的前置不该被 2 跳的挤掉")
+
+    def test_limit_zero_returns_nothing(self) -> None:
+        self._chain()
+        self.assertEqual(
+            expansion_kp_ids(self.conn, [HIGH], grade_levels=["junior"], max_depth=2, limit=0),
+            [],
+        )
+
+    def test_depth_scan_uses_one_query_per_seed(self) -> None:
+        self._chain()
+        seen: list[str] = []
+
+        def trace(statement: str) -> None:  # noqa: ANN001 - sqlite3 trace 回调签名
+            if statement.lstrip().upper().startswith("WITH RECURSIVE"):
+                seen.append(statement)
+
+        self.conn.set_trace_callback(trace)
+        self.addCleanup(self.conn.set_trace_callback, None)
+        expansion_kp_ids(
+            self.conn,
+            [HIGH],
+            grade_levels=["senior", "junior", "primary_high", "primary_low"],
+            max_depth=3,
+            limit=2,
+        )
+        self.conn.set_trace_callback(None)
+        self.assertEqual(len(seen), 1, f"一个 seed 应当只跑一次递归 CTE，实际 {len(seen)} 次")
+
+
 class TestExpansionOnRealCorpus(RealCorpusCase):
     def test_prerequisites_of_loop_include_variable(self) -> None:
         """★ 检索扩展：问「循环」要补进「变量」的内容（真教材）。"""

@@ -28,8 +28,17 @@
  * 主进程这一侧只能保证「中断结果被正确识别与呈现」：`interrupted` 标志、
  * `KeyboardInterrupt` 走「停不下来」的文案、以及 `evaluate_code` 仍返回可读结果
  * 而**不是抛异常**（抛出去会同时带走 UI —— Pi 与 UI 同进程）。
- * 真正的中断在 `sandbox/pyodide.worker.ts`（那条链由 `scripts/verify-ui.mjs` 的
- * CDP 断言端到端验证）。
+ *
+ * 真正的中断在 `sandbox/pyodide.worker.ts`（`setInterruptBuffer` + `Atomics.store(SIGINT)`）。
+ * ⚠️ **事实澄清**：那条链**没有**端到端 CDP 断言 —— `scripts/verify-ui.mjs` 里
+ *    `grep -ci pyodide` = 0，它不碰 Pyodide，也不碰编程卡片的执行通道。
+ *    （这里以前写的是「由 verify-ui 的 CDP 断言端到端验证」，那句话不成立。）
+ *    当前覆盖的实际边界是：
+ *      · 本文件 G18-1* —— 主进程侧的静态守卫与桥的纯逻辑单测；
+ *      · 本文件 G18-1c2/c3 —— 渲染进程入口 + 主进程 handler 的**接线**静态守卫；
+ *      · 本文件 G18-1e2 —— `installCodeExecutionBridge` 的注入式单测（假 bridge + 假 runner）；
+ *      · Worker 内部的真实执行与中断**只有** `pyodide.worker.ts` 自身的代码路径，
+ *        **没有自动化端到端覆盖** —— 现场演示前必须手点一次死循环验证「停止」。
  *
  * ---------------------------------------------------------------------------
  * G19-*：报错感知 / 分级提示不跳级 / 连续失败 3 次主动介入
@@ -72,6 +81,8 @@ import {
   type CodeRunRequest,
   type CodeRunner
 } from '../src/main/agent/extensions/coding.ts'
+// ★ 渲染进程侧：执行桥（主进程下发 → 渲染进程 Pyodide Worker 执行 → 回传）
+import { installCodeExecutionBridge } from '../src/renderer/src/sandbox/pyodide-runner.ts'
 // ★ 渲染进程侧：编程卡片的载荷投影（前后端交界处的契约消费方，和上面同一个文件里测）
 import {
   buildHintRequestMessage,
@@ -359,6 +370,47 @@ test('G18-1c: coding.ts 的执行出口只有 codeRunner 接缝（代码是发�
   )
 })
 
+/**
+ * ★★ G18-1c2 / G18-1c3：硬约束②的**渲染进程与 IPC 半边**的接线守卫。
+ *
+ * 缺口（审计结论）：`grep -rln "sandbox/pyodide-runner" desktop/tests` → 0 个文件，
+ * 主进程那半（G18-1a..i）测得很全，而「渲染进程入口真的把桥装上了」与
+ * 「主进程 handler 真的在发 codeExecute / 收 codeResult」没有任何机器判据 ——
+ * 那两处任意一处被删/改名，全套测试仍然全绿，只有现场手点「运行」才发现代码跑不起来。
+ */
+test('★ G18-1c2: 渲染进程入口真的装上了代码执行桥（installCodeExecutionBridge）', () => {
+  const mainEntry = join(desktopRoot, 'src', 'renderer', 'src', 'main.ts')
+  const code = stripComments(readFileSync(mainEntry, 'utf8'))
+  assert.ok(
+    /installCodeExecutionBridge\s*\(\s*window\.api\s*\)/.test(code),
+    'src/renderer/src/main.ts 必须调用 installCodeExecutionBridge(window.api) —— ' +
+      '这行是「主进程下发的执行请求」在渲染进程唯一的落点；删掉它，' +
+      'evaluate_code 会以「没有可用的渲染进程」失败，而没有任何测试会发现'
+  )
+  assert.ok(
+    /import\s*\{[^}]*installCodeExecutionBridge[^}]*\}\s*from\s*['"][^'"]*sandbox\/pyodide-runner['"]/.test(code),
+    '必须从 sandbox/pyodide-runner 导入（别处再写一份桥 = 两套实现）'
+  )
+})
+
+test('★ G18-1c3: 主进程 handler 同时下发 code:execute 并接收 code:result（IPC 两端都接上）', () => {
+  const source = stripComments(readFileSync(join(mainDir, 'ipc', 'handlers.ts'), 'utf8'))
+  // 下发端：把执行请求推给渲染进程（主进程自己不执行）
+  assert.ok(
+    /webContents\.send\(\s*IPC\.codeExecute\s*,/.test(source),
+    'handlers.ts 必须把执行请求经 `webContents.send(IPC.codeExecute, …)` 推给渲染进程 —— ' +
+      '这是「学生代码绝不在主进程执行」的落点'
+  )
+  // 接收端：兑现主进程侧挂着的 Promise
+  assert.ok(
+    /ipcMain\.handle\(\s*IPC\.codeResult\s*,/.test(source),
+    'handlers.ts 必须有 `ipcMain.handle(IPC.codeResult, …)` 把渲染进程的回执兑现回 pending'
+  )
+  // 两处通道名都必须来自 channels.ts 的单一来源（不是手写字符串）
+  assert.ok(!/['"]code:execute['"]/.test(source), '通道名不得手写在 handlers.ts 里（单一来源是 channels.ts 的 IPC 表）')
+  assert.ok(!/['"]code:result['"]/.test(source), '通道名不得手写在 handlers.ts 里（单一来源是 channels.ts 的 IPC 表）')
+})
+
 test('G18-1d: 未接线时如实失败，绝不在主进程兜底执行', async () => {
   // 不注入 runner、也没 bindCodeRunner → 默认运行器必须**如实报错**而不是自己跑
   bindCodeRunner(null)
@@ -414,6 +466,60 @@ test('G18-1e: 渲染进程执行桥只做 requestId 配对，不碰代码内容'
   assert.equal(outcome.stdout, 'hello\n')
   assert.equal(outcome.failure, undefined)
   assert.equal(bridge.pendingCount(), 0)
+})
+
+/**
+ * ★ G18-1e2：`installCodeExecutionBridge` 的**注入式**单测（假 bridge + 假 runner）。
+ *
+ * 这条确实能写：`installCodeExecutionBridge(bridge?)` 的 `bridge` 就是可注入接缝，
+ * 而它内部走 `handleDispatchedRun` → `runStudentCode` → `getSharedRunner()`，
+ * 后者在 Node 下会因为没有 `Worker` 全局而**如实失败**（不抛、不崩）——
+ * 这正好让我们能断言「requestId 原样回传」与「异常回一条可读 failure」这两件事。
+ *
+ * 注意：这里断言的是**协议纪律**，不是 Pyodide 真的跑起来了（那需要浏览器环境）。
+ */
+test('★ G18-1e2: 执行桥把 requestId 原样回传；执行通道异常时回一条可读 failure（不抛）', async () => {
+  let listener:
+    | ((request: { requestId: string; code: string; timeoutMs?: number; toolCallId?: string }) => void)
+    | null = null
+  const results: Array<{ requestId: string; stdout: string; failure?: string }> = []
+  const uninstall = installCodeExecutionBridge({
+    onCodeExecute: (handler) => {
+      listener = handler
+      return () => {
+        listener = null
+      }
+    },
+    sendCodeResult: (result) => results.push(result as { requestId: string; stdout: string; failure?: string })
+  })
+
+  assert.ok(listener !== null, '装上桥之后必须订阅到 onCodeExecute（否则主进程发的请求没人接）')
+  ;(listener as (request: { requestId: string; code: string }) => void)({
+    requestId: 'req-from-main-42',
+    code: 'print("hi")'
+  })
+
+  // 等回执（Node 下没有 Worker → 运行器立刻失败，回一条可读 failure）
+  await new Promise((resolveDone) => setTimeout(resolveDone, 300))
+
+  assert.equal(results.length, 1, '必须回一条结果（不回 = 主进程那边只能干等到超时）')
+  assert.equal(
+    results[0].requestId,
+    'req-from-main-42',
+    '★ requestId 必须**原样**回传（主进程的桥按它兑现 pending；生成新号会让每条请求超时）'
+  )
+  assert.ok(
+    typeof results[0].failure === 'string' && results[0].failure.length > 0,
+    `执行通道不可用时必须回**可读 failure**（不能只回空 stdout 让主进程猜）：${JSON.stringify(results[0])}`
+  )
+  assert.equal(results[0].stdout, '', '失败时不该有 stdout')
+
+  uninstall()
+  // 缺 bridge（单测 / 无 preload 环境）时必须静默返回一个可调用的退订函数，不抛
+  const noop = installCodeExecutionBridge(undefined)
+  assert.equal(typeof noop, 'function')
+  const partial = installCodeExecutionBridge({ onCodeExecute: () => () => {} })
+  assert.equal(typeof partial, 'function', '只给了一半能力时也要安全退化成 no-op')
 })
 
 test('G18-1f: 渲染进程没回话时超时收敛成可读结果（不挂死、不抛异常）', async () => {

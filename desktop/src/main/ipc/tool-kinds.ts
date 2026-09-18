@@ -40,5 +40,10 @@ export const PAYLOAD_TOOL_NAMES = [
  * 调用方据此**不发** `payload` 事件，而不是猜一个 `kind` 塞给前端。
  */
 export function kindForTool(toolName: string): PayloadKind | null {
-  return toolName in TOOL_TO_KIND ? TOOL_TO_KIND[toolName as PayloadToolName] : null
+  // ★ 必须用 `Object.hasOwn`（**不是 `in`**）：`in` 会顺着原型链命中原型成员名 ——
+  //   实测 `'toString' in TOOL_TO_KIND === true`，于是 `kind` 变成一个**函数**，
+  //   而调用点（`agent/events.ts`）只判 `kind === null`，非 null 就直接发 `payload` 事件：
+  //   前端白名单丢弃整张卡片（**静默少一张卡**），而守卫测试全绿。
+  //   今天没有 Tool 叫 `toString`，但 Tool 名来自模型/扩展，不该由原型链决定结果。
+  return Object.hasOwn(TOOL_TO_KIND, toolName) ? TOOL_TO_KIND[toolName as PayloadToolName] : null
 }

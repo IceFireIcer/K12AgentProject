@@ -33,6 +33,19 @@ const TIMEOUT_MS = Number(process.env.K12_EVIDENCE_TIMEOUT ?? 60_000)
 
 let failures = 0
 let passes = 0
+let skipped = 0
+/**
+ * 跳过也要**出声**（并且默认不算通过）。
+ *
+ * ⚠️ 曾经的写法是「找不到证据源就 `console.log` 一句跳过」—— 那让本脚本在没有
+ * `/tmp/mock.log` 的机器上（Windows / Git Bash 的 `/tmp` 与 Node 视角不同）**静默少跑**
+ * 一整组核对，仍以退出码 0 打印「全部通过」。这正好把这条证据的性质搞反了：
+ * 它是「key-gated 路径真的走到」的证明，跳过等于**没有证明**。
+ *
+ * 因此：跳过计进 `skipped` 并在汇总里单列一行，且默认让退出码非 0；
+ * 只有显式 `K12_ALLOW_SKIP=1` 才允许「有跳过但退出 0」（用于本地探索）。
+ */
+const ALLOW_SKIP = process.env.K12_ALLOW_SKIP === '1'
 const record = (ok, label, detail) => {
   if (ok) {
     passes += 1
@@ -40,6 +53,15 @@ const record = (ok, label, detail) => {
   } else {
     failures += 1
     console.log(`[FAIL] ${label}${detail ? ` — ${detail}` : ''}`)
+  }
+}
+/** 记一次「本组核对没跑」：出声 + 计入汇总（除非 K12_ALLOW_SKIP=1，否则算失败）。 */
+const recordSkip = (label, reason) => {
+  skipped += 1
+  console.log(`[SKIP] ${label} — ${reason}`)
+  if (!ALLOW_SKIP) {
+    failures += 1
+    console.log(`        ⚠️ 未设 K12_ALLOW_SKIP=1：跳过按**未通过**计（跳过 = 这条证据不存在）`)
   }
 }
 const section = (t) => console.log(`\n${'='.repeat(78)}\n${t}\n${'='.repeat(78)}`)
@@ -208,7 +230,9 @@ const gradeBadge = await evaluate(
   `(() => { const el=document.querySelector('[data-testid="grade-indicator"]'); return el ? el.getAttribute('data-grade') : null })()`
 )
 console.log(`[evidence] 学段指示器：data-grade=${gradeBadge}`)
-record(gradeBadge !== null, '学段指示器在位（只读）', `data-grade=${gradeBadge}`)
+// ★ 2026-09-17：学段现在**可以手动指定**（D-037），指示器不再「只读」——
+//   它同时是手动入口的触发器。这一条只采集「指示器在位且读到了学段」这个事实。
+record(gradeBadge !== null, '学段指示器在位（含手动入口）', `data-grade=${gradeBadge}`)
 
 /* ================================================================== *
  * 日志证据（主进程 stderr 与 mock provider 的请求）
@@ -218,23 +242,35 @@ section('日志证据：主进程的结构性审计行')
 
 // 主进程日志在 electron-vite dev 的 stdout；这里从应用进程的日志文件读不到，
 // 所以改为核对 mock provider 收到的请求（它是「LLM 自审 / 第二层判定真的发生」的直接证据）。
-// mock 的 stderr 由启动脚本重定向到 /tmp/mock.log（若存在）。
-const mockLogCandidates = ['/tmp/mock.log']
+// mock 的 stderr 由启动脚本重定向到 `K12_MOCK_LOG`（默认 /tmp/mock.log，Windows 上请显式给出）。
+const mockLogCandidates = [process.env.K12_MOCK_LOG, '/tmp/mock.log'].filter(Boolean)
 let mockLog = ''
+const mockLogUsed = []
 for (const candidate of mockLogCandidates) {
-  if (existsSync(candidate)) mockLog += readFileSync(candidate, 'utf8')
+  if (existsSync(candidate)) {
+    mockLog += readFileSync(candidate, 'utf8')
+    mockLogUsed.push(candidate)
+  }
 }
 if (mockLog) {
   const lines = mockLog.split(/\r?\n/).filter(Boolean)
-  console.log(`[evidence] mock provider 请求记录（${lines.length} 行，末尾 6 行）：`)
+  console.log(`[evidence] mock provider 请求记录（${lines.length} 行，来自 ${mockLogUsed.join('、')}，末尾 6 行）：`)
   for (const line of lines.slice(-6)) console.log(`  ${line.slice(0, 130)}`)
+  // ★ 真判据：mock provider 收到了请求（`lines` 非空）。原来这里写的是
+  //   `mockLog.includes(…) === false || true` —— 无论内容如何都成立，是一句恒真的假证据。
+  record(lines.length > 0, 'mock provider 收到了真实请求（说明 provider 通道打通）', `${lines.length} 行`)
+  // 另一件独立的事：违规正文不该被回显进请求记录（脱敏之外的顺带核对）
   record(
-    mockLog.includes('这是一段包含色情内容的回答') === false || true,
-    'mock provider 收到了真实请求（说明 provider 通道打通）',
-    `${lines.length} 行`
+    !mockLog.includes('这是一段包含色情内容的回答'),
+    'mock 请求记录里没有违规正文原文（不该由 provider 通道回显）',
+    `${mockLog.length} 字符`
   )
 } else {
-  console.log('[evidence] 未找到 mock provider 日志（/tmp/mock.log）—— 跳过该组核对')
+  recordSkip(
+    'mock provider 请求记录核对（K1 的 LLM 自审 / K3 的第二层判定是否真的发出请求）',
+    `找不到 mock provider 日志（试过 ${mockLogCandidates.join('、')}）` +
+      ' —— 请用 `node scripts/mock-provider.mjs 2> <日志路径>` 并把该路径经 K12_MOCK_LOG 传进来'
+  )
 }
 
 /* ================================================================== *
@@ -260,12 +296,22 @@ if (existsSync(dbPath)) {
     for (const entry of history) console.log(`  history: ${JSON.stringify(entry).slice(0, 150)}`)
     record(Number(signals.n) > 0, '★ 第一层信号落库（有 Key 世界同样工作）', `${signals.n} 行`)
   } catch (error) {
-    console.log(`[evidence] 读库失败：${error.message}`)
+    // ★ 读库失败**不能**只打印一句就过：那等于「学段落库」这条证据静默消失。
+    recordSkip('learning.db 学段轨迹核对', `读库失败：${error.message}`)
   }
 } else {
-  console.log(`[evidence] 找不到 ${dbPath}`)
+  recordSkip('learning.db 学段轨迹核对', `找不到 ${dbPath}`)
 }
 
-section(failures === 0 ? `全部通过：${passes} 项` : `失败 ${failures} 项 / 通过 ${passes} 项`)
+section(
+  (failures === 0 ? `全部通过：${passes} 项` : `失败 ${failures} 项 / 通过 ${passes} 项`) +
+    (skipped > 0 ? `；跳过 ${skipped} 组` : '')
+)
+if (skipped > 0) {
+  console.log(
+    `跳过 ${skipped} 组核对（跳过 = 这条证据没有采集到` +
+      `${ALLOW_SKIP ? '；K12_ALLOW_SKIP=1 已显式豁免，退出码仍可为 0' : '，按未通过计入 failures'}）。`
+  )
+}
 cdp.close()
 process.exitCode = failures === 0 ? 0 : 1

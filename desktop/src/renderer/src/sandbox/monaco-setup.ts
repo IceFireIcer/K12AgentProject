@@ -71,7 +71,14 @@ export interface CodeEditorHandle {
   setValue(text: string): void
   /** 是否只读（运行期间可锁住，避免"边跑边改"）。 */
   setReadOnly(readOnly: boolean): void
-  /** 切换主题。 */
+  /**
+   * 切换主题（`vs` / `vs-dark`）。
+   *
+   * ★ 目前**没有调用点**（卡片固定用浅色 `vs`）——刻意保留：Monaco 的主题是**全局**设置
+   *   （`monaco.editor.setTheme()`），将来做深色模式时所有编辑器实例要一起切，
+   *   而这个句柄正是唯一该碰 Monaco 的地方（组件不 import monaco）。
+   *   接口本身**不暴露 `any`**：主题只有两个字面量，加新主题改 {@link CodeEditorTheme} 即可。
+   */
   setTheme(theme: CodeEditorTheme): void
   /** 重算布局（卡片展开/全屏/窗口尺寸变化后必须调用，否则编辑器会留白或裁切）。 */
   layout(): void
@@ -125,7 +132,6 @@ export function editorOptions() {
 }
 
 /** 模块级缓存：Monaco 只装配一次（多次 `import` 是幂等的，但 MonacoEnvironment 只需设一次）。 */
-let monacoModule: any = null
 let monacoReady: Promise<any> | null = null
 
 /**
@@ -169,16 +175,10 @@ export async function loadMonaco(): Promise<any> {
       getWorker: (): Worker => new EditorWorker()
     }
 
-    monacoModule = monaco
     return monaco
   })()
 
   return await monacoReady
-}
-
-/** 已装配的 Monaco（未加载时返回 `null`）。 */
-export function loadedMonaco(): any {
-  return monacoModule
 }
 
 export interface CreateEditorOptions {
@@ -221,7 +221,10 @@ export async function createCodeEditor(options: CreateEditorOptions): Promise<Co
     setValue: (text: string) => editor.setValue(text),
     setReadOnly: (readOnly: boolean) => editor.updateOptions({ readOnly }),
     setTheme: (theme: CodeEditorTheme) => {
-      monaco.editor.setTheme(theme)
+      // `monaco` 本身是 `any`（monaco 的类型面很大，只在 `loadMonaco()` 边界收一次）；
+      // 这里**立刻**收窄成我们要的那一个方法，别让 `any` 顺着句柄跑到业务代码里。
+      const editorApi: { setTheme(theme: CodeEditorTheme): void } = monaco.editor
+      editorApi.setTheme(theme)
     },
     layout: () => editor.layout(),
     focus: () => editor.focus(),

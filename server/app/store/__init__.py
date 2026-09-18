@@ -14,4 +14,12 @@
 **扩展其他轨道请注意**：新表请在 ``migrations.py`` 里加一条 ``Migration``，
 用 ``ensure_migrated(conn, [...], set_name="<你的轨道>")`` 记账，
 不要另起一套 ``CREATE TABLE``、也不要改已发布的那条迁移。
+
+两条**跨模块**的纪律（踩过坑，改这些文件前先读）：
+
+1. **迁移里不许用 ``conn.executescript``**：它会隐式 COMMIT，让「失败整体回滚」
+   变成假的（半应用 + 不记账）。多条 SQL 用 ``migrations.execute_script``。
+2. 连接上统一开了 ``PRAGMA foreign_keys = ON``（见 ``connections.connect``），
+   所以 ``REFERENCES`` 是真的在生效：**清表顺序必须先引用方后被引用方**
+   （``knowledge_dependencies`` → ``kp``），悬空 kp_id 会在写入时直接报错而不是静默入库。
 """

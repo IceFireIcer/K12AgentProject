@@ -34,7 +34,7 @@
  *  之前调用本函数。将来若真要用 chord 打包 Extension，**必须在那个 import 之前**补一次调用。
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -145,16 +145,4 @@ export function ensureEsbuildBinaryPath(entryPath: string = import.meta.url): st
     process.env.ESBUILD_BINARY_PATH = location.binary
   }
   return location.binary
-}
-
-/**
- * 诊断用：列出 `@esbuild/` 作用域下实际有哪些平台包。
- * 「按架构分发」把别的平台剔掉之后，靠这个确认没误删当前平台。
- */
-export function listEsbuildPlatformPackages(scopeDir: string): string[] {
-  try {
-    return readdirSync(scopeDir).filter((name) => name.startsWith('win32-') || name.includes('-'))
-  } catch {
-    return []
-  }
 }

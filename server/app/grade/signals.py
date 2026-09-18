@@ -79,21 +79,26 @@ DAILY_TERMS: tuple[str, ...] = (
 
 #: 问题深度四档（§10.2：概念 / 原理 / 推导；工程实践是高中档，同样按「深度」计）。
 #: 判据是**提问用词**，不是问题本身的价值 —— 同一件事问得越靠内部机制，学段越高。
-DEPTH_LEVELS: tuple[tuple[GradeLevel, tuple[str, ...]], ...] = (
+#:
+#: ★★ 词表**分两类**（D3 修复的关键，别把两类合回一张表）：
+#:
+#: - :data:`DEPTH_FRAME_LEVELS` —— **提问框架**词（「怎么问的」）：什么是 / 原理 / 怎么推导 …。
+#:   档位由它决定，且**具体的那一档赢**（原理 > 概念：``神经网络的工作原理是什么``
+#:   命中 junior 的「原理」与 primary_high 的「是什么」，取 junior）；
+#: - :data:`DEPTH_TOPIC_LEVELS` —— **主题术语**词（「问的是啥」）：公式 / 矩阵 / 概率分布 …。
+#:   它**只在没有任何框架词命中时**才兜底。
+#:
+#: 为什么要分：``什么是公式`` 命中了概念框架（什么是）+ 高中术语（公式）。
+#: 合并成一张表 + 「最高档优先」会让它落 senior —— 学生只是问「公式是什么」，
+#: 却拿到一条 ``0.5 × 1.5 = 0.75 ≥ 0.6`` 的**上调**证据；同样是问概念，
+#: ``什么是循环``（词表里没有「循环」）却落 primary_high。**同一句式不该有两种档位。**
+DEPTH_FRAME_LEVELS: tuple[tuple[GradeLevel, tuple[str, ...]], ...] = (
     (
         "senior",
         (
             r"推导",
             r"证明",
             r"求导",
-            r"导数",
-            r"链式法则",
-            r"梯度",
-            r"公式",
-            r"矩阵",
-            r"概率分布",
-            r"极限",
-            r"收敛",
             r"误差(?:怎么|如何)?(?:计算|估计)",
         ),
     ),
@@ -128,12 +133,68 @@ DEPTH_LEVELS: tuple[tuple[GradeLevel, tuple[str, ...]], ...] = (
     ),
 )
 
+#: 主题术语（只兜底：没有框架词时才按「问到的词有多难」定档）。
+#: 方向仍是**从高到低取第一个命中**（难点的话题确实更像高学段在问）。
+DEPTH_TOPIC_LEVELS: tuple[tuple[GradeLevel, tuple[str, ...]], ...] = (
+    (
+        "senior",
+        (
+            r"导数",
+            r"链式法则",
+            r"梯度",
+            r"公式",
+            r"矩阵",
+            r"概率分布",
+            r"极限",
+            r"收敛",
+        ),
+    ),
+)
+
+#: 全部深度词表（框架 + 主题）：``raw`` 证据按它遍历命中项，文档/测试也认这个名字。
+DEPTH_LEVELS: tuple[tuple[GradeLevel, tuple[str, ...]], ...] = (
+    DEPTH_FRAME_LEVELS + DEPTH_TOPIC_LEVELS
+)
+
 #: 提问但没有任何「深度词」时按**概念问题**处理（学段 = 小学高年级）：
 #: 「电脑怎么认图片呀」这种口语提问不该被当成初中原理问题。
 DEFAULT_QUESTION_LEVEL: GradeLevel = "primary_high"
 
 #: 疑问句尾巴（配合上面的默认档：只有真在提问才落默认档，陈述句不猜）。
-QUESTION_MARKERS: tuple[str, ...] = ("?", "？", "吗", "呢", "呀", "吧", "嘛")
+#: ⚠️ **只收真正的疑问语气**。「吧 / 嘛」是**祈使 / 商量**语气（「我们开始吧」「做一道题吧」），
+#: 把它们当疑问句尾，等于把每句课堂用语都读成一次「小学档提问」→ 每轮累积一条下调信号（D2）。
+QUESTION_MARKERS: tuple[str, ...] = ("?", "？", "吗", "呢", "呀")
+
+#: ★ 落默认档的**最小信息量**：剥掉标点、语气词与课堂用语后，剩下的 CJK 实词至少这么多字，
+#: 才认它是「一个真正的问题」。否则「好呀」「继续吧」「那我们做一道题吧」这类课堂用语
+#: 每轮都会产生一条「小学档」读数（对初中/高中学生 = 下调），三五轮就能把学段推走一级，
+#: 而 D-020 之后**没有人工纠正出口** —— 代价不对称，所以门槛取保守值。
+MIN_QUESTION_CONTENT_CHARS = 4
+
+#: 落默认档时要剥掉的**非实词**（不承载任何知识点信息）：语气词、寒暄、课堂元话语。
+#: 只用于 :func:`question_content` 的信息量判定，**不参与任何证据计算**。
+FILLER_WORDS: tuple[str, ...] = (
+    # 语气词 / 叹词（单字）
+    "吧", "呀", "啊", "呢", "吗", "嘛", "哦", "嗯", "哈", "哟", "啦", "咦", "唉", "哇", "诶",
+    # 寒暄 / 礼貌语
+    "你好", "您好", "谢谢", "老师好", "老师", "请问", "请",
+    # 课堂元话语：「开始 / 继续 / 做题」这类，句子再长也没有知识点信息
+    "我们", "咱们", "同学", "一起", "现在", "接下来", "然后", "接着", "继续", "开始",
+    "再来", "上课", "下课", "休息", "可以", "能不能", "好不好", "行不行", "好吗", "好吧",
+    "好呀", "好啊", "好的", "一道", "做题目", "做题", "题目", "题", "练习", "学习",
+    "讲讲", "讲", "说说", "说", "看看", "看", "做", "来", "那", "再",
+    "这个", "那个", "这里", "那里", "一下", "一点", "有点", "那么", "这么", "这道", "那道",
+    "我会了", "会了", "懂了", "知道了",
+)
+
+#: 标点 / 空白 / 下划线（信息量判定前的清洗；``\\w`` 在 Python 里包含 CJK）。
+_NON_WORD_RE = re.compile(r"[\W_]+", re.UNICODE)
+
+#: CJK 汉字（信息量只数实词，英文数字不算「字」——中文提问里它们通常只是名字）。
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+#: 剥词顺序：**长的先剥**（否则「继续」被「来」拆散、「那里」被「那」拆散）。
+_FILLER_ORDERED: tuple[str, ...] = tuple(sorted(FILLER_WORDS, key=len, reverse=True))
 
 #: 元认知表达（§10.2 第四行）：**受挫 / 需要重复讲解** → 一律按「讲得太深了」处理。
 META_STRUGGLE: tuple[str, ...] = (
@@ -453,19 +514,51 @@ def extract_vocab_signal(
 # --------------------------------------------------------------------------- #
 # ② 问题深度
 # --------------------------------------------------------------------------- #
-def classify_depth(text: str) -> GradeLevel | None:
-    """提问深度 → 学段档位（从高到低取第一个命中的档；都没有就按概念问题处理）。
+def question_content(text: str) -> str:
+    """剥掉标点、语气词与课堂用语后剩下的**实词**文本（判「这句话有没有信息量」）。
 
-    - **推导档**（senior）：推导 / 证明 / 求导 / 链式法则 / 公式 …
-    - **原理档**（junior）：原理 / 机制 / 底层 / 内部 / 为什么能 / 怎么工作 …
-    - **概念档**（primary_high）：什么是 / 是什么 / 能干什么 / 怎么用 …
+    只为 :func:`has_question_content` 服务，**不参与任何证据计算**：
+    返回的是过滤后的中间产物，不写库、不回传。
+    """
+    stripped = _NON_WORD_RE.sub("", text or "")
+    for word in _FILLER_ORDERED:
+        if word in stripped:
+            stripped = stripped.replace(word, "")
+    return stripped
+
+
+def has_question_content(text: str) -> bool:
+    """这句话剥掉课堂用语后**还剩多少实词** —— 够 :data:`MIN_QUESTION_CONTENT_CHARS` 才算提问。
+
+    「好呀」「继续吧」「那我们做一道题吧」剥完是空的；「电脑怎么认图片呀」剥完还剩 8 个字。
+    """
+    return len(_CJK_RE.findall(question_content(text))) >= MIN_QUESTION_CONTENT_CHARS
+
+
+def classify_depth(text: str) -> GradeLevel | None:
+    """提问深度 → 学段档位。
+
+    判定顺序（★ D3 修复后）：
+
+    1. **框架优先**：命中提问框架词（:data:`DEPTH_FRAME_LEVELS`，顺序即「具体优先」：
+       推导 → 原理 → 概念）就按框架定档 —— ``什么是公式`` 是**概念**问题，
+       不会因为话题里出现「公式」这个高中词而被判成推导档；
+    2. **主题兜底**：没有任何框架词时，才按 :data:`DEPTH_TOPIC_LEVELS` 里的术语定档
+       （陈述句也走这条：「梯度和矩阵的关系」仍算 senior 深度的表述）；
+    3. **普通提问兜底**：既没有框架词也没有术语，但有疑问语气 **且**剥掉课堂用语后
+       还剩实词（:func:`has_question_content`），才落 :data:`DEFAULT_QUESTION_LEVEL`。
+       ★ 门槛是必需的：「我们开始吧」「好呀」这类课堂用语每轮都冒出来，
+       没有门槛就会给每个初中/高中学生每轮加一条**下调**信号（D2）。
 
     陈述句（没有疑问语气）且不含任何深度词 → ``None``（**不猜**）。
     """
-    for level, patterns in DEPTH_LEVELS:
+    for level, patterns in DEPTH_FRAME_LEVELS:
         if matches_any(text, patterns):
             return level
-    if any(marker in text for marker in QUESTION_MARKERS):
+    for level, patterns in DEPTH_TOPIC_LEVELS:
+        if matches_any(text, patterns):
+            return level
+    if any(marker in text for marker in QUESTION_MARKERS) and has_question_content(text):
         return DEFAULT_QUESTION_LEVEL
     return None
 
@@ -639,12 +732,17 @@ def decode_turn_raw(raw: str | None) -> tuple[int | None, str]:
 __all__ = [
     "DAILY_TERMS",
     "DEFAULT_QUESTION_LEVEL",
+    "DEPTH_FRAME_LEVELS",
     "DEPTH_LEVELS",
+    "DEPTH_TOPIC_LEVELS",
     "Directional",
+    "FILLER_WORDS",
     "GRADE_ORDER",
     "MAX_SIGNAL_STRENGTH",
     "META_REPHRASE",
     "META_STRUGGLE",
+    "MIN_QUESTION_CONTENT_CHARS",
+    "QUESTION_MARKERS",
     "QUIZ_ACCURACY_DOWN",
     "QUIZ_ACCURACY_UP",
     "QUIZ_HINTS_DOWN",
@@ -670,10 +768,12 @@ __all__ = [
     "extract_turn_signals",
     "extract_vocab_signal",
     "find_terms",
+    "has_question_content",
     "highest_terminology_level",
     "level_at",
     "matches_any",
     "mean_strength",
+    "question_content",
     "rank_of",
     "reset_terminology_cache",
     "strength_for",
