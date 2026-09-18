@@ -1,0 +1,267 @@
+<script setup lang="ts">
+/**
+ * 学习档案 · **历史会话**（搜索 + 只读回看）。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么是「只读回看」而不是「点开继续聊」
+ * ---------------------------------------------------------------------------
+ * 数据其实**一直在存**（Pi 每个会话写一个 JSONL），缺的一直是「能看见」。本页补上
+ * 「列出来 + 搜一搜 + 打开看」，但**故意不做**「切到这个会话继续对话」：
+ * 那要求 dispose 当前 runtime（否则 JSONL 半写）、把历史条目投影成前端的轮次、
+ * 并处理「装配期间被 dispose」的代际竞态 —— 是另一件事（见
+ * `architecture/pending/03-会话保存与恢复.md`）。把「看得见」和「接着聊」分开落地，
+ * 比半途接管会话安全得多。
+ *
+ * ★ `readSessionTranscript` **只传会话 id**：主进程先与 Pi 列出的会话做白名单对齐，
+ *   再用 Pi 给的 path 打开（渲染进程无法指定路径 —— 见 `main/study/sessions.ts`）。
+ * ★ 回看里**只有你问的与助手答的文本**：模型的思考过程与工具调用参数不投影进来
+ *   （那可能含题干与答案，且回看不需要）。
+ */
+import { computed, ref } from 'vue'
+import { useStudyStore, type SessionTranscriptShape } from '../stores/study'
+import { formatMs } from '../study/report-markdown'
+
+defineOptions({ name: 'StudySessionsTab' })
+
+const study = useStudyStore()
+
+const openTranscript = ref<SessionTranscriptShape | null>(null)
+const openId = ref<string | null>(null)
+const loadingTranscript = ref(false)
+
+/** 正在列出的那批：搜索时用命中结果，否则用全部会话。 */
+const shown = computed(() => {
+  if (study.searchHits) {
+    return study.searchHits.map((hit) => ({
+      id: hit.id,
+      title: hit.title,
+      modifiedAt: hit.modifiedAt,
+      snippet: hit.snippet,
+      messageCount: null as number | null
+    }))
+  }
+  return study.sessions.map((session) => ({
+    id: session.id,
+    title: session.title,
+    modifiedAt: session.modifiedAt,
+    snippet: session.preview,
+    messageCount: session.messageCount as number | null
+  }))
+})
+
+async function open(sessionId: string): Promise<void> {
+  if (openId.value === sessionId) {
+    // 再点一次 = 收起（省得学生找不到关闭的地方）
+    openTranscript.value = null
+    openId.value = null
+    return
+  }
+  loadingTranscript.value = true
+  openId.value = sessionId
+  try {
+    openTranscript.value = await study.readTranscript(sessionId)
+  } finally {
+    loadingTranscript.value = false
+  }
+}
+
+function close(): void {
+  openTranscript.value = null
+  openId.value = null
+}
+</script>
+
+<template>
+  <section class="tab-body" data-testid="study-sessions">
+    <div class="toolbar">
+      <label class="sr-only" for="session-search">搜索历史会话</label>
+      <input
+        id="session-search"
+        class="search"
+        type="search"
+        placeholder="搜索以前聊过的内容…"
+        data-testid="session-search"
+        :value="study.searchQuery"
+        @input="study.search(($event.target as HTMLInputElement).value)"
+      />
+      <button class="btn" type="button" data-testid="sessions-reload" @click="study.loadSessions()">
+        刷新
+      </button>
+    </div>
+
+    <p v-if="study.sessionsLoading" class="state" data-testid="sessions-loading">
+      正在读取历史会话…
+    </p>
+    <p v-else-if="study.sessionsError" class="state state--error" data-testid="sessions-error">
+      {{ study.sessionsError }}
+    </p>
+    <p v-else-if="shown.length === 0" class="state" data-testid="sessions-empty">
+      {{ study.searchHits ? '没有匹配的会话。' : '还没有历史会话 —— 到对话页问第一个问题吧。' }}
+    </p>
+
+    <ul v-else class="list" data-testid="sessions-list">
+      <li v-for="item in shown" :key="item.id" class="item" :data-session-id="item.id">
+        <button
+          class="item__head"
+          type="button"
+          :data-testid="`session-open-${item.id}`"
+          @click="open(item.id)"
+        >
+          <span class="item__title">{{ item.title }}</span>
+          <span v-if="item.messageCount !== null" class="item__meta">{{ item.messageCount }} 条消息</span>
+          <span class="item__meta">{{ formatMs(item.modifiedAt) }}</span>
+        </button>
+        <p v-if="item.snippet" class="item__snippet">{{ item.snippet }}</p>
+
+        <div v-if="openId === item.id" class="detail" :data-testid="`session-detail-${item.id}`">
+          <p v-if="loadingTranscript" class="state">正在读取会话内容…</p>
+          <template v-else-if="openTranscript">
+            <p v-if="openTranscript.truncated > 0" class="detail__note">
+              这个会话很长，只显示最近 {{ openTranscript.messages.length }} 条
+              （另有 {{ openTranscript.truncated }} 条更早的内容未显示）。
+            </p>
+            <p v-if="openTranscript.messages.length === 0" class="state">
+              这个会话里没有可显示的文字内容。
+            </p>
+            <ul v-else class="messages">
+              <li
+                v-for="(message, index) in openTranscript.messages"
+                :key="index"
+                class="message"
+                :class="message.role === 'user' ? 'message--user' : 'message--assistant'"
+              >
+                <span class="message__role">{{ message.role === 'user' ? '我' : '助手' }}</span>
+                <span class="message__text">{{ message.text }}</span>
+              </li>
+            </ul>
+            <button class="btn btn--mini" type="button" @click="close()">收起</button>
+          </template>
+        </div>
+      </li>
+    </ul>
+  </section>
+</template>
+
+<style scoped>
+.tab-body {
+  padding: 16px 24px 32px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.search {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.item__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 0;
+}
+
+.item__title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.item__meta {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.item__snippet {
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-faint);
+}
+
+.detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.detail__note {
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+  margin-bottom: 8px;
+}
+
+.message {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.message__role {
+  flex-shrink: 0;
+  width: 32px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.message--user .message__text {
+  color: var(--text);
+}
+
+.message--assistant .message__text {
+  color: var(--text);
+}
+
+.btn--mini {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.state {
+  padding: 10px 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.state--error {
+  color: var(--warn);
+  line-height: 1.7;
+}
+</style>

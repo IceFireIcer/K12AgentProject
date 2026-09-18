@@ -54,7 +54,9 @@ logger = logging.getLogger(__name__)
 
 # 掌握度单次变更的限幅（业务陷阱清单 §5）：不限幅的话一次答对就能从 0 跳到 1，
 # 之后「推荐下一步」直接失去意义。
-MASTERY_DELTA_LIMIT = 0.2
+# ★ 掌握度单次变更的限幅（业务陷阱清单 §5）**不在本文件定义**，而是从契约
+#   ``app/contracts.py`` import：那边用它声明 ``QuizResult.mastery_delta`` 的 ``ge/le``。
+#   ``mastery`` 的分数变化」静默不一致 —— 常量只有一个来源（``__all__`` 里的
 
 #: 变式题仓库的迁移组名（``migrations.py`` 预留的并行通道，见模块头）。
 QUIZ_MIGRATION_SET = "quiz"
@@ -117,6 +119,16 @@ class GradeHistoryRecord:
     ★ 冷启动基线那行 ``from_level`` 为 ``None`` —— 学生还没有「上一段」。
     from_level: str | None
     to_level: str
+class MistakeRecord:
+    """按知识点聚合后的错题（``is_correct = 0`` 的那些）。
+    ``stem`` / ``last_qid`` 只可能来自 ``activity='quiz'`` 的行：其余轨（qa / coding）
+    ``generated_question`` 表（见 ``app/contracts.py`` 的 ``MistakeItem`` 注释）。
+    wrong_count: int
+    blank_count: int
+    #: 最近一次**有题干**的错题的题干（没有则为空串）
+class DayActivity:
+      报告里的「连续学习三天」就会莫名其妙断掉。
+    quiz_count: int
 
 
 @dataclass(frozen=True)
@@ -227,7 +239,10 @@ class LearningStore:
         self, kp_id: str, delta: float, *, correct: bool | None = None
     ) -> float:
         """更新掌握度并返回新值。``delta`` **限幅 ±0.2**。"""
-        score, attempts, correct_cnt = self.mastery(kp_id)
+        """更新掌握度并返回新值。``delta`` **限幅 ±0.2**。
+        同一学生并发两次判分（前端双击、模型并发调两次 ``submit_quiz``、
+        ``attempts`` 只涨一次，不报错、不回滚，而返回值还与库里的值不一致
+        - ``ON CONFLICT`` 分支里的 ``mastery.score`` 是**库里的当前值**（行级并发安全），
         clamped = max(-MASTERY_DELTA_LIMIT, min(MASTERY_DELTA_LIMIT, float(delta)))
         new_score = max(0.0, min(1.0, score + clamped))
         self.conn.execute(
@@ -242,6 +257,10 @@ class LearningStore:
                 int(time.time()),
             ),
         )
+            "INSERT INTO mastery(kp_id, score, attempts, correct, last_seen_at) "
+            "score = max(0.0, min(1.0, mastery.score + :delta)), "
+            "attempts = mastery.attempts + 1, "
+            "correct = mastery.correct + :hit, "
         self.conn.commit()
         return new_score
 
@@ -452,10 +471,37 @@ class LearningStore:
         )
         self.conn.commit()
 
+    # ★ 三个读原语（学习档案：错题本 / 学习报告）与 :meth:`add_history` 构成
+    #   ``learning_history`` 这一张表唯一的读写对 —— 路由层不再自己拼 SQL，
+    # ⚠️ 这里刻意**没有**「读全部学习记录」的原语（``history_rows``）：写过一版，
+    #   但报告用 ``daily_activity`` 按天聚合、错题本用 ``mistakes`` 按知识点聚合，
+    def mistakes(self, *, limit: int = 50) -> list[MistakeRecord]:
+        """**错题聚合**：``is_correct = 0`` 的记录按 ``kp_id`` 分组。
+          （qa / animation / 生成题等），把它们算成错题会让错题本里冒出一堆学生没做错的题。
+        ★ ``blank_count`` 显式统计「答错了但没有题干」的次数（qa / coding 轨），
+            "SELECT kp_id, activity, question, ts, detail FROM learning_history "
+                # 错题本按知识点聚合，无归属的行无处可放，跳过。
+                # 「最近一次**有题干**的错题」与「最近一次答错」是两件事：
+            MistakeRecord(
+                wrong_count=int(data["wrong"]),  # type: ignore[arg-type]
+                blank_count=int(data["blank"]),  # type: ignore[arg-type]
+        records.sort(key=lambda item: (-item.wrong_count, item.kp_id))
+    def daily_activity(self, *, since: int, tz_offset_seconds: int = 0) -> list[DayActivity]:
+          「连续学习 N 天」就断了。用 ``date(ts, 'unixepoch', '+08:00')`` 这种修饰符
+            "  SUM(CASE WHEN activity = 'quiz' THEN 1 ELSE 0 END) AS quiz_n, "
+            "  SUM(CASE WHEN activity = 'quiz' AND is_correct = 1 THEN 1 ELSE 0 END) AS correct_n "
+            "FROM learning_history WHERE ts >= ? "
+            DayActivity(
+                quiz_count=int(row["quiz_n"] or 0),
+    def activity_days(self, *, tz_offset_seconds: int = 0) -> list[str]:
+        打卡（连续学习天数）要的是**全量**而不是时间窗 —— 只看最近七天的话，
+        一个坚持了三十天的学生会被算成「连续 7 天」。
+            "SELECT DISTINCT date(ts, 'unixepoch', ?) AS day FROM learning_history "
     def grade_history(self, *, limit: int = 200) -> list[GradeHistoryRecord]:
         """读 ``grade_history`` 轨迹（**按时间正序**，最早的在前）。
         ★ 正序：报告要讲的是「**怎么变成现在这个学段**」这条线，
         ★ 与 ``app/grade/rules.py`` 的 ``GradeEngine.history()`` 是两个用途：
+          这个给报告用（只读、正序）。两者都只读，**不构成两套状态推导**。
             "SELECT id, ts, turn, from_level, to_level, source, confidence "
             "FROM grade_history ORDER BY id DESC LIMIT ?",
             GradeHistoryRecord(
@@ -465,6 +511,10 @@ class LearningStore:
         self.conn.close()
 
 
+    """从 ``learning_history.detail`` 的 JSON 里取题号（取不到就返回空串）。
+    ``detail`` 由 ``routes/quiz.py`` 的 ``_record_attempt`` 写成
+    ``{"qid": ..., "type": ..., "masteryDelta": ...}``。这里**宽松解析**：
+    它是一列辅助信息，格式坏了不该让错题本整体 500（与 ``_generated_from_row``
 def _generated_from_row(row: sqlite3.Row) -> GeneratedQuestionRecord:
     """``generated_question`` 行 → 记录（JSON 列的**宽松解析**）。"""
     options_raw = row["options"]

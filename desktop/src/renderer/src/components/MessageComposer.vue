@@ -4,13 +4,26 @@
  *
  * ★ 只做「把文字交给上层」，不自己碰 IPC —— 发送链路是
  *   组件 → `stores/chat.ts` → `window.api.sendChat()`（preload 白名单）。
+ *
+ * ★ 草稿**存在 store 里**（`chat.draft`）而不是组件本地：
+ *   学习档案的「去练一练」要往这个输入框里预填一句提问，而它在另一个视图的另一个组件里
+ *   （`stores/chat.ts` 的 `prepareQuestion` 有详细理由）。
+ *   这里用 `v-model` 直接绑 store 的那个 ref —— 组件卸载/视图切换时草稿也不丢，
+ *   与 `<KeepAlive>` 保住的其它本地状态正好同一条思路。
  */
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
+import { useChatStore } from '../stores/chat'
 
 const props = defineProps<{ streaming: boolean }>()
 const emit = defineEmits<{ send: [text: string] }>()
 
-const draft = ref('')
+const chat = useChatStore()
+const draft = computed({
+  get: () => chat.draft,
+  set: (value: string) => {
+    chat.draft = value
+  }
+})
 const canSend = computed(() => draft.value.trim().length > 0 && !props.streaming)
 
 function submit(): void {

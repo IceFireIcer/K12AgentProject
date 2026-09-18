@@ -3,12 +3,14 @@
 - ``direction=successor``（默认）：**推荐路径** —— 学完这个知识点之后可以学什么；
 - ``direction=prerequisite``：**检索扩展** —— 要讲这个知识点，先补哪些前置内容；
 - ``direction=both``：两侧都要（前端画邻域图用）。
+- ``GET /api/graph/overview/{grade_level}``：某学段整张图的**全览**（学习地图用）。
 
 方向语义（全项目统一）：``from`` 是前置，``to`` 是后继 —— 详见 ``app/knowledge/deps.py``。
 取值与契约的 ``DepDirection`` 逐字一致（``prerequisite`` 不缩写）。
 
 薄控制器：只解析参数、校验、把服务层结果映射成 ``DepNode[]``。
 递归 CTE 与深度上限在 ``app/knowledge/deps.py``，这里**不做图遍历**。
+  ``/overview`` 走 ``kb.dependency_rows()``（整表读出）—— 后者不重复前者，
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.contracts import GraphEdge, GraphNode, GraphOverview
 from app.knowledge.deps import (
     DEFAULT_DEPTH,
     MAX_DEPTH_LIMIT,
@@ -111,11 +114,21 @@ def graph_deps(
         )
         for row in ordered
     ]
+    "/graph/overview/{grade_level}",
+    response_model=GraphOverview,
+    summary="某学段依赖图全览（学习地图用）",
+def graph_overview(
+) -> GraphOverview:
+    ★ 为什么按学段切片而不是给全图：学习地图是要**看**的，一次画 33 个节点还行，
     if grade_level not in GRADE_LEVELS:
             detail=f"学段非法：{grade_level!r}（允许：{'/'.join(GRADE_LEVELS)}）",
     conn = open_kb_readonly(request)
     except sqlite3.Error as exc:
+        logger.exception("依赖图全览读取失败：%s", grade_level)
+    return GraphOverview(
+    让它**降级成「环上的点留在第 0 层」**远比让整个学习地图 500 好。
     ★ 与 ``routes/knowledge.py`` 里那个同名私有函数是**两处各一份**吗？不是「重复实现」：
     except sqlite3.Error:
     "GRADE_LEVELS",
+    "graph_overview",
     "open_kb_readonly",

@@ -22,6 +22,8 @@ import {
   type CodeExecuteRequest,
   type CodeExecuteResult,
   type FetchModelsResult,
+  type FileExportRequest,
+  type FileExportResult,
   type GradeCallResult,
   type GradeSetResult,
   type GradeState,
@@ -29,9 +31,13 @@ import {
   type ProbeRequest,
   type ProbeResult,
   type ProviderCatalogEntry,
+  type SessionSearchRequest,
   type SettingsCallResult,
   type SettingsSnapshot,
   type SettingsUpdateRequest
+  type StudyCallResult,
+  type StudyGradeRequest,
+  type StudyReportRequest
 } from '../main/ipc/channels'
 import type { SidecarState } from '../main/sidecar/protocol'
 import type { GradeLevel } from '../shared/ipc-events'
@@ -82,9 +88,19 @@ export interface K12Api {
   onCodeExecute(listener: (request: CodeExecuteRequest) => void): () => void
   /** 回传执行结果（`requestId` 必须**原样带回**，主进程按它配对，否则每次都会超时）。 */
   sendCodeResult(result: CodeExecuteResult): void
+  readStudyReport(payload?: StudyReportRequest): Promise<StudyCallResult>
+  readStudyMistakes(): Promise<StudyCallResult>
   /** 某学段章节清单（带 `studentId` 就补每章的已掌握数）。 */
   readStudyChapters(payload: StudyGradeRequest): Promise<StudyCallResult>
   /** 某学段依赖图全览（学习地图；带 `studentId` 就标注哪些已掌握）。 */
+  readStudyGraph(payload: StudyGradeRequest): Promise<StudyCallResult>
+   * 列出当前学生的历史会话（只读回看）。
+  listSessions(): Promise<StudyCallResult>
+  readSessionTranscript(sessionId: string): Promise<StudyCallResult>
+  /** 在历史会话里搜索（命中标题或全文，返回片段）。 */
+  searchSessions(payload: SessionSearchRequest): Promise<StudyCallResult>
+   * 把一段 Markdown 存成文件（报告 / 错题本导出）。
+  exportMarkdown(payload: FileExportRequest): Promise<FileExportResult>
 }
 
 /**
@@ -189,8 +205,23 @@ const api: K12Api = {
       if (!isChapterState(state)) return
     ipcRenderer.on(IPC.chapterChanged, handler)
       ipcRenderer.removeListener(IPC.chapterChanged, handler)
+  // 学习档案：纯 invoke 转发（回执是判别联合 `{ok,data} | {ok,message}`，失败不抛异常）。
+  readStudyReport: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.studyReport, payload) as Promise<StudyCallResult>,
+  readStudyMistakes: (): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.studyMistakes) as Promise<StudyCallResult>,
   readStudyChapters: (payload): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.studyChapters, payload) as Promise<StudyCallResult>,
+  readStudyGraph: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.studyGraph, payload) as Promise<StudyCallResult>,
+  listSessions: (): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.sessionList) as Promise<StudyCallResult>,
+  readSessionTranscript: (sessionId): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.sessionTranscript, sessionId) as Promise<StudyCallResult>,
+  searchSessions: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.sessionSearch, payload) as Promise<StudyCallResult>,
+  exportMarkdown: (payload): Promise<FileExportResult> =>
+    ipcRenderer.invoke(IPC.fileExport, payload) as Promise<FileExportResult>
 }
 
 /** 学段状态的最小形状检查（`origin` 缺省按 `default` 处理：宁可显示待判定）。 */
@@ -250,7 +281,17 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.chapterChanged,
   IPC.codeExecute,
   IPC.codeResult
+  // 学习档案（invoke；聚合在 Python 侧）
+  IPC.studyReport,
+  IPC.studyMistakes,
   IPC.studyChapters,
+  IPC.studyGraph,
+  // 历史会话（invoke；只读回看；**只接受 id，不接受路径**）
+  IPC.sessionList,
+  IPC.sessionTranscript,
+  IPC.sessionSearch,
+  // 导出（invoke；回执只有文件名）
+  IPC.fileExport
 ]
 
 contextBridge.exposeInMainWorld('api', api)

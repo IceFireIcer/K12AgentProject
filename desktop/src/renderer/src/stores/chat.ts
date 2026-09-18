@@ -45,6 +45,7 @@ import {
   startTurn,
   subscribeToChatEvents,
   type ConversationState,
+  type InlineCard
 } from '../api/events'
 
 export const useChatStore = defineStore('chat', () => {
@@ -86,12 +87,15 @@ export const useChatStore = defineStore('chat', () => {
   /** 章节通道缺失时的可读说明（与 `gradeBridgeError` 同一口径）。 */
   const chapterBridgeError = ref<string | null>(null)
   /**
+   * 输入框草稿（**供「去练一练」预填**）。
    *
+   * ★ 为什么草稿要放到 store 里：输入框在 `MessageComposer.vue`，它的 `draft` 是组件本地状态；
    *   而「从错题本回对话页接着练」这个动作发生在**另一个视图的另一个组件**里，
    *   没有别的办法把一句话放进那个输入框（`provide/inject` 会绕更远）。
    * ★ 组件的本地草稿与此处**双向同步**（见 `MessageComposer.vue` 的注释）：
    *   以 store 为初值、每次输入写回 store，于是「预填 → 学生接着改 → 发送」这条链是通的。
    */
+  const draft = ref('')
   let unsubscribe: (() => void) | null = null
   let unsubscribeGrade: (() => void) | null = null
   let unsubscribeChapter: (() => void) | null = null
@@ -102,14 +106,20 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 整段对话里的卡片（**只在「卡片增删」时换引用**）。
    *
+   * ★ 为什么不能写成 `computed(() => turns.value.flatMap((turn) => turn.cards))`：
    *   每个 `delta` 都会替换 `turns` 数组（reducer 每个事件返回新状态），于是这条 computed
    *   逐字重算 —— 而它下游是**卡片载荷解析**（`collectQuizResults` / `collectHints` /
    *   `collectResult`，每张卡片都要跑一遍白名单投影）。长对话 + 多张卡片时，
    *   流式回答期间每秒上百次全量重解析 + 全量重渲染，低配机上表现为打字卡顿。
    *
+   * ★ 为什么可以安全缓存：reducer 只在**真的新增卡片**时才换 `turn.cards` 的数组引用
+   *   （`[...turn.cards, …]`）；`delta` / `citation` / `blocked` / `done` / `error`
+   *   都保留原引用（`{ ...turn, text }`）。所以「每轮的 cards 引用都没变」== 卡片没变。
    *   缓存命中时返回**同一个数组**，Vue 的 computed 在值未变时不会向下游传播
    *   （`refreshComputed` 里的 `hasChanged` 判定），解析与重渲染就此停在这一层。
    */
+  const cards = computed<InlineCard[]>(() => {
+    const lists = turns.value.map((turn) => turn.cards)
     if (
       cardCache !== null &&
       lists.length === cardCache.lists.length &&
@@ -121,6 +131,8 @@ export const useChatStore = defineStore('chat', () => {
     cardCache = { lists, value: flat }
     return flat
   })
+  /** `cards` 的缓存（非响应式：只做「引用没变就别重算」的判据，不参与渲染）。 */
+  let cardCache: { lists: readonly InlineCard[][]; value: InlineCard[] } | null = null
 
   /** 指示器上的学段名（还没判出来时是「待判定」）。 */
   const currentGradeLabel = computed(() =>
@@ -133,10 +145,11 @@ export const useChatStore = defineStore('chat', () => {
    * 为什么跨轮收集：题目卡片在某一轮，学生作答后**下一轮**才带回 `QuizResult`；
    * 只在本轮找的话，题干那张卡片永远等不到「答对了 / 掌握度 +0.15」。
    *
+   * ★ 依赖的是上面的 {@link cards}（卡片没变就不换引用）——这样流式正文增长时
    *   这条全量解析**不会**重跑；新增卡片（`payload` 事件）时照旧重算，
    *   「批改结果一定能刷出来」的行为不变。
    */
-  )
+  const quizResults = computed<Map<string, QuizResultView>>(() => collectQuizResults(cards.value))
 
   /** 连上主进程事件流（幂等：重复调用不会重复订阅）。 */
   function connect(): void {
@@ -443,6 +456,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * ★ 把一句**预填的提问**交给输入框并切回对话页（学习档案里的「去练一练」用）。
    *
    * 为什么是「预填 + 学生自己按发送」而不是直接 `send()`：
    *   - 主动替学生发消息会直接消耗一次云端调用，而学生可能只是想看看那句话对不对；
@@ -455,14 +469,19 @@ export const useChatStore = defineStore('chat', () => {
    * ★ 这里**不改视图**：切视图是 `stores/ui.ts` 的事，调用方（错题本分页）
    *   两件事一起做。本函数只管草稿，这样它就不依赖 UI 状态（更好测、更少耦合）。
    */
+  function prepareQuestion(text: string): void {
+    draft.value = text
   }
 
   return {
     conversation,
     turns,
     streaming,
+    cards,
     bridgeReady,
     localNotice,
+    draft,
+    prepareQuestion,
     currentGrade,
     currentGradeLabel,
     gradeOrigin,

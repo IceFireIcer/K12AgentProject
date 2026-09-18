@@ -106,19 +106,31 @@ export const IPC = {
   // ★ 四条都是 invoke（有回执），**不要**登记进 `PUSH_CHANNELS`。
   // ★ 渲染进程不直连 sidecar（守卫 G3）：token 与地址全留在主进程。
   /** 渲染进程 → 主进程：学习报告（`GET /api/profile/{id}/report?days=N`）。 */
+  studyReport: 'study:report',
   /** 渲染进程 → 主进程：错题本（`GET /api/quiz/mistakes/{id}`）。 */
+  studyMistakes: 'study:mistakes',
   /** 渲染进程 → 主进程：某学段章节清单（`GET /api/knowledge/chapters/{grade}`）。 */
   studyChapters: 'study:chapters',
   /** 渲染进程 → 主进程：某学段依赖图全览（`GET /api/graph/overview/{grade}`）。 */
+  studyGraph: 'study:graph',
 
+  // ── 历史会话（只读回看；`sessions.ts` 有「只接受 id」的安全约束说明）──
+  /** 渲染进程 → 主进程：列出当前学生的历史会话（读 Pi 的 sessionDir）。 */
+  sessionList: 'session:list',
   /** 渲染进程 → 主进程：按 id 读一条会话的正文（**绝不接受路径**）。 */
+  sessionTranscript: 'session:transcript',
+  /** 渲染进程 → 主进程：在历史会话里搜索（命中标题或全文，返回片段）。 */
+  sessionSearch: 'session:search',
 
+  // ── 导出 ──────────────────────────────────────────────────────────────
   /**
+   * 渲染进程 → 主进程：把一段 Markdown 存成文件（报告 / 错题本导出）。
    *
    * ★ **只回文件名，不回完整路径** —— 宿主目录结构不进渲染进程。
    * ★ 文件名由主进程清理（去掉分隔符与 `..`、限长、强制 `.md`）。
    * ★ 它是 invoke（有回执，学生可能取消保存）；**不**登记进 `PUSH_CHANNELS`。
    */
+  fileExport: 'file:export'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
@@ -252,9 +264,11 @@ export interface CodeExecuteResult {
 }
 
 /* ------------------------------------------------------------------ *
+ * 学习档案：跨 IPC 的请求 / 回执类型
  * ------------------------------------------------------------------ */
 
 /**
+ * 学习档案四条通道的通用回执（与 `SettingsCallResult` 同形）。
  *
  * ⚠️ `data` 是 `unknown` 而**不是**具体契约类型，这是刻意的：
  *    这些端点的字段全部由 pydantic 生成类型定义（`@shared/api-types`），
@@ -262,39 +276,51 @@ export interface CodeExecuteResult {
  *    渲染进程按生成类型消费（它有 `npm run typecheck` 兜着），
  *    主进程这边多写一份只会漂移。
  */
+export type StudyCallResult =
   | { ok: true; data: unknown }
   | { ok: false; message: string }
 
 /** 章节 / 依赖图全览的入参（按学段查；带 `studentId` 就补该学生的进度）。 */
+export interface StudyGradeRequest {
   gradeLevel: GradeLevel
   /** 可选：带上就把「已掌握」标注进来（读该学生自己的 `learning.db`）。 */
   studentId?: string
 }
 
 /** 学习报告的入参。 */
+export interface StudyReportRequest {
   /** 时间窗天数；省略即 7 天（服务端有默认，这里显式给一个便于界面回显）。 */
   days?: number
 }
 
+/** 历史会话搜索的入参。 */
+export interface SessionSearchRequest {
   query: string
 }
 
 /**
+ * 导出的入参。
  *
  * ★ `content` 是**已经拼好的 Markdown 文本**：拼装发生在渲染进程
  *   （它手里有报告/错题本的数据），主进程只负责「问路径 + 写盘」。
  */
+export interface FileExportRequest {
   /** 建议的文件名（主进程会清理：去分隔符与 `..`、限长、强制 `.md`）。 */
   fileName: string
   content: string
 }
 
+/** 导出的回执：**只有文件名**（完整路径不进渲染进程）。 */
+export type FileExportResult =
   | { ok: true; fileName: string }
   | { ok: false; message: string; canceled?: boolean }
 
 /**
+ * 单个会话文件的大小上限（导出/回看时的保护；超限直接拒绝而不是读进内存）。
  *
  * 1 MiB 对一个学生的单次会话足够宽松（实测一个 4 轮的会话约 4 KB）。
  */
 export const MAX_EXPORT_BYTES = 1_048_576
 
+/** 导出内容的字符上限（防止渲染进程递一个巨大字符串把主进程写爆）。 */
+export const MAX_EXPORT_CHARS = 200_000

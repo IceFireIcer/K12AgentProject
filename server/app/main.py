@@ -61,6 +61,7 @@ from app.routes.resources import public_router as animation_resources_router  # 
 from app.routes.resources import router as animation_router  # noqa: E402
 from app.routes.settings import router as settings_router  # noqa: E402
 from app.routes.students import router as students_router  # noqa: E402
+from app.routes.study import router as study_router  # noqa: E402
 from app.animation.compose import router as animation_compose_router  # noqa: E402
 from app.safety.guard import install_log_redaction  # noqa: E402
 from app.safety.route import router as safety_router  # noqa: E402
@@ -145,6 +146,7 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
     app.include_router(profile_router)
     app.include_router(quiz_router)
     app.include_router(knowledge_router)
+    app.include_router(study_router)
     # 学段自动推断（票 21）：前端没有选择器，这里是唯一的学段写路径
     app.include_router(grade_router)
     # 编程（票 18/19）：只提供模板/提示/报错翻译 —— **没有任何执行原语**

@@ -18,7 +18,8 @@
  *   渲染进程侧只认 `window.api` 上的三个方法，HTTP 与 token 全留在主进程。
  */
 
-import { app, BrowserWindow, ipcMain, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, type WebContents } from 'electron'
+import { writeFileSync } from 'node:fs'
 import { apiFetch } from '../bridge/client.ts'
 import { describeRuntimeFailure } from '../agent/events.ts'
 import { gradeStatePath } from '../agent/extensions/grade.ts'
@@ -34,6 +35,7 @@ import type { SidecarManager } from '../sidecar/manager.ts'
 import type { SidecarState } from '../sidecar/protocol.ts'
 import {
   IPC,
+  MAX_EXPORT_CHARS,
   type ChapterCallResult,
   type ChapterSetResult,
   type ChapterState,
@@ -41,20 +43,51 @@ import {
   type CodeExecuteRequest,
   type CodeExecuteResult,
   type FetchModelsResult,
+  type FileExportRequest,
+  type FileExportResult,
   type GradeCallResult,
   type GradeSetResult,
   type GradeState,
   type ProbeRequest,
   type ProbeResult,
   type ProviderCatalogEntry,
+  type SessionSearchRequest,
   type SettingsCallResult,
   type SettingsSnapshot,
   type SettingsUpdateRequest
+  type StudyCallResult,
+  type StudyGradeRequest,
+  type StudyReportRequest
 } from './channels.ts'
+// 学习档案的取数层（路径工厂 + 归一化；聚合全在 Python）
+  STUDY_GRADE_LEVELS,
+  STUDY_MAX_REPORT_DAYS,
+  fetchStudyJson,
+  readStudyGradeLevel,
+  studyChaptersPath,
+  studyGraphPath,
+  studyMistakesPath,
+  studyReportPath
+} from '../study/client.ts'
 // 当前教材章节（软偏好；读写只有这一处实现）
+  CHAPTER_TITLE_MAX_CHARS,
   fetchChapterState,
   readChapterTitle,
   saveChapterState
+} from '../study/chapter.ts'
+// 历史会话：投影/搜索是纯函数；`listStudentSessions` / `readStudentSessionEntries` 才碰 Pi
+  TITLE_MAX_CHARS,
+  findSessionById,
+  listStudentSessions,
+  projectSessionList,
+  projectTranscript,
+  readStudentSessionEntries,
+  searchSessions,
+  truncateChars,
+  type SessionTranscript
+} from '../study/sessions.ts'
+// 导出的文件名清理（纯函数，安全边界）
+import { normalizeExportContent, sanitizeFileName } from '../study/export-naming.ts'
 import { mergeModelCandidates } from '@shared/provider-catalog'
 import { parseChatSendRequest } from './chat-request.ts'
 import { ChatStreamRegistry, type StreamTarget, type TurnHandle } from './chat-stream.ts'
@@ -460,12 +493,67 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
     async (_event, payload: unknown): Promise<ChapterCallResult<ChapterSetResult>> => {
       const title = readChapterTitle((payload as { chapterTitle?: unknown } | undefined)?.chapterTitle)
             '设定章节失败：章节标题不合法（只能是最多 ' +
+            `${CHAPTER_TITLE_MAX_CHARS} 个字的文本；要取消选择请传空串）。`
       const result = await saveChapterState(resolveActiveStudentId(), title)
       const state = readChapterState(result.data)
       if (!state) return { ok: false, message: '设定章节失败：本地数据服务没有返回章节状态。' }
       pushChapterState(state)
       return { ok: true, data: { chapterTitle: state.chapterTitle } }
+  registerStudyHandlers()
+  registerSessionHandlers()
+  registerExportHandler()
+ * 学习档案（章节 / 报告 / 错题本 / 学习地图）
+function registerStudyHandlers(): void {
+    IPC.studyReport,
+    async (_event, payload: unknown): Promise<StudyCallResult> => {
+      const days = readReportDays((payload as StudyReportRequest | undefined)?.days)
+        return { ok: false, message: `报告天数不合法：${STUDY_MAX_REPORT_DAYS} 天以内、且必须是整数。` }
+      return await fetchStudyJson(studyReportPath(studentId(), days))
+  ipcMain.handle(IPC.studyMistakes, async (): Promise<StudyCallResult> => {
+    return await fetchStudyJson(studyMistakesPath(studentId()))
+    [IPC.studyChapters, studyChaptersPath],
+    [IPC.studyGraph, studyGraphPath]
+    ipcMain.handle(channel, async (_event, payload: unknown): Promise<StudyCallResult> => {
+      const level = readStudyGradeLevel((payload as StudyGradeRequest | undefined)?.gradeLevel)
+          message: `学段不合法（允许：${STUDY_GRADE_LEVELS.join(' / ')}）。`
       // 带上学生：章节要显示「3/5 已掌握」、地图要标注哪些已掌握。
+      return await fetchStudyJson(buildPath(level, studentId()))
+ * 历史会话（**只读回看**）
+ *   那是另一件事（见 `main/study/sessions.ts` 的文件头）。
+function registerSessionHandlers(): void {
+  ipcMain.handle(IPC.sessionList, async (): Promise<StudyCallResult> => {
+    return { ok: true, data: projectSessionList(loaded.infos) }
+  ipcMain.handle(IPC.sessionTranscript, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    const info = findSessionById(loaded.infos, id)
+  ipcMain.handle(IPC.sessionSearch, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    const query = typeof (payload as SessionSearchRequest | undefined)?.query === 'string'
+      ? (payload as SessionSearchRequest).query
+    return { ok: true, data: searchSessions(loaded.infos, query) }
+/** 列出当前学生的历史会话（走 Pi 的 `SessionManager.list`，目录**显式**指向该学生）。 */
+  { ok: true; infos: Awaited<ReturnType<typeof listStudentSessions>> } | { ok: false; message: string }
+    const infos = await listStudentSessions(app.getPath('userData'), resolveActiveStudentId())
+    return { ok: false, message: `读取历史会话失败：${describeRuntimeFailure(error)}` }
+}): Promise<StudyCallResult> {
+    const entries = await readStudentSessionEntries(
+    const projected = projectTranscript(entries)
+    const transcript: SessionTranscript = {
+      title: truncateChars(info.path.split(/[/\\]/).pop() ?? info.id, TITLE_MAX_CHARS),
+ * 导出（报告 / 错题本 → Markdown 文件）
+function registerExportHandler(): void {
+  ipcMain.handle(IPC.fileExport, async (event, payload: unknown): Promise<FileExportResult> => {
+    const clean = payload as FileExportRequest | undefined
+      return { ok: false, message: '导出失败：没有内容可导出。' }
+    if (clean.content.length > MAX_EXPORT_CHARS) {
+      return { ok: false, message: `导出失败：内容过长（上限 ${MAX_EXPORT_CHARS} 字）。` }
+    const fileName = sanitizeFileName(clean.fileName)
+    const content = normalizeExportContent(clean.content)
+      title: '导出学习档案',
+      ? await dialog.showSaveDialog(window, options)
+      : await dialog.showSaveDialog(options)
+      // 用户取消**不是错误**：回一个带 `canceled` 的失败，界面据此不弹「导出失败」
+      return { ok: false, message: '已取消导出。', canceled: true }
+      // UTF-8 无 BOM + LF（`normalizeExportContent` 已统一换行）
+      writeFileSync(picked.filePath, content, { encoding: 'utf8' })
 }
 
 /** 读/存设置的单次请求超时（本机回环，正常在毫秒级；超了就是 sidecar 卡住）。 */

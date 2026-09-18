@@ -506,7 +506,15 @@ const EXPECTED_API_METHODS = [
   'onCodeExecute',
   'sendCodeResult'
   // 学习档案（章节 / 报告 / 错题本 / 学习地图）：**纯转发**，聚合全在 Python 侧。
+  'readStudyReport',
+  'readStudyMistakes',
   'readStudyChapters',
+  'readStudyGraph',
+  // 历史会话（**只读回看**）：`readSessionTranscript` 只接受会话 id，
+  // 主进程先用 Pi 列出的会话做白名单对齐 —— 渲染进程无法指定路径。
+  'listSessions',
+  'readSessionTranscript',
+  'searchSessions',
 ]
 
 /** preload 里绝不允许出现的通用转发方法名。 */
