@@ -28,6 +28,8 @@
    ★ 表里存的 ``reference_answer`` 是**标准答案**（用于 ``POST /api/quiz/grade`` 判分），
      它**只在本文件与 Python 侧存在**，绝不出现在任何出参模型里（§6.3 答案泄漏防护：
      对外一律 ``QuizQuestionOut``，结构上没有答案字段）。
+学生显式选定的「在学哪一章」是**软偏好**（只进画像 Prompt，不做检索硬过滤），
+与 ``profile_pref`` 的读写对同一口径：**路由层不自己拼 SQL**。
 """
 
 from __future__ import annotations
@@ -229,6 +231,16 @@ class LearningStore:
         rows = self.conn.execute("SELECT kp_id, score FROM mastery").fetchall()
         return {str(r["kp_id"]): float(r["score"] or 0.0) for r in rows}
 
+    # ------------------------------------------------------------ 学习偏好 --
+    def preferences(self) -> dict[str, str]:
+        """读全部学习偏好（``profile_pref`` 的键值视图，供画像端点出参）。
+          不再自己写 ``SELECT key, value FROM profile_pref`` —— 与 :meth:`set_preference`
+        rows = self.conn.execute("SELECT key, value FROM profile_pref").fetchall()
+    def set_preference(self, key: str, value: str) -> None:
+        """写一条学习偏好（**幂等 upsert**：同 key 覆盖，不追加）。
+        ``key`` 由调用方（契约的 ``PreferenceKey``）保证是封闭词表 —— 本方法**不再校验**，
+          永远不需要清理逻辑，也没有「攒了几百条偏好把每轮 Prompt 挤爆」这条路径。
+            "INSERT INTO profile_pref(key, value) VALUES(?, ?) "
     # ------------------------------------------------------------ 闯关进度 --
     def progress_rows(self) -> list[ProgressRecord]:
         """读全部闯关进度（**按 kp_id 排序**，保证出参稳定可比对）。"""

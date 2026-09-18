@@ -9,13 +9,18 @@
  *      两道都走**同一个出口**：`gradeExtension.systemPromptFor()` —— 同一份文本，
  *      不会出现「第一轮不带权威段、后面带」的不一致。
  *   3. 学段：**由推断系统决定**（`agent/extensions/grade.ts` 是唯一权威来源）。
+ *      落盘证据。**三道都走同一个出口** {@link createChatRuntime} 里的 `buildSystemPrompt()`：
+ *      学段权威段（`gradeExtension.systemPromptFor`）+ 学生情况块（每轮预取的画像）—— 同一份文本，
+ *      ★ 另一道是**剥尾巴**：Pi 会在 `buildSystemPrompt()` 末尾无条件追加
+ *      所以在进那个出口**之前**先过 `stripPiCwdBlock()`（见下方接线处的注释）。
+ *      **学生情况**：由画像预取决定（`extensions/profile.ts` 的 `fetchStudentContext`）。
  *      ★ 两件事都由本文件**显式驱动**，不挂 Pi 事件（返工原因见 `grade.ts` 文件头）：
  *        - 观察：每轮开始调 `gradeExtension.observeTurn(text)`（**在无 Key 早退之前**，
  *          否则无 Key 世界里学段永远不动）；
  *        - prompt：`chatFactory` 的 `before_agent_start` 调 `systemPromptFor()`。
  *      运行时**不读**渲染进程传来的学段 —— `ChatSendRequest.gradeLevel` 只是历史字段，
  *      已不再权威（手动选学段的 UI 已取消，见 `ipc/channels.ts` 的字段注释）。
- *      `setGradeLevel()` 也已退化为**只读回显**，不再有第二个写入点。
+ *        - prompt：`chatFactory` 的 `before_agent_start` 调 `buildSystemPrompt()`。
  *   4. Pi → 6 事件：事件流交给 `events.ts` 的 `bindTurnStream()`，本文件只管会话与生命周期。
  *   5. provider 边界脱敏审计（§12）：`before_provider_request` 里把**真正要发出去的** system prompt
  *      取出、抹掉任何密钥痕迹、并做宿主路径泄漏断言，然后落盘作证据。
@@ -62,6 +67,11 @@ import quizExtension from './extensions/quiz.ts'
 // ★ 学段**推断**扩展（票 21）：它独占 `input`（收集本轮证据）与 `before_agent_start`（按推断出的
 //   学段替换整段 prompt），并自兜异常。工厂是「可调用 + `.refresh()/.useJudge()` 诊断入口」的形态。
 import gradeExtension, { GRADE_OVERRIDE_HEADING, buildJudgePrompt, parseProposal } from './extensions/grade.ts'
+// ★ 学生情况（画像）的每轮注入（票 20 的对话侧落点）：取值在 profile 扩展
+//   （`fetchStudentContext`，失败降级为空串），拼装在 `prompts/student-context.ts`（纯函数，幂等）。
+//   本文件只把它们接在 `buildSystemPrompt()` 这一个出口上 —— 6 个 prompt 落点共用它。
+import { fetchStudentContext } from './extensions/profile.ts'
+import { withStudentContext } from './prompts/student-context.ts'
 import ragSearchExtension from './extensions/rag-search.ts'
 import {
   builtinCatalog,
@@ -74,6 +84,7 @@ import {
   PROBE_API_KEY,
   PROBE_BASE_URL,
   resolveCredentials,
+  stripPiCwdBlock,
   writeModelsJson,
   type LlmConfigForPi,
   type PiCredentials
@@ -401,6 +412,16 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     refreshOnCreate: false
   })
 
+   * ★★ 学生情况（画像）的**每轮快照**：由 `runTurn()` 的预取写入，由 {@link buildSystemPrompt} 读取。
+   * 为什么是「先预取、后拼装」而不是在 `buildSystemPrompt` 里现取：拼装点有 6 个，
+  let studentContextBlock = ''
+   * ★★ **唯一的 system prompt 组装出口**：学段（权威）+ 学生情况（画像），6 个落点都走它。
+   * 顺序有意义（**不要对调**）：`withStudentContext` 把学生情况块插在**学段权威段之前**，
+   * 而画像只是背景（且它排前面也让 `grade.ts` 的 `stripGradeOverride` 不会每轮把它切掉）。
+   * ⚠️ 建会话时 `studentContextBlock` 还是空串（第一轮还没预取），所以
+   *   `before_agent_start` 用它覆盖，而 `withStudentContext` 对空块是原样返回（幂等）。
+  function buildSystemPrompt(incoming: string | undefined): string {
+    return withStudentContext(gradeExtension.systemPromptFor(incoming), studentContextBlock)
   /**
    * ② ★ prompt 基座 + 学段落点 + provider 边界审计（同一个工厂，注册顺序即执行顺序）。
    *
@@ -424,6 +445,10 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       if (typeof base === 'string') state.basePromptSeen = base
       // ★ 单一入口：学段的替换/权威段全在 grade 扩展里（这里只负责接上链条）
       const prompt = gradeExtension.systemPromptFor(typeof base === 'string' ? base : undefined)
+       * 根因（实测 0.85.1）：`buildSystemPrompt()` 在 `customPrompt` 分支的最后无条件执行
+      const cleaned = typeof base === 'string' ? stripPiCwdBlock(base) : undefined
+      // ★ 单一出口：学段（权威段）+ 学生情况（画像快照）都在 buildSystemPrompt 里拼
+      const prompt = buildSystemPrompt(cleaned)
       state.lastPrompt = prompt
       return { systemPrompt: prompt }
     })
@@ -584,6 +609,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     //   两道覆盖（这里 + `before_agent_start`）必须给出**同一份**文本，否则第一轮
     //   与后续轮次的提示词会不一致（前者带权威段、后者不带）。
     systemPromptOverride: () => gradeExtension.systemPromptFor(undefined),
+    //   `buildSystemPrompt` 的注释（每轮由 `before_agent_start` 覆盖，是预期行为）。
+    systemPromptOverride: () => buildSystemPrompt(undefined),
     // ★ 注册顺序 = 执行顺序（`before_agent_start` 的返回值链式叠加，后注册者看到前者结果）：
     //   ① 学段注入 + provider 边界审计（本文件的 chatFactory）
     //   ② 六个业务 Extension（票 08 的注册器）+ 轨迹扩展（票 08 基础设施）
@@ -751,7 +778,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    * 通过时**保持安静**（不刷日志），失败时打一条 error 说清看哪里。
    */
   try {
-    const prompt = gradeExtension.systemPromptFor(undefined)
+    const prompt = buildSystemPrompt(undefined)
     if (!prompt.includes(GRADE_OVERRIDE_HEADING)) {
       console.error(
         '[agent] 学段装配自检未通过：system prompt 里没有权威段标题（' +
@@ -861,6 +888,10 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         //   必须看到「本轮真正生效的学段」，而不是上一轮那一份。两次调用都是纯对象赋值，很便宜。
         bindCurrentSession()
 
+        // ★★ 画像预取（票 20 的对话侧落点）：**必须在三条早退路径之前**
+        //    与真正发出去的那一份不一致（它们都要走 `buildSystemPrompt`，读的就是这份快照）。
+        //    失败降级为空串（绝不阻断对话）—— 见 `extensions/profile.ts` 的 `fetchStudentContext`。
+        studentContextBlock = await fetchStudentContext(paths.studentId)
         // ★★ 内容安全【第一道：输入侧检查】（票 22 / §12）——**在发起模型调用之前**。
         //
         //    为什么放在这里而不是 Pi 的 `input` 事件里：`input` 只在真的调 `session.prompt()`
@@ -872,6 +903,9 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         if (inputVerdict && !inputVerdict.allowed) {
           state.inputBlocks += 1
           state.lastPrompt = gradeExtension.systemPromptFor(undefined)
+          // 「本轮按哪个学段作答」的 prompt 落盘（同一个出口 `buildSystemPrompt`，不是另写一份；
+          // 画像预取已在上面完成，所以这份证据与真正会发出去的那份**逐字一致**）。
+          state.lastPrompt = buildSystemPrompt(undefined)
           dumpPrompts(paths, state)
           emitBlockedTurn(sink, inputVerdict)
           console.warn(
@@ -908,13 +942,15 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         if (!credentialState.hasKey && !useProbe) {
           // ★ 无 Key 也要把「本轮按哪个学段作答」拼出来：它是 `chat-system-prompt.txt` 的证据来源，
           //   与真正发出去的那份**同一个函数**（`systemPromptFor`），不是另写一份。
-          state.lastPrompt = gradeExtension.systemPromptFor(undefined)
+          //   与真正发出去的那份**同一个函数**（`buildSystemPrompt`：学段 + 本轮画像快照），不是另写一份。
+          state.lastPrompt = buildSystemPrompt(undefined)
           dumpPrompts(paths, state)
           emitTerminal(sink, MISSING_KEY_MESSAGE)
           return { ok: false, status: 'missing-key', detail: `key来源=${credentials.source}` }
         }
         if (!authReady) {
         if (!credentialState.authReady) {
+          state.lastPrompt = buildSystemPrompt(undefined)
           dumpPrompts(paths, state)
           emitTerminal(sink, `${MISSING_KEY_MESSAGE}（供应商凭证检查未通过）`)
           return { ok: false, status: 'missing-key', detail: 'checkAuth 未通过' }

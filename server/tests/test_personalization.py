@@ -10,7 +10,10 @@
 3. ★ **冷启动**：全新学生 id 直接问推荐 → 有图里的入口知识点，不空、不 500；
 4. ★ **跨会话/重启记忆**：关掉库重开，掌握度 / 进度 / 徽章 / 画像全部还在
    （用**新的** `TestClient` 与**新的**库连接读一遍，而不是复用内存里的对象）；
-5. **画像不缓存、不落第二份副本**：每次读都反映 `learning.db` 的当前值。
+5. **画像不缓存、不落第二份副本**：每次读都反映 `learning.db` 的当前值；
+6. ★ **兴趣偏好有写入口且进入画像**（\"答题表现**和兴趣偏好**\"的后一半）：
+   `PUT /api/profile/{id}/preferences` → `GET /profile.preferences` → 重启后仍在。
+   ⚠️ 偏好**尚未**参与 `build_recommendation` 的计算（残留，见该用例的注释）。
 
 依赖图用例需要真实知识库；缺 kb 时跳过并说明原因（不假装通过）。
 """
@@ -192,7 +195,7 @@ class TestGraphDrivenRecommendation(PersonalizationCase):
     LOOP = "jr-py-loop"
 
     def test_mastering_variable_recommends_loop(self) -> None:
-        """★ 执行文档 §8.6 用途一的直接断言（也是答辩要念的那一条）。"""
+        """★ 执行文档 §8.6 用途一的直接断言（也是汇报要念的那一条）。"""
         self.set_student("student_graph_loop")
         self.master(self.VARIABLE, prefix="var")
 
@@ -493,6 +496,45 @@ class TestProfileBehaviour(PersonalizationCase):
             response = self.client.get(f"/api/profile/{bad}/recommendation")
             self.assertEqual(response.status_code, 422, f"{bad!r} 应被 422 拒绝")
 
+    def test_written_preference_reaches_the_profile_and_survives_restart(self) -> None:
+        """★ 偏好进入画像（闭环的另一半：需求的「和兴趣偏好」）。
+
+        需求要求「根据答题表现**和兴趣偏好**动态调整后续推荐」：答题表现那条链路
+        （判分 → 掌握度 → 推荐）是通的，兴趣偏好此前**只有读、没有写** ——
+        ``profile_pref`` 建好了、画像也读它，但生产代码从不写，等于断头路。
+
+        这里断言新写入口把偏好真的送进画像（``GET /profile.preferences``），
+        并跨「重启」（新建 app + 新建客户端）仍然在 —— 画像由 ``get_student_profile``
+        Tool 注入每轮 Prompt，写进去的内容必须重启后照样读得到。
+
+        ⚠️ **残留（不要假装已解决）**：``build_recommendation`` 目前**完全不读**
+        ``preferences``（它只看掌握度 + 依赖图），所以本用例**不**断言「推荐因此改变」
+        —— 那是后续工作。偏好当前的消费点是画像 → Prompt 注入，
+        不是推荐算法。当推荐开始消费偏好时，这条注释与用例应一起更新。
+        """
+        self.set_student("student_pref_20")
+        response = self.client.put(
+            f"/api/profile/{self.student}/preferences",
+            json={"key": "interest", "value": "喜欢机器人"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        profile = self.profile().json()
+        self.assertEqual(
+            profile["preferences"],
+            {"interest": "喜欢机器人"},
+            "偏好没进画像的话，get_student_profile Tool 就永远看不到它（等于没写）",
+        )
+
+        # ★ 重启（新 app + 新客户端，等价于新进程）后仍在
+        self.app = create_app(build_runtime_config(data_dir=self.tmp))
+        self.client = TestClient(self.app)
+        self.assertEqual(self.profile().json()["preferences"], {"interest": "喜欢机器人"})
+        # 推荐端点照常可用（偏好写入不该把推荐链路弄坏）
+        recommendation = self.recommend(gradeLevel="junior")
+        self.assertEqual(recommendation.status_code, 200, recommendation.text)
+        self.assertTrue(recommendation.json()["source"], "推荐来源必须仍然有值")
+
     def test_learning_db_field_inventory_is_minimal(self) -> None:
         """★ 数据合规（K12 未成年人）：字段清单过一遍，确认最小化采集。
 
@@ -504,7 +546,11 @@ class TestProfileBehaviour(PersonalizationCase):
         self.answer("cmp-1", "2")
 
         expected = {
-            "student": {"student_id", "nickname", "grade_level", "created_at", "last_active_at"},
+            # ★ ``current_chapter`` 是「学生在学哪一章教材」的标题（= kb 的 chapter_title），
+            #   不是新的个人信息：它由学生在界面上自己选、服务端只存一个标题字符串，
+            #   不采集姓名/联系方式/生物特征（下面那条 forbidden 断言仍然逐项挡着）。
+            "student": {"student_id", "nickname", "grade_level", "created_at", "last_active_at",
+                        "current_chapter"},
             "mastery": {"kp_id", "score", "attempts", "correct", "last_seen_at"},
             "learning_history": {"id", "ts", "session_id", "kp_id", "activity",
                                   "question", "is_correct", "detail"},

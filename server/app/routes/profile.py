@@ -6,8 +6,15 @@
   （供 Pi 的 ``get_student_profile`` Tool 注入 Prompt）；
 - **写**（``POST /api/profile/{student_id}/events``）：从对话/各模块提取出来的
   **结构化学习记录**回流到 ``learning.db``（``activity`` 覆盖 ``qa | animation | coding | quiz``）；
+- **写偏好**（``PUT /api/profile/{student_id}/preferences``）：写入**学习方式**类偏好
+  （喜好领域 / 讲解方式 / 节奏 / 一句备注）—— 这就是需求「根据答题表现**和兴趣偏好**
+  动态调整后续推荐」里「兴趣偏好」那一半的**唯一写入口**（在此之前 ``profile_pref`` 只被读过）。
+  键是**封闭词表**（``contracts.PreferenceKey``），值 ≤ 40 字单行；
 - **推荐**（``GET /api/profile/{student_id}/recommendation``，票 20）：
-  「下一步学什么」的**唯一出口**，依赖图 + 掌握度共同决定，冷启动有默认路径。
+  「下一步学什么」的**唯一出口**，依赖图 + 掌握度共同决定，冷启动有默认路径；
+  「在学哪一章教材」。★ 它是**软偏好**：只进画像 Prompt（Pi 每轮读 ``GET /profile``），
+  非空标题必须命中该生**当前学段**的教材清单（``kb.sqlite``），学段一变由
+  ``app/grade/rules.py`` 清空（那本教材已经不存在了）。
 
 ★★ 合规红线（§8.1 / §12）：**SQLite 不存对话正文**。
    本模块只接受「活动类型 + 知识点 id + 对错 + 一句固定口径的说明 + 时间戳」；
@@ -45,6 +52,7 @@ from app.contracts import (
     GradeLevel,
     LearningActivity,
     Mastery,
+    PreferenceUpdateRequest,
     Student,
     StudentProfile,
 )
@@ -112,7 +120,12 @@ class LearningEventRequest(CamelModel):
 
 
 class LearningEventAck(CamelModel):
-    """学习记录写入的回执（§6.3：``{ok}``）。"""
+    """写入类端点的回执（§6.3：``{ok}``）：学习记录回流与学习偏好写入**共用同一形状**。
+
+    ★ 偏好写入**复用**本模型而不是再造一个等价的 ``PreferenceAck``：两者的出参形状
+      一字不差（``{ok: true}``），同形状两个模型名只会让 OpenAPI/TS 多一个语义重复的
+      类型、让前端多写一个分支去认同一个 ``{ok}``。**新增写入型端点时也复用它。**
+    """
 
     ok: bool = True
 
@@ -162,11 +175,11 @@ class RecommendationResponse(CamelModel):
 
 
 def _load_kb_connection(request: Request):
-    """打开只读知识库；不可用时返回 ``None``（推荐降级为「按已有掌握度给建议」）。
+    """打开只读知识库；不可用时返回 ``None``（调用方各自决定降级方式）。
 
-    ★ **不抛异常**：知识库缺失/损坏是「推荐能力受限」，不是「画像打不开」。
-      画像本身（掌握度/偏好）落在学生自己的库里，与 kb 无关 —— 让它们互相拖垮，
-      结果是学生连自己的分数都看不到。
+    ★ **不抛异常**：知识库缺失/损坏是「这项能力受限」，不是「画像打不开」。
+    ★ 本函数有两个调用方，**降级方式不同**，所以日志只说「不可用」不说降级动作：
+      ① 推荐（:func:`build_recommendation`）→ 退化成「按掌握度给建议」；
     """
     from app.rag.retriever import default_kb_path
     from app.store.connections import connect
@@ -422,7 +435,10 @@ def _as_grade_or_none(value: str | None) -> GradeLevel | None:
 
 
 def _read_student(store, student_id: str) -> Student | None:
-    """从该学生的 ``learning.db`` 读学生行（秒 → 毫秒的换算只在 ``to_contract_ms`` 里做）。"""
+    """从该学生的 ``learning.db`` 读学生行（秒 → 毫秒的换算只在 ``to_contract_ms`` 里做）。
+
+      别处（``routes/students.py`` 的 ``LearningDbStudentStore`` 是另一条学生出参路径，
+    """
     record = store.get_student(student_id)
     if record is None:
         return None
@@ -467,7 +483,9 @@ def student_profile(request: Request, student_id: str) -> StudentProfile:
                 "SELECT kp_id, score, attempts, correct, last_seen_at FROM mastery "
                 "ORDER BY score DESC, kp_id"
             ).fetchall()
-            pref_rows = store.conn.execute("SELECT key, value FROM profile_pref").fetchall()
+            # ★ 偏好的读**只有一处实现**（`LearningStore.preferences()`），与写入
+            #   （`set_preference()`）构成这张表唯一的一对读写 —— 本文件不再自己拼 SQL。
+            preferences = store.preferences()
         except sqlite3.Error as exc:  # 表被外力删掉 / 库损坏
             logger.exception("读画像失败：%s", student_id)
             raise HTTPException(status_code=503, detail=f"读取学习记录失败（本地数据库异常）：{exc}") from exc
@@ -483,7 +501,6 @@ def student_profile(request: Request, student_id: str) -> StudentProfile:
             )
             for row in mastery_rows
         ]
-        preferences = {str(row["key"]): str(row["value"] or "") for row in pref_rows}
 
         # ★ 推荐（§8.6 用途一）：依赖图 + 掌握度 + 冷启动兜底。**只此一处实现。**
         recommendation = build_recommendation(
@@ -603,20 +620,150 @@ def record_learning_event(
         store.close()
 
 
-def _require_data_dir(request: Request) -> str:
-    """取学生数据根；缺失时给**可读**的 503（而不是在别处抛 KeyError）。
+@router.put(
+    "/profile/{student_id}/preferences",
+    response_model=LearningEventAck,
+    summary="写入学习偏好（兴趣 / 讲解方式 / 节奏）",
+)
+def update_preference(
+    request: Request, student_id: str, payload: PreferenceUpdateRequest
+) -> LearningEventAck:
+    """写一条学习偏好（``profile_pref`` 的**唯一生产写入口**）。
 
-    ★ 只认**显式传入**的 ``--data-dir``：没传时 ``app.config`` 的兜底值（``server/_data``）是
-    共享目录，拿它当学生数据根会让不同来源的数据混进同一棵树
-    （理由与 `resolve_student_data_root` 的注释一致）。
+    需求要求「根据答题表现**和兴趣偏好**动态调整后续推荐」：「答题表现」那条链路
+    （判分 → 掌握度 → 推荐）本就是通的，而「兴趣偏好」此前是条断头路 ——
+    ``profile_pref`` 表建好了、``GET /profile`` 也读它，但**生产代码从不写**。
+    本端点补上这一半：写入的偏好会经 ``GET /profile`` 进入画像，
+    再由 ``get_student_profile`` Tool 拼进每轮 Prompt。
+
+    ★ **为什么是 PUT 而不是 POST**：单键 upsert 是**幂等**操作 —— 同一个 key 提交两次，
+      库里的状态完全相同（``key`` 是主键，第二次是覆盖）。POST 会暗示「追加一条记录」，
+      与实际语义正好相反，调用方会以为「多写几条偏好更完整」而反复 POST。
+
+    ★ **为什么键是封闭词表**（``contracts.PreferenceKey``：``interest | explain_style |
+      pace | note``）：见该 Literal 的注释 —— 关键是「写掌握度」在**类型层面**就不可能。
+      掌握度是判分规则算出来的客观量，一旦模型能通过偏好通道写它，
+      就会出现「模型觉得学生懂了就改分」。这类多写路径的教训见 D-020。
+
+    ★ **为什么不改 ``StudentProfile`` 的形状**：偏好已经在该模型的 ``preferences`` 里，
+      本端点只写不读；出参复用 :class:`LearningEventAck`（``{ok: true}``）。
+
+    冷启动兜底与 ``POST /events`` **完全一致**（学生行不存在时建一条）——
+    两条写路径必须同口径，否则学生会遇到「写记录能用、写偏好 404」这类无谓差异。
     """
-    data_root = resolve_student_data_root(request)
     if data_root is None:
+
+    try:
+        student = store.get_student(student_id)
+        if student is None:
+            student = store.upsert_student(
+                student_id, nickname="", grade_level=DEFAULT_COLD_START_GRADE
+            )
+
+        try:
+            store.set_preference(payload.key, payload.value)
+        except sqlite3.Error as exc:
+            raise HTTPException(status_code=503, detail=f"学习偏好写入失败（本地数据库异常）：{exc}") from exc
+
+        return LearningEventAck(ok=True)
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+def _ensure_student_level(store, student_id: str) -> GradeLevel:
+    """确保学生行存在并返回其学段（**冷启动口径与学段轨一致**）。
+
+    ★ 为什么不在这里写 ``DEFAULT_COLD_START_GRADE``：那会让「冷启动默认学段」出现
+      **第三处**字面量/常量引用。``GradeEngine.ensure_student`` 是既有的冷启动入口
+    """
+    from app.grade.rules import GradeEngine
+
+    return as_grade_level(GradeEngine(store).ensure_student(student_id))
+
+
+    """该学段教材里的**全部章标题**（kb 不可用 → 503）。
+
+      它已经处理了「按第N章的章号排序」这件事。这里只把标题取成集合做**成员判断**，
+      **不重新排序、不复制一份 SELECT**（复制一份迟早会漏掉它的排序修正）。
+    """
+    from app.store import kb as kb_repo
+
+    conn = _load_kb_connection(request)
+    if conn is None:
         raise HTTPException(
             status_code=503,
             detail="sidecar 未配置 data-dir：无法定位学生数据目录（应由 Electron 经 --data-dir 传入 <userData>）",
         )
-    return str(data_root)
+    try:
+    except sqlite3.Error as exc:
+        raise HTTPException(
+        ) from exc
+    finally:
+        conn.close()
+
+
+    record = store.get_student(student_id)
+    if record is None:  # pragma: no cover - 调用方都已 ensure 过学生行
+        grade_level=as_grade_level(record.grade_level),
+    )
+
+
+@router.get(
+)
+
+    - ``studentId`` 非法 → 422（它会被拼进文件系统路径）；
+    - 学生行不存在 → **自动建行**（冷启动，见 :func:`_ensure_student_level`），
+      因此本端点对**全新学生**是「建行 + 读」，对已存在的学生才是纯读。
+    - 读库失败 → 503（可读中文）。
+    """
+
+    try:
+        try:
+            _ensure_student_level(store, student_id)
+        except sqlite3.Error as exc:
+            raise HTTPException(
+            ) from exc
+    finally:
+        store.close()
+
+
+@router.put(
+)
+
+    规则：
+
+      清除**不需要 kb**（清掉一个值不需要先查清单）。
+    - 非空 → 必须命中该生**当前学段**的章标题（清单来自 ``kb.sqlite``），
+      不在清单里 → **422**（否则 Prompt 里会出现一本不存在的教材）；
+    - kb 不可用且要设非空标题 → **503**（提示 ``build_kb``，**不猜、不静默接受**）。
+
+      学生选了第 4 章之后再问第 9 章的内容，``rag_search`` 照常检索。
+      本端点**不负责**这件事，也不要在读的时候「顺手修正」。
+    """
+
+    try:
+        try:
+            grade_level = _ensure_student_level(store, student_id)
+            if not title:
+
+            if title not in titles:
+                raise HTTPException(
+                    status_code=422,
+                )
+        except sqlite3.Error as exc:
+            # ⚠️ HTTPException（422/503）不是 sqlite3.Error，不会被这里吞掉。
+            raise HTTPException(
+            ) from exc
+    finally:
+        store.close()
+
+
+    """取学生数据根；缺失时给**可读**的 503（而不是在别处抛 KeyError）。
+
+    四条轨必须**同一口径**（只认显式传入的 ``--data-dir``，理由见
+    """
 
 
 __all__ = [
@@ -630,4 +777,5 @@ __all__ = [
     "RecommendationResponse",
     "build_recommendation",
     "router",
+    "update_preference",
 ]
