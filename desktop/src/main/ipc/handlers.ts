@@ -23,9 +23,13 @@ import { apiFetch } from '../bridge/client.ts'
 import { describeRuntimeFailure } from '../agent/events.ts'
 import { gradeStatePath } from '../agent/extensions/grade.ts'
 import { bindCodeRunner, createRendererCodeRunner } from '../agent/extensions/coding.ts'
+import { builtinCatalog } from '../agent/pi-bootstrap.ts'
 import { assertStudentId } from '../agent/pi-paths.ts'
 import type { ChatRuntime } from '../agent/runtime.ts'
 import { createChatRuntime } from '../agent/runtime.ts'
+  refreshRuntimeLlmConfig,
+  type RuntimeLlmConfig
+} from '../settings/runtime-config.ts'
 import type { SidecarManager } from '../sidecar/manager.ts'
 import type { SidecarState } from '../sidecar/protocol.ts'
 import {
@@ -33,14 +37,17 @@ import {
   type ChatSendResult,
   type CodeExecuteRequest,
   type CodeExecuteResult,
+  type FetchModelsResult,
   type GradeCallResult,
   type GradeState,
   type ProbeRequest,
   type ProbeResult,
+  type ProviderCatalogEntry,
   type SettingsCallResult,
   type SettingsSnapshot,
   type SettingsUpdateRequest
 } from './channels.ts'
+import { mergeModelCandidates } from '@shared/provider-catalog'
 import { parseChatSendRequest } from './chat-request.ts'
 import { ChatStreamRegistry, type StreamTarget, type TurnHandle } from './chat-stream.ts'
 
@@ -169,6 +176,7 @@ let runtimePending: Promise<ChatRuntime> | null = null
 /**
  * 取当前会话（没有就装配）。**Pi 只在真的发消息时被加载**。
  * `userDataDir` 用 Electron 的 `app.getPath('userData')`，绝不回退 `~/.pi`（票 03/09 的硬约束）。
+ * ⚠️ 取不到就**回落内置默认值照常装配**（`refreshRuntimeLlmConfig` 内部已兜异常并返回 `null`）：
  */
 export async function ensureChatRuntime(): Promise<ChatRuntime> {
   if (runtime) return runtime
@@ -179,6 +187,7 @@ export async function ensureChatRuntime(): Promise<ChatRuntime> {
       studentId: resolveActiveStudentId()
     })
       .then((instance) => {
+      const llm = await refreshRuntimeLlmConfig()
         runtime = instance
         return instance
       })
@@ -189,6 +198,11 @@ export async function ensureChatRuntime(): Promise<ChatRuntime> {
   return await runtimePending
 }
 
+ * 拿到了就 `applyLlmConfig()` 切过去，没拿到就什么都不做（下一轮再试）。
+  let llm: RuntimeLlmConfig | null = null
+    llm = await refreshRuntimeLlmConfig()
+    await runtime.applyLlmConfig({
+  llm: RuntimeLlmConfig | null
 /**
  * ★ `before-quit` 必须调用它（`session.dispose()` → JSONL flush）。
  * 幂等：重复调用安全（`ChatRuntime.dispose()` 自身也幂等）。
@@ -285,6 +299,7 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
         if (!isSettingsSnapshot(data)) {
           return { ok: false, message: '保存设置失败：后端回执不符合契约（缺 llm / embedding 两栏）。' }
         }
+        await applySavedLlmConfig()
         return { ok: true, data }
       } catch (error) {
         return { ok: false, message: `保存设置失败：${describeError(error)}` }
@@ -324,6 +339,21 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
     }
   )
 
+   * Pi 内置供应商预设（离线可用的端点 + 模型清单）。
+    IPC.settingsProviderCatalog,
+    async (): Promise<SettingsCallResult<ProviderCatalogEntry[]>> => {
+        const catalog = await builtinCatalog(app.getPath('userData'))
+        return { ok: false, message: `读取 Pi 内置供应商预设失败：${describeError(error)}` }
+   * 拉取模型清单：**端点实时结果 + Pi 内置预设** 合并去重。
+    IPC.settingsFetchModels,
+    async (_event, payload: unknown): Promise<SettingsCallResult<FetchModelsResult>> => {
+        return { ok: false, message: '拉取模型失败：请求体不是对象（渲染进程传参有误）。' }
+        const catalog = await builtinCatalog(app.getPath('userData'))
+      let message = '没能连上该地址拉取模型清单。'
+          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS)
+          message = `拉取模型失败（HTTP ${response.status}）：${await readDetail(response)}`
+        message = `拉取模型失败：${describeError(error)}`
+      const candidates = mergeModelCandidates(preset, endpoint)
   // ------------------------------------------------------------------ 代码执行
   // 渲染进程回传结果 → 兑现主进程侧挂着的 Promise（按 requestId 配对）
   ipcMain.handle(IPC.codeResult, (_event, payload: unknown): boolean => {
@@ -358,6 +388,10 @@ const SETTINGS_REQUEST_TIMEOUT_MS = 8000
 /** 连通性探测的超时：真的要走一次外呼，宽一些。 */
 const PROBE_TIMEOUT_MS = 15_000
 
+async function applySavedLlmConfig(): Promise<void> {
+  let llm: RuntimeLlmConfig | null
+    llm = await refreshRuntimeLlmConfig()
+    await instance.applyLlmConfig({
 /** 后端回执的最小形状检查（不通过就报可读错误，别让界面拿半个对象去渲染）。 */
 function isSettingsSnapshot(value: unknown): value is SettingsSnapshot {
   if (typeof value !== 'object' || value === null) return false

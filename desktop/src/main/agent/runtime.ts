@@ -24,7 +24,7 @@
  *   - `pi-bootstrap.ts`（票 03）是**冒烟**用的最小会话（学段无关的 baseline prompt + echo Tool），
  *     服务「关卡 B₁：Pi 能不能在 Electron 里加载」这条判定；
  *   - 本文件是**产品会话**（学段 prompt + 工具 + 事件流），服务「关卡 B：学生能不能流式对话」。
- *   两者共用 pi-bootstrap 导出的原语（`loadPi` / `resolveCredentials` / `ensureModelsJson` /
+ *   两者共用 pi-bootstrap 导出的原语（`loadPi` / `resolveCredentials` / `writeModelsJson` /
  *   `extractWireSystemPrompt` / `findHostPathLeaks`），**不重复实现目录隔离与 Key 解析链**。
  *
  * ★ 无 Key 时的行为（本机现状：`DEEPSEEK_API_KEY` 未设置）：
@@ -64,11 +64,18 @@ import quizExtension from './extensions/quiz.ts'
 import gradeExtension, { GRADE_OVERRIDE_HEADING, buildJudgePrompt, parseProposal } from './extensions/grade.ts'
 import ragSearchExtension from './extensions/rag-search.ts'
 import {
-  ensureModelsJson,
+  builtinCatalog,
+  DEFAULT_BASE_URL,
+  DEFAULT_MODEL_ID,
+  DEFAULT_PROVIDER_ID,
   extractWireSystemPrompt,
   findHostPathLeaks,
   loadPi,
+  PROBE_API_KEY,
+  PROBE_BASE_URL,
   resolveCredentials,
+  writeModelsJson,
+  type LlmConfigForPi,
   type PiCredentials
 } from './pi-bootstrap.ts'
 // ★ 内容安全投递层（票 22）：输入检查 + 生成结束后的整段终审 + provider 边界脱敏。
@@ -106,6 +113,9 @@ export interface ChatRuntimeOptions {
   studentId: string
   /** Key 解析链第一档（CLI `--api-key`）；其余档位由 `resolveCredentials` 处理。 */
   apiKey?: string
+  apiKeySource?: 'settings' | 'flag'
+  providerId?: string
+  /** 供应商显示名（只写进 `models.json` 的 `name`）。 */
   modelId?: string
   baseUrl?: string
   /** 会话工作目录（决定 Pi 的项目级资源发现范围）。 */
@@ -160,6 +170,11 @@ export interface ChatRuntime {
   /** 工具调用轨迹（`docs/tool-trace.mmd` 的数据来源；退出时由 `dispose()` 导出）。 */
   readonly trace: ToolTraceRecorder
   setGradeLevel(grade: GradeLevel | string | undefined): GradeLevel
+   *   ② `modelRuntime.refresh({ providers: [id] })` 让 Pi 重新组装这个 provider
+   *   ③ Key 同步到内存：有新 Key `setRuntimeApiKey()`，**没有就 `removeRuntimeApiKey()`**
+   *   ④ 重新解析 model，`session.setModel()` 热切换 —— **会话与对话历史都保留**
+   *      （`setModel` 只改 `agent.state.model` 并往会话里追一条 model_change）。
+  applyLlmConfig(config: LlmConfigForPi & { apiKey?: string }): Promise<void>
   /** 跑一轮：事件经 `sink` 投递（`sink` 就是 `ChatStreamRegistry` 的 `TurnHandle`）。 */
   runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome>
   /**
@@ -183,7 +198,9 @@ export interface ChatTurnSink extends TurnSink {
 
 /** 供应商 / 模型默认值来自 `pi-bootstrap`（单一来源，别在这里再写一份）。 */
 const PROBE_API_KEY = 'offline-probe-no-real-key'
-const PROBE_BASE_URL = 'http://127.0.0.1:9/v1'
+/** 供应商 / 模型默认值来自 `pi-bootstrap`（单一来源，别在这里再写一份）。
+ * ★ 离线探针的两个常量（假 Key / 不可达地址）同样来自 `pi-bootstrap`（`PROBE_API_KEY` /
+ *   `PROBE_BASE_URL`）：两处各写一份字面量会漂移，探针就不指向同一个不可达地址了。 */
 const PROBE_NOTICE =
   '离线探针模式：本轮用假 Key 指向本机不可达地址，**不会发出任何真实请求**，用于验证提示词装配与事件通道。'
 
@@ -239,14 +256,19 @@ interface PiResourceLoaderLike {
 interface PiModelRuntimeLike {
   getModel(providerId: string, modelId: string): unknown
   getModels(providerId?: string): unknown[]
+  getProviders(): Array<{ id: string }>
   checkAuth(providerId: string): Promise<{ type: 'api_key' | 'oauth' } | undefined>
   setRuntimeApiKey(providerId: string, apiKey: string): Promise<void>
+   *   实现见 `model-runtime.js:401`：`credentials.removeRuntimeApiKey(id)` +
+   *   `synchronizeCredentialState(…, "removeRuntimeApiKey", …)`）。
+  removeRuntimeApiKey(providerId: string): Promise<void>
 }
 
 interface PiSessionLike {
   systemPrompt: string
   subscribe(listener: (event: PiNativeEvent) => void): () => void
   prompt(text: string): Promise<void>
+  setModel(model: unknown, options?: { persist?: boolean }): Promise<void>
   dispose(): void
 }
 
@@ -310,13 +332,24 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   const paths = resolveStudentPiPaths(options.userDataDir, options.studentId)
   ensureStudentPiDirs(paths)
   ensureModelsJson(paths, options.baseUrl, options.modelId)
+  // ★ `models.json` 由**设置**派生（见 `pi-bootstrap.ts` 的 `writeModelsJson` 语义说明）。
+  const catalog = await builtinCatalog(options.userDataDir).catch(() => [])
+  writeModelsJson(
+      providerId: options.providerId?.trim() || DEFAULT_PROVIDER_ID,
+      baseUrl: options.baseUrl?.trim() || DEFAULT_BASE_URL,
+      modelId: options.modelId?.trim() || DEFAULT_MODEL_ID
 
   const credentials = resolveCredentials(paths, {
     apiKey: options.apiKey,
+    apiKeySource: options.apiKeySource,
+    providerId: options.providerId,
     modelId: options.modelId,
     baseUrl: options.baseUrl
   })
 
+   * ★ **当前生效的 LLM 配置**（可变：`applyLlmConfig()` 会就地更新）。
+  const activeLlm = {
+    providerId: credentials.providerId,
   const probeRequested = options.offlineProbe === true || process.env.K12_OFFLINE_PROBE === '1'
   const useProbe = probeRequested && !credentials.apiKey
 
@@ -332,6 +365,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     retractions: 0
   }
 
+   * ★★ **当前生效的 Key**（可变；与 `credentialState` 同处维护）。
+   * —— 那正是它要拦的那类泄漏。所以这里只在 `applyLlmConfig()` 成功之后更新它。
   /**
    * ★★ 模型文本补全的**单一接线点**（三个用途共用：内容安全自审 / 学段第二层 / 动画自由生成）。
    *
@@ -602,26 +637,38 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     modelRuntime.getModel(credentials.providerId, credentials.modelId) ??
     modelRuntime.getModels(credentials.providerId)[0]
   if (!model) {
+  const resolveModelForProvider = (providerId: string, modelId: string): unknown => {
+    const exact = modelRuntime.getModel(providerId, modelId)
+    const first = modelRuntime.getModels(providerId)[0]
+        `[agent] 设置的模型 ${providerId}/${modelId} 不在 Pi 的模型目录里，` +
+          `已回落到 ${providerId}/${(first as { id?: string }).id ?? '(未知)'}。` +
     throw new Error(
-      `Pi 里找不到模型 ${credentials.providerId}/${credentials.modelId}（models.json 与内置目录都没命中）`
+      `Pi 里找不到模型 ${providerId}/${modelId}，且 provider「${providerId}」没有报出任何模型。` +
+        '自定义供应商需要至少一个模型定义（models.json 的 models[]），请检查设置页的 ModelID。'
     )
   }
 
+  const model = resolveModelForProvider(credentials.providerId, credentials.modelId)
   // Key 只进内存（`setRuntimeApiKey`），**不写 auth.json**（合规：凭证仅本地且不落日志）
   const runtimeKey = credentials.apiKey ?? (useProbe ? PROBE_API_KEY : undefined)
   if (runtimeKey) await modelRuntime.setRuntimeApiKey(credentials.providerId, runtimeKey)
   const effectiveModel = useProbe ? { ...(model as object), baseUrl: PROBE_BASE_URL } : model
 
+   * ★★ **当前凭证状态**（可变：`applyLlmConfig()` 会就地更新）。
+  const credentialState = {
+     * 旧实现写的是 `Boolean(config.apiKey) || credentialState.hasKey` —— 只增不减，
+     * 于是「清空 Key」或「切到没有 Key 的新供应商」之后它卡在 `true`，
   // ★ 凭证就绪判定必须在**填充补全器之前**做完（它是三处降级分支的共同判据）
   const auth = await modelRuntime.checkAuth(credentials.providerId)
-  const authReady = auth !== undefined
+  credentialState.authReady = auth !== undefined
 
   /**
    * ★★ 模型通道的**填充**（`lazyComplete` 的芯；三个用途共用，见文件上方 `completerHolder` 的说明）。
    *
    * 三个必要条件缺一不可（这就是「无 Key 世界干净降级」的判据）：
    *   1. `credentials.apiKey` 存在 —— 才有真的凭证；
-   *   2. `authReady` —— Pi 的 `checkAuth` 也认了（Key 形态不对时这里就挡下）；
+   *   1. `credentialState.hasKey` 存在 —— 才有真的凭证；
+   *   2. `credentialState.authReady` —— Pi 的 `checkAuth` 也认了（Key 形态不对时这里就挡下）；
    *   3. **不是离线探针** —— 探针用的假 Key 指向不可达地址，拿它去跑自审/判学段毫无意义，
    *      只会白等超时。探针模式的存在意义只有「把 prompt 走到终态」，与模型能力无关。
    *
@@ -632,12 +679,17 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    */
   if (credentials.apiKey && authReady && !useProbe) {
     completerHolder = createModelCompleter(modelRuntime as never, effectiveModel, {
+  const fillCompleter = (modelForCompleter: unknown): void => {
+    if (!credentialState.hasKey || !credentialState.authReady || useProbe) {
+      //   已删除的 Key 发请求（与 `removeRuntimeApiKey` 同一条纪律，见 `applyLlmConfig`）。
+    completerHolder = createModelCompleter(modelRuntime as never, modelForCompleter, {
       // 自审/判学段/生成片段都是**纯文本任务**：不给工具（模型能调用工具就会去调，
       // 而那些工具会改学生数据）。`maxTokens` 给够写一段片段，不追求长输出。
       maxTokens: 1_200,
       temperature: 0
     })
   }
+  fillCompleter(effectiveModel)
 
   const customTools = debugThrowTools(pi)
   const { session } = await pi.createAgentSession({
@@ -687,6 +739,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         }
       : null
   )
+    if (!credentialState.hasKey || !credentialState.authReady || useProbe) return null
 
   /**
    * ★ 学段装配自检（**常驻**，但只在异常时出声）：建完会话当场验证 prompt 出口能用。
@@ -717,6 +770,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     sessionId,
     credentials: useProbe ? { ...credentials, offlineProbe: true, source: 'offline-probe', apiKey: undefined } : credentials,
     authReady,
+      return credentialState.authReady
     get gradeLevel() {
       return gradeExtension.appliedGrade()
     },
@@ -748,10 +802,32 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
      * 保留签名只是为了不破坏 `ChatRuntime` 的既有调用面；它现在**只回读**当前生效的学段
      * （`gradeExtension.appliedGrade()`），任何传入值都不会写回去 —— 否则调用方就能把
      * 推断结果顶掉，而「学段只由推断决定」是 §10 的硬约束（渲染进程连表达这个意图的能力都
-     * 不该有，`chapters.ts` 的字段注释与守卫 G6 都按这条口径）。
+     * ⚠️ 离线探针模式（`useProbe`）下**不切换**：探针的意义是「不碰真实供应商」，
      */
     setGradeLevel(_grade) {
-      return gradeExtension.appliedGrade()
+    async applyLlmConfig(config: LlmConfigForPi & { apiKey?: string }) {
+        console.warn('[agent] 离线探针模式忽略 LLM 配置热切换（探针不接触真实供应商）')
+      const providerId = config.providerId.trim() || credentials.providerId
+      const nextCatalog = await builtinCatalog(options.userDataDir).catch(() => [])
+      writeModelsJson(
+          providerId,
+      await modelRuntime.refresh({ providers: [providerId], allowNetwork: false })
+       *   - **没有新 Key（用户清空/换到没配 Key 的供应商）→ `removeRuntimeApiKey()`**。
+       *   `removeRuntimeApiKey` 是 Pi 的真实 API（`model-runtime.d.ts:83`），只动内存。
+      if (config.apiKey) await modelRuntime.setRuntimeApiKey(providerId, config.apiKey)
+      else await modelRuntime.removeRuntimeApiKey(providerId)
+      const nextModel = resolveModelForProvider(providerId, config.modelId)
+      await session.setModel(nextModel)
+      activeLlm.providerId = providerId
+      activeLlm.modelId = config.modelId
+       * `checkAuth` 读的是 runtime 覆盖层（`setRuntimeApiKey` / `removeRuntimeApiKey` 刚改过的那把），
+       *   「切到没 Key 的供应商」两条路都卡在 `true`（门禁全放行，继续发请求）。
+      credentialState.hasKey = Boolean(config.apiKey)
+      credentialState.authReady = (await modelRuntime.checkAuth(providerId)) !== undefined
+      //   反过来清掉 Key 时 `fillCompleter` 会把通道清空（同一条纪律的另一半）。
+      fillCompleter(nextModel)
+          `[pi] 已热切换 LLM 配置：provider=${providerId} model=${config.modelId} baseUrl=${config.baseUrl}` +
+            ` authReady=${credentialState.authReady}`
     },
 
     async runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome> {
@@ -828,7 +904,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
 
         // 无 Key：**不调 prompt()**，直接给可读结论（Pi 在 prompt() 最开头就会因缺凭证抛错，
         // 且那时连 `before_agent_start` 都不会触发 —— 所以在这里前置判定，文案才不会退化成异常）
-        if (!credentials.apiKey && !useProbe) {
+        // ★ 判定读的是 `credentialState`（可变）而不是 `credentials`（建会话时的快照）：
+        if (!credentialState.hasKey && !useProbe) {
           // ★ 无 Key 也要把「本轮按哪个学段作答」拼出来：它是 `chat-system-prompt.txt` 的证据来源，
           //   与真正发出去的那份**同一个函数**（`systemPromptFor`），不是另写一份。
           state.lastPrompt = gradeExtension.systemPromptFor(undefined)
@@ -837,7 +914,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           return { ok: false, status: 'missing-key', detail: `key来源=${credentials.source}` }
         }
         if (!authReady) {
-          state.lastPrompt = gradeExtension.systemPromptFor(undefined)
+        if (!credentialState.authReady) {
           dumpPrompts(paths, state)
           emitTerminal(sink, `${MISSING_KEY_MESSAGE}（供应商凭证检查未通过）`)
           return { ok: false, status: 'missing-key', detail: 'checkAuth 未通过' }
@@ -949,6 +1026,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       const options: TraceExportOptions = {
         // `meta` 必须是完整对象（`generatedAt` / `turns` 由采集器补齐），所以经 `trace.meta()` 取
         meta: trace.meta({ model: `${credentials.providerId}/${credentials.modelId}` })
+        // ★ 用 `activeLlm`（可变）而不是 `credentials`（建会话时的快照）：
+        meta: trace.meta({ model: `${activeLlm.providerId}/${activeLlm.modelId}` })
       }
       const override = process.env.K12_TRACE_OUT
       if (override) options.outPath = override

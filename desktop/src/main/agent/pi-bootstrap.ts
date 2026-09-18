@@ -21,7 +21,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { BASELINE_SYSTEM_PROMPT } from './prompts/baseline.ts'
@@ -36,10 +36,14 @@ import { ensurePiDirs, resolvePiPaths, type PiPaths } from './pi-paths.ts'
 /** Pi 的包名（唯一合法入口）。 */
 export const PI_PACKAGE = '@earendil-works/pi-coding-agent'
 
-/** 默认供应商 / 模型（赛题要求 BaseURL 与 ModelID 均可自填，这里只是默认值）。 */
+/** 默认供应商 / 模型（需求要求 BaseURL 与 ModelID 均可自填，这里只是默认值）。 *
+ * ⚠️ 这三项**必须与 `server/app/contracts.py` 的同名默认值一字不差**：
+ * 服务端默认值经 `GET /api/settings/runtime` 喂进来，这里只是「拿不到服务端配置时」的兜底。
+ * `deepseek-v4-flash` 是 Pi 内置 deepseek 目录里真实存在的模型 —— 老默认值 `deepseek-chat`
+ * **不在**目录里，会让首轮对话直接抛「Pi 里找不到模型」（实测踩到，见 pitfalls.md）。 */
 export const DEFAULT_PROVIDER_ID = 'deepseek'
 export const DEFAULT_MODEL_ID = 'deepseek-v4-flash'
-/** ★ Pi 内置 DeepSeek provider 的 baseUrl **没有 `/v1`**；前端默认值带 `/v1`，两者都要能连通。 */
+/** ★ Pi 内置 DeepSeek provider 的 baseUrl **没有 `/v1`**（前端提示文案仍会告诉你另一种写法）。 */
 export const DEFAULT_BASE_URL = 'https://api.deepseek.com'
 
 /** 环境变量名（Key 解析链的第三档）。 */
@@ -56,9 +60,12 @@ const ENV_KEY_NAMES = ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY']
  * 在内存里换成 `http://127.0.0.1:9/v1`（保留端口 9 = discard，必然连接被拒）。
  * 这样：`before_agent_start` 正常触发 → system prompt 走到终态 → 请求在**本地**连接失败。
  * **不接触任何真实供应商、不写盘、不伪造任何响应。**
+ *
+ * ★ 导出给 `runtime.ts` 用（`PROBE_API_KEY` / `PROBE_BASE_URL` 是**同一份**常量）：
+ *   两处各写一遍字面量会漂移（改了一边、另一边还是旧值，探针就不指向同一个不可达地址了）。
  */
-const PROBE_API_KEY = 'offline-probe-no-real-key'
-const PROBE_BASE_URL = 'http://127.0.0.1:9/v1'
+export const PROBE_API_KEY = 'offline-probe-no-real-key'
+export const PROBE_BASE_URL = 'http://127.0.0.1:9/v1'
 
 export interface PiCredentials {
   providerId: string
@@ -66,8 +73,8 @@ export interface PiCredentials {
   baseUrl: string
   /** 解析到的 Key；`undefined` 表示「没有 Key」——**这不是加载失败**，要分开报。 */
   apiKey?: string
-  /** Key 从哪来，用于排查（`--api-key` / `auth.json` / 环境变量 / `models.json` / 离线探针 / 无）。 */
-  source: 'flag' | 'auth.json' | 'env' | 'models.json' | 'offline-probe' | 'none'
+  /** Key 从哪来，用于排查（设置页 / `--api-key` / `auth.json` / 环境变量 / `models.json` / 离线探针 / 无）。 */
+  source: 'settings' | 'flag' | 'auth.json' | 'env' | 'models.json' | 'offline-probe' | 'none'
   /** 本轮用的是离线探针（假 Key + 不可达 baseUrl），**没有真实请求发出**。 */
   offlineProbe?: boolean
 }
@@ -138,33 +145,222 @@ export function extractWireSystemPrompt(payload: unknown): string | undefined {
 }
 
 /* ------------------------------------------------------------------ *
- * models.json：让 BaseURL / ModelID 可自填（赛题硬要求）
+ * ★ Pi 内置供应商目录：预设端点 / 模型清单的唯一来源
  * ------------------------------------------------------------------ */
 
+/** 目录里的一个模型（只取我们要用的字段；值原样来自 Pi 的内置目录）。 */
+export interface CatalogModel {
+  id: string
+  name?: string
+  baseUrl?: string
+  reasoning?: boolean
+  thinkingLevelMap?: unknown
+  input?: unknown
+  cost?: unknown
+  contextWindow?: number
+  maxTokens?: number
+  compat?: unknown
+}
+
+/** 目录里的一个供应商（`models` 顺序即 Pi 的目录顺序）。 */
+export interface CatalogProvider {
+  id: string
+  name: string
+  baseUrl?: string
+  models: CatalogModel[]
+}
+
+/** 进程级缓存（按 userDataDir 分键：目录是静态数据，但目录隔离要求我们不共用一个临时根）。 */
+const catalogCache = new Map<string, Promise<CatalogProvider[]>>()
+
 /**
- * 首次运行时写入本应用自己的 `models.json`。
- * - **幂等**：已存在就一个字节都不动（用户/设置页改过的不能被覆盖）。
- * - 走 `providers.<id>` + `models[].id`；只覆盖 baseUrl/apiKey，内置模型仍然保留（Pi 是 upsert 语义）。
+ * ★★ Pi 内置供应商目录（**离线**，本机实测 40 个 provider）。
+ *
+ * 做法：建一个 catalog-only 的 `ModelRuntime`：
+ *   - `modelsPath: null` —— **不读本应用的 `models.json`**（我们要的就是纯净的内置目录）；
+ *   - `allowModelNetwork: false` + `refreshOnCreate: false` —— **不联网**，离线演示也能用；
+ *   - `authPath` 显式指向**本应用自己的目录**下的一个 scratch 路径 ——
+ *     `ModelRuntime.create` 会创建它（实测：会落一个空的 `auth.json`），
+ *     所以**绝不能省略**：省略即退回 `~/.pi/agent/auth.json`，那就碰了用户的全局 Pi 配置
+ *     （AGENTS §5.12 的硬约束，`pi-paths.ts` 的隔离断言也守着这条）。
+ *
+ * 用途（两处，见 `buildModelsJsonConfig` 与设置页的预设下拉）：
+ *   1. 判断「这个 provider 是不是内置的」、「这个 modelId 在不在内置目录里」；
+ *   2. 作为设置页「供应商预设」的下拉数据源（端点地址现成可用，不用手输）。
+ *
+ * 失败**不缓存**（下次可重试）；成功则进程内复用（目录不会变）。
  */
-export function ensureModelsJson(paths: PiPaths, baseUrl = DEFAULT_BASE_URL, modelId = DEFAULT_MODEL_ID): boolean {
-  if (existsSync(paths.modelsPath)) return false
-  const config = {
-    providers: {
-      [DEFAULT_PROVIDER_ID]: {
-        baseUrl,
-        api: 'openai-completions',
-        // 允许用环境变量占位（Pi 会把 $VAR 展开）；没有 Key 时这里只是个占位符，不会联网。
-        apiKey: '$DEEPSEEK_API_KEY',
-        models: [{ id: modelId, name: modelId }]
-      }
+export function builtinCatalog(userDataDir: string): Promise<CatalogProvider[]> {
+  const existing = catalogCache.get(userDataDir)
+  if (existing) return existing
+
+  const pending = (async (): Promise<CatalogProvider[]> => {
+    const pi = await loadPi()
+    const paths = resolvePiPaths(userDataDir)
+    // ⚠️ 专门的 scratch 子目录：不与应用会话的 auth.json / models.json 混在一起。
+    const scratch = join(paths.logDir, 'provider-catalog')
+    mkdirSync(scratch, { recursive: true })
+
+    // `ModelRuntime` 的返回类型在 `PiModuleLike` 里是刻意松的（只声明我们用到的方法），
+    // 这里就地给出目录读取所需的最小结构面，避免为一个只读用途把整个 `pi-ai` 类型图拖进来。
+    const runtime = (await pi.ModelRuntime.create({
+      authPath: join(scratch, 'auth.json'),
+      modelsPath: null,
+      allowModelNetwork: false,
+      refreshOnCreate: false
+    })) as unknown as {
+      getProviders(): Array<{ id: string; name?: string; baseUrl?: string }>
+      getModels(providerId?: string): CatalogModel[]
     }
+
+    return runtime.getProviders().map((provider) => ({
+      id: String(provider.id),
+      name: String(provider.name ?? provider.id),
+      baseUrl: typeof provider.baseUrl === 'string' ? provider.baseUrl : undefined,
+      models: runtime.getModels(provider.id).map((model) => ({
+        id: String(model.id),
+        name: String(model.name ?? model.id),
+        baseUrl: typeof model.baseUrl === 'string' ? model.baseUrl : undefined,
+        reasoning: typeof model.reasoning === 'boolean' ? model.reasoning : undefined,
+        thinkingLevelMap: model.thinkingLevelMap,
+        input: model.input,
+        cost: model.cost,
+        contextWindow: typeof model.contextWindow === 'number' ? model.contextWindow : undefined,
+        maxTokens: typeof model.maxTokens === 'number' ? model.maxTokens : undefined,
+        compat: model.compat
+      }))
+    }))
+  })()
+
+  catalogCache.set(userDataDir, pending)
+  pending.catch(() => {
+    // 失败别把坏结果留在缓存里（否则一次网络抖动就永久失效）
+    if (catalogCache.get(userDataDir) === pending) catalogCache.delete(userDataDir)
+  })
+  return pending
+}
+
+/**
+ * ★ 单测/诊断用的目录缓存清理 —— **已删除**。
+ *
+ * 删它的理由（不是「没人用」，是它本身有害）：`builtinCatalog()` 的缓存键是 `userDataDir`，
+ * 而清掉缓存只影响「下一次重新读目录」，对任何一条真实链路都没有作用；
+ * 保留它反而鼓励「测试里清一下缓存掩盖状态残留」这种写法。
+ * 真需要重读目录时重开一个 `userDataDir`（测试本来就是这么做的）。
+ */
+
+/* ------------------------------------------------------------------ *
+ * models.json：由**设置**派生（不再是「幂等不覆盖」的文件）
+ * ------------------------------------------------------------------ */
+
+/** 一份「要喂给 Pi」的 LLM 配置（字段名与 `LlmRuntimeConfig` 契约对齐）。 */
+export interface LlmConfigForPi {
+  providerId: string
+  providerName: string
+  baseUrl: string
+  modelId: string
+}
+
+/**
+ * ★★ 把设置里的 LLM 配置**翻译成 Pi 的 `models.json`**（纯函数，可单测）。
+ *
+ * 为什么必须走 `models.json`：BaseURL / ModelID 自填是需求硬性要求，
+ * 而 Pi 只认 `providers.<id>` + `models[].id` 这一套。
+ *
+ * ★★ 三条**读源码 + 实测**得出的规则（改动前务必看懂，踩过的坑见 pitfalls.md）：
+ *
+ *   1. **provider 是内置的、且 modelId 也在内置目录里** → **只写 provider 级 `baseUrl`**，
+ *      **不写 `models[]`**。
+ *      理由：`provider-composer.js` 的 `applyModelsJson()` 在 `config.models` 里遇到
+ *      **已存在的 id** 时会**整个替换**那条模型（`modelFromJson()` 只 merge
+ *      provider 级与 definition 自身的 compat，**不含被替换模型自己的 compat**）。
+ *      实测：给 deepseek 写一条 `{id:'deepseek-v4-flash'}` 会把内置的
+ *      `reasoning:true` / `compat.thinkingFormat:"deepseek"` **静默抹掉** ——
+ *      模型看起来还在，推理与思考格式却没了。只改 provider 级 baseUrl 则原样保留（已实测）。
+ *
+ *   2. **provider 是内置的、但 modelId 不在内置目录里**（例如老配置里的 `deepseek-chat`）
+ *      → 追加 `models[]` 声明它，并**从同 provider 的兄弟模型抄字段**
+ *      （reasoning / thinkingLevelMap / input / cost / contextWindow / maxTokens / compat）。
+ *      不抄的话，新模型只有默认值（`reasoning:false`、contextWindow 128k、无 deepseek 思考格式），
+ *      同一 provider 下两个模型的行为会莫名其妙地不一致。实测：抄完 compat 正确，
+ *      且**不会**连累已有的内置条目。
+ *
+ *   3. **provider 不是内置的**（校内网关 / 自建服务，需求要求支持）
+ *      → 必须写 `models[]`：Pi 对没有任何内置定义的 provider 要求至少给出
+ *      `baseUrl`/`headers`/`compat`/`modelOverrides`/`models` 之一，否则整个 provider
+ *      组装失败（`must specify "baseUrl", …`）。没有 `models[]` 时 `getModels()` 为空，
+ *      `getModel()` 必然返回 undefined → 第一轮对话直接抛「Pi 里找不到模型」。
+ *
+ * ★ **绝不写任何 API Key**：Key 一律经 `setRuntimeApiKey()` 只进内存（合规要求）。
+ *   这里也不写 `apiKey: '$ENV'` 之类的占位 —— 内置 provider 自带自己的环境变量认证，
+ *   自定义 provider 的环境变量名我们无从得知，写了反而是误导。
+ */
+export function buildModelsJsonConfig(
+  config: LlmConfigForPi,
+  catalog: readonly CatalogProvider[]
+): { providers: Record<string, Record<string, unknown>> } {
+  const providerId = config.providerId.trim() || DEFAULT_PROVIDER_ID
+  const builtin = catalog.find((provider) => provider.id === providerId)
+
+  const providerName = config.providerName.trim() || builtin?.name || providerId
+  const modelId = config.modelId.trim()
+  // 端点取值顺序：设置里填的 > 该 provider 的内置端点 > 全局默认。
+  const baseUrl = config.baseUrl.trim() || builtin?.baseUrl || DEFAULT_BASE_URL
+
+  const entry: Record<string, unknown> = {
+    name: providerName,
+    baseUrl,
+    api: 'openai-completions'
   }
-  writeFileSync(paths.modelsPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
-  return true
+
+  const isBuiltinModel = builtin?.models.some((model) => model.id === modelId) ?? false
+  if (modelId && !isBuiltinModel) {
+    // 规则 2 / 3：非内置 id 必须显式声明（内置 provider 则从兄弟模型抄字段）
+    const sibling = builtin?.models[0]
+    const definition: Record<string, unknown> = { id: modelId, name: modelId, api: 'openai-completions', baseUrl }
+    if (sibling) {
+      // 只抄「有值」的字段，别把 undefined 也写成 JSON 的 null（Pi 的 schema 不收 null）
+      if (sibling.reasoning !== undefined) definition.reasoning = sibling.reasoning
+      if (sibling.thinkingLevelMap !== undefined) definition.thinkingLevelMap = sibling.thinkingLevelMap
+      if (sibling.input !== undefined) definition.input = sibling.input
+      if (sibling.cost !== undefined) definition.cost = sibling.cost
+      if (sibling.contextWindow !== undefined) definition.contextWindow = sibling.contextWindow
+      if (sibling.maxTokens !== undefined) definition.maxTokens = sibling.maxTokens
+      if (sibling.compat !== undefined) definition.compat = sibling.compat
+    }
+    entry.models = [definition]
+  }
+
+  return { providers: { [providerId]: entry } }
+}
+
+/**
+ * 把设置派生的配置**写进** `models.json`（原子写：临时文件 + rename）。
+ *
+ * ★★ 语义与历史上的 `ensureModelsJson` **相反**，这是有意的：
+ *   旧版本「文件存在就一个字节都不动」，本意是「不覆盖用户手改的配置」；
+ *   但那让**设置页改了什么都进不去 Pi**（`models.json` 成了首次运行后永不更新的死值）。
+ *   现在 `models.json` 是**由设置派生的产物**（settings 是唯一权威），每次建会话 /
+ *   保存设置都重写。要手改配置请改设置页 —— 那也是 `config.json` 的唯一写入口。
+ *
+ * 返回写入的文本（诊断与断言用）。
+ */
+export function writeModelsJson(
+  paths: PiPaths,
+  config: LlmConfigForPi,
+  catalog: readonly CatalogProvider[]
+): string {
+  const text = `${JSON.stringify(buildModelsJsonConfig(config, catalog), null, 2)}\n`
+  mkdirSync(paths.agentDir, { recursive: true })
+  // 原子写：半截 JSON 会让 ModelRuntime 整个加载失败（而它只是配置文件，不该拦住应用启动）
+  const temp = `${paths.modelsPath}.tmp`
+  writeFileSync(temp, text, 'utf8')
+  renameSync(temp, paths.modelsPath)
+  return text
 }
 
 /* ------------------------------------------------------------------ *
- * Key 解析链：--api-key → auth.json → 环境变量 → models.json
+ * Key 解析链：设置页 > --api-key → auth.json → 环境变量 → models.json
  * ------------------------------------------------------------------ */
 
 /**
@@ -185,14 +381,14 @@ interface PersistedProviderConfig {
   models?: Array<{ id?: string }>
 }
 
-/** 读本应用自己的 `models.json`（解析失败一律当「没有」，**绝不**伪装成加载失败）。 */
-function readModelsJson(paths: PiPaths): PersistedProviderConfig | undefined {
+/** 读本应用自己的 `models.json` 里某个 provider 的配置（解析失败一律当「没有」，绝不伪装成加载失败）。 */
+function readModelsJson(paths: PiPaths, providerId: string): PersistedProviderConfig | undefined {
   if (!existsSync(paths.modelsPath)) return undefined
   try {
     const config = JSON.parse(readFileSync(paths.modelsPath, 'utf8')) as {
       providers?: Record<string, PersistedProviderConfig>
     }
-    return config.providers?.[DEFAULT_PROVIDER_ID]
+    return config.providers?.[providerId]
   } catch {
     return undefined
   }
@@ -201,19 +397,29 @@ function readModelsJson(paths: PiPaths): PersistedProviderConfig | undefined {
 /**
  * 解析本次会话要用的 provider / model / baseUrl / key。
  *
- * 优先级（**冻结**：票 05 设置页与票 03 冒烟都依赖这两条）：
- *   - BaseURL / ModelID：**显式入参 > `models.json`（设置页持久化的那份）> 环境变量 > 内置默认**。
+ * 优先级（**冻结**：设置页、冒烟脚本与 `runtime.ts` 都依赖这几条）：
+ *   - providerId：**显式入参 > 内置默认**。它决定用哪一份 provider 定义（认证 / 目录 / 协议）。
+ *   - BaseURL / ModelID：**显式入参 > `models.json` > 环境变量 > 内置默认**。
  *     ⚠️ 显式入参必须能压过 `models.json` —— 否则「运行期改 BaseURL」根本不生效
  *     （票 03 的冒烟正是靠这条把请求指向本地桩；改前实测踩到过：请求被 models.json
  *     里的 `https://api.deepseek.com` 顶掉，于是拿着桩用的假 Key 打了真实供应商）。
- *   - API Key：CLI `--api-key` → `auth.json` → 环境变量 → `models.json`（执行文档 §9.4 第 3 条）。
+ *   - API Key：**设置页（经由 `apiKeySource:'settings'` 显式标注）** → CLI `--api-key`
+ *     → `auth.json` → 环境变量 → `models.json`（执行文档 §9.4 第 3 条）。
+ *     后四档是「设置页还没配 Key」时的兜底；真正拍板的是 Pi 自己的 `checkAuth()`。
  */
 export function resolveCredentials(
   paths: PiPaths,
-  options: { apiKey?: string; modelId?: string; baseUrl?: string } = {}
+  options: {
+    apiKey?: string
+    providerId?: string
+    modelId?: string
+    baseUrl?: string
+    /** `apiKey` 从哪来：设置页或 CLI 参数。只影响诊断与 `source` 标签。 */
+    apiKeySource?: 'settings' | 'flag'
+  } = {}
 ): PiCredentials {
-  const providerId = DEFAULT_PROVIDER_ID
-  const persisted = readModelsJson(paths)
+  const providerId = options.providerId?.trim() || DEFAULT_PROVIDER_ID
+  const persisted = readModelsJson(paths, providerId)
   const modelId = options.modelId ?? persisted?.models?.[0]?.id ?? resolveDefaultModelId()
   const baseUrl = options.baseUrl ?? persisted?.baseUrl ?? resolveDefaultBaseUrl()
   let apiKey: string | undefined
@@ -221,10 +427,10 @@ export function resolveCredentials(
 
   if (options.apiKey) {
     apiKey = options.apiKey
-    source = 'flag'
+    source = options.apiKeySource ?? 'flag'
   }
 
-  // ── Key 解析链：CLI --api-key → auth.json → 环境变量 → models.json ──
+  // ── Key 解析链（设置页之后的四档兜底）──
   if (!apiKey && existsSync(paths.authPath)) {
     try {
       const auth = JSON.parse(readFileSync(paths.authPath, 'utf8')) as Record<string, unknown>
@@ -289,6 +495,45 @@ export function findHostPathLeaks(prompt: string, extraPatterns: string[] = []):
   return leaks
 }
 
+/**
+ * ★★ 抹掉 Pi **无条件追加**在 system prompt 末尾的 cwd 环境块。
+ *
+ * 为什么必须有它（实测 0.85.1 读源码 + 真机验证，见 `dist/core/system-prompt.js`）：
+ *   `buildSystemPrompt()` 在 `customPrompt` 分支的**最后一行**执行
+ *
+ *       prompt += `\nCurrent working directory: ${promptCwd}\n`
+ *
+ *   —— **`systemPromptOverride` 只管住默认 prompt，管不住这一行**。于是即便我们两道都覆盖了，
+ *   会话状态里的 prompt 仍然是「四学段模板 + Current working directory: C:/Users/<用户名>/…」，
+ *   而 `before_provider_request` 取出来的**就是要发给云端模型的那几个字节**：
+ *   宿主安装路径与 Windows 用户名真的会出网（Pi issue #6308 的真实形态）。
+ *   连带后果：`runTurn()` 结尾的 `findHostPathLeaks` 断言**必然非空** → 每一轮都被记成
+ *   `provider-error`，那条断言从此永远红着，等于失效。
+ *
+ * 语义：**只剥尾巴**。它不解析、不改写 prompt 正文，只在末尾形如
+ *   `\nCurrent working directory: <非换行内容>`（可能带一个结尾换行）时把它去掉；
+ * 认不出就**原样返回**（绝不猜测、绝不误删正文里的其它内容）。
+ *
+ * 调用点：`runtime.ts` 的 `before_agent_start` —— 在把 prompt 交给学段出口
+ * （`gradeExtension.systemPromptFor`）**之前**先过这里，所以扩展侧收到的已经是干净的字符串
+ * （扩展自己那条 `bare.includes(target) ? bare : …` 分支不会再把 cwd 留下来）。
+ *
+ * @param prompt `before_agent_start` 事件里的 `systemPrompt`（= Pi 拼完的基座 prompt）
+ * @returns 去掉 cwd 尾块后的 prompt（没有该尾块时逐字返回原值）
+ */
+export function stripPiCwdBlock(prompt: string): string {
+  if (typeof prompt !== 'string' || prompt.length === 0) return prompt
+  let out = prompt
+  // 循环是防御性的：append 段/技能段理论上不会重复追加，但真重复时不该留一半。
+  // 上限 4 次足够（一次拼装最多追加一次），避免任何病态输入上的死循环。
+  for (let i = 0; i < 4; i += 1) {
+    const next = out.replace(/\nCurrent working directory:[^\n]*\n?$/i, '')
+    if (next === out) break
+    out = next
+  }
+  return out
+}
+
 /* ------------------------------------------------------------------ *
  * 会话装配
  * ------------------------------------------------------------------ */
@@ -335,6 +580,8 @@ interface PiAuthCheck {
 interface PiModelRuntime {
   getModel(providerId: string, modelId: string): unknown
   getModels(providerId?: string): unknown[]
+  /** 目录用（`builtinCatalog`）：列出全部 provider。 */
+  getProviders(): Array<{ id: string; name?: string; baseUrl?: string }>
   checkAuth(providerId: string): Promise<PiAuthCheck | undefined>
   setRuntimeApiKey(providerId: string, apiKey: string): Promise<void>
 }
@@ -386,10 +633,16 @@ export function piEntryPath(): string | undefined {
 export interface CreatePiSessionOptions {
   /** ★ 必须显式传入（Electron 里是 `app.getPath('userData')`）；禁止回退 `~/.pi`。 */
   userDataDir: string
-  /** Key 解析链第一档（CLI `--api-key`）。 */
+  /** Key 解析链第一档（设置页 / CLI `--api-key`）。 */
   apiKey?: string
+  /** `apiKey` 的来源标签（设置页 vs CLI 参数），只影响 `credentials.source` 诊断。 */
+  apiKeySource?: 'settings' | 'flag'
+  /** ★ Pi 的 provider id（设置里的那一项）；不传则用内置默认。 */
+  providerId?: string
   modelId?: string
   baseUrl?: string
+  /** 供应商显示名（只写进 `models.json` 的 `name`，用于 Pi 侧排查；填什么都行）。 */
+  providerName?: string
   /** 会话工作目录（决定 Pi 的项目级资源发现范围）。 */
   cwd?: string
   /**
@@ -410,12 +663,25 @@ export interface CreatePiSessionOptions {
 export async function createPiSession(options: CreatePiSessionOptions): Promise<PiSessionHandle> {
   const paths = resolvePiPaths(options.userDataDir)
   ensurePiDirs(paths)
-  // 首次运行写入的默认值必须与「本次真正要用的那个」一致（含 K12_BASE_URL 覆盖），
-  // 否则会出现「落盘的默认值把本次覆盖顶掉」这种自相矛盾（票 03 实测踩到过）。
-  ensureModelsJson(paths, resolveDefaultBaseUrl(options.baseUrl), resolveDefaultModelId(options.modelId))
+
+  // ★ `models.json` 由**设置**派生（见 `writeModelsJson` 的语义说明）。
+  //   拿不到内置目录时退化成「只写 provider 级 baseUrl」，不影响可用性。
+  const catalog = await builtinCatalog(options.userDataDir).catch(() => [])
+  writeModelsJson(
+    paths,
+    {
+      providerId: options.providerId?.trim() || DEFAULT_PROVIDER_ID,
+      providerName: options.providerName?.trim() || '',
+      baseUrl: resolveDefaultBaseUrl(options.baseUrl),
+      modelId: resolveDefaultModelId(options.modelId)
+    },
+    catalog
+  )
 
   const credentials = resolveCredentials(paths, {
     apiKey: options.apiKey,
+    apiKeySource: options.apiKeySource,
+    providerId: options.providerId,
     modelId: options.modelId,
     baseUrl: options.baseUrl
   })

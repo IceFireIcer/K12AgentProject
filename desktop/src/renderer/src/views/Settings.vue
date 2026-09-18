@@ -7,29 +7,73 @@
  *   → 主进程 IPC 处理器 → `PUT /api/settings` / `POST /api/settings/probe`
  *
  * 界面纪律（与票 07 的自测项一一对应）：
- * - **供应商名称 / BaseURL / APIKey / ModelID 全部可改**（赛题硬要求，不得写死某一家）；
+ * - **供应商名称 / BaseURL / APIKey / ModelID 全部可改**（需求硬性要求，不得写死某一家）；
  * - Key 是**密码框且永不回填掩码**：只显示「已配置 …abcd / 未配置」，留空即沿用已存 Key；
  * - 探测结果（成功或失败原因）内联展示，**失败也能保存**（离线场景）；
  * - BaseURL 的 `/v1` 差异写在输入框下面，不靠用户猜。
  */
-import { computed, onMounted } from 'vue'
-import { GRADE_UNKNOWN_LABEL } from '../labels'
-import { EMBEDDING_MODE_LABELS, type EmbeddingMode } from '../api/settings'
+import { computed, onMounted, ref, watch } from 'vue'
+import { EMBEDDING_MODE_LABELS, MANUAL_PRESET_ID, type EmbeddingMode } from '../api/settings'
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
 import { useSidecarStore } from '../stores/sidecar'
+import { useStudyStore } from '../stores/study'
 
 const sidecar = useSidecarStore()
 const chat = useChatStore()
 const settings = useSettingsStore()
+const study = useStudyStore()
 
 const EMBEDDING_MODES: readonly EmbeddingMode[] = ['local_fastembed', 'cloud_api', 'none']
 
 const probeTitle = computed(() => (settings.probeAt ? `探测结果（${settings.probeAt}）` : '探测结果'))
 const cloudEmbedding = computed(() => settings.embedding.mode === 'cloud_api')
 
+ *
+ *   各自写一份写路径的话，迟早出现「在设置页改了、顶栏指示器还显示旧值」——
+ *   学生据此判断改没改成，一处不同步就等于告诉他没改成。
+ * ★ 这里只传「学生选了什么」：生效逻辑（写库 + 冷却 10 轮）在服务端，前端不推断、不预判。
+ */
+
+  try {
+  } finally {
+  }
+}
+
+ *
+ */
+
+  try {
+  } finally {
+  }
+}
+
+/**
+ */
+watch(
+  (level, previous) => {
+  }
+)
+
+/**
+ * 预设下拉下面的说明：三种状态各说各的，**不要一句话打天下**。
+ *   - 目录还在读 → 说清「正在读什么」，而不是让下拉空着看起来像坏了；
+ *   - 目录读失败 → 给可读原因并明说「手填不受影响」（预设只是便利，不是前置条件）；
+ *   - 正常 → 告诉用户预设会带出哪些字段（端点与模型名，不含 Key）。
+ */
+const presetHintText = computed(() => {
+  if (settings.catalogError) {
+    return `${settings.catalogError}（可以继续手填 BaseURL 与 ModelID，功能不受影响。）`
+  }
+  if (settings.loadingCatalog) return '正在读取 Pi 内置的供应商清单…'
+  if (settings.catalog.length === 0) return '没有读到 Pi 内置预设：请手动填写下面的 BaseURL、ModelID 与供应商 ID。'
+  return `共 ${settings.catalog.length} 个内置预设。选中会把端点地址与首选模型名带出来（Key 不会被动）。`
+})
+
 onMounted(() => {
+  // 两条并行：设置的读写与预设清单互不依赖，谁先回来都能先渲染
   void settings.load()
+  void settings.loadCatalog()
 })
 </script>
 
@@ -42,7 +86,7 @@ onMounted(() => {
     </header>
 
     <p class="lead">
-      模型供应商四项都可以自己填（不锁定任何一家）：填完点「保存并探测」，应用会**真的**去调一次该地址，
+      模型供应商四项都可以自己填（不锁定任何一家）：填完点「保存并探测」，应用会<strong>真的</strong>去调一次该地址，
       把成功或失败原因显示在下面。配置只存在这台电脑上，API Key 不外传、不写日志、界面上永远只显示掩码。
     </p>
 
@@ -59,7 +103,48 @@ onMounted(() => {
     <!-- ─────────────────────────── 模型供应商 ─────────────────────────── -->
     <form class="card" data-testid="settings-llm" @submit.prevent="settings.save()">
       <h3 class="card__title">模型供应商</h3>
-      <p class="card__lead">四项都自填：供应商名称只用于显示，真正决定调用的是 BaseURL / ModelID / APIKey。</p>
+      <p class="card__lead">
+        可以从预设里挑一个（端点地址与模型清单都是现成的），也可以完全手填。四项都自填，
+        不锁定任何一家服务。
+      </p>
+
+      <div class="field">
+        <label class="field__label" for="llm-preset">供应商预设</label>
+        <select
+          id="llm-preset"
+          class="field__input"
+          data-testid="settings-llm-preset"
+          :value="settings.presetValue"
+          :disabled="settings.busy || settings.catalog.length === 0"
+          @change="settings.applyPreset(($event.target as HTMLSelectElement).value)"
+        >
+          <option :value="MANUAL_PRESET_ID">手动填写（自己填端点与模型名）</option>
+          <option v-for="preset in settings.catalog" :key="preset.id" :value="preset.id">
+            {{ preset.label }}（{{ preset.models.length }} 个模型）
+          </option>
+        </select>
+        <p class="field__hint" data-testid="settings-preset-hint">
+          {{ presetHintText }}
+        </p>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="llm-providerid">供应商 ID</label>
+        <input
+          id="llm-providerid"
+          v-model="settings.draft.providerId"
+          class="field__input"
+          data-testid="settings-llm-providerid"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="例如 deepseek / openai / custom"
+        />
+        <p class="field__hint">
+          这一项<strong>真正决定用哪一套接入方式</strong>（认证、模型目录、协议）：预设会替你填好，
+          自建/校内网关填你自己的 id（例如 <code>custom</code>）即可，字母数字与短横线最稳。
+        </p>
+      </div>
 
       <div class="field">
         <label class="field__label" for="llm-provider">供应商名称</label>
@@ -129,17 +214,60 @@ onMounted(() => {
 
       <div class="field">
         <label class="field__label" for="llm-modelid">ModelID</label>
-        <input
-          id="llm-modelid"
-          v-model="settings.draft.modelId"
-          class="field__input"
-          data-testid="settings-llm-modelid"
-          type="text"
-          spellcheck="false"
-          autocomplete="off"
-          placeholder="例如 deepseek-chat"
-        />
-        <p class="field__hint">必须是该地址支持的模型名；探测结果里如果提示「没有看到这个模型」，先核对这里。</p>
+        <div class="field__row">
+          <input
+            id="llm-modelid"
+            v-model="settings.draft.modelId"
+            class="field__input"
+            data-testid="settings-llm-modelid"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="例如 deepseek-v4-flash"
+          />
+          <button
+            class="btn btn--small"
+            type="button"
+            data-testid="settings-fetch-models"
+            :disabled="settings.busy || settings.fetching"
+            @click="settings.fetchModels()"
+          >
+            {{ settings.fetching ? '拉取中…' : '拉取模型' }}
+          </button>
+        </div>
+        <p class="field__hint">
+          必须是该地址支持的模型名。「拉取模型」会同时给你两份候选：该地址实际报出的清单，
+          以及 Pi 内置目录里该供应商的模型（后者离线也在）。
+        </p>
+
+        <div
+          v-if="settings.modelCandidates.length > 0 && settings.candidatesOpen"
+          class="candidates"
+          data-testid="settings-model-candidates"
+        >
+          <p class="candidates__head">
+            候选模型（点击填入）
+            <span v-if="settings.fetched" class="candidates__source">
+              · {{ settings.fetched.ok ? '含端点实时结果' : '仅 Pi 内置预设' }}
+            </span>
+          </p>
+          <div class="candidates__list">
+            <button
+              v-for="modelId in settings.modelCandidates"
+              :key="modelId"
+              class="chip chip--model"
+              :class="{ 'chip--model-active': modelId === settings.draft.modelId.trim() }"
+              type="button"
+              :data-testid="`settings-model-candidate-${modelId}`"
+              @click="settings.chooseModel(modelId)"
+            >
+              {{ modelId }}
+            </button>
+          </div>
+          <p v-if="settings.fetched" class="candidates__note" data-testid="settings-fetch-message">
+            {{ settings.fetched.message }}
+          </p>
+        </div>
       </div>
 
       <div class="actions">
@@ -259,11 +387,21 @@ onMounted(() => {
               v-if="settings.embeddingKeyStatus !== '未配置'"
               class="btn btn--danger btn--small"
               type="button"
+              data-testid="settings-embedding-clear-key"
               @click="settings.clearStoredEmbeddingKey()"
             >
               清除
             </button>
           </div>
+          <!-- ★ 与 LLM 那条同一口径（H10）：点「清除」必须立刻有可见反馈，
+               否则 chip 仍写着「已配置 …abcd」，用户会以为没生效而反复点。 -->
+          <p
+            v-if="settings.embeddingKeyCleared"
+            class="field__hint field__hint--warn"
+            data-testid="settings-embedding-key-cleared"
+          >
+            保存后已保存的嵌入 Key 会被删除（此操作不可撤销）。
+          </p>
         </div>
 
         <div class="field">
@@ -297,6 +435,52 @@ onMounted(() => {
           保存嵌入配置
         </button>
       </div>
+    </section>
+
+         放在「本地数据服务」卡片**之前**：这是一项可操作的功能，不是诊断信息 ——
+         埋在状态/端口/PID 中间会让需要它的学生根本找不到。
+      <p class="field__hint">系统会根据你问的问题自动判断；你也可以自己指定，指定后 10 轮内系统不再自动改。</p>
+        <button
+          v-for="level in GRADE_LEVELS"
+          :key="level"
+          type="button"
+        >
+          {{ GRADE_LABELS[level] }}
+        </button>
+      </div>
+           `data-active` 全为 false 是**对的**（不拿默认值冒充学生的选择）。 -->
+      </p>
+    </section>
+
+      </p>
+
+      </p>
+      <template v-else>
+        <p class="field__hint">
+        </p>
+        </p>
+        <template v-else>
+          </p>
+            <button
+              type="button"
+            >
+            </button>
+          </div>
+          <p
+            class="field__hint"
+          >
+          </p>
+        </template>
+
+          <button
+            type="button"
+          >
+          </button>
+        </div>
+      </template>
+
+      </p>
+      </p>
     </section>
 
     <!-- ──────────────────────── 本地服务与安全约定 ──────────────────────── -->
@@ -432,6 +616,17 @@ onMounted(() => {
   background: var(--surface);
 }
 
+/* 下拉复用 `.field__input` 的外观；只需补上 select 的原生差异 */
+select.field__input {
+  cursor: pointer;
+  appearance: auto;
+}
+
+select.field__input:disabled {
+  cursor: not-allowed;
+  color: var(--text-faint);
+}
+
 .field__hint {
   margin-top: 6px;
   font-size: 12px;
@@ -523,6 +718,62 @@ onMounted(() => {
   font-size: 13px;
 }
 
+/* ── 候选模型（「拉取模型」的结果）──────────────────────────── */
+
+.candidates {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface-muted);
+}
+
+.candidates__head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.candidates__source {
+  font-weight: 400;
+  color: var(--text-faint);
+}
+
+.candidates__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.candidates__note {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-faint);
+  word-break: break-word;
+}
+
+/* 可点击的模型 chip（复用 .chip 的底色，加上「可点」的交互与选中态） */
+.chip--model {
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chip--model:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.chip--model-active {
+  border-color: rgba(47, 111, 208, 0.45);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .notice {
   margin-top: 14px;
   padding: 12px 14px;
@@ -548,6 +799,72 @@ onMounted(() => {
   background: var(--danger-soft);
   border: 1px solid rgba(179, 38, 30, 0.2);
   color: var(--danger);
+}
+
+
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+  cursor: not-allowed;
+  color: var(--text-faint);
+}
+
+/* 当前生效的那一档（含学生刚选中的）：与对话页顶栏的徽章同一视觉语言 */
+  border-color: rgba(47, 111, 208, 0.45);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+  margin-top: 8px;
+}
+
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+  cursor: not-allowed;
+  color: var(--text-faint);
+}
+
+  border-color: rgba(47, 111, 208, 0.45);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 600;
 }
 
 .rows {

@@ -18,6 +18,7 @@
  *   G10 ★ `TOOL_TO_KIND` 单一定义：7 个 Tool 在表内，`rag_search` / `get_student_profile` 不在表内
  *   G11 ★ 6 事件载荷字段与契约逐字一致（`shared/ipc-events.ts`）
  *   G12 ★ 渲染进程接事件是**订阅回调**：不存在解析层（无 `TextDecoder` / `EventSource`）
+ *   G13 ★ 明文 LLM 配置只有主进程能取；`shared/provider-catalog.ts`（唯一的契约例外）
  *
  * 跑法：`npm test`。全部用 fs 读源码做静态断言，失败信息里带上具体文件路径。
  */
@@ -486,6 +487,9 @@ const EXPECTED_API_METHODS = [
   'readSettings',
   'saveSettings',
   'probeSettings',
+  // 供应商预设 / 拉取模型（设置页选端点与模型名用的**只读**辅助能力；不含任何凭证）
+  'readProviderCatalog',
+  'fetchProviderModels',
   'getGrade',
   'onGradeChanged',
   // 票 18：代码执行桥（主进程只**下发**代码，渲染进程在 Pyodide Worker 里跑，结果回传）
@@ -538,6 +542,11 @@ test('G9: preload 只暴露白名单方法，不暴露通用 ipcRenderer 转发'
   assert.deepEqual(valueUses, [], `ipcRenderer 被当成值传出去了（渲染进程会拿到通用 IPC 能力）：${valueUses.join(' / ')}`)
 })
 
+ *   - ★ **`src/shared/provider-catalog.ts` 也被扫**（它是架构里唯一被批准的契约例外，
+ *    而 `provider-catalog.ts` 的性质不同：它**只承载界面展示用的候选清单**，
+  // ④ ★ `shared/provider-catalog.ts` 也被扫：它是架构里**唯一被批准的契约例外**
+  const sharedCatalogFile = join(desktopRoot, 'src', 'shared', 'provider-catalog.ts')
+    `provider-catalog.ts 的可执行代码里出现凭证字段名（该文件承诺「不允许任何凭证字段」）：\n  ` +
 // ── G10 Tool → payload.kind 映射表 ───────────────────────────────────
 
 test('G10: TOOL_TO_KIND 只有一处定义；7 个 Tool 在表内，画像/检索不在表内', () => {

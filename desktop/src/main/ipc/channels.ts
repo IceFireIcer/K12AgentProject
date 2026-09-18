@@ -50,8 +50,10 @@ export const IPC = {
   /**
    * 渲染进程 → 主进程：读**当前学段**（只读展示用；前端没有选择器）。
    * ★ 学段完全由系统推断（`agent/extensions/grade.ts`），**没有写入通道** ——
-   *   这条通道只有读，学生改不了学段（D-020）。
+   * 渲染进程 → 主进程：**Pi 内置供应商预设**（离线可用的端点 + 模型清单）。
    */
+  settingsProviderCatalog: 'settings:provider-catalog',
+  settingsFetchModels: 'settings:fetch-models',
   gradeGet: 'grade:get',
   /** 主进程 → 渲染进程：推断出的学段发生变化时推送（只读徽章据此更新）。 */
   gradeChanged: 'grade:changed',
@@ -67,6 +69,9 @@ export const IPC = {
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
 
+ * 设置页「预设 / 拉取模型」两个通道的载荷类型。
+ * ★ 形状定义在 `src/shared/provider-catalog.ts`（渲染进程也要用，而它不该 import 主进程模块）。
+export type { FetchModelsResult, ProviderCatalogEntry } from '@shared/provider-catalog'
 /**
  * 主进程 → 渲染进程的**单向推送**通道。
  * 守卫据此断言事件流走的是推送通道（不是拿 invoke 回执当流用）。

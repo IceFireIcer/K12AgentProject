@@ -24,6 +24,14 @@
  */
 
 import type { components } from '@shared/api-types'
+// ★ 这两个类型**不是** pydantic 契约的一部分（Python 侧不存在这份数据：它们是 Pi 自带的
+//   provider 目录，只有主进程能读到），形状定义在 `@shared/provider-catalog`。
+import type { FetchModelsResult, ProviderCatalogEntry } from '@shared/provider-catalog'
+// ★ IPC 回执与设置域契约**不在这里重写**（H12）：唯一来源是 `src/main/ipc/channels.ts`
+//   （preload 也从那里 import）。跨目录用相对路径 type-only 导入，编译后被擦除，
+//   渲染进程运行时不加载任何主进程模块（与 `stores/sidecar.ts` 引 `main/sidecar/protocol` 同法）。
+import type { SettingsCallResult } from '../../../main/ipc/channels'
+import type { K12Api } from '../../../preload/index'
 
 // ---------------------------------------------------------------- 契约类型 --
 export type SettingsSnapshot = components['schemas']['SettingsResponse']
@@ -35,22 +43,25 @@ export type EmbeddingConfigInput = components['schemas']['EmbeddingConfigIn']
 export type ProbeRequest = components['schemas']['ProbeRequest']
 export type ProbeResult = components['schemas']['ProbeResult']
 export type EmbeddingMode = EmbeddingSnapshot['mode']
+export type { FetchModelsResult, ProviderCatalogEntry }
+export type { SettingsCallResult }
 
-/** IPC 回执（与主进程 `channels.ts` 的写法一致：失败不抛异常，回一句人话）。 */
-export type SettingsCallResult<T> = { ok: true; data: T } | { ok: false; message: string }
-
-/** 主进程需要暴露的三个方法（preload 白名单）。 */
+/** 主进程暴露的设置相关方法（preload 白名单）。 */
 export interface SettingsBridge {
   readSettings(): Promise<SettingsCallResult<SettingsSnapshot>>
   saveSettings(payload: SettingsUpdateRequest): Promise<SettingsCallResult<SettingsSnapshot>>
   probeSettings(payload: ProbeRequest): Promise<SettingsCallResult<ProbeResult>>
+  readProviderCatalog(): Promise<SettingsCallResult<ProviderCatalogEntry[]>>
+  fetchProviderModels(payload: ProbeRequest): Promise<SettingsCallResult<FetchModelsResult>>
 }
 
 /** 缺少的能力名（提示文案用，也是给接线人的清单）。 */
 export const SETTINGS_BRIDGE_METHODS: readonly (keyof SettingsBridge)[] = [
   'readSettings',
   'saveSettings',
-  'probeSettings'
+  'probeSettings',
+  'readProviderCatalog',
+  'fetchProviderModels'
 ]
 
 /** 取桥接的结果：要么拿到能力，要么拿到**可读的缺失原因**（不抛异常、不白屏）。 */
@@ -73,8 +84,12 @@ export function resolveSettingsBridge(): SettingsBridgeLookup {
     }
   }
 
-  const host = window.api as unknown as Record<string, unknown>
-  const missing = SETTINGS_BRIDGE_METHODS.filter((name) => typeof host[name] !== 'function')
+  // ★ 结构检查替代双重断言（H12）：先按**主进程白名单的真实类型**拿到 `window.api`，
+  //   再逐个确认方法存在（白名单是分步接线的），最后显式拼出桥 ——
+  //   方法改名或改签名时 typecheck 会当场报出来，而不是像原来的
+  //   `host as unknown as SettingsBridge` 那样把 `window.api` 的真实签名抹掉。
+  const api: K12Api = window.api
+  const missing = SETTINGS_BRIDGE_METHODS.filter((name) => typeof api[name] !== 'function')
   if (missing.length > 0) {
     return {
       ready: false,
@@ -85,7 +100,17 @@ export function resolveSettingsBridge(): SettingsBridgeLookup {
     }
   }
 
-  return { ready: true, bridge: host as unknown as SettingsBridge }
+  return {
+    ready: true,
+    // 逐项包一层：不把白名单上的方法原样转出去（返回类型由 `K12Api` 保证与契约一致）
+    bridge: {
+      readSettings: () => api.readSettings(),
+      saveSettings: (payload) => api.saveSettings(payload),
+      probeSettings: (payload) => api.probeSettings(payload),
+      readProviderCatalog: () => api.readProviderCatalog(),
+      fetchProviderModels: (payload) => api.fetchProviderModels(payload)
+    }
+  }
 }
 
 // ---------------------------------------------------------------- 纯逻辑 --
@@ -152,3 +177,72 @@ export const EMBEDDING_MODE_LABELS: Record<EmbeddingMode, string> = {
   cloud_api: '云端接口（OpenAI 兼容 /embeddings，需要地址与 Key）',
   none: '不使用嵌入（检索退回关键词兜底）'
 }
+
+// ---------------------------------------------------------------- 供应商预设 --
+
+/**
+ * 「手动填写」预设的哨兵 id。
+ *
+ * 用户在预设下拉里选它 = 不改 `providerId` 之外的任何东西（端点与模型名自己填）。
+ * Pi 对**非内置** provider 的 id 没有命名约束，所以自定义 / 校内网关直接用它自己的 id
+ * （例如 `custom`）也能正常工作 —— 见 `pi-bootstrap.ts` 的 `buildModelsJsonConfig` 规则 3。
+ */
+export const MANUAL_PRESET_ID = '__manual__'
+
+/** 预设下拉的一项（「手动填写」由界面另外拼，不在这个列表里）。 */
+export interface PresetOption {
+  id: string
+  label: string
+  baseUrl: string
+  /** 该预设的模型候选（顺序即 Pi 目录顺序，第一个是默认推荐）。 */
+  models: string[]
+}
+
+/**
+ * 把主进程给的目录投影成下拉选项（纯函数，可单测）。
+ *
+ * - 过滤掉**没有任何模型**的 provider：选它只会得到一个找不到模型的配置（Pi 里 `getModels()` 为空）；
+ * - 排序：有内置端点的排前面（选完就能用），同组内按显示名排序（稳定、可预期）；
+ * - `label` 带上端点的 host，让用户在选之前就能看出这是哪一家（不用点进去看 URL）。
+ */
+export function buildPresetOptions(catalog: readonly ProviderCatalogEntry[]): PresetOption[] {
+  return catalog
+    .filter((provider) => provider.models.length > 0)
+    .map((provider) => ({
+      id: provider.id,
+      label: provider.name && provider.name !== provider.id ? `${provider.name}` : provider.id,
+      baseUrl: provider.baseUrl ?? '',
+      models: provider.models.map((model) => model.id)
+    }))
+    .sort((left, right) => {
+      const leftHasEndpoint = left.baseUrl !== ''
+      const rightHasEndpoint = right.baseUrl !== ''
+      if (leftHasEndpoint !== rightHasEndpoint) return leftHasEndpoint ? -1 : 1
+      return left.label.localeCompare(right.label, 'zh-Hans-CN')
+    })
+}
+
+/** 按 id 找预设（找不到返回 `undefined`；界面据此把下拉停在「手动填写」）。 */
+export function findPresetById(presets: readonly PresetOption[], providerId: string): PresetOption | undefined {
+  return presets.find((preset) => preset.id === providerId)
+}
+
+/**
+ * 候选模型 id 的合并。
+ *
+ * ★ 直接 re-export `@shared/provider-catalog` 的那一份（**主进程用的是同一份实现**）：
+ *   界面在切换预设时要能就地重算，而两处各写一份的话规则会悄悄分叉
+ *   （表现为「界面显示的候选」与「主进程实际返回的候选」不一致，且两边单测都绿）。
+ */
+export { mergeModelCandidates } from '@shared/provider-catalog'
+
+/**
+ * 「供应商预设」下拉当前应当停在哪个值上（纯函数）。
+ *
+ * 判据：磁盘上的 `providerId` 能在预设里找到 → 停在它；否则停在「手动填写」。
+ * 这样用户手填过的配置（例如校内网关 `custom`）不会被下拉悄悄显示成某个内置供应商。
+ */
+export function selectedPresetId(presets: readonly PresetOption[], providerId: string): string {
+  return findPresetById(presets, providerId.trim()) ? providerId.trim() : MANUAL_PRESET_ID
+}
+

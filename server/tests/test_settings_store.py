@@ -37,13 +37,21 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import build_runtime_config  # noqa: E402
+from app.contracts import (  # noqa: E402
+    DEFAULT_LLM_BASE_URL,
+    DEFAULT_LLM_MODEL_ID,
+    DEFAULT_LLM_PROVIDER_ID,
+)
 from app.main import create_app  # noqa: E402
 from app.routes import settings as settings_module  # noqa: E402
+from app.safety import guard  # noqa: E402
 from app.routes.settings import (  # noqa: E402
     SETTINGS_STORE_ATTR,
     HttpOutcome,
     InMemorySettingsStore,
+    UrllibTransport,
     base_url_variant,
+    fetch_provider_models,
     probe_llm_connectivity,
 )
 from app.security import AUTH_HEADER  # noqa: E402
@@ -144,6 +152,51 @@ class _FakeProviderHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *args: object) -> None:
         """别把访问日志打到 stderr（测试输出要干净）。"""
+
+
+class _RedirectHandler(http.server.BaseHTTPRequestHandler):
+    """回 302 的「跳板」服务：指向 ``target``（用于验证探测**不跟随跳转**）。
+
+    与 :class:`_FakeProviderHandler` 一样只跑在回环上；它记录收到的 ``Authorization``
+    （起始地址拿到 Key 是正常的 —— 不正常的只有**跳转目标**也拿到）。
+    """
+
+    target = ""
+    seen_authorization: list[str] = []
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server 的约定命名
+        type(self).seen_authorization.append(self.headers.get("Authorization", ""))
+        # 故意回一个**跨端口**的跳转：若探测跟随它，Key 就会跟着头一起送过去。
+        self.send_response(302)
+        self.send_header("Location", type(self).target)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        """同上：安静一点。"""
+
+
+class _StatuslessResponse:
+    """模拟「没有 ``.status`` 属性」的响应对象（`data:` / `file:` 那类协议）。"""
+
+    def __init__(self, body: bytes = b"hello") -> None:
+        self._body = body
+
+    def read(self, _limit: int | None = None) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_StatuslessResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+
+class _StatuslessOpener:
+    """把 :data:`app.routes.settings._PROBE_OPENER` 换成一个只会返回无状态码响应的对象。"""
+
+    def open(self, request: object, timeout: float | None = None) -> _StatuslessResponse:  # noqa: ARG002
+        return _StatuslessResponse()
 
 
 class TestProbeOverRealHttp(unittest.TestCase):
@@ -260,6 +313,119 @@ class TestProbeOverRealHttp(unittest.TestCase):
             any(word in result.message for word in ("连接被拒绝", "网络请求失败", "连接超时")),
             result.message,
         )
+
+    # ------------------------------------------------------------------ A1 --
+    def test_a_stored_key_is_bound_to_its_own_address(self) -> None:
+        """★ A1 的正面口径：**同一个地址**才允许复用已存 Key（这条防线不误伤正常用法）。
+
+        真正的攻击用例在 `TestProbeCredentialBoundary`（那里有伪「攻击者服务」记录一切）。
+        """
+        from app.contracts import LlmConfigIn
+        from app.routes.settings import _resolve_probe_credentials
+        from app.settings_store import StoredLlm
+
+        stored = StoredLlm(base_url=f"{self.root}/v1", api_key=SECRET_KEY, model_id="deepseek-chat")
+        same = _resolve_probe_credentials(
+            LlmConfigIn(base_url=f"{self.root}/v1/", api_key=MASK), stored
+        )
+
+        self.assertEqual(same.api_key, SECRET_KEY)
+        self.assertIsNone(same.error)
+        self.assertEqual(same.base_url, f"{self.root}/v1")
+
+    # ------------------------------------------------------------------ A2 --
+    def test_non_http_schemes_never_reach_the_transport(self) -> None:
+        """★ A2：非 http(s) 一律在入口挡住（`file:` 以前会真读本机文件并把路径回显）。"""
+        for submitted in ("api.deepseek.com", "data:text/plain,hi", "file:///C:/Windows/win.ini"):
+            with self.subTest(base_url=submitted):
+                result = probe_llm_connectivity(
+                    base_url=submitted, api_key=SECRET_KEY, model_id="deepseek-chat"
+                )
+
+                self.assertFalse(result.ok)
+                self.assertIn("http", result.message)
+                self.assertNotIn("win.ini", result.message)
+                self.assertNotIn(SECRET_KEY, result.message)
+
+        models = fetch_provider_models(base_url="file:///C:/Windows/win.ini", api_key=SECRET_KEY)
+        self.assertFalse(models.ok)
+        self.assertEqual(models.models, [])
+        self.assertNotIn("win.ini", models.message)
+
+    def test_the_transport_survives_a_statusless_response(self) -> None:
+        """★ A2：``int(response.status)`` 前判 ``None`` —— 否则 `data:` 协议直接 500。"""
+        with mock.patch.object(settings_module, "_PROBE_OPENER", _StatuslessOpener()):
+            outcome = UrllibTransport().exchange(
+                method="GET",
+                url="http://127.0.0.1:9/v1/models",
+                api_key=SECRET_KEY,
+                payload=None,
+                timeout=3.0,
+            )
+
+        self.assertIsNone(outcome.status)
+        self.assertEqual(outcome.error, "config")
+        self.assertNotIn(SECRET_KEY, outcome.detail)
+
+    # ------------------------------------------------------------------ A3 --
+    def test_a_redirect_is_reported_and_never_followed(self) -> None:
+        """★★ A3：跨主机/跨端口 302 不许把 ``Authorization`` 转发给跳转目标。"""
+        target = _FakeProviderHandler  # 跳转目标 = 我们的「攻击者服务」（记录一切）
+        target.seen_paths = []
+        target.seen_authorization = []
+
+        redirector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        _RedirectHandler.seen_authorization = []
+        _RedirectHandler.target = f"{self.root}/v1"
+        thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = int(redirector.server_address[1])
+            result = probe_llm_connectivity(
+                base_url=f"http://127.0.0.1:{port}/v1",
+                api_key=SECRET_KEY,
+                model_id="deepseek-chat",
+            )
+        finally:
+            redirector.shutdown()
+            redirector.server_close()
+            thread.join(timeout=5)
+
+        self.assertFalse(result.ok, "跳转不是「连通成功」，它只证明地址填的不是最终地址")
+        self.assertIn("跳转", result.message)
+        self.assertIn("302", result.message)
+        self.assertNotIn(SECRET_KEY, result.message)
+        # ★ 跳转目标一个字节都没收到（Key 也就没有跟着过去）
+        self.assertEqual(target.seen_paths, [], "★ 跟随了重定向：Key 已经被转发给跳转目标")
+        self.assertEqual(target.seen_authorization, [])
+        # ★ 起始地址确实收到过 Key（它才是用户填的那个地址），说明这不是「啥都没发」
+        self.assertEqual(_RedirectHandler.seen_authorization, [f"Bearer {SECRET_KEY}"])
+
+    def test_a_redirect_target_is_never_echoed_to_the_ui(self) -> None:
+        """跳转目标不该被回显到界面上（响应方控制的内容不进我们的 UI 文案）。"""
+        target = _FakeProviderHandler
+        target.seen_paths = []
+
+        redirector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        _RedirectHandler.target = "http://evil.example.com/v1"
+        thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = int(redirector.server_address[1])
+            result = probe_llm_connectivity(
+                base_url=f"http://127.0.0.1:{port}/v1",
+                api_key=SECRET_KEY,
+                model_id="deepseek-chat",
+            )
+        finally:
+            redirector.shutdown()
+            redirector.server_close()
+            thread.join(timeout=5)
+
+        self.assertFalse(result.ok)
+        self.assertIn("跳转", result.message)
+        self.assertNotIn("evil.example.com", result.message, "响应方给的目标地址不该被我们回显")
+        self.assertEqual(target.seen_paths, [])
 
 
 # --------------------------------------------------------------------------- #
@@ -389,6 +555,281 @@ class TestProbeDiagnosis(unittest.TestCase):
             self.assertNotIn(SECRET_KEY, url)
             self.assertNotIn("api_key", url)
 
+    def test_redirect_is_diagnosed_instead_of_followed(self) -> None:
+        """A3：3xx 如实上报（探测不跟随跳转），并且**只发一次**请求。"""
+        transport = FakeTransport(default=HttpOutcome(status=302, body=b""))
+        result = self._probe(transport, base_url="https://short.example.com/v1")
+
+        self.assertFalse(result.ok)
+        self.assertIn("跳转", result.message)
+        self.assertIn("302", result.message)
+        self.assertEqual(
+            transport.calls,
+            [("GET", "https://short.example.com/v1/models")],
+            "★ 跳转之后还有第二次外呼 —— Key 可能已经被送到跳转目标",
+        )
+
+    def test_a_redirecting_chat_endpoint_is_also_not_followed(self) -> None:
+        """对话端点（1-token 回退那一步）跳转时同样不跟随。"""
+        typed = "https://gw.example.com/v1"
+        transport = FakeTransport(
+            {
+                ("GET", f"{typed}/models"): HttpOutcome(status=404, body=b"{}"),
+                ("POST", f"{typed}/chat/completions"): HttpOutcome(status=307, body=b""),
+            }
+        )
+        result = self._probe(transport, base_url=typed)
+
+        self.assertFalse(result.ok)
+        self.assertIn("跳转", result.message)
+        self.assertEqual(
+            [url for _, url in transport.calls],
+            [f"{typed}/models", f"{typed}/chat/completions"],
+            "★ 跳转后仍有第三次外呼（Key 会跟着过去）",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# ★ A1：已存明文 Key 与「地址」绑定（凭据外泄防线）
+# --------------------------------------------------------------------------- #
+class TestProbeCredentialBoundary(unittest.TestCase):
+    """★★ P0：**已存的明文 Key 只允许用于保存它的那个地址**。
+
+    攻击模型（审查里复现过）：渲染进程提交
+    ``{"baseUrl": "http://攻击者", "apiKey": "…abcd"}`` —— 那个 Key 字段只是它从
+    ``GET /api/settings`` 读到的掩码回显，看起来「什么都没改」。若 sidecar 把掩码解释成
+    「用已存 Key」而地址用提交值，攻击者服务就会收到 ``Authorization: Bearer sk-真Key``。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = app_with_data_dir(Path(self.tmp.name))
+        self.client = authed_client(self.app)
+
+    def _patch_transport(self, transport: FakeTransport):
+        return mock.patch.object(settings_module, "UrllibTransport", lambda: transport)
+
+    def _save_gateway(self, base_url: str = "https://gw.example.com/v1") -> None:
+        self.client.put(
+            "/api/settings", json={"llm": {"baseUrl": base_url, "apiKey": SECRET_KEY}}
+        )
+
+    def test_helper_refuses_any_key_when_the_address_changes(self) -> None:
+        """直接钉住私有 helper 的返回值（不经过网络，失败信息也最直白）。"""
+        from app.contracts import LlmConfigIn
+        from app.routes.settings import _resolve_probe_credentials
+        from app.settings_store import StoredLlm
+
+        stored = StoredLlm(base_url="https://gw.example.com/v1", api_key=SECRET_KEY, model_id="m")
+
+        same = _resolve_probe_credentials(
+            LlmConfigIn(base_url="https://gw.example.com/v1/", api_key=MASK), stored
+        )
+        self.assertEqual(same.api_key, SECRET_KEY, "同地址时掩码仍应回退已存 Key")
+
+        changed = _resolve_probe_credentials(
+            LlmConfigIn(base_url="http://attacker.example.com/v1", api_key=MASK), stored
+        )
+        self.assertEqual(changed.api_key, "", "★ 换了地址还带着已存 Key")
+        self.assertIsNotNone(changed.error)
+        assert changed.error is not None
+        self.assertIn("重新填写 API Key", changed.error)
+
+        replaced = _resolve_probe_credentials(
+            LlmConfigIn(base_url="http://attacker.example.com/v1", api_key="sk-user-typed-0001"),
+            stored,
+        )
+        self.assertEqual(replaced.api_key, "sk-user-typed-0001", "用户自己填的 Key 应照提交值用")
+        self.assertIsNone(replaced.error)
+
+    def test_probe_returns_before_any_outbound_call_when_the_address_changed(self) -> None:
+        """★ 用假传输断言「一次外呼都没有」—— 这是比「Key 没出现」更强的断言。"""
+        self._save_gateway()
+        transport = FakeTransport(default=HttpOutcome(status=200, body=json_body({"data": []})))
+
+        with self._patch_transport(transport):
+            response = self.client.post(
+                "/api/settings/probe",
+                json={"llm": {"baseUrl": "http://attacker.example.com/v1", "apiKey": MASK}},
+            )
+
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("重新填写 API Key", body["message"])
+        self.assertIn("gw.example.com", body["message"], "要说清已存 Key 绑定的是哪个地址")
+        self.assertEqual(transport.calls, [], "★ 换了地址还外呼了（真实 Key 已经发出去了）")
+        self.assertNotIn(SECRET_KEY, response.text)
+
+    def test_models_returns_before_any_outbound_call_when_the_address_changed(self) -> None:
+        self._save_gateway()
+        transport = FakeTransport(default=HttpOutcome(status=200, body=json_body({"data": []})))
+
+        with self._patch_transport(transport):
+            response = self.client.post(
+                "/api/settings/models",
+                json={"llm": {"baseUrl": "http://attacker.example.com/v1", "apiKey": MASK}},
+            )
+
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["models"], [])
+        self.assertIn("重新填写 API Key", body["message"])
+        self.assertEqual(transport.calls, [])
+        self.assertNotIn(SECRET_KEY, response.text)
+
+    def test_a_new_key_unlocks_the_new_address(self) -> None:
+        """换了地址 + 真填了新 Key → 照常探测（不能因为安全边界把正常用法堵死）。"""
+        self._save_gateway()
+        transport = FakeTransport(default=HttpOutcome(status=200, body=json_body({"data": [{"id": "m"}]})))
+
+        with self._patch_transport(transport):
+            response = self.client.post(
+                "/api/settings/probe",
+                json={"llm": {"baseUrl": "http://new.example.com/v1", "apiKey": "sk-new-key-0987"}},
+            )
+
+        self.assertTrue(response.json()["ok"], response.text)
+        self.assertEqual([url for _, url in transport.calls], ["http://new.example.com/v1/models"])
+
+    def test_no_stored_key_still_gives_the_plain_readable_hint(self) -> None:
+        """没存过 Key 时保持原有文案（不要用安全边界文案去糊无 Key 的情况）。"""
+        response = self.client.post(
+            "/api/settings/probe",
+            json={"llm": {"baseUrl": "http://attacker.example.com/v1", "apiKey": ""}},
+        )
+        self.assertIn("尚未配置 API Key", response.json()["message"])
+
+
+class TestCredentialBoundaryOverRealHttp(unittest.TestCase):
+    """★★ A1 的原始攻击，**用真 socket 复现**（回环地址上起一个伪「攻击者服务」）。
+
+    这条与 `TestProbeCredentialBoundary` 的区别：那边注入假传输（断言「一次外呼都没有」），
+    这边**不注入任何东西** —— 请求真发得出去就会落到攻击者服务上并被记录。
+    所以「攻击者什么也没收到」是端到端的证据，而不是「我们以为没发」。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        _FakeProviderHandler.seen_paths = []
+        _FakeProviderHandler.seen_authorization = []
+        cls.attacker = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FakeProviderHandler)
+        cls.attacker_port = int(cls.attacker.server_address[1])
+        cls.thread = threading.Thread(target=cls.attacker.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.attacker.shutdown()
+        cls.attacker.server_close()
+        cls.thread.join(timeout=5)
+
+    def setUp(self) -> None:
+        _FakeProviderHandler.seen_paths = []
+        _FakeProviderHandler.seen_authorization = []
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = app_with_data_dir(Path(self.tmp.name))
+        self.client = authed_client(self.app)
+
+        # 用户真正的配置：真 Key + 官方地址（与攻击者地址明显不同）
+        saved = self.client.put(
+            "/api/settings",
+            json={"llm": {"baseUrl": "https://api.deepseek.com", "apiKey": SECRET_KEY}},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+
+    @property
+    def attacker_url(self) -> str:
+        return f"http://127.0.0.1:{self.attacker_port}/v1"
+
+    def test_probe_route_never_sends_the_stored_key_to_another_address(self) -> None:
+        """★ 攻击：提交「攻击者地址 + 我读到的掩码」，攻击者不该收到任何东西。"""
+        response = self.client.post(
+            "/api/settings/probe", json={"llm": {"baseUrl": self.attacker_url, "apiKey": MASK}}
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("重新填写 API Key", body["message"])
+        self.assertEqual(
+            _FakeProviderHandler.seen_authorization, [], "★ 攻击者收到了带真 Key 的请求头（凭据外泄）"
+        )
+        self.assertEqual(_FakeProviderHandler.seen_paths, [], "★ 攻击者收到了请求（地址已按提交值外呼）")
+        self.assertNotIn(SECRET_KEY, response.text)
+
+    def test_models_route_never_sends_the_stored_key_to_another_address(self) -> None:
+        """A1 的第二条路径：同一套边界，不能只修一条。"""
+        response = self.client.post(
+            "/api/settings/models", json={"llm": {"baseUrl": self.attacker_url, "apiKey": MASK}}
+        )
+
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["models"], [])
+        self.assertIn("重新填写 API Key", body["message"])
+        self.assertEqual(_FakeProviderHandler.seen_authorization, [])
+        self.assertEqual(_FakeProviderHandler.seen_paths, [])
+
+    def test_the_stored_key_is_still_usable_for_its_own_address(self) -> None:
+        """★ 对照断言（真网络）：地址没变时掩码照旧回退已存 Key，探测真的打过去。
+
+        否则「保存完再点探测」永远红 —— 安全边界把正常用法一起堵死，等于没修好。
+        """
+        saved_url = f"{self.attacker_url}"
+        self.client.put(
+            "/api/settings",
+            json={"llm": {"baseUrl": saved_url, "apiKey": _FakeProviderHandler.api_key}},
+        )
+
+        response = self.client.post(
+            "/api/settings/probe", json={"llm": {"baseUrl": saved_url, "apiKey": MASK}}
+        )
+
+        self.assertTrue(response.json()["ok"], response.text)
+        self.assertEqual(_FakeProviderHandler.seen_paths, ["/v1/models"])
+        self.assertEqual(
+            _FakeProviderHandler.seen_authorization,
+            [f"Bearer {_FakeProviderHandler.api_key}"],
+        )
+
+    def test_a_user_supplied_key_may_go_to_a_new_address(self) -> None:
+        """用户自己填的新 Key + 新地址 = 正常用法（换供应商必须还能用）。"""
+        response = self.client.post(
+            "/api/settings/probe",
+            json={"llm": {"baseUrl": self.attacker_url, "apiKey": _FakeProviderHandler.api_key}},
+        )
+
+        self.assertTrue(response.json()["ok"], response.text)
+        self.assertNotIn(SECRET_KEY, response.text, "★ 已存的真 Key 不该出现在这次外呼里")
+        self.assertEqual(
+            _FakeProviderHandler.seen_authorization,
+            [f"Bearer {_FakeProviderHandler.api_key}"],
+        )
+
+    def test_non_http_schemes_are_readable_and_touch_nothing(self) -> None:
+        """★ A2（路由口径）：漏写 ``https://`` / ``data:`` / ``file:`` 一律可读结论。
+
+        `file:` 尤其要紧：以前会真把本机文件读出来，连绝对路径与系统错误文本一起回显。
+        """
+        for submitted in ("api.deepseek.com", "data:text/plain,hi", "file:///C:/Windows/win.ini"):
+            with self.subTest(base_url=submitted):
+                response = self.client.post(
+                    "/api/settings/probe", json={"llm": {"baseUrl": submitted, "apiKey": SECRET_KEY}}
+                )
+
+                self.assertEqual(response.status_code, 200, response.text)
+                body = response.json()
+                self.assertFalse(body["ok"])
+                self.assertIn("http", body["message"])
+                # ★ 不回显提交的字符串（那可能是本机路径），更不能把文件内容读出来
+                self.assertNotIn("win.ini", response.text)
+                self.assertNotIn("[fonts]", response.text.lower())
+                self.assertNotIn(SECRET_KEY, response.text)
+
+        self.assertEqual(_FakeProviderHandler.seen_paths, [])
+
 
 # --------------------------------------------------------------------------- #
 # 探测路由（HTTP 边界）
@@ -456,6 +897,343 @@ class TestProbeRoute(unittest.TestCase):
         self.client.put("/api/settings", json={"llm": {"apiKey": SECRET_KEY}})
         response = self.client.post("/api/settings/probe", json={"llm": {"apiKey": SECRET_KEY}})
         self.assertNotIn(SECRET_KEY, response.text)
+
+
+# --------------------------------------------------------------------------- #
+# 拉取模型（`POST /api/settings/models`）
+# --------------------------------------------------------------------------- #
+class TestFetchProviderModels(unittest.TestCase):
+    """「拉取模型」：与探测共用外呼实现，但**只列候选**（不证明可用）。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = app_with_data_dir(Path(self.tmp.name))
+        self.client = authed_client(self.app)
+
+    def _patch_transport(self, transport: FakeTransport):
+        return mock.patch.object(settings_module, "UrllibTransport", lambda: transport)
+
+    def test_returns_model_ids_from_a_standard_models_endpoint(self) -> None:
+        transport = FakeTransport(
+            default=HttpOutcome(
+                status=200,
+                body=json_body({"object": "list", "data": [{"id": "glm-5.2"}, {"id": "glm-5.3"}]}),
+            )
+        )
+        with self._patch_transport(transport):
+            response = self.client.post(
+                "/api/settings/models",
+                json={"llm": {"baseUrl": "https://api.z.ai/api/coding/paas/v4", "apiKey": SECRET_KEY}},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["models"], ["glm-5.2", "glm-5.3"])
+        self.assertIn("2", body["message"])
+        self.assertNotIn(SECRET_KEY, response.text)
+
+    def test_requires_a_base_url(self) -> None:
+        result = fetch_provider_models(base_url="", api_key=SECRET_KEY)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.models, [])
+        self.assertIn("BaseURL 不能为空", result.message)
+
+    def test_empty_catalog_is_not_reported_as_success_with_models(self) -> None:
+        """端点通了但一个模型都没报出来：**如实说清**，不要假装拉到了东西。"""
+        transport = FakeTransport(default=HttpOutcome(status=200, body=json_body({"data": []})))
+        with self._patch_transport(transport):
+            response = self.client.post(
+                "/api/settings/models", json={"llm": {"baseUrl": "http://127.0.0.1:9/v1", "apiKey": SECRET_KEY}}
+            )
+
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["models"], [])
+        self.assertIn("没有报出任何模型", body["message"])
+
+    def test_non_standard_body_stays_readable(self) -> None:
+        """响应不是标准模型列表（有些兼容服务如此）：给可读结论并允许手填。"""
+        transport = FakeTransport(default=HttpOutcome(status=200, body=b"<html>hello</html>"))
+        with self._patch_transport(transport):
+            response = self.client.post(
+                "/api/settings/models", json={"llm": {"baseUrl": "http://127.0.0.1:9/v1", "apiKey": SECRET_KEY}}
+            )
+
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("手填", body["message"])
+
+    def test_auth_failure_is_readable_and_mentions_presets(self) -> None:
+        transport = FakeTransport(
+            default=HttpOutcome(status=401, body=json_body({"error": {"message": "invalid api key"}}))
+        )
+        with self._patch_transport(transport):
+            response = self.client.post(
+                "/api/settings/models", json={"llm": {"baseUrl": "https://api.z.ai/api/v4", "apiKey": SECRET_KEY}}
+            )
+
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("API Key 被拒绝", body["message"])
+        # 端点不通时界面仍要有候选可选用 —— 文案里要指出去哪里拿
+        self.assertIn("Pi 内置预设", body["message"])
+        self.assertNotIn(SECRET_KEY, response.text)
+
+    def test_missing_models_endpoint_points_at_the_other_url_form(self) -> None:
+        """404（没有 /models 端点）时说清另一种 /v1 写法，并明确「不影响保存」。"""
+        transport = FakeTransport(default=HttpOutcome(status=404, body=b""))
+        with self._patch_transport(transport):
+            response = self.client.post(
+                "/api/settings/models", json={"llm": {"baseUrl": "https://api.deepseek.com", "apiKey": SECRET_KEY}}
+            )
+
+        body = response.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("/v1", body["message"])
+        self.assertIn("不影响保存", body["message"])
+
+    def test_uses_the_stored_key_when_the_mask_is_submitted(self) -> None:
+        """掩码 + **同一个地址** == 「用已存的 Key」（这是用户点「探测」的常规路径）。"""
+        self.client.put(
+            "/api/settings",
+            json={"llm": {"baseUrl": "https://gw.example.com/v1", "apiKey": SECRET_KEY}},
+        )
+
+        transport = FakeTransport(default=HttpOutcome(status=200, body=json_body({"data": [{"id": "m"}]})))
+        with self._patch_transport(transport):
+            response = self.client.post(
+                "/api/settings/models",
+                json={"llm": {"baseUrl": "https://gw.example.com/v1", "apiKey": MASK}},
+            )
+
+        self.assertTrue(response.json()["ok"], response.text)
+        self.assertEqual([url for _, url in transport.calls], ["https://gw.example.com/v1/models"])
+
+
+# --------------------------------------------------------------------------- #
+# 主进程专用的运行时配置（`GET /api/settings/runtime`）
+# --------------------------------------------------------------------------- #
+class TestRuntimeConfigRoute(unittest.TestCase):
+    """★★ 这条接口**含明文 Key**，是「设置 → Pi」的唯一载体。
+
+    三条安全边界各有一组断言（缺任何一条这条链路都不成立）：
+      ① 与其它 `/api/*` 一样需要 token；
+      ② 读设置那条接口（`GET /api/settings`）**仍然只回掩码**；
+      ③ 明文只在 `api_key` 这一个字段里（`has_key` 是布尔，不含密钥）。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = app_with_data_dir(Path(self.tmp.name))
+        self.client = authed_client(self.app)
+
+    def test_requires_auth(self) -> None:
+        anonymous = TestClient(self.app)
+        self.assertEqual(anonymous.get("/api/settings/runtime").status_code, 401)
+
+    def test_returns_the_plaintext_key_for_the_main_process(self) -> None:
+        self.client.put(
+            "/api/settings",
+            json={
+                "llm": {
+                    "providerId": "zai",
+                    "providerName": "Z.AI",
+                    "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+                    "apiKey": SECRET_KEY,
+                    "modelId": "glm-5.2",
+                }
+            },
+        )
+
+        body = self.client.get("/api/settings/runtime").json()
+
+        self.assertEqual(body["providerId"], "zai")
+        self.assertEqual(body["modelId"], "glm-5.2")
+        self.assertEqual(body["baseUrl"], "https://api.z.ai/api/coding/paas/v4")
+        self.assertEqual(body["apiKey"], SECRET_KEY, "主进程要拿到明文才发得出请求")
+        self.assertTrue(body["hasKey"])
+
+    def test_the_plaintext_key_never_leaks_into_the_normal_settings_read(self) -> None:
+        """★ 对照断言：同一个存储，`GET /api/settings` 读回来必须仍是掩码。"""
+        self.client.put("/api/settings", json={"llm": {"apiKey": SECRET_KEY}})
+
+        normal = self.client.get("/api/settings")
+        self.assertEqual(normal.json()["llm"]["apiKey"], MASK)
+        self.assertNotIn(SECRET_KEY, normal.text)
+
+    def test_repr_never_contains_the_key(self) -> None:
+        """契约模型的 `repr` 也必须干净（异常里打印模型是常见事故）。"""
+        from app.contracts import LlmRuntimeConfig
+
+        config = LlmRuntimeConfig(api_key=SECRET_KEY)
+        self.assertNotIn(SECRET_KEY, repr(config))
+        self.assertNotIn(SECRET_KEY[-8:], repr(config))
+
+    def test_defaults_are_returned_before_anything_is_saved(self) -> None:
+        body = self.client.get("/api/settings/runtime").json()
+        self.assertEqual(body["providerId"], DEFAULT_LLM_PROVIDER_ID)
+        self.assertEqual(body["baseUrl"], DEFAULT_LLM_BASE_URL)
+        self.assertEqual(body["modelId"], DEFAULT_LLM_MODEL_ID)
+        self.assertEqual(body["apiKey"], "")
+        self.assertFalse(body["hasKey"])
+
+
+# --------------------------------------------------------------------------- #
+# provider_id 在 HTTP 边界的语义（占位即保留）
+# --------------------------------------------------------------------------- #
+class TestProviderIdRouteSemantics(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = app_with_data_dir(Path(self.tmp.name))
+        self.client = authed_client(self.app)
+
+    def test_partial_put_keeps_the_stored_provider_id(self) -> None:
+        """★ 只改 BaseURL 的局部 PUT **不该**把 provider 静默重置回默认值。
+
+        否则设置页分栏保存（或任何一次局部修改）都会悄悄换掉供应商 ——
+        表现为「我明明选了 Z.AI，改了下地址就变回 deepseek 了」。
+        """
+        self.client.put("/api/settings", json={"llm": {"providerId": "zai", "modelId": "glm-5.2"}})
+
+        # 只提交一个字段，providerId 完全不出现
+        self.client.put("/api/settings", json={"llm": {"baseUrl": "https://proxy.example.com/v1"}})
+
+        body = self.client.get("/api/settings").json()
+        self.assertEqual(body["llm"]["providerId"], "zai")
+        self.assertEqual(body["llm"]["baseUrl"], "https://proxy.example.com/v1")
+
+    def test_explicit_provider_id_overwrites(self) -> None:
+        self.client.put("/api/settings", json={"llm": {"providerId": "zai"}})
+        self.client.put("/api/settings", json={"llm": {"providerId": "openai"}})
+        self.assertEqual(self.client.get("/api/settings").json()["llm"]["providerId"], "openai")
+
+    def test_blank_provider_id_falls_back_to_the_stored_one(self) -> None:
+        """空串同样按「未修改」处理（前端下拉停在「手动填写」时可能提交空值）。"""
+        self.client.put("/api/settings", json={"llm": {"providerId": "zai"}})
+        self.client.put("/api/settings", json={"llm": {"providerId": "   "}})
+        self.assertEqual(self.client.get("/api/settings").json()["llm"]["providerId"], "zai")
+
+
+# --------------------------------------------------------------------------- #
+# ★ A4：**字段级**局部 PUT —— 没提交的字段一律保留（不许回落出厂默认）
+# --------------------------------------------------------------------------- #
+class TestPartialPutKeepsUntouchedFields(unittest.TestCase):
+    """★ A4：`PUT {"llm": {"apiKey": "…"}}` 这种**字段级**局部提交是受支持的用法。
+
+    修复前只有 `providerId` 是「占位即保留」，其余字段「提交即覆盖」，而入参模型的
+    默认值就是出厂默认 —— 于是「只换一下 Key」会把用户自填的校内网关整组换回
+    DeepSeek 默认值（providerName / baseUrl / modelId 全丢），界面上还显示「保存成功」。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.app = app_with_data_dir(Path(self.tmp.name))
+        self.client = authed_client(self.app)
+
+    def _save_custom_gateway(self) -> None:
+        saved = self.client.put(
+            "/api/settings",
+            json={
+                "llm": {
+                    "providerId": "custom",
+                    "providerName": "校内网关",
+                    "baseUrl": "https://gw.example.com/v1",
+                    "apiKey": SECRET_KEY,
+                    "modelId": "qwen-max",
+                }
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+
+    def test_putting_only_a_key_keeps_every_other_llm_field(self) -> None:
+        self._save_custom_gateway()
+
+        # 设置页的常规动作：换一把 Key，别的栏一个都没动
+        self.client.put("/api/settings", json={"llm": {"apiKey": "sk-brand-new-key-0987"}})
+
+        llm = self.client.get("/api/settings").json()["llm"]
+        self.assertEqual(llm["providerId"], "custom")
+        self.assertEqual(llm["providerName"], "校内网关")
+        self.assertEqual(llm["baseUrl"], "https://gw.example.com/v1")
+        self.assertEqual(llm["modelId"], "qwen-max")
+        self.assertTrue(llm["hasKey"])
+        self.assertEqual(self.client.get("/api/settings/runtime").json()["apiKey"], "sk-brand-new-key-0987")
+
+    def test_blank_submissions_also_keep_the_stored_values(self) -> None:
+        """前端输入框被清空后提交空串：同样算「没改」（空 ModelID 根本调不通）。"""
+        self._save_custom_gateway()
+
+        self.client.put(
+            "/api/settings", json={"llm": {"providerName": "", "baseUrl": "", "modelId": "   "}}
+        )
+
+        llm = self.client.get("/api/settings").json()["llm"]
+        self.assertEqual(llm["providerName"], "校内网关")
+        self.assertEqual(llm["baseUrl"], "https://gw.example.com/v1")
+        self.assertEqual(llm["modelId"], "qwen-max")
+
+    def test_explicitly_submitted_fields_still_overwrite(self) -> None:
+        """★ 对照断言：真提交了的值必须生效（不能因为「保留」把改配置这条路堵死）。"""
+        self._save_custom_gateway()
+
+        self.client.put(
+            "/api/settings",
+            json={"llm": {"providerId": "zai", "providerName": "Z.AI", "modelId": "glm-5.2"}},
+        )
+
+        llm = self.client.get("/api/settings").json()["llm"]
+        self.assertEqual(llm["providerId"], "zai")
+        self.assertEqual(llm["providerName"], "Z.AI")
+        self.assertEqual(llm["modelId"], "glm-5.2")
+        self.assertEqual(llm["baseUrl"], "https://gw.example.com/v1", "没提交的地址应保留")
+
+    def test_partial_embedding_put_keeps_mode_and_endpoint(self) -> None:
+        """嵌入那栏同一条规则：只换 Key 不该把云端嵌入整组退回本地默认。"""
+        self.client.put(
+            "/api/settings",
+            json={
+                "embedding": {
+                    "mode": "cloud_api",
+                    "baseUrl": "https://embed.example.com/v1",
+                    "apiKey": "emb-key-123456",
+                    "modelId": "bge-m3",
+                }
+            },
+        )
+
+        self.client.put("/api/settings", json={"embedding": {"apiKey": "emb-key-new-999999"}})
+
+        embedding = self.client.get("/api/settings").json()["embedding"]
+        self.assertEqual(embedding["mode"], "cloud_api")
+        self.assertEqual(embedding["baseUrl"], "https://embed.example.com/v1")
+        self.assertEqual(embedding["modelId"], "bge-m3")
+        self.assertTrue(embedding["hasKey"])
+
+    def test_embedding_mode_can_still_be_switched_explicitly(self) -> None:
+        """★ 对照断言：显式提交 `mode` 必须真的切过去（默认值不再来自入参模型）。"""
+        self.client.put(
+            "/api/settings",
+            json={"embedding": {"mode": "cloud_api", "baseUrl": "https://embed.example.com/v1"}},
+        )
+        self.client.put("/api/settings", json={"embedding": {"mode": "none"}})
+
+        embedding = self.client.get("/api/settings").json()["embedding"]
+        self.assertEqual(embedding["mode"], "none")
+        self.assertEqual(embedding["baseUrl"], "https://embed.example.com/v1", "地址仍应保留")
+
+    def test_partial_put_never_clears_a_stored_key(self) -> None:
+        """掩码语义在「字段级局部 PUT」下也要成立（两处规则叠加不能互相破坏）。"""
+        self._save_custom_gateway()
+
+        self.client.put("/api/settings", json={"llm": {"baseUrl": "https://gw2.example.com/v1"}})
+
+        self.assertTrue(self.client.get("/api/settings").json()["llm"]["hasKey"])
+        self.assertEqual(self.client.get("/api/settings/runtime").json()["apiKey"], SECRET_KEY)
 
 
 # --------------------------------------------------------------------------- #
@@ -568,12 +1346,59 @@ class TestConfigFileStore(unittest.TestCase):
 
     def test_settings_from_json_is_pure_and_reports_issues(self) -> None:
         settings, issues = settings_from_json({"llm": {"base_url": 123}})
-        self.assertEqual(settings.llm.base_url, "https://api.deepseek.com/v1")
+        # 默认值来自 DEFAULT_LLM_BASE_URL（与 Pi 内置 deepseek provider 一致：**无 /v1**）
+        self.assertEqual(settings.llm.base_url, DEFAULT_LLM_BASE_URL)
         self.assertTrue(any("llm.base_url" in issue for issue in issues))
 
         settings, issues = settings_from_json({})
         self.assertEqual(settings, default_settings())
         self.assertEqual(issues, [])
+
+    def test_provider_id_is_read_back_and_old_files_get_the_default(self) -> None:
+        """★ `provider_id` 的读取兼容：新文件读得回，**旧文件（没有这个键）静默取默认值**。
+
+        升级不该让老用户看到一条无意义的警告 —— 老 `config.json` 没有 `provider_id`
+        是完全正常的状态（那个字段是后加的），所以断言 `issues == []`。
+        """
+        # 旧文件：只有历史字段（没有 provider_id / providerId）
+        legacy, legacy_issues = settings_from_json(
+            {
+                "llm": {
+                    "provider_name": "DeepSeek",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": SECRET_KEY,
+                    "model_id": "deepseek-chat",
+                }
+            }
+        )
+        self.assertEqual(legacy.llm.provider_id, DEFAULT_LLM_PROVIDER_ID)
+        self.assertEqual(legacy_issues, [], "旧文件缺 provider_id 不该产生任何 issue（静默取默认值）")
+
+        # 新文件（snake_case 与 camelCase 都要认）
+        for key in ("provider_id", "providerId"):
+            with self.subTest(key=key):
+                settings, issues = settings_from_json({"llm": {key: "zai", "model_id": "glm-5.2"}})
+                self.assertEqual(settings.llm.provider_id, "zai")
+                self.assertEqual(issues, [])
+
+    def test_provider_id_survives_a_round_trip(self) -> None:
+        """落盘 → 读回：`provider_id` 必须真的写进 config.json（否则重启就丢）。"""
+        store = self.store()
+        store.save(
+            StoredSettings(
+                llm=StoredLlm(
+                    provider_id="zai",
+                    provider_name="Z.AI",
+                    base_url="https://api.z.ai/api/coding/paas/v4",
+                    api_key=SECRET_KEY,
+                    model_id="glm-5.2",
+                )
+            )
+        )
+
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(document["llm"]["provider_id"], "zai")
+        self.assertEqual(self.store().load().llm.provider_id, "zai")
 
     def test_write_failure_raises_instead_of_pretending_success(self) -> None:
         blocked = self.data_dir / "not-a-dir"
@@ -636,6 +1461,132 @@ class TestKeyNeverLeaks(unittest.TestCase):
             any(record.args for record in records),
             "写盘日志必须用 %s 参数化（不要把 Key 拼进消息，也不要无脑擦 msg）",
         )
+
+
+class _CapturingHandler(logging.Handler):
+    """把格式化后的日志文本收进列表（**真实 handler**，不是 ``assertLogs``）。
+
+    用真实 handler 才能照出「过滤器到底挂在 handler 上没有」—— ``assertLogs`` 会临时
+    接管 handler 树，恰好绕开 ``install_log_redaction()`` 实际改写的那批对象。
+    """
+
+    def __init__(self, sink: list[str]) -> None:
+        super().__init__(level=logging.INFO)
+        self.sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.sink.append(record.getMessage())
+
+
+#: 自建/校内网关的**自定义形态** Key。
+#: ★ 为什么不能用 `SECRET_KEY`（`sk-…`）：那种形态被 `guard` 的**形态规则**
+#:   （`_SECRET_PATTERNS` 的 `sk-[A-Za-z0-9_-]{6,}`）无条件擦掉，**与登记无关** ——
+#:   拿它写「登记生效」的断言会得到一条**恒绿的假测试**（已实测踩到：把 `register_secret`
+#:   全部删掉，用 `sk-` 形态的用例依然通过）。
+#:   这条自定义形态不在任何形态规则里，**只有登记了才会被擦**，才真的在测登记。
+GATEWAY_KEY = "gw-8f3a2c1b9d4e6f70a1b2c3d4"
+
+
+class TestLlmKeyIsRegisteredForRedaction(unittest.TestCase):
+    """★★ 回归用例（审计发现，修复前**必红**）：LLM 的明文 Key 必须在保存/加载路径上登记。
+
+    缺陷形态：``guard.install_log_redaction()`` 的过滤器只能抹掉**它认识的**凭据
+    （登记表 + 形态规则）。嵌入侧的明文 Key 早在 ``rag/embedder.read_embedding_config``
+    里登记了，而 **LLM 的明文 Key 只在 ``routes/settings.py`` 出现** —— 那条线当时
+    一个 ``register_secret()`` 调用点都没有。
+
+    为什么必须走**真实子 logger + 真实 root handler**（而不是 ``assertLogs``）：
+    ``assertLogs`` 会临时接管 handler，照不出「生产里 filter 到底挂没挂上」。
+    这里的顺序与 ``main.py`` 一致：先建 root handler（= ``configure_logging``），
+    再装脱敏，最后让 ``app.routes.settings`` 这个子 logger 经 propagate 把记录交给它。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+
+        self.root = logging.getLogger()
+        self._saved_handlers = list(self.root.handlers)
+        self._saved_level = self.root.level
+        self.addCleanup(self._restore_root)
+
+        self.captured: list[str] = []
+        self.root.handlers = [_CapturingHandler(self.captured)]
+        self.root.setLevel(logging.INFO)
+        guard.install_log_redaction()
+        self.addCleanup(guard.clear_secrets)
+
+    def _restore_root(self) -> None:
+        for handler in list(self.root.handlers):
+            handler.filters = [
+                f for f in handler.filters if not isinstance(f, guard.RedactionFilter)
+            ]
+        self.root.handlers = self._saved_handlers
+        self.root.setLevel(self._saved_level)
+        self.root.filters = [
+            f for f in self.root.filters if not isinstance(f, guard.RedactionFilter)
+        ]
+
+    def _client(self) -> TestClient:
+        return authed_client(
+            create_app(build_runtime_config(token=TOKEN, data_dir=str(self.data_dir)))
+        )
+
+    def test_saving_a_key_registers_it_for_redaction(self) -> None:
+        """``PUT /api/settings`` 存下的明文 Key，之后任何日志里都必须被擦掉。"""
+        client = self._client()
+        response = client.put("/api/settings", json={"llm": {"apiKey": GATEWAY_KEY}})
+        self.assertEqual(response.status_code, 200)
+
+        # 生产形态：子 logger 经 propagate 交给 root 的 handler
+        logging.getLogger("app.routes.settings").warning("保存后的诊断行 key=%s", GATEWAY_KEY)
+
+        self.assertTrue(self.captured, "子 logger 的记录没有到达 root 的 handler")
+        leaked = [line for line in self.captured if GATEWAY_KEY in line]
+        self.assertEqual(leaked, [], f"明文 Key 进了日志：{leaked}")
+
+    def test_loading_settings_registers_the_key_for_redaction(self) -> None:
+        """★ 加载路径同样要登记 —— 进程重启后第一次读配置就得生效。
+
+        只有保存路径登记是不够的：重启后到第一次保存之间，任何读配置触发的日志
+        都会漏出上一次存下的明文 Key。
+        """
+        # 先直接落盘（不经路由，模拟「上次运行留下的配置」）
+        ConfigFileSettingsStore(self.data_dir).save(
+            StoredSettings(llm=StoredLlm(provider_name="自建", api_key=GATEWAY_KEY))
+        )
+        guard.clear_secrets()  # 确保「登记」只可能来自本次加载
+
+        client = self._client()
+        response = client.get("/api/settings")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(GATEWAY_KEY, response.text, "读设置只许回掩码")
+
+        logging.getLogger("app.routes.settings").warning("加载后的诊断行 key=%s", GATEWAY_KEY)
+        self.assertTrue(self.captured)
+        leaked = [line for line in self.captured if GATEWAY_KEY in line]
+        self.assertEqual(leaked, [], f"明文 Key 进了日志：{leaked}")
+
+    def test_runtime_config_route_also_registers_the_key(self) -> None:
+        """``GET /api/settings/runtime``（含明文，只给主进程）这条路径同样要登记。
+
+        它是明文 Key 最集中的一条出参路径，一旦被记进日志就是最大的一处泄漏。
+        """
+        ConfigFileSettingsStore(self.data_dir).save(
+            StoredSettings(llm=StoredLlm(provider_name="自建", api_key=GATEWAY_KEY))
+        )
+        guard.clear_secrets()
+
+        client = self._client()
+        response = client.get("/api/settings/runtime")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(GATEWAY_KEY, response.text, "该接口本就该回明文（供 Pi 用）")
+
+        logging.getLogger("app.routes.settings").warning("运行时配置诊断 key=%s", GATEWAY_KEY)
+        self.assertTrue(self.captured)
+        leaked = [line for line in self.captured if GATEWAY_KEY in line]
+        self.assertEqual(leaked, [], f"明文 Key 进了日志：{leaked}")
 
 
 # --------------------------------------------------------------------------- #
@@ -719,7 +1670,8 @@ class TestSettingsRouteStorage(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, "配置坏了也要能打开设置页（回退默认值）")
         self.assertFalse(response.json()["llm"]["hasKey"])
-        self.assertEqual(response.json()["llm"]["baseUrl"], "https://api.deepseek.com/v1")
+        self.assertEqual(response.json()["llm"]["baseUrl"], DEFAULT_LLM_BASE_URL)
+        self.assertEqual(response.json()["llm"]["providerId"], DEFAULT_LLM_PROVIDER_ID)
 
     def test_write_failure_surfaces_as_readable_5xx(self) -> None:
         store = ConfigFileSettingsStore(self.data_dir / "blocked")

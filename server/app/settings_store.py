@@ -16,7 +16,7 @@
     {
       "version": 1,
       "saved_at": "2026-09-16T12:00:00+00:00",
-      "llm":       {"provider_name": "...", "base_url": "...", "api_key": "<明文，仅本地>", "model_id": "..."},
+      "llm":       {"provider_id": "...", "provider_name": "...", "base_url": "...", "api_key": "<明文，仅本地>", "model_id": "..."},
       "embedding": {"mode": "local_fastembed", "base_url": null, "api_key": "", "model_id": "BAAI/bge-small-zh-v1.5"}
     }
 
@@ -45,6 +45,7 @@ from app.contracts import (
     DEFAULT_EMBEDDING_MODEL_ID,
     DEFAULT_LLM_BASE_URL,
     DEFAULT_LLM_MODEL_ID,
+    DEFAULT_LLM_PROVIDER_ID,
     DEFAULT_LLM_PROVIDER_NAME,
     EmbeddingMode,
     normalize_base_url,
@@ -84,6 +85,9 @@ class SettingsWriteError(RuntimeError):
 class StoredLlm:
     """落盘的 LLM 配置（**含明文 Key**，只在本模块与存储层之间流转）。"""
 
+    #: ★ Pi 的 provider id（预设清单里的键）。与 ``provider_name`` 分工不同：
+    #: 前者决定「用哪份 provider 定义」，后者**只用于显示**。
+    provider_id: str = DEFAULT_LLM_PROVIDER_ID
     provider_name: str = DEFAULT_LLM_PROVIDER_NAME
     base_url: str = DEFAULT_LLM_BASE_URL
     #: ``repr=False`` —— **Key 绝不进 repr()/str()/日志**（日志/异常里打印 dataclass 是常见事故）。
@@ -321,6 +325,7 @@ def dump_settings(settings: StoredSettings) -> str:
         "version": CONFIG_SCHEMA_VERSION,
         "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "llm": {
+            "provider_id": settings.llm.provider_id,
             "provider_name": settings.llm.provider_name,
             "base_url": settings.llm.base_url,
             "api_key": settings.llm.api_key,
@@ -348,6 +353,9 @@ def settings_from_json(data: dict[str, Any]) -> tuple[StoredSettings, list[str]]
     embedding_raw = _section(data, "embedding")
 
     llm = StoredLlm(
+        # ★ 旧版 config.json 没有这个键 → `_read_text` 对 `_MISSING` **静默**取默认值
+        #   （不记 issue、不报错）：升级不该让老用户的设置页弹一条无意义的警告。
+        provider_id=_read_text(llm_raw, ("provider_id", "providerId"), DEFAULT_LLM_PROVIDER_ID, issues, "llm.provider_id"),
         provider_name=_read_text(llm_raw, ("provider_name", "providerName"), DEFAULT_LLM_PROVIDER_NAME, issues, "llm.provider_name"),
         base_url=_read_base_url(llm_raw, DEFAULT_LLM_BASE_URL, issues, "llm.base_url"),
         api_key=_read_text(llm_raw, ("api_key", "apiKey"), "", issues, "llm.api_key"),

@@ -18,11 +18,13 @@ import {
   type ChatSendResult,
   type CodeExecuteRequest,
   type CodeExecuteResult,
+  type FetchModelsResult,
   type GradeCallResult,
   type GradeState,
   type IpcChannel,
   type ProbeRequest,
   type ProbeResult,
+  type ProviderCatalogEntry,
   type SettingsCallResult,
   type SettingsSnapshot,
   type SettingsUpdateRequest
@@ -47,7 +49,9 @@ export interface K12Api {
   probeSettings(payload: ProbeRequest): Promise<SettingsCallResult<ProbeResult>>
   /**
    * 读**当前学段**（只读）。
-   * ★ 故意**没有** `setGrade`：学段完全由系统推断，前端连请求改的能力都不该有（D-020）。
+   * Pi 内置供应商预设（端点地址现成可用，含模型清单）——设置页的「供应商预设」下拉。
+  readProviderCatalog(): Promise<SettingsCallResult<ProviderCatalogEntry[]>>
+  fetchProviderModels(payload: ProbeRequest): Promise<SettingsCallResult<FetchModelsResult>>
    */
   getGrade(): Promise<GradeCallResult<GradeState>>
   /** 订阅学段变化（推进只读徽章），返回取消订阅函数。 */
@@ -116,6 +120,10 @@ const api: K12Api = {
 
   probeSettings: (payload): Promise<SettingsCallResult<ProbeResult>> =>
     ipcRenderer.invoke(IPC.settingsProbe, payload) as Promise<SettingsCallResult<ProbeResult>>,
+  readProviderCatalog: (): Promise<SettingsCallResult<ProviderCatalogEntry[]>> =>
+    ipcRenderer.invoke(IPC.settingsProviderCatalog) as Promise<SettingsCallResult<ProviderCatalogEntry[]>>,
+  fetchProviderModels: (payload): Promise<SettingsCallResult<FetchModelsResult>> =>
+    ipcRenderer.invoke(IPC.settingsFetchModels, payload) as Promise<SettingsCallResult<FetchModelsResult>>,
   getGrade: (): Promise<GradeCallResult<GradeState>> =>
     ipcRenderer.invoke(IPC.gradeGet) as Promise<GradeCallResult<GradeState>>,
   onCodeExecute: (listener): (() => void) => {
@@ -183,6 +191,8 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.settingsRead,
   IPC.settingsSave,
   IPC.settingsProbe,
+  IPC.settingsProviderCatalog,
+  IPC.settingsFetchModels,
   IPC.gradeGet,
   IPC.gradeChanged,
   IPC.codeExecute,
