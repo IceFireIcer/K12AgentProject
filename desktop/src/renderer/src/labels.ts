@@ -91,14 +91,19 @@ export function gradeManualNotice(grade: GradeLevel): string {
   return `已按你选的${GRADE_LABELS[grade]}来讲。`
 }
 
-  quiz: '做几道题，检验一下刚学的'
+/** 没选章节时的说法（指示器与设置页共用**同一句**，两处不一致学生会以为没生效）。 */
+export const CHAPTER_NONE_LABEL = '未选择章节（自由问答）'
 
 /**
  * 「正在学哪一章」这一行的**唯一**拼装实现（对话页顶栏指示器与设置页都调它）。
  *
  * ★ 为什么收口：两个入口各拼一次，改一处忘另一处时表现是「同一个状态，一处写『正在学：第4章…』、
+ *   另一处写『未选择章节』」—— 学生据此判断自己刚选的那一下有没有生效。
  * ★ 章标题本身已经含学段语境（「第4章 用 Python 处理数据」），**后面不再重复学段标签**。
+ * ★ 空串 = 未选择（契约里只有这一种空值形态，见 `api/chapter.ts` 的注释）。
  */
+export function chapterLineLabel(chapterTitle: string): string {
+  const title = chapterTitle.trim()
   return title.length === 0 ? CHAPTER_NONE_LABEL : `正在学：${title}`
 }
 

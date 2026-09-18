@@ -34,6 +34,9 @@ import type { SidecarManager } from '../sidecar/manager.ts'
 import type { SidecarState } from '../sidecar/protocol.ts'
 import {
   IPC,
+  type ChapterCallResult,
+  type ChapterSetResult,
+  type ChapterState,
   type ChatSendResult,
   type CodeExecuteRequest,
   type CodeExecuteResult,
@@ -48,6 +51,10 @@ import {
   type SettingsSnapshot,
   type SettingsUpdateRequest
 } from './channels.ts'
+// 当前教材章节（软偏好；读写只有这一处实现）
+  fetchChapterState,
+  readChapterTitle,
+  saveChapterState
 import { mergeModelCandidates } from '@shared/provider-catalog'
 import { parseChatSendRequest } from './chat-request.ts'
 import { ChatStreamRegistry, type StreamTarget, type TurnHandle } from './chat-stream.ts'
@@ -152,10 +159,25 @@ function pushGradeState(next: GradeState | null): void {
   }
 }
 
+ * 当前教材章节（**读**给界面用），与 {@link currentGrade} 并列。
+ * ★ 写入只有一条，走 `chapter:set`（见下面的 handler）：学生显式选定某一章时，
+ *   主进程写库、然后用服务端回执推一条 `chapter:changed`。
+ * ★ 章节是**软偏好**：它进每轮 System Prompt，但**不进检索契约、不做 SQL 硬过滤**。
+let currentChapter: ChapterState | null = null
+ * 把 sidecar 回执归一成 {@link ChapterState}（两栏都过白名单，认不出回 `null`）。
  * ★ 与 `readGradeState` 同一纪律：**主进程这一侧也要校验**，不拿 `as` 断言糊过去 ——
  *   后端字段风格一变，指示器就会显示一个不存在的学段或一段脏标题，而 TypeScript 看不见。
+function readChapterState(value: unknown): ChapterState | null {
+  const record = value as { gradeLevel?: unknown; chapterTitle?: unknown }
   const gradeLevel = readGradeLevel(record.gradeLevel)
+  return { gradeLevel, chapterTitle: readChapterTitle(record.chapterTitle) ?? '' }
 /** 值变了才推送 —— 与 {@link pushGradeState} 同一手法（否则指示器会反复闪动）。 */
+function pushChapterState(next: ChapterState | null): void {
+    currentChapter !== null &&
+    currentChapter.gradeLevel === next.gradeLevel &&
+    currentChapter.chapterTitle === next.chapterTitle
+  currentChapter = next
+    webContents.send(IPC.chapterChanged, next)
 /**
  * ★ 默认学生 id（票 09：一人一目录、一人一库）。
  *
@@ -419,7 +441,31 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
         //   带上 `source: 'explicit'`，让指示器说的是「你选的」而不是「AI 推的」。
         pushGradeState({ gradeLevel: level, origin: 'explicit', source: 'explicit' })
         return { ok: false, message: '设定学段失败：' + (error instanceof Error ? error.message : String(error)) }
+  // ---------------------------------------------------------------- 教材章节（读 + 一条写）
   // ★ 与学段那一对**完全对称**：读一条、写一条、写成功即推。
+  //   章节一旦混进去，「发一条消息」就会顺带改一次章节（学生的显式选择退化成聊天的副作用）。
+  // ★ 章节是**软偏好**：它进每轮 System Prompt 让回答优先围绕本章，但**不进检索契约**。
+  //   与 Pi 会话无关（拉 Pi 进来还会让「刚启动就点章节」受装配竞态牵连）。
+  ipcMain.handle(IPC.chapterGet, async (): Promise<ChapterCallResult<ChapterState>> => {
+    const result = await fetchChapterState(resolveActiveStudentId())
+    const state = readChapterState(result.data)
+    if (!state) return { ok: false, message: '读章节失败：本地数据服务没有返回章节状态。' }
+    currentChapter = state
+   * ★ 学生**手动选定当前教材章节**（写入的唯一入口）。
+   * ② 写 sidecar（服务端还会按**当前学段**的章节清单核一次，不认识的章 422）；
+   * ③ 成功后**立刻推一条 `chapter:changed`**，指示器无需轮询就更新。
+   * ⚠️ 空串是**合法入参**（= 清除，回到「不限章节，自由问答」），不是「没填」：
+   *   它必须能穿过校验，否则学生选了章节就再也回不到自由问答。
+    IPC.chapterSet,
+    async (_event, payload: unknown): Promise<ChapterCallResult<ChapterSetResult>> => {
+      const title = readChapterTitle((payload as { chapterTitle?: unknown } | undefined)?.chapterTitle)
+            '设定章节失败：章节标题不合法（只能是最多 ' +
+      const result = await saveChapterState(resolveActiveStudentId(), title)
+      const state = readChapterState(result.data)
+      if (!state) return { ok: false, message: '设定章节失败：本地数据服务没有返回章节状态。' }
+      pushChapterState(state)
+      return { ok: true, data: { chapterTitle: state.chapterTitle } }
+      // 带上学生：章节要显示「3/5 已掌握」、地图要标注哪些已掌握。
 }
 
 /** 读/存设置的单次请求超时（本机回环，正常在毫秒级；超了就是 sidecar 卡住）。 */

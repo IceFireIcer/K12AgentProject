@@ -7,9 +7,12 @@
  *
  * ★ 顶部常驻**学段只读指示器**：学段由系统从对话里判定，学生改不了，
  *   指示器只把「当前按哪个年级讲」显示出来（判定变化时给一句提示）。
+ * ★ 紧跟着**章节指示器**（`ChapterIndicator`）：学段下面紧接着「这一章学到哪儿了」，
+ *   学生选的章节是一份**软偏好**（回答与检索优先围绕它），同样可以随时改。
  */
 import { nextTick, ref, watch } from 'vue'
 import ChatMessage from '../components/ChatMessage.vue'
+import ChapterIndicator from '../components/ChapterIndicator.vue'
 import GradeIndicator from '../components/GradeIndicator.vue'
 import MessageComposer from '../components/MessageComposer.vue'
 import { useChatStore } from '../stores/chat'
@@ -44,6 +47,7 @@ function onSend(text: string): void {
 <template>
   <section class="chat" data-testid="chat-area">
     <GradeIndicator />
+    <ChapterIndicator />
 
     <div ref="logEl" class="chat__log" data-testid="chat-log">
       <div class="shell">

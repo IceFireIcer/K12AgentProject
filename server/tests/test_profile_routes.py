@@ -278,6 +278,7 @@ class TestLearningEvents(ProfileCase):
             store = LearningDbStudentStore(self.tmp)
             self.assertIsNotNone(store.get_student(student_id))
         rows = self.query(student_id, "SELECT set_name, version FROM schema_version ORDER BY version")
+        # ★ 账本里 v1 / v2 各一行：v2 是「学生当前教材章节列」（current_chapter）。
         #   断言的是**整张账本**（重复开库不许把任何一行写第二遍），
         #   而不是「只剩最新一条」—— 已发布过的迁移行不许被抹掉。
         self.assertEqual([(r["set_name"], r["version"]) for r in rows], [("learning", 1), ("learning", 2)])

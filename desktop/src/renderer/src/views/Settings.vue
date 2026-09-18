@@ -13,6 +13,7 @@
  * - BaseURL 的 `/v1` 差异写在输入框下面，不靠用户猜。
  */
 import { computed, onMounted, ref, watch } from 'vue'
+import { GRADE_LABELS, GRADE_UNKNOWN_LABEL, chapterLineLabel, gradeOriginLabel } from '../labels'
 import { EMBEDDING_MODE_LABELS, MANUAL_PRESET_ID, type EmbeddingMode } from '../api/settings'
 import { GRADE_LEVELS } from '../api/grade'
 import { useChatStore } from '../stores/chat'
@@ -53,19 +54,37 @@ async function chooseGrade(level: GradeLevel): Promise<void> {
   }
 }
 
+/* ── 教材章节（选择入口二；入口一在对话页顶栏的 ChapterIndicator）──────────
  *
+ * ★ 两个入口**共用同一个 store action** `chat.setChapter`（走 `chapter:set` 独立通道）。
+ * ★ 章节是**软偏好**：回答与检索优先围绕它，但学生问到别的章节照常回答（不做硬过滤）。
+ * ★ 章节清单复用既有的取数路径 `study.loadChapters(chat.currentGrade)`
+ *   —— 与「学习档案 → 章节进度」是同一份数据，不新增第二条取数路径。
  */
+const chapterBusy = ref(false)
+const chapterError = ref<string | null>(null)
+const chapterList = computed(() => study.chapters?.chapters ?? [])
 
+async function chooseChapter(title: string): Promise<void> {
+  if (chapterBusy.value) return
+  chapterBusy.value = true
+  chapterError.value = null
   try {
+    const result = await chat.setChapter(title)
+    if (!result.ok) chapterError.value = result.message ?? '设定章节失败。'
   } finally {
+    chapterBusy.value = false
   }
 }
 
 /**
+ * ★ 学段变化会换掉整份章节目录：这里要跟着重取（`loadChapters` 自带「同段不重复取」）。
+ *   学段未判定时 `loadChapters(null)` 只记一句提示，不发请求。
  */
 watch(
   () => chat.currentGrade,
   (level, previous) => {
+    if (level !== previous) void study.loadChapters(level)
   }
 )
 
@@ -479,35 +498,72 @@ onMounted(() => {
       <p v-if="gradeError" class="notice notice--danger" data-testid="settings-grade-error">{{ gradeError }}</p>
     </section>
 
+    <!-- ─────────────────────── 教材章节（选择入口二） ───────────────────────
          与学段区块并列：都是「学生显式指定」的软偏好，指完立刻生效（不进检索契约）。
+         ★ 入口一在对话页顶栏（ChapterIndicator 的「选择章节」），两处共用 store 的 setChapter。 -->
+    <section class="card" data-testid="settings-chapter-block">
+      <h3 class="card__title">当前教材章节</h3>
+      <p class="field__hint" data-testid="settings-chapter-line">
+        {{ chapterLineLabel(chat.currentChapter) }}
       </p>
 
+      <p v-if="!chat.currentGrade" class="field__hint" data-testid="settings-chapter-no-grade">
+        还没有判定出你的学段：教材章节按学段分，判定出来之后就能从这里选。
       </p>
       <template v-else>
         <p class="field__hint">
+          章节目录来自{{ GRADE_LABELS[chat.currentGrade] }}教材。选了哪一章，讲题时会优先围绕它。
         </p>
+        <p v-if="study.loading.chapters" class="field__hint" data-testid="settings-chapter-loading">
+          正在读取教材章节…
         </p>
         <template v-else>
+          <p v-if="study.errors.chapters" class="field__hint" data-testid="settings-chapter-error">
+            {{ study.errors.chapters }}
           </p>
+          <div v-if="chapterList.length > 0" class="chapter-picker" data-testid="settings-chapter-list">
             <button
+              v-for="chapter in chapterList"
+              :key="chapter.chapterTitle"
               type="button"
+              :data-testid="`settings-chapter-option-${chapter.chapterTitle}`"
+              :data-active="String(chat.currentChapter === chapter.chapterTitle)"
+              :disabled="chat.streaming || chapterBusy"
+              @click="chooseChapter(chapter.chapterTitle)"
             >
+              {{ chapter.chapterTitle }}
             </button>
           </div>
           <p
+            v-else-if="!study.errors.chapters"
             class="field__hint"
+            data-testid="settings-chapter-empty"
           >
+            这个学段还没有编入教材章节。
           </p>
         </template>
 
+        <!-- 「不限章节」永远可选：选了它 = 清空当前章节，回到自由问答 -->
+        <div class="chapter-picker chapter-picker--single">
           <button
             type="button"
+            data-testid="settings-chapter-option-none"
+            :data-active="String(chat.currentChapter === '')"
+            :disabled="chat.streaming || chapterBusy"
+            @click="chooseChapter('')"
           >
+            不限章节（自由问答）
           </button>
         </div>
       </template>
 
+      <!-- ★ 必须写清楚：这两件事各自独立 —— 章节归教材目录，学段归回答的深浅 -->
+      <p class="field__hint" data-testid="settings-chapter-hint">
+        选择章节不会改变学段：学段决定「按什么水平讲」，章节只决定「围绕哪一章讲」。
+        反之，学段一旦变化，当前选的章节会被清空（那本教材已不属于新学段）。
       </p>
+      <p v-if="chapterError" class="notice notice--danger" data-testid="settings-chapter-set-error">
+        {{ chapterError }}
       </p>
     </section>
 
@@ -867,16 +923,20 @@ select.field__input:disabled {
   font-weight: 600;
 }
 
+/* ── 章节选择（同一套按钮组视觉；章节名较长，所以允许换行铺满）── */
 
+.chapter-picker {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
 }
 
+.chapter-picker--single {
   margin-top: 8px;
 }
 
+.chapter-picker button {
   padding: 6px 14px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
@@ -887,14 +947,17 @@ select.field__input:disabled {
   cursor: pointer;
 }
 
+.chapter-picker button:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
 }
 
+.chapter-picker button:disabled {
   cursor: not-allowed;
   color: var(--text-faint);
 }
 
+.chapter-picker button[data-active='true'] {
   border-color: rgba(47, 111, 208, 0.45);
   background: var(--accent-soft);
   color: var(--accent-strong);

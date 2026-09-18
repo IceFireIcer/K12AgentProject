@@ -46,6 +46,7 @@ export type GradeLevel = components['schemas']['GradeLevel']
 
 /**
  * `citation` 事件的检索来源条目（检索严格按学段隔离，向上兼容须显式标注）。
+ * ★ 同样从生成物派生：字段（`chunkId` / `chapterTitle` / `sectionTitle` / `gradeLevel` / `compat`）
  *   与 `contracts.py` 的 `Citation`（「只有这 5 个字段，一字不改」）逐字一致。
  */
 export type Citation = components['schemas']['Citation']

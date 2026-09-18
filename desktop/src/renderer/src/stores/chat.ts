@@ -15,13 +15,18 @@
  *   ★ 前端自己算、自己改本地状态也不行：界面显示的学段会与库里的不一致，
  *     而下一轮对话用的是库里的值 —— 表现成「指示器写着初中，回答却按小学讲」。
  *
+ * ★ 教材章节（本章节新增）与学段是**两条独立的线**，但共用同一套纪律：
+ *   - 学生的显式选择 → {@link setChapter} → `window.api.setChapter()`（`chapter:set` 独立通道）；
+ *   - 章节是**软偏好**（进 System Prompt 的画像块，不做检索硬过滤）；
+ *   - ★ **学段一变就清空章节**（那本教材不存在了）—— 清空规则在服务端，
+ *     本 store 在「显示出来的学段真的变了」时**真去读一次**（{@link refreshChapter}），
  *     不自己猜「大概是空的了」。
  */
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { GradeLevel } from '@shared/ipc-events'
-import { normalizeGradeState, resolveGradeBridge, type GradeOrigin } from '../api/grade'
+import { GRADE_LABELS, chapterLineLabel, gradeAdaptNotice, gradeManualNotice } from '../labels'
 import {
   GRADE_SET_MISSING_HINT,
   normalizeGradeState,
@@ -30,6 +35,9 @@ import {
 } from '../api/grade'
 import {
   CHAPTER_SET_MISSING_HINT,
+  normalizeChapterState,
+  resolveChapterBridge
+} from '../api/chapter'
 import { buildQuizSubmissionMessage, collectQuizResults, type QuizResultView } from '../cards/quiz'
 import {
   applyChatEvent,
@@ -59,14 +67,24 @@ export const useChatStore = defineStore('chat', () => {
   /** 学段推送通道缺失时的可读说明（缺通道不白屏，只说明原因）。 */
   const gradeBridgeError = ref<string | null>(null)
   /**
+   * 学生当前在学的教材章节（`''` = 未选择，自由问答）。
    *
    * ★ 它是一份**软偏好**：只进 System Prompt 的画像块（「回答与检索优先围绕本章」），
+   *   不做检索硬过滤 —— 学生问到别的章节照常回答。
+   * ★ 界面显示的章节**永远来自服务端**（回执 / 推送 / 重取），前端不自己存一份猜测值：
+   *   学段变更会清空章节，而这条规则只有服务端知道。
+   * ★ 显示用的那一行字由 {@link chapterLineLabel} 拼（指示器与设置页共用同一句）。
    */
+  const currentChapter = ref('')
   /**
+   * 章节**被清空**时的一次性提示（下一个问题发出时清掉；学生自己选的那一下有更贴切的回执）。
    *
    * ★ 为什么必须有这句话：那一下**不是学生的动作**（是系统判定出的学段变了），
    *   学生会看到「正在学：第4章…」突然不见了 —— 不说一声就是「东西自己没了」。
    */
+  const chapterNotice = ref<string | null>(null)
+  /** 章节通道缺失时的可读说明（与 `gradeBridgeError` 同一口径）。 */
+  const chapterBridgeError = ref<string | null>(null)
   /**
    *
    *   而「从错题本回对话页接着练」这个动作发生在**另一个视图的另一个组件**里，
@@ -76,6 +94,7 @@ export const useChatStore = defineStore('chat', () => {
    */
   let unsubscribe: (() => void) | null = null
   let unsubscribeGrade: (() => void) | null = null
+  let unsubscribeChapter: (() => void) | null = null
 
   const turns = computed(() => conversation.value.turns)
   const streaming = computed(() => turns.value.some((turn) => turn.status === 'streaming'))
@@ -122,6 +141,7 @@ export const useChatStore = defineStore('chat', () => {
   /** 连上主进程事件流（幂等：重复调用不会重复订阅）。 */
   function connect(): void {
     connectGrade()
+    connectChapter()
     if (unsubscribe !== null) return
     if (typeof window === 'undefined' || typeof window.api === 'undefined') {
       bridgeReady.value = false
@@ -140,6 +160,8 @@ export const useChatStore = defineStore('chat', () => {
     unsubscribe = null
     unsubscribeGrade?.()
     unsubscribeGrade = null
+    unsubscribeChapter?.()
+    unsubscribeChapter = null
   }
 
   /**
@@ -206,9 +228,15 @@ export const useChatStore = defineStore('chat', () => {
     gradeOrigin.value = next.origin
     currentGrade.value = next.gradeLevel
 
+    // ★★ 学段真的变了 → **真去读一次**章节（服务端在学段变更时把 `current_chapter` 清空）。
+    //   为什么不能在这里直接 `currentChapter.value = ''`：那是渲染进程在猜服务端的规则
     //   （清空是「学段变更」的副作用，而不是「学段变了」这条状态本身）。
+    //   照抄的后果：学生先自己选回同一个学段时，界面会把他已选的章节凭空抹掉 ——
+    //   服务端那条「重复确认同一学段不清章节」的分支本来是对的，界面却先撒了谎。
     //   ⚠️ 重取**不做本地比较**：`applyGradeState` 有两条来路（推送 + 初始 `getGrade()`），
+    //      「上一条我收到的是不是同一个学段」判断不准；服务端才是章节状态的唯一来源。
     if (previous !== next.gradeLevel) {
+      void refreshChapter()
     }
 
     if (next.origin === 'inferred' && previous !== next.gradeLevel) {
@@ -256,22 +284,36 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /* ------------------------------------------------------------ 教材章节 */
 
   /**
+   * 订上章节推送（幂等；缺通道时只记原因，不抛异常）。
    *
+   * 主进程推什么就显示什么 —— 渲染进程不做第二套判定，也不自己清章节。
    */
+  function connectChapter(): void {
+    if (unsubscribeChapter !== null) return
+    const lookup = resolveChapterBridge()
     if (!lookup.ready) {
+      chapterBridgeError.value = lookup.message
       return
     }
+    chapterBridgeError.value = null
 
     try {
+      unsubscribeChapter = lookup.bridge.onChapterChanged((raw) => {
+        applyChapterState(raw)
       })
     } catch (error) {
+      chapterBridgeError.value = `章节推送订阅失败：${error instanceof Error ? error.message : String(error)}`
       return
     }
 
     // 初始值（可选能力）：拿不到就等推送，不报错
+    if (typeof lookup.bridge.getChapter === 'function') {
+      void lookup.bridge.getChapter().then(
         (result) => {
+          if (result.ok) applyChapterState(result.data)
         },
         () => {
           /* 拉取失败不影响推送路径 */
@@ -281,45 +323,77 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * 应用一条章节状态（纯折叠 + 「被清空」时的一次性提示）。
    *
+   * ★ 提示只在**从有到无**时给：那一下不是学生的动作（学段变了，服务端清了章节），
    *   学生看到「正在学：第4章…」突然不见了，不说一声就是「东西自己没了」。
+   *   学生自己选「不限章节」时不该推这句 —— 那是他刚做的选择，回执由 {@link setChapter} 给。
    */
+  function applyChapterState(raw: unknown): void {
+    const next = normalizeChapterState(raw)
     if (next === null) return
+    const hadChapter = currentChapter.value !== ''
+    currentChapter.value = next.chapterTitle
+    // 只在「从有到无」时给那句话（学生自己选「不限章节」时不该报「被清空了」——
+    // 那是他刚做的选择，回执由 setChapter 给）
+    if (hadChapter && next.chapterTitle === '') {
+      chapterNotice.value = '学段变了，之前选的教材章节已清空 —— 可以重新选一章，或直接自由问答。'
     }
   }
 
   /**
+   * ★ 重新读一次当前章节（学段变化后调；也可由界面在需要时主动调）。
    *
+   * ★ **不做本地比较**：判断「章节到底变没变」是服务端的事（同 `applyChapterState` 的注释）。
+   *   失败**不抛异常**、也算不上「出了错」—— 章节只是软偏好，抓不到就不显示，
    *   对话照常（与「画像抓不到就用空块」同一条纪律）。
    */
+  async function refreshChapter(): Promise<void> {
+    const lookup = resolveChapterBridge()
     if (!lookup.ready) {
+      chapterBridgeError.value = lookup.message
       return
     }
+    if (typeof lookup.bridge.getChapter !== 'function') return
     try {
+      const result = await lookup.bridge.getChapter()
+      if (result.ok) applyChapterState(result.data)
     } catch {
       /* 读不到就保持现状，不阻断对话 */
     }
   }
 
   /**
+   * ★ 学生显式选择章节（**唯一的人工写入口**，空串 = 回到「不限章节，自由问答」）。
    *
    * 为什么前端不算、不推断：前端只传「学生选了什么」，生效逻辑全在服务端
+   * （写 `learning.db` 的 `student.current_chapter`），章节的软偏好进 Prompt 也在主进程侧。
+   * ★ 走 `window.api.setChapter()`（preload 白名单），**绝不混进 `ChatSendRequest`**。
    * ★ 失败**不抛**、不写本地状态：返回一句可读中文，由调用方展示（与 {@link setGrade} 同口径）。
    */
+  async function setChapter(chapterTitle: string): Promise<{ ok: boolean; message?: string }> {
+    const lookup = resolveChapterBridge()
     if (!lookup.ready) return { ok: false, message: lookup.message }
+    // ★ 缺 `setChapter` 是「这条线还没接」，不是「章节整个不可用」：单独一句说明，
     //   否则学生会以为指示器上那行「正在学：…」也坏了（那只读那部分其实好着）。
+    if (typeof lookup.bridge.setChapter !== 'function') {
       return { ok: false, message: CHAPTER_SET_MISSING_HINT }
     }
 
     try {
+      const result = await lookup.bridge.setChapter(chapterTitle)
       if (!result.ok) return { ok: false, message: result.message }
 
       // ★ 成功才动本地状态：服务端已经写了库，这里只是把它显示出来（与 setGrade 同一条纪律）。
+      currentChapter.value = result.data.chapterTitle
+      chapterNotice.value = null
+      chapterBridgeError.value = null
       return { ok: true }
     } catch (error) {
       // ★ IPC 崩了也要出可读中文（绝不把异常抛给组件，那会渲染成一段堆栈文本）
       return {
         ok: false,
+        message: `设定章节失败：${error instanceof Error ? error.message : String(error)}`
       }
     }
   }
@@ -331,6 +405,8 @@ export const useChatStore = defineStore('chat', () => {
 
     localNotice.value = null
     gradeNotice.value = null
+    // ★ 章节的「被清空」提示与学段提示同一口径：**下一个问题发出时清掉**（一次性）。
+    chapterNotice.value = null
     if (typeof window === 'undefined' || typeof window.api === 'undefined') {
       bridgeReady.value = false
       localNotice.value = '预加载脚本未生效（window.api 缺失），无法发送。'
@@ -392,12 +468,20 @@ export const useChatStore = defineStore('chat', () => {
     gradeOrigin,
     gradeNotice,
     gradeBridgeError,
+    currentChapter,
+    chapterNotice,
+    chapterBridgeError,
     quizResults,
     connect,
     connectGrade,
+    connectChapter,
     disconnect,
     /** ★ 唯一的人工写入口：学生手动指定学段（走 `grade:set`，不碰对话请求）。 */
     setGrade,
+    /** ★ 唯一的人工写入口：学生选择当前教材章节（走 `chapter:set`，不碰对话请求）。 */
+    setChapter,
+    /** 重新读一次当前章节（学段变化后由 store 自己调；不抛异常）。 */
+    refreshChapter,
     send,
     submitQuizAnswer
   }

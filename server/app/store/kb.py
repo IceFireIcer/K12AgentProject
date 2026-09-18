@@ -15,14 +15,12 @@
 
 from __future__ import annotations
 
-import logging
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 
 # 向量 BLOB 的 dtype：小端 float32。**两端必须一致**，改一处等于全库向量作废。
 VECTOR_DTYPE = np.dtype("<f4")
@@ -111,11 +109,17 @@ CHUNK_COLUMNS = (
 def clear_knowledge_tables(conn: sqlite3.Connection) -> None:
     """清空教材相关表 —— **建索引幂等的前提**（不清表重跑 = 数据翻倍）。
 
-    顺序有讲究：先清 ``chunk_vec``（vec0 表），再清 ``chunk``，
-    否则会出现「vec 行还在、chunk 行已换」的错位窗口。
+    顺序有讲究（两条都不能反）：
+
+    1. 先清 ``chunk_vec``（vec0 表）再清 ``chunk``：否则会出现「vec 行还在、chunk 行已换」
+       的错位窗口。
+    2. 先清 ``knowledge_dependencies`` 再清 ``kp``：连接上开了 ``foreign_keys=ON``
+       （见 ``store/connections.py``），依赖边引用 ``kp`` —— 反过来先删 ``kp``
+       会被 FK 直接拒绝，**重跑建库脚本就炸**。
+
     ``chunk_fts`` 是外部内容表，不直接 DELETE，改用 ``'rebuild'`` 指令重建。
     """
-    for table in ("chunk_vec", "chunk", "kp", "knowledge_dependencies"):
+    for table in ("chunk_vec", "chunk", "knowledge_dependencies", "kp"):
         if table_exists(conn, table):
             conn.execute(f"DELETE FROM {table}")
     if table_exists(conn, "chunk_fts"):
@@ -194,22 +198,6 @@ def insert_chunk(
     return rowid
 
 
-def insert_dependency(
-    conn: sqlite3.Connection,
-    *,
-    from_kp_id: str,
-    to_kp_id: str,
-    relation: str,
-    weight: float = 1.0,
-) -> None:
-    """写一条依赖边。**from = 前置，to = 后继**（全项目统一，见 ``app/knowledge/deps.py``）。"""
-    conn.execute(
-        "INSERT OR REPLACE INTO knowledge_dependencies(from_kp_id, to_kp_id, relation, weight) "
-        "VALUES(?,?,?,?)",
-        (from_kp_id, to_kp_id, relation, weight),
-    )
-
-
 def rebuild_fts(conn: sqlite3.Connection) -> None:
     """重建 FTS5 索引（外部内容表专用指令）。
 
@@ -230,13 +218,6 @@ def get_chunk_by_id(conn: sqlite3.Connection, chunk_id: str) -> ChunkRecord | No
     return ChunkRecord.from_row(row) if row else None
 
 
-def get_chunk_by_rowid(conn: sqlite3.Connection, rowid: int) -> ChunkRecord | None:
-    row = conn.execute(
-        f"SELECT {CHUNK_COLUMNS} FROM chunk WHERE rowid = ?", (rowid,)
-    ).fetchone()
-    return ChunkRecord.from_row(row) if row else None
-
-
 def chunks_by_rowids(
     conn: sqlite3.Connection, rowids: Sequence[int]
 ) -> dict[int, ChunkRecord]:
@@ -251,23 +232,15 @@ def chunks_by_rowids(
     return {int(r["rowid"]): ChunkRecord.from_row(r) for r in rows}
 
 
-def get_parent(conn: sqlite3.Connection, chunk: ChunkRecord) -> ChunkRecord:
-    """命中子块 → 取父块。**注入 LLM 的上下文是父块完整内容，不是碎片**。
-
-    父块缺失（数据不一致）时退回子块本身，并记一条 warning —— 宁可上下文短一点，
-    也不要让整次检索失败。
-    """
-    if not chunk.parent_chunk_id:
-        return chunk
-    parent = get_chunk_by_id(conn, chunk.parent_chunk_id)
-    if parent is None:
-        logger.warning("父块缺失：child=%s parent=%s", chunk.chunk_id, chunk.parent_chunk_id)
-        return chunk
-    return parent
-
-
 def parent_text_map(conn: sqlite3.Connection, chunk_ids: Iterable[str]) -> dict[str, str]:
-    """批量取父块文本：``{child_chunk_id: 父块文本}``（一次查询，不在循环里打库）。"""
+    """批量取父块文本：``{child_chunk_id: 父块文本}``（一次查询，不在循环里打库）。
+
+    ★ **注入上下文走这条批量路径，不走「逐块取父块记录」**：KNN 命中 N 个子块时，
+    逐块 ``SELECT`` 变成 N 次查询，而这条一次 JOIN 就够 —— 而且它只带回
+    **父块正文**（检索上下文唯一要用的字段），不必把父块的整行都读出来。
+    ``COALESCE(p.text, c.text)``：父块缺失（数据不一致）时退回子块正文，
+    宁可上下文短一点，也不要让整次检索失败。
+    """
     ids = [c for c in chunk_ids if c]
     if not ids:
         return {}
@@ -409,6 +382,119 @@ def kp_names(conn: sqlite3.Connection, kp_ids: Iterable[str]) -> dict[str, str]:
     return {str(r["kp_id"]): str(r["name"]) for r in rows}
 
 
+def kp_meta(
+    conn: sqlite3.Connection, kp_ids: Iterable[str]
+) -> dict[str, tuple[str, str, str]]:
+    """``kp_id → (name, chapter_title, grade_level)``（一次取回，供章节/错题/地图补名）。
+
+    ★ 与 :func:`kp_names` 的分工：那个只要名字（检索引用那类地方够用）；
+      这个多带章节与学段 —— 错题本要显示「错在《第4章 用 Python 处理数据》里」，
+      学习地图要按章节分组，都需要这三样一起。
+    """
+    ids = [k for k in dict.fromkeys(kp_ids) if k]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT kp_id, name, chapter_title, grade_level FROM kp WHERE kp_id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    return {
+        str(r["kp_id"]): (
+            str(r["name"] or ""),
+            str(r["chapter_title"] or ""),
+            str(r["grade_level"] or ""),
+        )
+        for r in rows
+    }
+
+
+def chapters_by_grade(
+    conn: sqlite3.Connection, grade_level: str
+) -> list[dict[str, object]]:
+    """按学段列出章节（含每章的 ``kp_ids``，**顺序 = 教材顺序**）。
+
+    ★ 排序是这里的**核心难点**，踩过一次，别改回去：
+      - **不能按 ``chapter_title`` 字典序**：中文序号「第10章」的字面排在「第2章」前面；
+      - **也不能按 ``MIN(rowid)``**：``kp`` 表的 rowid 是**入库顺序**，而入库顺序是
+        *文件名字典序*（``pl-ai-around-me`` → ``pl-ai-draws`` → …），
+        于是小学低年级会排成 ``第1章, 第6章, 第1章, 第3章, …`` 这种乱序（实测过）。
+        真正能依赖的只有章节名里的数字。
+      - 所以：**解析 ``第N章`` 的 N 排序**；解析不出来的章节名（理论上不会有 ——
+        ``library.py`` 的 ``REQUIRED_META`` 强制这个字段存在，但格式未必总是「第N章」）
+        统一排到末尾并按名称兜底，保证「同输入同输出」。
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT chapter_title FROM kp WHERE grade_level = ?",
+        (grade_level,),
+    ).fetchall()
+    titles = [str(row["chapter_title"] or "") for row in rows]
+    titles.sort(key=_chapter_sort_key)
+
+    chapters: list[dict[str, object]] = []
+    for title in titles:
+        # 组内按 kp_id 排：同一章的知识点顺序没有教材依据，取字典序至少是**稳定**的
+        # （不许用 rowid —— 它随入库顺序变化，同章的 kp 列表会无缘无故重排）。
+        members = conn.execute(
+            "SELECT kp_id FROM kp WHERE grade_level = ? AND COALESCE(chapter_title, '') = ? "
+            "ORDER BY kp_id",
+            (grade_level, title),
+        ).fetchall()
+        chapters.append(
+            {
+                "chapter_title": title,
+                "kp_ids": [str(r["kp_id"]) for r in members],
+            }
+        )
+    return chapters
+
+
+#: 章节名里的中文序号（``第4章`` → 4）。只认阿拉伯数字：教材标题实测全是这种形态。
+_CHAPTER_NUMBER_RE = re.compile(r"^第\s*(\d+)\s*章")
+
+
+def _chapter_sort_key(title: str) -> tuple[int, int, str]:
+    """章节排序键：``(能否解析, 章号, 标题)``。
+
+    解析不出章号的排到最后（第一项为 1），并在同组内按标题字典序 ——
+    这样即使教材里混进一个不规范标题，也不会让整份目录的顺序变得不确定。
+    """
+    match = _CHAPTER_NUMBER_RE.match(title.strip())
+    if match:
+        return (0, int(match.group(1)), title)
+    return (1, 0, title)
+
+
+def dependency_rows(conn: sqlite3.Connection) -> list[tuple[str, str, str, float]]:
+    """全部依赖边：``(from_kp_id, to_kp_id, relation, weight)``。**``from`` 是前置、``to`` 是后继。**
+
+    ★ 用不着递归：``knowledge_dependencies`` 是一张**边表**，全量读出来就是完整的图
+      （几十到几百条）。递归 CTE 只在「从一个点向上/下游展开」时才需要
+      （见 ``app/knowledge/deps.py`` 的 ``successors`` / ``prerequisites``）。
+    """
+    rows = conn.execute(
+        "SELECT from_kp_id, to_kp_id, relation, weight FROM knowledge_dependencies "
+        "ORDER BY from_kp_id, to_kp_id"
+    ).fetchall()
+    return [
+        (
+            str(r["from_kp_id"]),
+            str(r["to_kp_id"]),
+            str(r["relation"] or "prerequisite"),
+            float(r["weight"] or 1.0),
+        )
+        for r in rows
+    ]
+
+
+def kp_ids_by_grade(conn: sqlite3.Connection, grade_level: str) -> list[str]:
+    """某学段的全部知识点 id（**按教材定义序**，即 rowid 升序）。"""
+    rows = conn.execute(
+        "SELECT kp_id FROM kp WHERE grade_level = ? ORDER BY rowid", (grade_level,)
+    ).fetchall()
+    return [str(r["kp_id"]) for r in rows]
+
+
 def _kp_from_row(row: sqlite3.Row) -> KpRecord:
     return KpRecord(
         kp_id=str(row["kp_id"]),
@@ -421,7 +507,7 @@ def _kp_from_row(row: sqlite3.Row) -> KpRecord:
 
 
 def stats(conn: sqlite3.Connection) -> dict[str, int]:
-    """库规模（报告与答辩要能一行输出）。"""
+    """库规模（报告与汇报要能一行输出）。"""
     def count(sql: str) -> int:
         try:
             return int(conn.execute(sql).fetchone()[0])

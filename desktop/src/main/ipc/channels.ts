@@ -77,11 +77,18 @@ export const IPC = {
   gradeSet: 'grade:set',
   /** 主进程 → 渲染进程：推断出的学段发生变化时推送（指示器据此更新）。 */
   gradeChanged: 'grade:changed',
+  /** 渲染进程 → 主进程：读**当前教材章节**（指示器 / 设置页展示用）。 */
+  chapterGet: 'chapter:get',
   /**
+   * 渲染进程 → 主进程：**学生手动选定当前教材章节**（写入的唯一入口）。
    *
    * ★ 与 `grade:set` 完全对称：**不混进 `ChatSendRequest`**（那个请求只有 `text`，
+   *   守卫 G6c 钉着）。章节是学生的显式选择，不该变成「发一条消息」的副作用。
    * ★ 它是 invoke（有回执）：学生要看到「选没选上」，推送通道给不了这个。
    */
+  chapterSet: 'chapter:set',
+  /** 主进程 → 渲染进程：当前章节发生变化时推送（指示器据此更新）。 */
+  chapterChanged: 'chapter:changed',
   /**
    * 主进程 → 渲染进程：**把学生代码下发到渲染进程执行**（票 18 的硬约束）。
    * ★ 主进程**绝不执行学生代码** —— Pi 的 Extension 与 UI 同进程且拥有完整系统权限，
@@ -91,6 +98,7 @@ export const IPC = {
   /** 渲染进程 → 主进程：回传执行结果（按 requestId 与下发配对）。 */
   codeResult: 'code:result',
 
+  // ── 学习档案（章节 / 报告 / 错题本 / 学习地图）─────────────────────────
   //
   // ★ 这四条都是**纯转发**：主进程把请求发给 sidecar，把 JSON 原样回给渲染进程。
   //   聚合、排序、学段过滤、连续天数**全部在 Python 侧**（混合后端的硬边界：
@@ -99,6 +107,8 @@ export const IPC = {
   // ★ 渲染进程不直连 sidecar（守卫 G3）：token 与地址全留在主进程。
   /** 渲染进程 → 主进程：学习报告（`GET /api/profile/{id}/report?days=N`）。 */
   /** 渲染进程 → 主进程：错题本（`GET /api/quiz/mistakes/{id}`）。 */
+  /** 渲染进程 → 主进程：某学段章节清单（`GET /api/knowledge/chapters/{grade}`）。 */
+  studyChapters: 'study:chapters',
   /** 渲染进程 → 主进程：某学段依赖图全览（`GET /api/graph/overview/{grade}`）。 */
 
   /** 渲染进程 → 主进程：按 id 读一条会话的正文（**绝不接受路径**）。 */
@@ -125,13 +135,14 @@ export type { FetchModelsResult, ProviderCatalogEntry } from '@shared/provider-c
  * 主进程 → 渲染进程的**单向推送**通道。
  * 守卫据此断言事件流走的是推送通道（不是拿 invoke 回执当流用）。
  *
- * ⚠️ 设置域三条与 `gradeGet` 是 invoke（有回执），**不要**登记到这里。
+ * ⚠️ 设置域三条、`gradeGet` / `gradeSet` / `chapterGet` / `chapterSet` 都是 invoke（有回执），
  * **不要**登记到这里。
  */
 export const PUSH_CHANNELS: readonly IpcChannel[] = [
   IPC.sidecarChanged,
   IPC.chatEvent,
   IPC.gradeChanged,
+  IPC.chapterChanged,
   IPC.codeExecute
 ]
 
@@ -177,15 +188,28 @@ export interface GradeSetResult {
 }
 
 /**
+ * 当前教材章节（展示 / 读回用），与 {@link GradeState} 并列。
  *
+ * ★ **章节是软偏好**：它进每轮 System Prompt（让回答与检索优先围绕本章），
+ *   但**不进检索契约、不做 SQL 硬过滤** —— 学生问别的章节照常回答。
+ * ★ `chapterTitle` 的语义：**空串 = 未选择章节**（不是 `null`）——
+ *   前端不用为「空」处理两种值；「不限章节（自由问答）」就是空串。
+ * ★ **与学段相互独立**，但学段一变服务端会**清空章节**（那本教材不存在了），
  *   所以渲染进程在学段变化后要重新读一次（不要自己猜成空串）。
  */
+export interface ChapterState {
   gradeLevel: GradeLevel
+  chapterTitle: string
 }
 
+/** 章节读取的回执（与 {@link GradeCallResult} 同形，便于前端统一处理）。 */
+export type ChapterCallResult<T> =
   | { ok: true; data: T }
   | { ok: false; message: string }
 
+/** 手动设定章节的回执（回的是**生效后的**章标题；空串 = 已清除）。 */
+export interface ChapterSetResult {
+  chapterTitle: string
 }
 
 /** 一轮对话的入参。 */
@@ -241,6 +265,7 @@ export interface CodeExecuteResult {
   | { ok: true; data: unknown }
   | { ok: false; message: string }
 
+/** 章节 / 依赖图全览的入参（按学段查；带 `studentId` 就补该学生的进度）。 */
   gradeLevel: GradeLevel
   /** 可选：带上就把「已掌握」标注进来（读该学生自己的 `learning.db`）。 */
   studentId?: string

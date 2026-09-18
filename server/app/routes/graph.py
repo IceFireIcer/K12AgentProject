@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -26,6 +27,7 @@ from app.knowledge.deps import (
 )
 from app.rag.contracts_bridge import DepNode
 from app.store import kb as kb_repo
+from app.store.connections import DatabaseMissing, connect
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,11 @@ router = APIRouter(prefix="/api", tags=["graph"])
 
 Direction = Literal["successor", "prerequisite", "both"]
 
+GRADE_LEVELS: tuple[str, ...] = ("primary_low", "primary_high", "junior", "senior")
+def open_kb_readonly(request: Request) -> sqlite3.Connection:
+    ★ 这个函数是本文件与 ``routes/knowledge.py`` **共用**的：两处各写一遍
+      「取 kb 路径 + 判断存在 + readonly 连接 + 把 ``DatabaseMissing`` 转成 503」
+    except DatabaseMissing as exc:
 
 @router.get("/graph/deps/{kp_id}", response_model=list[DepNode])
 def graph_deps(
@@ -67,7 +74,7 @@ def graph_deps(
     try:
         conn = connect(kb_path, readonly=True)
     except DatabaseMissing as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    conn = open_kb_readonly(request)
 
     try:
         if kb_repo.get_kp(conn, kp_id) is None:
@@ -104,3 +111,11 @@ def graph_deps(
         )
         for row in ordered
     ]
+    if grade_level not in GRADE_LEVELS:
+            detail=f"学段非法：{grade_level!r}（允许：{'/'.join(GRADE_LEVELS)}）",
+    conn = open_kb_readonly(request)
+    except sqlite3.Error as exc:
+    ★ 与 ``routes/knowledge.py`` 里那个同名私有函数是**两处各一份**吗？不是「重复实现」：
+    except sqlite3.Error:
+    "GRADE_LEVELS",
+    "open_kb_readonly",

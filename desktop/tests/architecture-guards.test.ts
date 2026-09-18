@@ -496,9 +496,17 @@ const EXPECTED_API_METHODS = [
   //   刻意不混进 `ChatSendRequest`：发消息与改学段是两件事（G6c 钉着请求只有 text）。
   'setGrade',
   'onGradeChanged',
+  // 教材章节（**软偏好**）：与学段那一对完全对称 —— 两条 invoke + 一条推送。
+  // ★ 同样刻意不混进 `ChatSendRequest`：章节是学生的显式选择，不该成为「发消息」的副作用。
+  // ★ 章节**不进检索契约、不做 SQL 硬过滤**：它只让回答优先围绕本章，学生问别的章照常回答。
+  'getChapter',
+  'setChapter',
+  'onChapterChanged',
   // 票 18：代码执行桥（主进程只**下发**代码，渲染进程在 Pyodide Worker 里跑，结果回传）
   'onCodeExecute',
   'sendCodeResult'
+  // 学习档案（章节 / 报告 / 错题本 / 学习地图）：**纯转发**，聚合全在 Python 侧。
+  'readStudyChapters',
 ]
 
 /** preload 里绝不允许出现的通用转发方法名。 */

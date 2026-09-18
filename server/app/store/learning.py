@@ -28,8 +28,13 @@
    ★ 表里存的 ``reference_answer`` 是**标准答案**（用于 ``POST /api/quiz/grade`` 判分），
      它**只在本文件与 Python 侧存在**，绝不出现在任何出参模型里（§6.3 答案泄漏防护：
      对外一律 ``QuizQuestionOut``，结构上没有答案字段）。
+当前教材章节（``student.current_chapter``）
 学生显式选定的「在学哪一章」是**软偏好**（只进画像 Prompt，不做检索硬过滤），
+存在 ``student`` 表的一列里（迁移 v2，见 ``migrations.py`` 的 ``_apply_chapter_v2``；
+（:meth:`LearningStore.current_chapter` / :meth:`LearningStore.set_current_chapter`），
 与 ``profile_pref`` 的读写对同一口径：**路由层不自己拼 SQL**。
+> ⚠️ 章节的**清单**不在这里 —— 它来自 ``kb.sqlite`` 的 ``kp.chapter_title``
+> （随包分发的只读内容资产，``store/kb.py:chapters_by_grade``）。
 """
 
 from __future__ import annotations
@@ -102,6 +107,10 @@ class StudentRecord:
     grade_level: str
     created_at: int
     last_active_at: int
+    #: 学生当前在学的教材章节标题；**空串 = 未选择**（库里的 NULL 也读成空串）。
+    #: ★ 只在 ``student.current_chapter`` 一列里存 —— 章节**清单**归 ``kb.sqlite``，
+    #:   这里只存「学生选了哪一个」这一个值（软偏好，见 ``app/contracts.ChapterUpdateRequest``）。
+    current_chapter: str = ""
 class GradeHistoryRecord:
     """``grade_history`` 的一行（学段变化轨迹）。
     ★ ``ts`` 是**秒**（由路由层经 ``to_contract_ms`` 转毫秒，与画像/学段同一处换算）。
@@ -176,7 +185,7 @@ class LearningStore:
 
     def get_student(self, student_id: str) -> StudentRecord | None:
         row = self.conn.execute(
-            "SELECT student_id, nickname, grade_level, created_at, last_active_at "
+            "SELECT student_id, nickname, grade_level, created_at, last_active_at, current_chapter "
             "FROM student WHERE student_id = ?",
             (student_id,),
         ).fetchone()
@@ -188,10 +197,23 @@ class LearningStore:
             grade_level=str(row["grade_level"]),
             created_at=int(row["created_at"] or 0),
             last_active_at=int(row["last_active_at"] or 0),
+            current_chapter=str(row["current_chapter"] or ""),
         )
 
+    # ------------------------------------------------------- 当前教材章节 --
+    # ★ 这一对方法是 ``student.current_chapter`` 这一列**唯一的读写实现**：
+    #   ``routes/profile.py`` 的两条章节端点调它们，别处（学段变更清空在 rules.py 里
     #   是同一张表的一次 UPDATE，属学段轨自己的事务）不许再拼一份 SELECT/UPDATE。
+    def current_chapter(self, student_id: str) -> str:
+        """读该学生当前章节标题（无行 / ``NULL`` / 空串 → **空串**）。"""
+            "SELECT current_chapter FROM student WHERE student_id = ?", (student_id,)
+        return str(row["current_chapter"] or "")
+    def set_current_chapter(self, student_id: str, title: str | None) -> None:
+        """写/清除当前章节（**空串 / ``None`` → 写 ``NULL``**，读回仍是空串）。
+          否则 ``WHERE current_chapter = ''`` 这类查询会漏掉 ``NULL`` 的行
+          （三值逻辑），排查起来是「明明没选章节却查不出来」。
           （``upsert_student`` 要一并写学段），存储层不该替它决定学段。
+            "UPDATE student SET current_chapter = ? WHERE student_id = ?",
     # ------------------------------------------------------------ 掌握度 --
     def mastery(self, kp_id: str) -> tuple[float, int, int]:
         row = self.conn.execute(

@@ -14,6 +14,9 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import {
   IPC,
+  type ChapterCallResult,
+  type ChapterSetResult,
+  type ChapterState,
   type ChatSendRequest,
   type ChatSendResult,
   type CodeExecuteRequest,
@@ -64,6 +67,14 @@ export interface K12Api {
   setGrade(gradeLevel: GradeLevel): Promise<GradeCallResult<GradeSetResult>>
   /** 订阅学段变化（推进指示器），返回取消订阅函数。 */
   onGradeChanged(listener: (state: GradeState) => void): () => void
+   * 读**当前教材章节**。
+   * ★ 章节的写入口只有一条：{@link setChapter}（走 `chapter:set` 独立通道）。
+  getChapter(): Promise<ChapterCallResult<ChapterState>>
+   * ★ 学生手动选定当前教材章节（走 `chapter:set` 独立通道；**绝不混进对话请求**）。
+   * ★ 传**空串 = 取消选择**（回到「不限章节，自由问答」）—— 空串是合法入参，不是「没填」。
+  setChapter(chapterTitle: string): Promise<ChapterCallResult<ChapterSetResult>>
+  /** 订阅当前章节变化（推进指示器），返回取消订阅函数。 */
+  onChapterChanged(listener: (state: ChapterState) => void): () => void
   /**
    * 订阅「下发学生代码去执行」的请求（渲染进程侧在沙箱 Worker 里跑），返回取消订阅函数。
    * ★ 主进程绝不执行学生代码 —— 它只把代码推下来，结果由 {@link sendCodeResult} 回传。
@@ -71,6 +82,8 @@ export interface K12Api {
   onCodeExecute(listener: (request: CodeExecuteRequest) => void): () => void
   /** 回传执行结果（`requestId` 必须**原样带回**，主进程按它配对，否则每次都会超时）。 */
   sendCodeResult(result: CodeExecuteResult): void
+  /** 某学段章节清单（带 `studentId` 就补每章的已掌握数）。 */
+  readStudyChapters(payload: StudyGradeRequest): Promise<StudyCallResult>
   /** 某学段依赖图全览（学习地图；带 `studentId` 就标注哪些已掌握）。 */
 }
 
@@ -165,6 +178,19 @@ const api: K12Api = {
       ipcRenderer.removeListener(IPC.gradeChanged, handler)
     }
   }
+  // 教材章节：与学段那一对完全对称（读一条、写一条、订阅一条）。
+  getChapter: (): Promise<ChapterCallResult<ChapterState>> =>
+    ipcRenderer.invoke(IPC.chapterGet) as Promise<ChapterCallResult<ChapterState>>,
+  // ★ 入参按 `{ chapterTitle }` 递过去，主进程再用 `readChapterTitle` 做一次白名单校验
+  setChapter: (chapterTitle): Promise<ChapterCallResult<ChapterSetResult>> =>
+    ipcRenderer.invoke(IPC.chapterSet, { chapterTitle }) as Promise<
+      ChapterCallResult<ChapterSetResult>
+  onChapterChanged: (listener): (() => void) => {
+      if (!isChapterState(state)) return
+    ipcRenderer.on(IPC.chapterChanged, handler)
+      ipcRenderer.removeListener(IPC.chapterChanged, handler)
+  readStudyChapters: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.studyChapters, payload) as Promise<StudyCallResult>,
 }
 
 /** 学段状态的最小形状检查（`origin` 缺省按 `default` 处理：宁可显示待判定）。 */
@@ -177,8 +203,13 @@ function isGradeState(value: unknown): value is GradeState {
     typeof record.gradeLevel === 'string' &&
     (GRADE_LEVELS as readonly string[]).includes(record.gradeLevel) &&
     (record.origin === 'inferred' || record.origin === 'default')
+ * 章节状态的最小形状检查（与 {@link isGradeState} 同一口径）。
+ * ★ `chapterTitle` 必须是字符串（**空串合法** = 未选择章节）：认不出就整条丢掉，
+function isChapterState(value: unknown): value is ChapterState {
+  const record = value as { gradeLevel?: unknown; chapterTitle?: unknown }
     typeof record.gradeLevel === 'string' &&
     (GRADE_LEVELS as readonly string[]).includes(record.gradeLevel) &&
+    typeof record.chapterTitle === 'string'
   )
 }
 
@@ -213,8 +244,13 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.gradeGet,
   IPC.gradeSet,
   IPC.gradeChanged,
+  // 教材章节（读取 invoke / 手动设定 invoke / 变化推送）
+  IPC.chapterGet,
+  IPC.chapterSet,
+  IPC.chapterChanged,
   IPC.codeExecute,
   IPC.codeResult
+  IPC.studyChapters,
 ]
 
 contextBridge.exposeInMainWorld('api', api)

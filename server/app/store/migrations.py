@@ -187,6 +187,12 @@ CREATE INDEX IF NOT EXISTS idx_signals_session ON grade_signals(session_id);
 
 def _apply_learning_v1(conn: sqlite3.Connection) -> None:
     conn.executescript(_LEARNING_V1)
+def _apply_chapter_v2(conn: sqlite3.Connection) -> None:
+    """v2：给 ``student`` 补 ``current_chapter`` 列（学生当前在学的教材章节）。
+    ⚠️ 这里**只加列、不填默认值**：``NULL`` 就是「未选择章节」，
+      读写原语（``LearningStore.current_chapter`` / ``set_current_chapter``）把
+    if "current_chapter" not in columns:
+        conn.execute("ALTER TABLE student ADD COLUMN current_chapter TEXT")
 
 
 KB_MIGRATIONS: tuple[Migration, ...] = (
@@ -196,6 +202,7 @@ KB_MIGRATIONS: tuple[Migration, ...] = (
 
 LEARNING_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="学生画像 / 掌握度 / 学习历史 / 进度 / 学段信号", apply=_apply_learning_v1),
+    Migration(version=2, name="学生当前教材章节列（current_chapter）", apply=_apply_chapter_v2),
 )
 
 

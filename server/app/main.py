@@ -53,6 +53,7 @@ from app.routes.code import router as code_router  # noqa: E402
 from app.routes.grade import router as grade_router  # noqa: E402
 from app.routes.graph import router as graph_router  # noqa: E402
 from app.routes.health import router as health_router  # noqa: E402
+from app.routes.knowledge import router as knowledge_router  # noqa: E402
 from app.routes.profile import router as profile_router  # noqa: E402
 from app.routes.quiz import router as quiz_router  # noqa: E402
 from app.routes.rag import router as rag_router  # noqa: E402
@@ -143,6 +144,7 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
     app.include_router(graph_router)
     app.include_router(profile_router)
     app.include_router(quiz_router)
+    app.include_router(knowledge_router)
     # 学段自动推断（票 21）：前端没有选择器，这里是唯一的学段写路径
     app.include_router(grade_router)
     # 编程（票 18/19）：只提供模板/提示/报错翻译 —— **没有任何执行原语**

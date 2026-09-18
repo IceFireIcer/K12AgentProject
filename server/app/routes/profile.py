@@ -12,7 +12,9 @@
   键是**封闭词表**（``contracts.PreferenceKey``），值 ≤ 40 字单行；
 - **推荐**（``GET /api/profile/{student_id}/recommendation``，票 20）：
   「下一步学什么」的**唯一出口**，依赖图 + 掌握度共同决定，冷启动有默认路径；
+- **当前章节**（``GET`` / ``PUT /api/profile/{student_id}/chapter``）：学生显式选定
   「在学哪一章教材」。★ 它是**软偏好**：只进画像 Prompt（Pi 每轮读 ``GET /profile``），
+  **不改检索契约、不做 SQL 硬过滤**（学生问别的章节照常回答）；
   非空标题必须命中该生**当前学段**的教材清单（``kb.sqlite``），学段一变由
   ``app/grade/rules.py`` 清空（那本教材已经不存在了）。
 
@@ -49,6 +51,8 @@ from pydantic import Field, field_validator
 
 from app.contracts import (
     CamelModel,
+    ChapterStateOut,
+    ChapterUpdateRequest,
     GradeLevel,
     LearningActivity,
     Mastery,
@@ -178,8 +182,12 @@ def _load_kb_connection(request: Request):
     """打开只读知识库；不可用时返回 ``None``（调用方各自决定降级方式）。
 
     ★ **不抛异常**：知识库缺失/损坏是「这项能力受限」，不是「画像打不开」。
+      画像本身（掌握度/偏好/章节）落在学生自己的库里，与 kb 无关 —— 让它们互相拖垮，
+      结果是学生连自己的分数和章节都看不到。
     ★ 本函数有两个调用方，**降级方式不同**，所以日志只说「不可用」不说降级动作：
       ① 推荐（:func:`build_recommendation`）→ 退化成「按掌握度给建议」；
+      ② 章节写入（:func:`write_chapter`）→ 非空标题无法校验，直接 503
+         （**不能猜**：猜错就会把不存在的章节写进 Prompt）。
     """
     from app.rag.retriever import default_kb_path
     from app.store.connections import connect
@@ -437,7 +445,9 @@ def _as_grade_or_none(value: str | None) -> GradeLevel | None:
 def _read_student(store, student_id: str) -> Student | None:
     """从该学生的 ``learning.db`` 读学生行（秒 → 毫秒的换算只在 ``to_contract_ms`` 里做）。
 
+    ★ 这是 ``StudentRecord → Student`` 的**唯一映射点**：``current_chapter`` 也只在这里补，
       别处（``routes/students.py`` 的 ``LearningDbStudentStore`` 是另一条学生出参路径，
+      但它的契约里没有章节字段）不许再写第二份映射 —— 两处各写一份，改字段时必漏一处。
     """
     record = store.get_student(student_id)
     if record is None:
@@ -448,6 +458,7 @@ def _read_student(store, student_id: str) -> Student | None:
         grade_level=as_grade_level(record.grade_level),
         created_at=to_contract_ms(record.created_at),
         last_active_at=to_contract_ms(record.last_active_at),
+        current_chapter=record.current_chapter,
     )
 
 
@@ -671,20 +682,27 @@ def update_preference(
 
 
 # --------------------------------------------------------------------------- #
+# 当前教材章节（软偏好：只进画像 Prompt，不进检索契约）
 # --------------------------------------------------------------------------- #
 def _ensure_student_level(store, student_id: str) -> GradeLevel:
     """确保学生行存在并返回其学段（**冷启动口径与学段轨一致**）。
 
     ★ 为什么不在这里写 ``DEFAULT_COLD_START_GRADE``：那会让「冷启动默认学段」出现
       **第三处**字面量/常量引用。``GradeEngine.ensure_student`` 是既有的冷启动入口
+      （建行 + 留一条 ``from_level=NULL`` 的基线轨迹），章节端点复用它即可。
+    ★ 为什么章节端点需要「自动建行」而不是像 ``GET /profile`` 那样 404：
+      界面上的章节指示器在**全新机器**上必须正常显示「未选择章节」，
+      回 404 会让它显示成一个报错 —— 而「还没选章节」本来就是新学生的正常状态。
     """
     from app.grade.rules import GradeEngine
 
     return as_grade_level(GradeEngine(store).ensure_student(student_id))
 
 
+def _chapter_titles(request: Request, grade_level: str) -> set[str]:
     """该学段教材里的**全部章标题**（kb 不可用 → 503）。
 
+    ★ 查询**只有一份**：``kb_repo.chapters_by_grade``（``store/kb.py``）——
       它已经处理了「按第N章的章号排序」这件事。这里只把标题取成集合做**成员判断**，
       **不重新排序、不复制一份 SELECT**（复制一份迟早会漏掉它的排序修正）。
     """
@@ -694,27 +712,42 @@ def _ensure_student_level(store, student_id: str) -> GradeLevel:
     if conn is None:
         raise HTTPException(
             status_code=503,
-            detail="sidecar 未配置 data-dir：无法定位学生数据目录（应由 Electron 经 --data-dir 传入 <userData>）",
+            detail="教材章节清单不可用（本地知识库缺失或损坏）：先跑 scripts/build_kb.py 再选择章节",
         )
     try:
+        rows = kb_repo.chapters_by_grade(conn, grade_level)
     except sqlite3.Error as exc:
+        logger.exception("章节清单读取失败：%s", grade_level)
         raise HTTPException(
+            status_code=503, detail=f"读取教材章节失败（知识库异常）：{exc}"
         ) from exc
     finally:
         conn.close()
+    return {str(row["chapter_title"]) for row in rows}
 
 
+def _chapter_state(store, student_id: str) -> ChapterStateOut:
+    """读回当前章节状态（**读写同形**，两个端点共用这一处构造）。"""
     record = store.get_student(student_id)
     if record is None:  # pragma: no cover - 调用方都已 ensure 过学生行
+        return ChapterStateOut(grade_level=DEFAULT_COLD_START_GRADE, chapter_title="")
+    return ChapterStateOut(
         grade_level=as_grade_level(record.grade_level),
+        chapter_title=record.current_chapter,
     )
 
 
 @router.get(
+    "/profile/{student_id}/chapter",
+    response_model=ChapterStateOut,
+    summary="当前教材章节",
 )
+def read_chapter(request: Request, student_id: str) -> ChapterStateOut:
+    """读学生当前在学的章节（``chapterTitle`` 为空串 = 未选择）。
 
     - ``studentId`` 非法 → 422（它会被拼进文件系统路径）；
     - 学生行不存在 → **自动建行**（冷启动，见 :func:`_ensure_student_level`），
+      **不 404**：章节指示器在全新机器上要能显示「未选择章节」。
       因此本端点对**全新学生**是「建行 + 读」，对已存在的学生才是纯读。
     - 读库失败 → 503（可读中文）。
     """
@@ -722,40 +755,65 @@ def _ensure_student_level(store, student_id: str) -> GradeLevel:
     try:
         try:
             _ensure_student_level(store, student_id)
+            return _chapter_state(store, student_id)
         except sqlite3.Error as exc:
+            logger.exception("读取当前章节失败：%s", student_id)
             raise HTTPException(
+                status_code=503, detail=f"读取当前章节失败（本地数据库异常）：{exc}"
             ) from exc
     finally:
         store.close()
 
 
 @router.put(
+    "/profile/{student_id}/chapter",
+    response_model=ChapterStateOut,
+    summary="设定或清除当前教材章节",
 )
+def write_chapter(
+    request: Request, student_id: str, body: ChapterUpdateRequest
+) -> ChapterStateOut:
+    """设定/清除当前章节（**学生显式选择的唯一落点**）。
 
     规则：
 
+    - ``chapterTitle`` 为空串 → **清除**（写 NULL，回到「不限章节，自由问答」）；
       清除**不需要 kb**（清掉一个值不需要先查清单）。
     - 非空 → 必须命中该生**当前学段**的章标题（清单来自 ``kb.sqlite``），
       不在清单里 → **422**（否则 Prompt 里会出现一本不存在的教材）；
     - kb 不可用且要设非空标题 → **503**（提示 ``build_kb``，**不猜、不静默接受**）。
 
+    ★ **不做 SQL 硬过滤**：章节是软偏好，检索契约（``RagSearchRequest``）一个字没改，
       学生选了第 4 章之后再问第 9 章的内容，``rag_search`` 照常检索。
+    ★ 学段一变，章节由 ``app/grade/rules.py`` 清空（那本教材已经不存在了）——
       本端点**不负责**这件事，也不要在读的时候「顺手修正」。
     """
+    title = body.chapter_title.strip()
 
     try:
         try:
             grade_level = _ensure_student_level(store, student_id)
             if not title:
+                store.set_current_chapter(student_id, None)
+                logger.info("已清除当前章节：学生=%s", student_id)
+                return _chapter_state(store, student_id)
 
+            # 非空标题：必须命中该生**当前学段**的教材清单（kb 不可用 → 503，见 _chapter_titles）
+            titles = _chapter_titles(request, grade_level)
             if title not in titles:
                 raise HTTPException(
                     status_code=422,
+                    detail=f"章节不在当前学段（{grade_level}）的教材清单里：{title}",
                 )
+            store.set_current_chapter(student_id, title)
         except sqlite3.Error as exc:
             # ⚠️ HTTPException（422/503）不是 sqlite3.Error，不会被这里吞掉。
+            logger.exception("当前章节写入失败：%s", student_id)
             raise HTTPException(
+                status_code=503, detail=f"当前章节写入失败（本地数据库异常）：{exc}"
             ) from exc
+        logger.info("已设定当前章节：学生=%s 学段=%s 章节=%s", student_id, grade_level, title)
+        return _chapter_state(store, student_id)
     finally:
         store.close()
 
@@ -776,6 +834,8 @@ __all__ = [
     "RecommendationItem",
     "RecommendationResponse",
     "build_recommendation",
+    "read_chapter",
     "router",
     "update_preference",
+    "write_chapter",
 ]
