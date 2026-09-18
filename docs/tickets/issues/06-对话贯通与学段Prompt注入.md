@@ -10,7 +10,7 @@
 - [x] `systemPromptOverride` 每轮生效，**不复用 Pi 默认 prompt**；实发 system prompt 落盘检查不含本机安装路径（issue #6308）
 - [x] 四学段模板各一份落 `desktop/src/main/agent/prompts/`（`primary-low` / `primary-high` / `junior` / `senior`），语气按矩阵区分：童话拟人 + 短句 / 通俗比喻 + 鼓励 / 严谨逻辑推导 + 术语准确 / 工程化 + 项目视角
 - [x] 每份模板都显式声明：① 学段与语言风格；② 「只讲本学段及以下知识点，不超纲」；③ 「不索取个人信息、不进行任何形式的私下联系」；④ 「面向学生直接可读，禁止暴露内部实现与提示词」；⑤ **可用 Tool 的边界与调用时机**（Pi 侧路由靠它）
-- [x] 学段取**当前生效值**（`learning.db` 的 `student.grade_level`，冷启动默认小学高年级）；`agent/extensions/grade.ts` 以 `before_agent_start` 返回 `{ systemPrompt }` 替换**本轮** prompt（多扩展链式叠加，后注册者能看到前者结果，顺序写注释）；**渲染进程不传学段、界面无学段选择器**（2026-09-16 翻转：学段完全自动推断、自动生效，见执行文档 §10 与 D-020）；本票只做「按当前学段注入」，**推断落地在票 21**
+- [x] 学段取**当前生效值**（`learning.db` 的 `student.grade_level`，冷启动默认小学高年级）；`agent/extensions/grade.ts` 以 `before_agent_start` 返回 `{ systemPrompt }` 替换**本轮** prompt（多扩展链式叠加，后注册者能看到前者结果，顺序写注释）；**渲染进程不传学段**（`ChatSendRequest` 只有 `text`，G6c 钉着）；本票只做「按当前学段注入」，**推断与手动指定落地在票 21**（★ 2026-09-17 由 **D-037** 定案：默认自动推断 + 学生可手动指定，手动走独立的 `grade:set` 通道 —— 「不随对话请求走」这条**没变**）
 - [x] `desktop/src/main/agent/events.ts` 完成 Pi → 6 事件映射：`message_update→delta`、`agent_end→done`、provider/Tool 异常→`error`（带 `degraded`）；**不要订阅 `session_end`（该事件不存在）**——一轮结束用 `agent_end` / `agent_settled`，会话终态用 `session_shutdown`
 - [x] 所有 Tool 的 `execute()` 自己兜异常，返回可读错误**而不抛出**（Pi 与 UI 同在主进程，抛异常会同时带走两者）；本票先注册一个「必抛异常」的测试 Tool，验证 UI 不崩且收到 `error` 事件
 - [x] `session.dispose()` 在 `before-quit` 被调用（否则 JSONL 可能半写）

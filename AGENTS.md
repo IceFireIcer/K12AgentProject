@@ -19,7 +19,13 @@ K12Agent/
 └─ .gitignore  .gitattributes
 ```
 
-`desktop/` 与 `server/` **均已落地**（后端 635 项、桌面 352 项测试全绿；安装包与绿色版可出）。因此：
+`desktop/` 与 `server/` **均已落地**（后端 650+ / 桌面 370+ 项测试全绿；安装包与绿色版可出）。
+
+> **测试数字不要写死**（它会随每一票增长）：以后端 `uv run python -m unittest discover -s tests`
+> 与桌面 `npm test`（= `node --test` + `check:api` + `check:tool-schema`）的**实际输出**为准。
+> 本文件里的量级只表示「已有成规模回归」，不是某个精确基线。
+
+因此：
 
 - **不恢复、不参考任何历史实现**。删码前的代码产物（Electron 壳、sidecar 握手、pydantic 契约层、事件通道、单测与守卫）
   **已移出工作区**；`archive/s02-full-code` 标签**仅作历史留档**——
@@ -37,11 +43,23 @@ K12Agent/
 
 ## 1. 项目是什么
 
-中国移动浙江公司发榜赛题 **JBGS-2026-02「多模态 K12 人工智能通识课教学助手对话智能体」**。
-面向小学低/高年级、初中、高中的 AI 通识课对话教学助手，充当「7×24 在线 AI 教师」，
-具备学段自适应、多模态交互、个性化学习路径。
+面向 K12 的人工智能通识课对话教学助手，充当「7×24 在线 AI 教师」，
+覆盖小学低/高年级、初中、高中四个学段，具备学段自适应、多模态交互、个性化学习路径。
 
-- **交付物**：可运行的 Electron 桌面应用原型（**本期只做 Windows .exe**）、完整源码 + 本地运行说明、项目报告与答辩 PPT、演示视频。
+> **产品名：智团团**（吉祥物是一只抱着蜂窝的小熊，自称「团团」）。
+> - 品牌名的**唯一来源**是 `desktop/src/shared/brand.ts`（主进程与渲染进程共用）；
+>   `desktop/src/renderer/index.html` 的 `<title>` 与 `desktop/electron-builder.yml` 的
+>   `productName` 是纯静态配置、无法 import，**改品牌名时必须手工同步这三处**。
+> - ★ **存储目录名刻意与品牌名解耦**：`userData` 钉在固定 slug
+>   （`src/main/index.ts` 的 `applyStableUserDataSlug`）。否则改一次品牌名，
+>   学生的 `config.json` / `learning.db` / Pi 会话就整体留在旧目录里「凭空消失」。
+>   这个 slug **不要再改**；确需变更必须写迁移逻辑。守卫：`desktop/tests/brand.test.ts`。
+> - **吉祥物素材**：仓库根 `logos/` 是原始图（2048²、约 12MB，**不入包**）；
+>   经 `server/scripts/make_brand_icons.py` 生成 `desktop/build/icon.ico`（打包图标，
+>   多尺寸）与 `desktop/resources/brand/*.png`（运行时 256px，按学段切换）。
+>   改了 logo 就重跑那个脚本，不要手工导出。
+
+- **交付物**：可运行的 Electron 桌面应用原型（**本期只做 Windows .exe**）、完整源码 + 本地运行说明、项目报告与汇报 PPT、演示视频。
 - **约束前提**：**单人开发 · 15 天极限冲刺**。所有排期与范围决策都服从这一前提。
 - **评分权重**：设计合理性 25% / 多模态交互质量 25% / 教育适配性 20% / 用户体验 15% / 创新性 15%。
 
@@ -60,7 +78,11 @@ C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（�
 > **★ 票 03 是全程风险最高的一票**：Pi 包根导入会拖入 `esbuild` 原生依赖（Pi issue #9286），
 > 必须**在最早的提交里就在打包产物上冒烟**，不要等收口。失败则启用 Plan B = Pi RPC 模式。
 
-### 24 票清单（一票一文件：`docs/tickets/issues/`；索引：`docs/tickets/README.md`）
+### 23 票清单（一票一文件：`docs/tickets/issues/`；索引：`docs/tickets/README.md`）
+
+> ⚠️ 票 24（交付物：报告 / PPT / 演示视频）已由用户裁决**移除**，不纳入交付范围；
+> `docs/tickets/issues/24-交付物报告与PPT与演示视频.md` **只作裁决留档**。
+> 原来这里是「24 票」、README 是「23 票」、而磁盘上两个文件都在 —— 三处口径打架过，现统一以 README 为准。
 
 - **关卡 B₁ / B（票 01–06）**：01 双端脚手架与依赖基线 · 02 Sidecar 生命周期与端口握手（**关卡 A**） ·
   03 Pi 可加载性 + esbuild 打包冒烟（**关卡 B₁**） · 04 契约冻结 + OpenAPI→TS 防漂移链 ·
@@ -72,9 +94,10 @@ C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（�
 - **练习与闯关（票 14–15）**：14 练习 Extension + 客观题批改 · 15 主观题批改 + 闯关闭环（**关卡 D**）
 - **多模态与编程（票 16–19）**：16 动画沙箱 + RPC + nonce 资源托管 · 17 动画模板优先 + 容错降级 ·
   18 Monaco + Pyodide Worker 隔离 · 19 编程模板 + 报错感知 + 分级求助
-- **闭环、安全与收口（票 20–24）**：20 个性化闭环 · 21 学段自动推断（**自动生效，无人工入口 / 无建议条**） ·
-  22 内容安全终审 + provider 边界脱敏 · 23 集成回归 + 四学段补齐 + 最终打包（**关卡 E**） ·
-  24 交付物：报告 / PPT / 演示视频
+- **闭环、安全与收口（票 20–23）**：20 个性化闭环 · 21 学段自适应（**默认自动生效 + 学生可手动指定**；
+  2026-09-17 由 D-037 定案，取代 D-020 的「无人工入口」） ·
+  22 内容安全终审 + provider 边界脱敏 · 23 集成回归 + 四学段补齐 + 最终打包（**关卡 E**）
+  （票 24「交付物：报告 / PPT / 演示视频」已由用户裁决移除 —— 交付物本身仍要做，只是不再作为一张票跟踪）
 
 > **「今天做什么」看 `docs/tickets/` + 各票 `Blocked by`；「规格是什么」看执行文档；「做完没有」看执行文档第 14 节验收。**
 > 切片只是执行文档的任务视图，**冲突时以执行文档为准**。
@@ -91,14 +114,16 @@ C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（�
 | `docs/agents/` | 工程技能约定：tracker 路径、triage 标签、领域文档消费方式。 |
 | `docs/研判文档PiAgent.md` | Pi 迁移提案（含核实批注）。已归档，**含 6 项未决分叉的原始陈述**；执行文档第 13.3 节已裁决。**不要再照它实现。** |
 | `docs/研判文档Deepseek.md` | 数据层、RAG、教育适配的设计依据。编排部分已被执行文档取代。 |
-| `docs/项目简介.md` | 赛题原文与评分标准，需求边界以此为准。 |
+| `docs/项目简介.md` | 需求原文与评分标准，需求边界以此为准。 |
 | `docs/研判文档Qwen3.7.md` | 早期研判，**部分结论已被取代**。仅背景参考，不要照它实现。 |
 
 **执行文档相对研判文档的关键裁剪**（**不要「恢复」这些，是有意为之**）：
 编排改用 **Pi Agent SDK（TypeScript，嵌入 Electron 主进程）**，但 **Python sidecar 保留**为数据 / RAG / 嵌入 / 判分 / 学习记录服务；
 嵌入维持 **fastembed bge-small-zh-v1.5（移除 Ollama/torch）**；契约维持 **pydantic 唯一来源**；
 动画维持「模板优先 + 生成补充」；检索加 FTS5 + numpy 兜底；语音降为 P2；
-学段改为 **完全自动推断、自动生效（界面无选择入口，只读指示器）** —— 2026-09-16 翻转，赛题「学生可选择学段」的字面要求被主动放弃。
+学段改为 **默认完全自动推断、自动生效；学生可手动指定（手动后冷却 10 轮回归自动）** ——
+2026-09-17 由 **D-037** 定案（它取代了 2026-09-16 的 D-020「界面无选择入口」那一半：
+D-020 曾让需求「学生可选择学段」的字面要求被主动放弃，D-037 把它收回来了）。
 详见执行文档第 0 节、第 10 节与第 13 节。
 **混合后端（Python + TS）是刻意取舍，不是半成品**——不要为「统一语言」把编排挪回 Python 或把数据挪进 TS。
 
@@ -120,9 +145,49 @@ C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（�
   - **渲染进程 ↔ 主进程**：**IPC 事件流**（`ipcMain` / `webContents.send` ↔ `ipcRenderer.on`），6 事件词表冻结。
   - **渲染进程不直连 sidecar**：渲染进程只走 IPC 白名单，**token 永不进入渲染进程**。
 - 编排：**Pi Agent SDK**（**锁 `^0.85.1`**，0.85.0 在 Electron 里会崩）。主 Agent 由 LLM **自主选 Tool** 路由
-  （**不设 `intent` 字段**），能力经 `pi.registerTool()` 暴露，共 6 个 Extension（动画/编程/练习/画像/学段/学习记录）。
-  **不用 LangGraph，不用 `langgraph-checkpoint-sqlite`，不用 `SqliteSaver`。**
+  （**不设 `intent` 字段**），能力经 `pi.registerTool()` 暴露，共 6 个 Extension（动画/编程/练习/画像/学段/学习记录）、
+  **10 个 Tool**（`AGENT_TOOL_NAMES`）。**不用 LangGraph，不用 `langgraph-checkpoint-sqlite`，不用 `SqliteSaver`。**
   **传输层是 IPC：本项目从零实现，永不写 SSE / `EventSource`。**
+- **个性化记忆（D-031，两条接线，别理解成两个新机制）**：
+  - **画像每轮进 Prompt**：`runtime.ts` 的 `buildSystemPrompt()` 是**唯一拼装出口**（6 个 prompt 落点共用），
+    内容 = 学段（`gradeExtension.systemPromptFor`）+ **学生情况块**（`prompts/student-context.ts`）。
+    块插在**学段权威段之前**（学段必须是最后一句权威指令）；两块**各自按自己的标题 strip** → 天然幂等。
+    ⚠️ 块是**预取**的（`fetchStudentContext`，在 `runTurn` 里 `reviewInput` **之前**），因为拼装点有 6 个、
+    且三条早退路径（输入拦截 / 无 Key / 鉴权未过）落盘的 prompt 必须与真发出去的那份**同一份文本**。
+    ⚠️ 抓不到画像 → 块为**空串**，对话照常（画像只是增强，绝不阻断）。
+  - **偏好写入口**：`remember_preference` Tool → `PUT /api/profile/{id}/preferences` → `profile_pref` 表。
+    ★ **key 是固定词表 4 个**（`interest` / `explain_style` / `pace` / `note`，契约 `PreferenceKey`）：
+    因为 key 是主键，**总条数天然 ≤ 4**、不需要清理逻辑；且「模型写掌握度」在**类型层面不可能**
+    （掌握度是判分规则算出的客观量 —— 一旦模型能写，就会出现「模型觉得懂了就改分」的漏洞）。
+    值限 1–40 字、**拒换行**（防长文塞进每轮 prompt）。
+    守卫：`desktop/tests/student-context.test.ts`（含「6 个拼装点不许各写一份」的源码级断言）。
+  - ★★ **注入块必须逐字节稳定（D-032，改这块前必读）**：块在 system prompt **之内**（system prompt 是整条请求的最前面一段，
+    按「最长相同前缀」命中）—— 块里**任何每轮都变的字节**都会让它之前的内容一起前功尽弃、
+    并**连同其后全部对话历史**掉出缓存（学生感觉到的是响应变慢，账单上是成本）。
+    所以三条硬规则：**① 块里不放时间**（「最近活跃」已移除；`lastActiveAt` 仍在契约里给界面用，
+    但**不得进给模型的那一段**）；**② 偏好按 `PREFERENCE_ORDER` 固定顺序渲染**，不用 `Object.entries`
+    的原始顺序（那取决于 SQLite 行序 —— 重写同一个键就可能让整块变样）；**③ 掌握度平局按 `kpId` 兜底排序**，
+    不依赖服务端返回的数组顺序。
+    守卫：`student-context.test.ts` 的 **G21 组 6 条**（含**反向对照**：画像真变了块**必须**变 ——
+    防「为省缓存把块冻成常量」这种假优化）。
+    ⚠️ 学段模板整份替换（约 1.8k token）**是应该付的代价**，不要为缓存把它拆成「公共基座 + 风格段」
+    ——「四学段语气可明显区分」是评分表上的明文验收项。
+    ⚠️ 也**不要**把画像改成「每轮追加进对话历史」：内容会永久驻留并逐轮叠加（长期反而更贵），
+    还会把内部画像写进学生的 Pi 会话 JSONL（破坏「画像只在数据层」的边界）。
+  - **错题摘要也进这个块**（与「学习档案 → 错题本」**同一个端点** `/api/quiz/mistakes/{id}`）：
+    只注入 `{知识点名, 错次}` **最多 3 条** —— 它让 `senior.ts` 那条「错题要给变式题巩固」
+    从**悬空要求**变成有数据支撑的行为（此前模型手里没有任何错题数据）。
+    ⚠️ **绝不注入题干（`stem`）与时间（`lastWrongAt`）**：前者稳定挤掉教材上下文，
+    后者每天都在变（违反上面那条 D-032 硬规则）。守卫：`student-context.test.ts` 的 **G22 组 8 条**。
+  - **教材章节 = 软偏好（D-038）**：学生可显式选定「当前在学哪一章教材」，
+    它作为**软偏好**渲染进上面那个块的**固定位置**（紧跟首行标题、在掌握度之前；无章节时**整行不出现**）——
+    **不做 SQL 硬过滤、不改 `RagSearchRequest`**（学生问「前面学的那个…」时硬过滤会检索不到）。
+    ★ **学生的显式选择，模型不可写**：不新增 Tool、不扩 `PreferenceKey`（仍 4 个）、也不写进 `profile_pref`。
+    ★ **章节清单只读 `kb.sqlite`（`kb_repo.chapters_by_grade`），「当前章节」只写 `learning.db` 的
+    `student.current_chapter` 列** —— 两处不许混。
+    ⚠️ **学段变更即清空当前章节**（见第 5 节第 1 条）：章节属于某一本教材，学段换了那本书就不存在了。
+    章节行只在**学生改动时**变 → 不违反 D-032；守卫：`server/tests/test_chapter_selection.py`、
+    `desktop/tests/student-context.test.ts` 的 **G23 组**。
 - 前端（`desktop/`）：**Electron 44 + electron-vite 5 + vite 7 + Vue 3 + Pinia 4 + TypeScript 5.9（strict）**，
   对话优先布局，内联卡片 + 展开/全屏。
   **Electron 侧不得引入任何原生数据库模块**（刻意的风险隔离）——**Pi 迁移不影响此约束**。
@@ -138,9 +203,18 @@ C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（�
   - **Pi JSONL 会话树**（每人一份）：对话历史、工具调用记录、分支。
   - **必须显式配置 Pi 的 `agentDir` / `sessionDir` 落到 `students/<id>/pi-agent/`**，
     否则会写进用户全局 `~/.pi/agent/`，造成跨学生数据混放（合规硬伤）。**SQLite 不存对话正文。**
-- 主模型：**DeepSeek 云端 API**（OpenAI 兼容），必须支持下改供应商名称 / BaseURL / APIKey / Model ID。
-  ⚠️ Pi 内置 DeepSeek provider 的 baseUrl 是 `https://api.deepseek.com`（**无 `/v1`**），
-  与前端默认值的 `/v1` 形式不同，**保存时必须做真实连通性探测**。
+- 主模型：**DeepSeek 云端 API**（OpenAI 兼容），必须支持下改**供应商 / BaseURL / APIKey / Model ID**。
+  ★ **配置的权威源是设置页**（`userData/config.json`），Pi 的 `models.json` 只是**由它派生的产物**
+  （每次建会话 / 保存设置都重写）—— 不要再去手改 `models.json`，也不要让它变回「存在就不动」。
+  ★★ **默认值必须与 Pi 内置目录一字不差**：`provider_id="deepseek"` /
+  `base_url="https://api.deepseek.com"`（**无 `/v1`**）/ `model_id="deepseek-v4-flash"`。
+  ⚠️ 历史默认 `deepseek-chat` **不在 Pi 的模型目录里**（那里的 deepseek 只有
+  `deepseek-v4-flash` / `-vision-exp` / `-pro`），会让首轮对话直接抛「Pi 里找不到模型」（P-048）。
+  两种 `/v1` 写法都可能连通，**保存时必须做真实连通性探测**，不要静默改写用户填的地址。
+- **供应商预设与拉取模型**：Pi 自带 40 个 provider 的目录（端点 + 模型清单），
+  用 `ModelRuntime.create({ modelsPath: null })` **离线**读出来（不碰 `~/.pi`），
+  设置页的预设下拉与「拉取模型」都基于它。自定义/校内网关（`providerId` 自取，如 `custom`）
+  **必须写 `models[]`**，否则该 provider 一个模型都没有 → 建会话失败。
 - 嵌入：**fastembed `BAAI/bge-small-zh-v1.5`（512 维，ONNX，约 90MB）**。**不引入 torch，不依赖 Ollama**。
   维度写在配置常量里，勿散落硬编码；升级 `bge-base-zh-v1.5`（768 维）须同步改 `vec0` 维度并重建索引。
 - 动画：**Anime.js v3**（**锁 v3，v4 API 不兼容**），运行在 sandboxed iframe。
@@ -164,7 +238,10 @@ C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（�
 | `desktop/src/renderer/src/api/sse-parser.ts` | **`desktop/src/renderer/src/api/events.ts`**（IPC 事件解帧） |
 
 **新增（无旧名）**：`desktop/src/main/bridge/client.ts`（唯一的 sidecar HTTP 客户端）、
-`desktop/src/main/ipc/channels.ts`（IPC 通道名单一来源）、`desktop/src/shared/ipc-events.ts`（6 事件 TS 类型）。
+`desktop/src/main/ipc/channels.ts`（IPC 通道名单一来源）、`desktop/src/shared/ipc-events.ts`（6 事件 TS 类型）、
+`desktop/src/main/settings/runtime-config.ts`（**设置 → Pi 的唯一桥梁**：取「生效中的 LLM 配置」，含明文 Key）、
+`desktop/src/shared/provider-catalog.ts`（供应商预设 / 拉取模型的跨进程类型；**非 pydantic 契约**，
+因为那份数据只存在于 Pi 的 TS 目录里 —— 理由见文件头）。
 
 > **Tool 名与 6 事件名不变**——它们是**契约**而非命名，改名会同时打断 Python、Pi 与前端三方。若文档里出现旧文件名，按上表直呼新名。
 
@@ -179,19 +256,48 @@ C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（�
   全部在 `desktop/src/main/`。**Python 侧不得调用任何 LLM**，**不得安装 langgraph / langchain**（编排类库一概不装）。
 - **契约面 → 只走冻结契约**：跨语言交换一律 pydantic（`server/app/contracts.py`）→ OpenAPI → 生成 TS；
   **禁止手写 TS 接口兜底、禁止临时加松散字段**。
+  ⚠️ **唯一例外（有意为之，且只此一处）**：`desktop/src/shared/provider-catalog.ts` 手写两个 TS 类型。
+  理由是那份数据**在 Python 侧根本不存在** —— 它是 Pi（TS 包）自带的 provider 目录，
+  只有主进程能读到。把一份 TS 独有的形状塞进 pydantic 契约，等于给「pydantic 是唯一来源」
+  这条规则开一个更坏的口子（TS 从此也能「凭需要造契约」）。
+  该例外有两条硬约束：① 只承载**界面展示用的候选清单**，不参与持久化与任何业务判定；
+  ② 里面**不允许**出现任何凭证字段（Key / token），G13 守卫盯着。
 - **执行面 → 只在渲染进程**：学生代码只在渲染进程的 **Pyodide Worker** 执行，**绝不在主进程**（也不能落到 Python 进程）。
 
 以下为原有层规则：
 
-1. **学段完全由系统自动推断、自动生效 —— 没有人工选择入口（这是有意的，2026-09-16 设计翻转，见执行文档 §10 与 D-020）**：
-   前端**没有学段选择器**，请求里也**不带学段**（`ChatSendRequest` 无 `gradeLevel` 字段）；四类规则信号每轮写入
-   `grade_signals`，第 3 轮（证据不足则第 5 轮）跑**一次**轻量 LLM 判定，**最终决策权在规则引擎**
-   （`server/app/grade/rules.py`：置信度 < 0.6 不改 / 连续 3 轮同向 / 5 轮冷却 / 单次最多动一级 / LLM 与规则反向即否决），
-   判定后**原子写入** `student.grade_level` + `grade_history(source="inferred")`，**下一轮**经 `before_agent_start` 生效。
-   学生端只有**只读指示器**（「当前：初中」/「待判定」）—— **没有确认、没有纠偏、没有设置项**。
+1. **学段：默认自动推断 + 学生可手动指定（D-037，2026-09-17 定案；它取代了 D-020 的「无人工入口」那一半）**：
+   两条写路径，**同一个决策者与同一列**（`student.grade_level` + `grade_history`）：
+
+   | 路径 | 谁触发 | `source` | 生效时机 | 冷却窗口 |
+   | --- | --- | --- | --- | --- |
+   | **自动**（默认） | 四类规则信号每轮写入 `grade_signals`，第 3 轮（不足则第 5 轮）跑一次轻量 LLM 判定 | `inferred` | 下一轮（`before_agent_start`） | `COOLDOWN_TURNS` = 5 |
+   | **手动** | 学生点指示器或设置页 → `grade:set` → `POST /api/grade/override` | `explicit` | **立即** | `MANUAL_COOLDOWN_TURNS` = 10 |
+
+   **规则引擎一个字没变**（`server/app/grade/rules.py`：置信度 < 0.6 不改 / 连续 3 轮同向 / 单次最多动一级 /
+   LLM 与规则反向即否决）—— 手动路径**不经过** `decide()`，它写库、报冷却，由现有的冷却机制接管。
+   **冷却窗口按来源推导**（锚点 = 最近一条 `from_level` 非空的 `grade_history` 行），**刻意不加列**。
    SubAgent 不得自行推断或改写学段。
-   **已知代价（不要粉饰）**：赛题「学生可选择所在学段」不再被字面满足；原「误判可由学生重选纠正」的出口已取消，
-   补偿机制是元认知表达信号（「听不懂」「再讲一遍」）驱动**自动下调一级**。
+
+   ★★ **三条硬约束（违反即架构事故）**：
+   - **不把 `gradeLevel` 加回 `ChatSendRequest`**（G6c 钉死字段集合恰好是 `['text']`）。手动走**独立通道** ——
+     加回请求里会让「发一条消息」变成「顺带改一次学段」的副作用。
+   - **不新增表或列**（冷却长度可从来源推导；加列会引入第二处真相）。
+   - **手动选择不写 `grade_signals`**（信号是「观察到的证据」，手动是「学生的意图」；混进去会污染连续同向计数）。
+   - ⚠️ **在途的自动判定不得覆盖手动选择**：`grade.ts` 的 `epoch` 在 `adoptOverride` 时 +1，
+     上交任务 `await` 前后比对，不一致就丢弃结论（与「跨学生丢弃在途证据」同一手法）。
+
+   **已知代价（不要粉饰）**：学生可能把自己锁在错档位最多 10 轮。兜底：冷却期**不是**关闭自动（期满立刻按
+   积累的证据判定，期间信号照常收集）；学生**随时可以再改**（重复选择写新锚点、冷却重新计时）。
+   ★ 与 D-020 相比的**收益**：需求原文「学生可选择所在学段」**重新被字面满足**，四学段对比演示重新有 UI 入口。
+   ★ **教材章节与学段相互独立（D-038）**：选章节**不改学段**；反过来，**学段一变就清空当前章节** ——
+   章节属于某一本教材，学段换了那本书就不存在了，留着就是第二处真相。
+   写学段的地方只有**两处**（`server/app/grade/rules.py` 的 `_apply()` 与 `override_level()`），
+   **都要清 `current_chapter`**：自动路径只在 `decision.changed` 为真时被调用（直接改语句）；
+   手动路径按 `changed` 分成**两条 SQL**（改学段的那条才带 `current_chapter = NULL`）——
+   重复确认同一学段 = 学生确认现状，**不得**顺手清掉他已选的章节。
+   ⚠️ 因此按字面 grep `UPDATE student SET grade_level` 会数到 **3 行**（`override_level()` 占两条），
+   这不是「多了一处落点」。
 2. **主 Agent 负责路由与对话答疑**：路由交给 LLM 自主选 Tool；
    **但关键约束必须在代码层强制**——学段隔离在 `rag_search` Tool 内由 Python 强制（模型改不了 WHERE），
    安全终审是独立步骤，沙箱是运行时属性，Tool 参数由 TypeBox 校验。**不要把这四条也交给模型。**
@@ -237,6 +343,8 @@ C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（�
 - **Tool 名 → 事件 `kind` 映射冻结**（新增 Tool 必须同步登记）：
   `generate_animation→animation`；`get_code_template`/`get_coding_hint`/`evaluate_code→coding`；
   `generate_quiz`/`submit_quiz`/`generate_variants→quiz`。
+  ⚠️ **不发 `payload` 的 Tool 明确不在表内**：`rag_search`（走 `citation`）、`get_student_profile` 与
+  `remember_preference`（只影响 Prompt / 只写库）。**不要**为了「整齐」把它们塞进 `TOOL_TO_KIND`。
 - SubAgent 输出用统一 pydantic Payload（`AnimationPayload` / `CodeTemplate` / `CodingHint` / `CodeEvaluation` / `QuizPayload` / `QuizResult`），不要用松散 dict。
   **不要引入 `ModuleResult<T>` / `ModuleError` 那套 `{success, error}` 包装**——失败统一走 `error` 事件（带 `degraded`），否则前端要处理两套失败形态。
 - **答案泄漏防护**：`QuizQuestion`（含 `answer`）**只留 Python 侧**，发给前端/TS 的一律是 **`QuizQuestionOut`（无 `answer`）**——
@@ -248,8 +356,39 @@ C = 票 11（RAG 学段隔离）；D = 票 15（闯关闭环）；E = 票 23（�
 - **中文输出**：仓库文档、面向学生与家长的文案、System Prompt 均为中文；代码标识符与提交信息可用英文。
 - **学段语气**：System Prompt 按学段差异化（童话拟人 / 严谨逻辑推导），不要只改难度数字而忽略语气。
   四学段各一份模板放 `desktop/src/main/agent/prompts/`。
-- **学段不得由 UI 写入**：前端只读（`GradeIndicator`），**不要新增选择器 / 下拉框 / 确认按钮**，也不要在请求里加学段字段；
-  学段的唯一写路径是服务端推断（`server/app/grade/rules.py`）。阈值只写在该文件里，别处不得再写字面量。
+- **学段的手动写入只走 `grade:set` 独立通道（D-037）**：**绝不能把 `gradeLevel` 加回对话请求** ——
+  `ChatSendRequest` 的字段集合被守卫 **G6c** 钉死为 `['text']`，加回去会让「每轮对话」变成「每轮改学段」的副作用。
+  前端既**不推断**学段（那不是它的事），也**不自己改本地状态** —— 它只把「学生选了什么」递给主进程，
+  生效逻辑全在服务端（`rules.override_level`）。阈值（`CONFIDENCE_THRESHOLD` / `COOLDOWN_TURNS` /
+  `MANUAL_COOLDOWN_TURNS` / `MAX_STEP_LEVELS`）只写在 `server/app/grade/rules.py` 里，**别处不得再写字面量**。
+- **学习档案（D-033）**：四个只读聚合端点的**聚合与判定全在 Python**（连续天数、正确率、章节排序、
+  错题归并、依赖图分层），渲染进程只显示；**导出成 Markdown 的拼装放在渲染进程**
+  （`study/report-markdown.ts`，纯函数）—— 它是展示文本，不参与持久化/推荐/Prompt。
+  ⚠️ 章节清单来自 `kb.sqlite`、学生进度来自 `learning.db`，**不要把教材清单存进学生库**。
+  ⚠️ 章节顺序**只能按章号解析**（`第N章`）：既不能按标题字典序，**也不能按 rowid**
+  （rowid 是文件名字典序，实测会排成 `1,6,1,3,5,2` —— 见 P-057）。
+- **历史会话只读回看（D-034）**：`session:transcript` **只接受会话 id，绝不接受路径** ——
+  主进程先用 `SessionManager.list()` 的结果做白名单对齐，再用 **Pi 给的 `path`** 打开；
+  会话目录必须显式指向该学生（否则 Pi 退回 `~/.pi/agent/sessions/`）。
+  本轮**不做**切会话续聊（要 dispose 当前 runtime 并处理代际竞态，是另一件事）。
+- **导出文件名用白名单重建（D-035）**：`sanitizeFileName()` 只保留
+  「汉字/字母/数字/空格/`-`/`_`/`.`」并可强制 `.md`；回执**只回文件名**（完整路径不进渲染进程）。
+- **学习地图自绘内联 SVG（D-036）**：**不引入任何图表库**（零新增依赖 + 断网可用）；
+  布局是纯函数（`study/map/layout.ts`），箭头永远向下、同层按 kpId 排、直角折线。
+- **学段手动入口（D-037）**：两处入口（`GradeIndicator.vue` 点开 + `Settings.vue` 的「学段」区块）
+  **必须共享同一个 store action `chat.setGrade`** —— 各写一份就会出现「一处改了另一处没同步」。
+  指示器上要有**来源标签**（`gradeOriginLabel()`，唯一实现在 `labels.ts`）：
+  「手动选中」/「AI 引擎推算」，否则学生点完看不出到底生效没有。
+  ★ **选项默认收起**（点触发器才展开）：展开是**学生主动动作**的结果，
+  而不是顶栏上一直摊着一个选择控件。
+  ★ **`gradeHistory` 的 `source` 有两种取值**，报告叙事要分清
+  「第 3 轮系统判定为初中（inferred, 0.81）」与「第 8 轮学生手动选为小学低年级（explicit）」。
+- **教材章节（D-038）**：章节是**软偏好**，不改检索契约、不做 SQL 硬过滤（见第 4 节）。
+  ★ **手动写入只走 `chapter:set` 独立通道**，**绝不混进 `ChatSendRequest`** ——
+  G6c 仍钉死那个请求的字段集合为 `['text']`，混进去会让「发一条消息」变成「顺带改一次章节」的副作用。
+  ★ **两处入口（对话页 `ChapterIndicator.vue` + 设置页的「章节」区块）必须共用同一个
+  store action `chat.setChapter`** —— 与 `chat.setGrade` 同一条纪律，各写一份会出现「一处改了另一处没同步」。
+  学生身份由主进程决定（`chapter:get` / `chapter:set` 都不接受渲染进程递来的 `studentId`）。
 
 ## 7. 开发与打包命令
 
@@ -262,6 +401,7 @@ uv sync
 uv run uvicorn app.main:app --reload --port 8756     # 开发用固定端口
 uv run python scripts/fetch_embedding_model.py       # 联网获取 bge-small-zh-v1.5（约 90MB）
 uv run python scripts/export_openapi.py              # 导出 OpenAPI → 生成前端 TS 类型
+uv run python scripts/make_brand_icons.py            # 从 logos/ 生成打包图标 + 学段 logo（改了 logo 就跑）
 
 # 后端打包（--onedir，不用 onefile）——统一走脚本，不要手敲 pyinstaller
 uv run python scripts/build_server.py
@@ -362,8 +502,23 @@ npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解�
   **必须显式改道 + 加自动化断言**（检测 `students/<id>/` 外的本应用 `.jsonl`）。
 - **Pi 是纯 TypeScript，无 Python 绑定**。唯一的 Python 集成路径是 RPC 模式
   （`subprocess.Popen(["pi","--mode","rpc"])`，LF 分隔 JSONL；⚠️ **不能用 `readline`**，它会按 Unicode 分隔符切分 JSON 载荷内部）。
-- **Provider 配置**：DeepSeek 是 Pi 一等公民 provider，但**自填 BaseURL/ModelID 必须保留**（赛题硬要求）。
-  走 `models.json` 的 `providers.<name>` + `models[].id`；Key 解析顺序：CLI `--api-key` → `auth.json` → 环境变量 → `models.json`。
+- **Provider 配置**：DeepSeek 是 Pi 一等公民 provider，但**自填 BaseURL/ModelID 必须保留**（需求硬性要求）。
+  走 `models.json` 的 `providers.<id>` + `models[].id`；Key 解析顺序：
+  **设置页** → CLI `--api-key` → `auth.json` → 环境变量 → `models.json`。
+  ⚠️ **`models.json` 里声明一个已存在的内置模型 ID 会丢掉它自己的 `compat`**
+  （`provider-composer.js` 的 `applyModelsJson()` 遇同 id 整条替换，`modelFromJson()` 只 merge
+  provider 级与 definition 自身的 compat）—— 实测：给 deepseek 写一条 `{id:'deepseek-v4-flash'}`
+  会把内置的 `reasoning:true` / `compat.thinkingFormat:"deepseek"` **静默抹掉**。
+  所以 **内置 ID 只覆盖 provider 级 `baseUrl`、不写 `models[]`；非内置 ID 才写，并从兄弟模型抄字段**。
+  实现见 `desktop/src/main/agent/pi-bootstrap.ts` 的 `buildModelsJsonConfig()`（有单测钉住三分支）。
+- **`models.json` 是派生产物，不是用户配置文件**：由设置页经 `writeModelsJson()` 每次重写。
+  ⚠️ 它的旧语义是「首次运行写一次、之后一个字节都不动」—— 那让**设置页改了什么都进不去 Pi**
+  （P-049）。不要再改回幂等，也不要拿它当「用户手改的配置」来保护。
+- **明文 Key 的通路**：设置页的 Key 存在 `config.json`（明文，仅本地），
+  主进程经 `GET /api/settings/runtime` 取（**含明文**，token 鉴权）→ `setRuntimeApiKey()` **只进内存**。
+  ⚠️ 该接口**只允许主进程调用**：渲染进程没有对应 IPC 通道、preload 没有对应方法，
+  架构守卫 **G13** 会断言这一点（往渲染进程加这条链路 = 架构事故）。
+  **`GET /api/settings` 必须继续只回掩码**（有对照测试）。
 - **不要照搬 `pi-agent-sdk-starter` 的 `bun install` 建议**：那是**某第三方 starter kit** 的 README，
   不是 Pi 官方结论（Pi 官方文档零处提及 electron），且 **Pi 本身不依赖 `better-sqlite3`**。
 - **`/resources/animation/*` 不能走 `X-Auth-Token`**（iframe 带不了自定义 header），
@@ -390,9 +545,11 @@ npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解�
 
 ## 10. 报告素材纪律
 
-`docs/report-material/` **已建立**（`README.md` / `decisions.md`（D-001…D-017）/ `pitfalls.md`（P-001…P-034））：
-**决策与踩坑编号从 D-001 / P-001 起**——**不要引用任何已删除的文件、不要从 git 取旧素材**。
+`docs/report-material/` **已建立**（`README.md` / `decisions.md` / `pitfalls.md`）：
+**决策与踩坑编号从 D-001 / P-001 起、只追加不重排**——**不要引用任何已删除的文件、不要从 git 取旧素材**。
 `decisions.md` 是决策正文的唯一去处（执行文档只引用编号，见其 §0.4）。
+⚠️ **编号范围不要写死在文档里**（这里曾写「D-001…D-017 / P-001…P-034」，早已不准）：
+要看进度直接查两个文件末尾的编号。
 
 **每天留 30 分钟**把当天的截图 / 关键决策 / 踩坑与解决写进去：
 `decisions.md`（决策 → 理由 → 被否决方案）、
@@ -402,7 +559,7 @@ npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解�
 > 「设计合理性」维度的架构证据是**工具调用轨迹图**（`docs/tool-trace.mmd`，票 08 产出），
 > 不要贴任何历史状态流转图。
 
-**重建期间必记的三类素材**（答辩直接用）：
+**重建期间必记的三类素材**（汇报直接用）：
 1. **Pi 迁移的真实代价与解决过程**（esbuild 打包、Node 版本、导入图）——主动讲代价比被问出来可信。
 2. **为什么保留 Python sidecar 而不是全单进程**——这是主动权衡，不是妥协。
 3. **混合后端的边界如何防止两套实现**——数据/编排各只有一处实现，怎么用契约 + 守卫测试挡住「两边各写一遍」的漂移。
@@ -412,6 +569,8 @@ npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解�
 
 **进度落后时的砍单顺序**（从先到后）：
 高中深度内容 → 交互式题型 → 动画自由生成 → 编程模板 → **学段自动推断的第二层（LLM 复核，只留第一层规则信号）** → 教师导出。
+（**注意**：D-037 之后**手动入口不在砍单序列里** —— 它是需求原文「学生可选择所在学段」的直接兑现，
+砍它等于把需求那句再丢一次；能砍的仍然只有第二层 LLM 复核。）
 （**注意**：原第 5 档写作「只保留显式选择」—— 该退路**已不存在**，人工入口在 2026-09-16 的翻转中一并取消。）
 
 ---
@@ -420,7 +579,7 @@ npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解�
 
 ### Issue tracker
 
-工作切片以本地 markdown 存放于 `docs/tickets/issues/`（一票一文件，按依赖顺序编号；当前 24 票清单见第 2 节），
+工作切片以本地 markdown 存放于 `docs/tickets/issues/`（一票一文件，按依赖顺序编号；当前 23 票清单见第 2 节），
 不使用外部 tracker；约定见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
