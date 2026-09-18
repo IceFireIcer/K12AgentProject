@@ -9,10 +9,12 @@
  *      两道都走**同一个出口**：`gradeExtension.systemPromptFor()` —— 同一份文本，
  *      不会出现「第一轮不带权威段、后面带」的不一致。
  *   3. 学段：**由推断系统决定**（`agent/extensions/grade.ts` 是唯一权威来源）。
+ *      `before_agent_start` 每轮改写（★ 最后一道改写点，学段语气就落在这里）+ 三条早退路径的
  *      落盘证据。**三道都走同一个出口** {@link createChatRuntime} 里的 `buildSystemPrompt()`：
  *      学段权威段（`gradeExtension.systemPromptFor`）+ 学生情况块（每轮预取的画像）—— 同一份文本，
  *      ★ 另一道是**剥尾巴**：Pi 会在 `buildSystemPrompt()` 末尾无条件追加
  *      所以在进那个出口**之前**先过 `stripPiCwdBlock()`（见下方接线处的注释）。
+ *   3. 学段：**由推断系统决定**（`agent/extensions/grade.ts` 是唯一权威来源），
  *      **学生情况**：由画像预取决定（`extensions/profile.ts` 的 `fetchStudentContext`）。
  *      ★ 两件事都由本文件**显式驱动**，不挂 Pi 事件（返工原因见 `grade.ts` 文件头）：
  *        - 观察：每轮开始调 `gradeExtension.observeTurn(text)`（**在无 Key 早退之前**，
@@ -21,6 +23,9 @@
  *      运行时**不读**渲染进程传来的学段 —— `ChatSendRequest.gradeLevel` 只是历史字段，
  *      已不再权威（手动选学段的 UI 已取消，见 `ipc/channels.ts` 的字段注释）。
  *        - prompt：`chatFactory` 的 `before_agent_start` 调 `buildSystemPrompt()`。
+ *      运行时**不读**渲染进程传来的学段 —— `ChatSendRequest` 里根本没有学段字段
+ *      ★ 学段的写入口**只有一条**：{@link ChatRuntime.setGradeLevel}（学生显式设定，
+ *      学段，而「发消息」与「改学段」是两件不同的事（一个失误就可能把学生的选择冲掉）。
  *   4. Pi → 6 事件：事件流交给 `events.ts` 的 `bindTurnStream()`，本文件只管会话与生命周期。
  *   5. provider 边界脱敏审计（§12）：`before_provider_request` 里把**真正要发出去的** system prompt
  *      取出、抹掉任何密钥痕迹、并做宿主路径泄漏断言，然后落盘作证据。
@@ -66,7 +71,9 @@ import codingExtension from './extensions/coding.ts'
 import quizExtension from './extensions/quiz.ts'
 // ★ 学段**推断**扩展（票 21）：它独占 `input`（收集本轮证据）与 `before_agent_start`（按推断出的
 //   学段替换整段 prompt），并自兜异常。工厂是「可调用 + `.refresh()/.useJudge()` 诊断入口」的形态。
-import gradeExtension, { GRADE_OVERRIDE_HEADING, buildJudgePrompt, parseProposal } from './extensions/grade.ts'
+import gradeExtension, {
+  GRADE_OVERRIDE_HEADING,
+  postGradeOverride
 // ★ 学生情况（画像）的每轮注入（票 20 的对话侧落点）：取值在 profile 扩展
 //   （`fetchStudentContext`，失败降级为空串），拼装在 `prompts/student-context.ts`（纯函数，幂等）。
 //   本文件只把它们接在 `buildSystemPrompt()` 这一个出口上 —— 6 个 prompt 落点共用它。
@@ -186,6 +193,10 @@ export interface ChatRuntime {
    *   ④ 重新解析 model，`session.setModel()` 热切换 —— **会话与对话历史都保留**
    *      （`setModel` 只改 `agent.state.model` 并往会话里追一条 model_change）。
   applyLlmConfig(config: LlmConfigForPi & { apiKey?: string }): Promise<void>
+   * ★ 学生手动设定学段（走 `grade:set` 这条独立通道；**绝不混进对话请求**）。
+   * ② `gradeExtension.adoptOverride()` **立即生效**并作废在途的推断结论；
+   * ③ 重新把学生上下文绑进扩展层，让 `learning-log` 等每轮用到的那份学段也立刻是新值。
+  setGradeLevel(gradeLevel: GradeLevel): Promise<{ changed: boolean; cooldownRemainingTurns: number }>
   /** 跑一轮：事件经 `sink` 投递（`sink` 就是 `ChatStreamRegistry` 的 `TurnHandle`）。 */
   runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome>
   /**
@@ -272,6 +283,7 @@ interface PiModelRuntimeLike {
   setRuntimeApiKey(providerId: string, apiKey: string): Promise<void>
    *   实现见 `model-runtime.js:401`：`credentials.removeRuntimeApiKey(id)` +
    *   `synchronizeCredentialState(…, "removeRuntimeApiKey", …)`）。
+   * 于是内容安全自审 / 学段第二层 / 动画自由生成**继续用已删除的 Key 发请求**
   removeRuntimeApiKey(providerId: string): Promise<void>
 }
 
@@ -417,8 +429,11 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   let studentContextBlock = ''
    * ★★ **唯一的 system prompt 组装出口**：学段（权威）+ 学生情况（画像），6 个落点都走它。
    * 顺序有意义（**不要对调**）：`withStudentContext` 把学生情况块插在**学段权威段之前**，
+   * 于是学段那句「本轮按哪个学段作答」始终排在最后、离生成最近 —— 它是不可协商的指令，
    * 而画像只是背景（且它排前面也让 `grade.ts` 的 `stripGradeOverride` 不会每轮把它切掉）。
+   *   ③ 学段装配自检；④⑤⑥ 三条早退路径（输入拦截 / 无 Key / 凭证未过）落盘的 `state.lastPrompt`。
    * ⚠️ 建会话时 `studentContextBlock` 还是空串（第一轮还没预取），所以
+   *   `systemPromptOverride` 的产物等于「纯学段模板」—— 这是**预期**的：每轮都会由
    *   `before_agent_start` 用它覆盖，而 `withStudentContext` 对空块是原样返回（幂等）。
   function buildSystemPrompt(incoming: string | undefined): string {
     return withStudentContext(gradeExtension.systemPromptFor(incoming), studentContextBlock)
@@ -445,7 +460,11 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       if (typeof base === 'string') state.basePromptSeen = base
       // ★ 单一入口：学段的替换/权威段全在 grade 扩展里（这里只负责接上链条）
       const prompt = gradeExtension.systemPromptFor(typeof base === 'string' ? base : undefined)
+       * ★★ E1：**先把 Pi 无条件追加的 cwd 尾巴剥掉**，再交给学段出口。
        * 根因（实测 0.85.1）：`buildSystemPrompt()` 在 `customPrompt` 分支的最后无条件执行
+       * `systemPrompt = "四学段模板…\nCurrent working directory: C:/Users/<用户名>/…"`，
+       * ⚠️ 学段扩展（`extensions/grade.ts` 的 `buildGradeSystemPrompt`）在「认不出别的模板」
+       *   学段扩展本身**不需要改**（它是通用拼装器，不认识 cwd 这种 Pi 内部产物）。
       const cleaned = typeof base === 'string' ? stripPiCwdBlock(base) : undefined
       // ★ 单一出口：学段（权威段）+ 学生情况（画像快照）都在 buildSystemPrompt 里拼
       const prompt = buildSystemPrompt(cleaned)
@@ -609,6 +628,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     //   两道覆盖（这里 + `before_agent_start`）必须给出**同一份**文本，否则第一轮
     //   与后续轮次的提示词会不一致（前者带权威段、后者不带）。
     systemPromptOverride: () => gradeExtension.systemPromptFor(undefined),
+    //   ⚠️ 建会话时学生情况块还是空串（每轮预取才填上），这里因此只出学段模板 —— 见
     //   `buildSystemPrompt` 的注释（每轮由 `before_agent_start` 覆盖，是预期行为）。
     systemPromptOverride: () => buildSystemPrompt(undefined),
     // ★ 注册顺序 = 执行顺序（`before_agent_start` 的返回值链式叠加，后注册者看到前者结果）：
@@ -642,6 +662,9 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    * 契约是「**每次建会话 / 切学生时都要调用**」：Tool 里的 `currentAgentSession()` 只可能拿到
    * 主进程写进来的这份 —— 学段推断（`grade.ts`）、画像、学习记录都靠它，而学生身份**不是**
    * Tool 参数（模型连表达「读别人」的能力都没有）。建会话时先绑一次，每轮再绑一次刷新会话 id。
+   * ★ 它同时是**手动设学段之后的重新绑定入口**（`setGradeLevel` 里调用）：
+   *   学段一旦换了，扩展层里那份 `AgentSessionContext.gradeLevel` 也必须跟着换，
+   *   否则 `learning-log` 这类每轮读上下文的地方还按旧学段记账。
    */
   const bindCurrentSession = (): void => {
     bindAgentSession({
@@ -685,6 +708,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   const credentialState = {
      * 旧实现写的是 `Boolean(config.apiKey) || credentialState.hasKey` —— 只增不减，
      * 于是「清空 Key」或「切到没有 Key 的新供应商」之后它卡在 `true`，
+     * 三道门禁（每轮对话 / 自审 / 判学段）全部拿它当「有 Key」，继续发请求。
   // ★ 凭证就绪判定必须在**填充补全器之前**做完（它是三处降级分支的共同判据）
   const auth = await modelRuntime.checkAuth(credentials.providerId)
   credentialState.authReady = auth !== undefined
@@ -706,6 +730,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    */
   if (credentials.apiKey && authReady && !useProbe) {
     completerHolder = createModelCompleter(modelRuntime as never, effectiveModel, {
+   * 自审 / 判学段 / 动画生成这三条链路都应当恢复可用。
   const fillCompleter = (modelForCompleter: unknown): void => {
     if (!credentialState.hasKey || !credentialState.authReady || useProbe) {
       //   已删除的 Key 发请求（与 `removeRuntimeApiKey` 同一条纪律，见 `applyLlmConfig`）。
@@ -765,7 +790,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           }
         }
       : null
-  )
+  gradeExtension.useJudge(async ({ turns, currentGrade }) => {
     if (!credentialState.hasKey || !credentialState.authReady || useProbe) return null
 
   /**
@@ -840,6 +865,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           providerId,
       await modelRuntime.refresh({ providers: [providerId], allowNetwork: false })
        *   - **没有新 Key（用户清空/换到没配 Key 的供应商）→ `removeRuntimeApiKey()`**。
+       *   于是内容安全自审 / 学段第二层 / 动画自由生成**继续用用户以为已经撤销的 Key 发请求**。
        *   `removeRuntimeApiKey` 是 Pi 的真实 API（`model-runtime.d.ts:83`），只动内存。
       if (config.apiKey) await modelRuntime.setRuntimeApiKey(providerId, config.apiKey)
       else await modelRuntime.removeRuntimeApiKey(providerId)
@@ -851,14 +877,27 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
        *   「切到没 Key 的供应商」两条路都卡在 `true`（门禁全放行，继续发请求）。
       credentialState.hasKey = Boolean(config.apiKey)
       credentialState.authReady = (await modelRuntime.checkAuth(providerId)) !== undefined
+      //   自审 / 判学段 / 动画生成这三条链路都要跟着恢复（否则「配好了也只有对话能用」）；
       //   反过来清掉 Key 时 `fillCompleter` 会把通道清空（同一条纪律的另一半）。
       fillCompleter(nextModel)
           `[pi] 已热切换 LLM 配置：provider=${providerId} model=${config.modelId} baseUrl=${config.baseUrl}` +
             ` authReady=${credentialState.authReady}`
+     * ★ 学生手动设定学段（`grade:set` 通道的唯一实现，见接口上的注释）。
+     *      否则 `learning-log` 等每轮读上下文的地方还按旧学段记账（**只在成功后**重新绑，
+     *   设定学段是控制面的动作，不该被「上一条回答还没说完」挡住（学生改学段的时刻
+    async setGradeLevel(
+      gradeLevel: GradeLevel
+      if (disposed) throw new Error('会话已关闭，无法设定学段。')
+      const result = await postGradeOverride(paths.studentId, gradeLevel)
+      gradeExtension.adoptOverride(result.gradeLevel, result.cooldownRemainingTurns)
+      // 结构性日志：只有学段与轮数，**不含任何凭证、不含学生原话**
+        `[grade] 学生手动设定学段：${result.previousLevel} → ${result.gradeLevel}` +
     },
 
     async runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome> {
-      // ★★ 学段**不在这里改**：由 `extensions/grade.ts` 的推断独占。
+      // ★★ 学段**不在这条路径上改**：推断由 `extensions/grade.ts` 独占，
+      //    学生显式设定走独立的 `setGradeLevel()`（`grade:set` 通道），
+      //    两者都不借道「发一条消息」—— 对话请求里没有、也不该有学段字段（守卫 G6c）。
 
       // ★★ 每轮绑定当前学生上下文（票 09）：见 `bindCurrentSession()` 的注释 ——
       //    学生身份**不是** Tool 参数，模型没有表达「读别人」的能力。
@@ -1047,6 +1086,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     }
   }
 
+      // 学习记录是辅助能力：收尾失败绝不能拦住退出（与 `gradeExtension.flush` 同一条纪律）
   /**
    * 轨迹落盘（票 08：`docs/tool-trace.mmd`）。
    *

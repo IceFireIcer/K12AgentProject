@@ -20,6 +20,7 @@ import {
   type CodeExecuteResult,
   type FetchModelsResult,
   type GradeCallResult,
+  type GradeSetResult,
   type GradeState,
   type IpcChannel,
   type ProbeRequest,
@@ -30,6 +31,7 @@ import {
   type SettingsUpdateRequest
 } from '../main/ipc/channels'
 import type { SidecarState } from '../main/sidecar/protocol'
+import type { GradeLevel } from '../shared/ipc-events'
 import { IPC_EVENT_NAMES, type IpcEvent } from '../shared/ipc-events'
 
 export interface K12Api {
@@ -52,9 +54,15 @@ export interface K12Api {
    * Pi 内置供应商预设（端点地址现成可用，含模型清单）——设置页的「供应商预设」下拉。
   readProviderCatalog(): Promise<SettingsCallResult<ProviderCatalogEntry[]>>
   fetchProviderModels(payload: ProbeRequest): Promise<SettingsCallResult<FetchModelsResult>>
+   * 读**当前学段**。
+   * ★ 学段的写入口只有一条：{@link setGrade}（走 `grade:set` 独立通道）。
    */
   getGrade(): Promise<GradeCallResult<GradeState>>
   /** 订阅学段变化（推进只读徽章），返回取消订阅函数。 */
+   * ★ 学生手动设定学段（走 `grade:set` 独立通道；**绝不混进对话请求** ——
+   *   发消息与改学段是两件事，混在一起会让「每轮对话」变成「每轮写一次学段」）。
+  setGrade(gradeLevel: GradeLevel): Promise<GradeCallResult<GradeSetResult>>
+  /** 订阅学段变化（推进指示器），返回取消订阅函数。 */
   onGradeChanged(listener: (state: GradeState) => void): () => void
   /**
    * 订阅「下发学生代码去执行」的请求（渲染进程侧在沙箱 Worker 里跑），返回取消订阅函数。
@@ -63,6 +71,7 @@ export interface K12Api {
   onCodeExecute(listener: (request: CodeExecuteRequest) => void): () => void
   /** 回传执行结果（`requestId` 必须**原样带回**，主进程按它配对，否则每次都会超时）。 */
   sendCodeResult(result: CodeExecuteResult): void
+  /** 某学段依赖图全览（学习地图；带 `studentId` 就标注哪些已掌握）。 */
 }
 
 /**
@@ -126,6 +135,10 @@ const api: K12Api = {
     ipcRenderer.invoke(IPC.settingsFetchModels, payload) as Promise<SettingsCallResult<FetchModelsResult>>,
   getGrade: (): Promise<GradeCallResult<GradeState>> =>
     ipcRenderer.invoke(IPC.gradeGet) as Promise<GradeCallResult<GradeState>>,
+  // ★ 学段的写入口（唯一）：入参按 `{ gradeLevel }` 递过去，主进程再做一次白名单校验
+  //   （渲染进程递来的值一律不当真，见 `ipc/handlers.ts` 的 gradeSet 处理器）。
+  setGrade: (gradeLevel): Promise<GradeCallResult<GradeSetResult>> =>
+    ipcRenderer.invoke(IPC.gradeSet, { gradeLevel }) as Promise<GradeCallResult<GradeSetResult>>,
   onCodeExecute: (listener): (() => void) => {
     const handler = (_event: IpcRendererEvent, request: unknown): void => {
       if (!isCodeExecuteRequest(request)) return
@@ -155,6 +168,8 @@ const api: K12Api = {
 }
 
 /** 学段状态的最小形状检查（`origin` 缺省按 `default` 处理：宁可显示待判定）。 */
+ * 学段状态的最小形状检查（`origin` 缺省按 `default` 处理：宁可显示待判定）。
+ * ★ 三态都要认（`explicit` = 学生手动选的）—— 漏掉它会让「刚点完学段」的推送被整条丢掉，
 function isGradeState(value: unknown): value is GradeState {
   if (typeof value !== 'object' || value === null) return false
   const record = value as { gradeLevel?: unknown; origin?: unknown }
@@ -162,6 +177,8 @@ function isGradeState(value: unknown): value is GradeState {
     typeof record.gradeLevel === 'string' &&
     (GRADE_LEVELS as readonly string[]).includes(record.gradeLevel) &&
     (record.origin === 'inferred' || record.origin === 'default')
+    typeof record.gradeLevel === 'string' &&
+    (GRADE_LEVELS as readonly string[]).includes(record.gradeLevel) &&
   )
 }
 
@@ -194,6 +211,7 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.settingsProviderCatalog,
   IPC.settingsFetchModels,
   IPC.gradeGet,
+  IPC.gradeSet,
   IPC.gradeChanged,
   IPC.codeExecute,
   IPC.codeResult

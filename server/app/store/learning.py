@@ -102,6 +102,12 @@ class StudentRecord:
     grade_level: str
     created_at: int
     last_active_at: int
+class GradeHistoryRecord:
+    """``grade_history`` 的一行（学段变化轨迹）。
+    ★ ``ts`` 是**秒**（由路由层经 ``to_contract_ms`` 转毫秒，与画像/学段同一处换算）。
+    ★ 冷启动基线那行 ``from_level`` 为 ``None`` —— 学生还没有「上一段」。
+    from_level: str | None
+    to_level: str
 
 
 @dataclass(frozen=True)
@@ -184,6 +190,8 @@ class LearningStore:
             last_active_at=int(row["last_active_at"] or 0),
         )
 
+    #   是同一张表的一次 UPDATE，属学段轨自己的事务）不许再拼一份 SELECT/UPDATE。
+          （``upsert_student`` 要一并写学段），存储层不该替它决定学段。
     # ------------------------------------------------------------ 掌握度 --
     def mastery(self, kp_id: str) -> tuple[float, int, int]:
         row = self.conn.execute(
@@ -411,13 +419,26 @@ class LearningStore:
     def add_grade_signal(
         self, *, signal_type: str, value: float, raw: str = "", session_id: str = ""
     ) -> None:
-        """写一条学段信号（自动推断用；**只写建议**，改学段须学生确认）。"""
+        """写一条学段信号（自动推断的原料）。
+        ⚠️ 这里**只落信号**，不做任何判定：学段的唯一写路径是 ``app/grade/rules.py``
+        的规则引擎 —— 达到阈值时它把新学段**自动生效**并写
+        ``grade_history(source="inferred")``。学生端没有选择器、也没有确认动作
+        （D-020 翻转；旧的「只写建议、改学段须学生确认」口径已废止）。
         self.conn.execute(
             "INSERT INTO grade_signals(ts, session_id, signal_type, value, raw) VALUES(?,?,?,?,?)",
             (int(time.time()), session_id, signal_type, float(value), raw),
         )
         self.conn.commit()
 
+    def grade_history(self, *, limit: int = 200) -> list[GradeHistoryRecord]:
+        """读 ``grade_history`` 轨迹（**按时间正序**，最早的在前）。
+        ★ 正序：报告要讲的是「**怎么变成现在这个学段**」这条线，
+        ★ 与 ``app/grade/rules.py`` 的 ``GradeEngine.history()`` 是两个用途：
+            "SELECT id, ts, turn, from_level, to_level, source, confidence "
+            "FROM grade_history ORDER BY id DESC LIMIT ?",
+            GradeHistoryRecord(
+                from_level=None if row["from_level"] is None else str(row["from_level"]),
+                to_level=str(row["to_level"] or ""),
     def close(self) -> None:
         self.conn.close()
 

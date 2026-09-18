@@ -1,17 +1,23 @@
 # -*- coding: utf-8 -*-
-"""学段推断的四个薄控制器（票 21）—— 提取在 ``app/grade/signals.py``、决策在 ``app/grade/rules.py``。
+"""学段推断的五个薄控制器（票 21）—— 提取在 ``app/grade/signals.py``、决策在 ``app/grade/rules.py``。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET  | ``/api/grade/signals/{student_id}`` | 契约 :class:`app.contracts.GradeSignals`：当前学段 + 最近信号 + 待生效建议 |
 | GET  | ``/api/grade/state/{student_id}``   | 轻量状态：当前学段 / 连续轮次 / 冷却剩余（桌面端每轮取「当前学段」用这个） |
-| GET  | ``/api/grade/history/{student_id}`` | ``grade_history`` 轨迹（报告与答辩的叙事素材） |
+| GET  | ``/api/grade/history/{student_id}`` | ``grade_history`` 轨迹（报告与汇报的叙事素材） |
 | POST | ``/api/grade/turns/{student_id}``   | ★ 上交**一批轮次证据** → 服务端提取信号 + 判定 + 必要时改学段 |
+| POST | ``/api/grade/override/{student_id}`` | 学生**手动**设定学段（写 grade_history(source="explicit")，之后 MANUAL_COOLDOWN_TURNS 轮内不再自动调整；契约 :class:`app.contracts.GradeOverrideResponse`） |
 
-★ 第 3 行的入参是**证据**（学生原话 + 答题表现 + 第二层 LLM 的提议），
+学段**默认自动推断、自动生效**；学生可以手动覆盖，覆盖后进入更长的冷却
+（:data:`app.grade.rules.MANUAL_COOLDOWN_TURNS`），冷却期满平滑回归自动。
+
+★ 第 4 行的入参是**证据**（学生原话 + 答题表现 + 第二层 LLM 的提议），
 **不是**桌面端算好的信号 —— 信号提取只有一份实现（Python 侧），免得两边漂移。
 学生原话经 HTTP 传进来，**不入库**（``grade_signals.raw`` 只写自有词表的命中项，
 见 ``signals.SignalReading``）—— SQLite 不存对话正文是合规硬约束（执行文档 §8.1）。
+手动覆盖的入参更小：只有一个学段字面量，**没有**说明文本框（见
+:class:`app.contracts.GradeOverrideRequest` 的注释：库表没有可写列，写日志又违反合规）。
 
 一人一库：每次请求现开现关该学生的 ``learning.db``（``app.routes.students.open_learning_store``），
 **不跨学生复用连接**；表结构由 ``app/store/learning.py`` 的迁移器负责，本文件**不写任何 DDL**。
@@ -40,13 +46,21 @@ import sqlite3
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
 
-from app.contracts import CamelModel, GradeLevel, GradeSignal, GradeSignals
+from app.contracts import (
+    CamelModel,
+    GradeHistoryEntry,
+    GradeLevel,
+    GradeOverrideRequest,
+    GradeOverrideResponse,
+    GradeSignal,
+    GradeSignals,
+)
 from app.grade.rules import SIGNAL_LIST_LIMIT, GradeEngine, GradeProposal
 from app.grade.signals import QuizPerformance
 from app.routes.students import (
     as_grade_level,
     open_learning_store,
-    resolve_student_data_root,
+    require_data_dir,
     to_contract_ms,
     validate_student_id,
 )
@@ -158,19 +172,13 @@ class GradeStateOut(CamelModel):
     suggested_level: GradeLevel | None = None
 
 
-class GradeHistoryEntry(CamelModel):
-    """``grade_history`` 的一行（学段变化轨迹）。"""
-
-    ts: int
-    turn: int
-    from_level: GradeLevel | None = None
-    to_level: GradeLevel
-    source: str
-    confidence: float = 0.0
-
-
 class GradeHistoryResponse(CamelModel):
-    """``grade_history`` 轨迹（报告叙事：「第 3 轮调为小学低年级（0.75）」）。"""
+    """``grade_history`` 轨迹（报告叙事：「第 3 轮调为小学低年级（0.75）」）。
+
+    ★ ``entries`` 用契约里的 :class:`app.contracts.GradeHistoryEntry`：学习报告的
+      ``/api/profile/{id}/report`` 要给出**同一份**轨迹，两处各定义一个同形模型迟早分叉
+      （这原是本文件模块头「需要 contracts.py 补的模型」第 2 条，现已兑现）。
+    """
 
     student_id: str
     current_level: GradeLevel
@@ -178,21 +186,16 @@ class GradeHistoryResponse(CamelModel):
 
 
 # --------------------------------------------------------------------------- #
-# 取数据根（与画像路由同一口径，不重复实现解析逻辑）
+# 取数据根（与画像 / 练习 / 动画路由同源，不再本地复制一份）
 # --------------------------------------------------------------------------- #
 def _require_data_dir(request: Request) -> str:
-    """取学生数据根；缺失时给**可读**的 503（理由与 ``routes/profile.py`` 逐字一致）。
+    """取学生数据根；缺失时给**可读**的 503。
 
-    ★ 只认**显式传入**的 ``--data-dir``：没传时的兜底值是共享目录，
-    拿它当学生数据根会让不同来源的数据混进同一棵学生目录树。
+    ★ 实现归口在 :func:`app.routes.students.require_data_dir` —— 画像 / 练习 / 学段 / 动画
+    四条轨必须**同一口径**（只认显式传入的 ``--data-dir``）。保留这个私有名字只是为了
+    少改调用点；本地再抄一份实现的风险是实测过的（文案差一个词、口径迟早分叉，见 D4）。
     """
-    data_root = resolve_student_data_root(request)
-    if data_root is None:
-        raise HTTPException(
-            status_code=503,
-            detail="sidecar 未配置 data-dir：无法定位学生目录（应由 Electron 经 --data-dir 传入 <userData>）",
-        )
-    return str(data_root)
+    return require_data_dir(request)
 
 
 def _open_engine(request: Request, student_id: str) -> GradeEngine:
@@ -227,9 +230,10 @@ def _read_signals(engine: GradeEngine, limit: int = SIGNAL_LIST_LIMIT) -> list[G
 def grade_signals(request: Request, student_id: str) -> GradeSignals:
     """当前学段 + 最近信号 + （够格但被挡住时的）待生效建议。
 
-    ★ 与旧设计不同：这里**不再有「学生确认」这一步** —— 学段由系统自动生效，
-    ``source`` 恒为 ``inferred``。``suggested_level`` 的含义因此收窄为
-    「证据已够、但被冷却期或置信度挡住的下一个学段」，供前端显示「将在下一轮生效」。
+    ``source`` 现在有**两种**取值：默认是 ``inferred``（系统自动推断），
+    学生手动设定过则是 ``explicit``（见 ``POST /grade/override/{student_id}``）。
+    ``suggested_level`` 的含义不变：「证据已够、但被冷却期或置信度挡住的下一个学段」，
+    供前端显示「将在下一轮生效」。
     """
     engine = _open_engine(request, student_id)
     try:
@@ -237,7 +241,8 @@ def grade_signals(request: Request, student_id: str) -> GradeSignals:
         return GradeSignals(
             student_id=student_id,
             current_level=state.grade_level,
-            source="inferred",
+            # 与 /grade/state 同一口径：来源跟着最近一次写入走（手动后是 explicit）
+            source=state.source,
             suggested_level=state.suggested_level,
             confidence=state.confidence,
             signals=_read_signals(engine),
@@ -252,6 +257,9 @@ def grade_signals(request: Request, student_id: str) -> GradeSignals:
 @router.get("/grade/state/{student_id}", response_model=GradeStateOut, summary="当前学段状态（轻量）")
 def grade_state(request: Request, student_id: str) -> GradeStateOut:
     """桌面端每轮取「当前学段」的入口（不含信号列表，载荷最小）。
+
+    当前学段可能是**推断引擎自动写入**的，也可能是**学生手动设定**的
+    （后者 ``source="explicit"``、``cooldownRemainingTurns`` 更长）。
 
     学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，
     而不是 404 —— 学段推断从第一轮就要开始工作。
@@ -392,6 +400,47 @@ def submit_grade_turns(
         engine.store.close()
 
 
+@router.post(
+    "/grade/override/{student_id}",
+    response_model=GradeOverrideResponse,
+    summary="学生手动设定学段（写 grade_history(source=explicit)，之后进入更长冷却）",
+)
+def override_grade(
+    request: Request, student_id: str, payload: GradeOverrideRequest
+) -> GradeOverrideResponse:
+    """★ **唯一的人工写路径**：学生选定学段 → 立即生效 + 进入 :data:`MANUAL_COOLDOWN_TURNS` 冷却。
+
+    与 ``POST /grade/turns`` 的分工：那条路径收的是**证据**（可能改变学段，也可能不），
+    这条路径收的是**决定**（一定按学生的意思生效）。两者写的是同一张 ``grade_history``，
+    区别只有 ``source`` 与冷却窗口长度 —— 冷却期一过，自动推断照常接管。
+    """
+    engine = _open_engine(request, student_id)
+    try:
+        result = engine.override_level(student_id=student_id, level=payload.grade_level)
+        # 日志只记 id / 学段 / 是否真的变了 / 轮次 —— 手动切换本来就不带学生文本，别在这里加。
+        logger.info(
+            "学段手动设定：%s grade=%s changed=%s turn=%s",
+            student_id,
+            result["grade_level"],
+            result["changed"],
+            result["turn"],
+        )
+        return GradeOverrideResponse(
+            student_id=student_id,
+            grade_level=result["grade_level"],
+            previous_level=result["previous_level"],
+            source=result["source"],
+            changed=result["changed"],
+            turn=result["turn"],
+            cooldown_remaining_turns=result["cooldown_remaining_turns"],
+        )
+    except sqlite3.Error as exc:
+        logger.exception("学段手动设定失败：%s", student_id)
+        raise HTTPException(status_code=503, detail=f"设定学段失败（本地数据库异常）：{exc}") from exc
+    finally:
+        engine.store.close()
+
+
 def _as_quiz_performance(value: QuizPerformanceInput | None) -> QuizPerformance | None:
     if value is None:
         return None
@@ -418,6 +467,8 @@ __all__ = [
     "GradeEvaluationOut",
     "GradeHistoryEntry",
     "GradeHistoryResponse",
+    "GradeOverrideRequest",
+    "GradeOverrideResponse",
     "GradeProposalInput",
     "GradeStateOut",
     "GradeTurnInput",

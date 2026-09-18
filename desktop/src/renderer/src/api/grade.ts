@@ -1,73 +1,76 @@
 /**
- * 「当前学段」的**只读**读取入口（渲染进程侧）。
+ * 「当前学段」的**读取 + 手动设定**入口（渲染进程侧）。
  *
- * ★★ 设计已变更（2026-09）：**没有手动学段选择器了**。
+ * 学段的来源有两条线：
+ *   1. **自动推断**（主进程侧：规则引擎 + 轻量 LLM 判定，票 21）→ 推 `grade:changed`；
+ *   2. **学生手动指定**（本文件的 {@link GradeBridge.setGrade}）→ 服务端照单生效，
+ *      冷却期内不再自动改（回执里的 `cooldownRemainingTurns`）。
  *
- *   学段由系统从对话里判定（规则引擎 + 轻量 LLM 判定，主进程侧实现；票 21）。
- *   渲染进程因此只做两件事：
- *     1. 订阅「当前学段」的推送，把它当**状态**显示（只读指示器，不是控件）；
- *     2. 判定结果变化时给一句可读提示，让学生**感知**到系统在适配他，而不需要他做任何操作。
+ * 渲染进程因此做三件事：
+ *   1. 订阅「当前学段」的推送，把它当**状态**显示（指示器 / 设置页的只读行）；
+ *   2. 判定结果变化时给一句可读提示，让学生**感知**到系统在适配他；
+ *   3. 学生想自己指定时，把「他选了什么」**原样**交给服务端 —— 前端不推断、不预判、不算。
  *
- *   `ChatSendRequest` 里**没有** `gradeLevel` 字段：前端既不能决定学段，也不发送学段。
+ * ★ 手动学段**绝不混进对话请求**：`ChatSendRequest` 只有 `text`（架构守卫 G6c 钉死）。
+ *   混进去的话「发一条消息」会顺带写一次学段，清空输入框重发、同一句话重试都会再写一遍 ——
+ *   写入从「学生的显式动作」退化成「聊天的副作用」，而且没有回执可以告诉学生冷却还剩几轮。
  *
  * ---------------------------------------------------------------------------
- * ★ 需要主进程提供的能力（唯一缺口；主进程侧落地后本模块自动生效）
+ * ★ 需要主进程提供的能力（分步接线；缺哪条本模块给可读说明，不抛异常、不白屏）
  * ---------------------------------------------------------------------------
  *
  * 通道名（唯一来源 `src/main/ipc/channels.ts`，本文件不写死通道字符串）：
  *
  *   `IPC.gradeChanged`（主进程 → 渲染进程，**推送**）
  *       webContents.send(IPC.gradeChanged, state: GradeState)
- *       系统判定出学段时推一条（首次判定 / 判定结果变化都要推）。
- *       ★ 必须登记进 `PUSH_CHANNELS`（架构守卫据此断言推送通道白名单）。
+ *       判定出学段、或学生手动设定后都要推一条。
+ *       ★ 已登记进 `PUSH_CHANNELS`（架构守卫据此断言推送通道白名单）。
  *
  *   `IPC.gradeGet`（渲染进程 → 主进程，invoke，**可选**）
  *       ipcMain.handle(IPC.gradeGet, () => GradeCallResult<GradeState>)
  *       挂载时拉一次当前值，避免「刚打开时指示器空着」。
  *       若主进程在 `did-finish-load` 后主动推一次，这条可以不做——渲染进程已按可选处理。
  *
- * payload（建议与 `GradeLevel` 同源放在 `src/shared/ipc-events.ts`）：
+ *   `IPC.gradeSet`（渲染进程 → 主进程，invoke，**可选**）
+ *       ipcMain.handle(IPC.gradeSet, (level) => GradeCallResult<GradeSetResult>)
+ *       学生手动设定学段（唯一的人工写入口）。必须**有回执**（invoke 而不是 send）：
+ *       学生要看到「改没改成、冷却还剩几轮」，推送通道给不了这个。
  *
- *     export interface GradeState {
- *       gradeLevel: GradeLevel          // 四冻结字面量之一
- *       origin: 'inferred' | 'default'  // 系统判定的 / 冷启动默认值（还没判出来）
- *       reason?: string | null          // 判定依据摘要（给开发者看；UI 不展示）
- *     }
+ * preload 白名单（`K12Api`）三个方法：
  *
- * preload 白名单（`K12Api`）两个方法：
- *
- *     getGrade(): Promise<GradeCallResult<GradeState>>                    // 可选
- *     onGradeChanged(listener: (state: GradeState) => void): () => void   // 必需
+ *     getGrade(): Promise<GradeCallResult<GradeState>>                              // 可选
+ *     setGrade(level: GradeLevel): Promise<GradeCallResult<GradeSetResult>>          // 可选
+ *     onGradeChanged(listener: (state: GradeState) => void): () => void             // 必需
  *
  * ★ 缺通道时**不许崩、不许白屏**：`resolveGradeBridge()` 返回 `{ready:false, message}`，
  *   store 记下原因，指示器显示「待判定」并附一句可读说明（与 `api/settings.ts`
  *   的 `resolveSettingsBridge()` 同一口径）。
  */
 
+import type { K12Api } from '../../../preload/index'
+import type { GradeCallResult, GradeOrigin, GradeSetResult, GradeState } from '../../../main/ipc/channels'
 import type { GradeLevel } from '@shared/ipc-events'
 
-/** 判定来源：`inferred` = 系统真判出来了；`default` = 冷启动默认值（还没判）。 */
-export type GradeOrigin = 'inferred' | 'default'
-
-/** 当前学段（主进程推送 / 拉取的载荷）。 */
-export interface GradeState {
-  gradeLevel: GradeLevel
-  origin: GradeOrigin
-  /** 判定依据摘要（给开发者；界面不展示）。 */
-  reason?: string | null
-}
-
-/** IPC 回执（与 `channels.ts` 的 `SettingsCallResult` 同一写法：失败也回一句人话）。 */
-export type GradeCallResult<T> = { ok: true; data: T } | { ok: false; message: string }
+/**
+ * ★ 这三个类型**不在渲染进程重写一遍**（H12）：
+ *   它们的唯一来源是 `src/main/ipc/channels.ts`（preload 也 import 那里），
+ *   形状在这里各写一份的话，主进程改了字段渲染侧不会报错 —— 正是契约漂移的起点。
+ *   跨目录用**相对路径** type-only 导入（与 `stores/sidecar.ts` 引 `main/sidecar/protocol` 同一写法）；
+ *   纯类型导入在编译后被完全擦除，渲染进程运行时不加载任何主进程模块。
+ */
+export type { GradeCallResult, GradeOrigin, GradeSetResult, GradeState }
 
 /**
  * 主进程需要暴露的学段能力。
  *
  * `onGradeChanged` **必需**（没有它指示器永远是「待判定」）；
- * `getGrade` **可选**（主进程若在订阅后主动推一次当前值，就不需要它）。
+ * `getGrade` / `setGrade` **可选** —— 白名单是分步接线的：主进程若在订阅后主动推一次
+ * 当前值，就不需要 `getGrade`；还没做手动入口时，就不需要 `setGrade`。
  */
 export interface GradeBridge {
   getGrade?(): Promise<GradeCallResult<GradeState>>
+  /** ★ 学生手动设定学段。缺失 = 主进程还没接线，界面给一句可读说明而不是抛异常。 */
+  setGrade?(gradeLevel: GradeLevel): Promise<GradeCallResult<GradeSetResult>>
   onGradeChanged(listener: (state: GradeState) => void): () => void
 }
 
@@ -80,7 +83,19 @@ export type GradeBridgeLookup =
 export const GRADE_BRIDGE_MISSING_HINT =
   '学段自动判定还没有接线：preload 白名单缺少 onGradeChanged —— 需要先在主进程注册' +
   '「学段推送」通道（由 preload 白名单暴露，渲染进程不直接持有通道名），再由 preload 暴露' +
-  ' `onGradeChanged` / `getGrade`。接线后刷新页面即可生效。'
+  ' `onGradeChanged` / `getGrade` / `setGrade`。接线后刷新页面即可生效。'
+
+/**
+ * 桥在、但**缺少写入方法**时的说明。
+ *
+ * ★ 单独一条的理由：读与写是**两条**分步接线的能力（`gradeGet` / `gradeSet`）。
+ *   只有读能力时，指示器照常显示系统判出来的学段，只是「自己指定」这个动作不可用 ——
+ *   这时必须说清**是写入没接线**，而不是让学生以为「学段整个功能坏了」。
+ */
+export const GRADE_SET_MISSING_HINT =
+  '手动设定学段还没有接线：preload 白名单缺少 setGrade —— 需要先在主进程注册' +
+  '「学段设定」通道（invoke，带回执，学生要看到改没改成），再由 preload 暴露 `setGrade`。' +
+  '接线后刷新页面即可生效。'
 
 /**
  * 从 `window.api` 上取学段能力。
@@ -94,12 +109,24 @@ export function resolveGradeBridge(): GradeBridgeLookup {
     return { ready: false, message: '预加载脚本未生效（window.api 缺失），学段判定暂时读不到。' }
   }
 
-  const host = window.api as unknown as Record<string, unknown>
-  if (typeof host.onGradeChanged !== 'function') {
+  // ★ 结构检查替代双重断言（H12）：先按**主进程白名单的真实类型**拿到 `window.api`，
+  //   再逐方法确认（白名单是分步接线的，运行时可能缺方法），最后显式拼出要交给上层的桥。
+  //   原来那句 `host as unknown as GradeBridge` 把 `window.api` 的真实签名整条抹掉 ——
+  //   主进程把 `onGradeChanged` 改名或改签名，渲染侧一行都不会报错。
+  const api: K12Api = window.api
+  if (typeof api.onGradeChanged !== 'function') {
     return { ready: false, message: GRADE_BRIDGE_MISSING_HINT }
   }
 
-  return { ready: true, bridge: host as unknown as GradeBridge }
+  const bridge: GradeBridge = {
+    // 包一层：不把白名单上的方法原样转出去（订阅的是「我们的回调」，不是别人的方法引用）
+    onGradeChanged: (listener) => api.onGradeChanged(listener)
+  }
+  if (typeof api.getGrade === 'function') bridge.getGrade = () => api.getGrade()
+  // ★ 同样是「可选能力」：`grade:set` 晚一步接线时，界面照常展示（只是不能手动指定），
+  //   不能因为缺这一个方法就把整块学段显示变成一句「未接线」。
+  if (typeof api.setGrade === 'function') bridge.setGrade = (level) => api.setGrade(level)
+  return { ready: true, bridge }
 }
 
 /** 四学段字面量（冻结；与 `shared/ipc-events.ts` 逐字一致）。 */
@@ -109,7 +136,17 @@ export const GRADE_LEVELS: readonly GradeLevel[] = ['primary_low', 'primary_high
  * 学段载荷的**白名单投影**：认得出就返回规范化对象，认不出返回 `null`（调用方忽略该条）。
  *
  * 与 `api/events.ts` 同一原则：脏数据一律「忽略而不抛异常」，绝不猜一个最近的学段。
- * `origin` 只认两个字面量；缺省时按 `default` 处理（**宁可显示待判定，也不要假装系统判过**）。
+ *
+ * ★ `origin` **三态都要认**（`inferred` / `explicit` / 其它 → `default`）。
+ *   把 `explicit` 漏成 `default` 的后果不是「显示得不准」，而是**整条推送被丢掉**：
+ *   store 只让 `inferred` / `explicit` 上屏，学生刚点完学段、主进程立刻推来的那条
+ *   `origin: 'explicit'` 会被归一化成一个「不算判定结果」的值，界面停在上一个状态 ——
+ *   表现成**点了没反应**（学生以为自己没点中，于是反复点）。
+ *   缺省时按 `default` 处理：**宁可显示待判定，也不要假装系统判过**。
+ *
+ * ★ 只投影**两个字段**（`gradeLevel` / `origin`）：它们是界面真正消费的部分，也是
+ *   `GradeState` 两个版本都有的字段。传输类型里那些诊断字段（`reason` / `source` 之类，
+ *   只给开发者看）**不复制、也不在这里另起名字** —— 渲染进程不该为了排查再维护一份契约。
  */
 export function normalizeGradeState(raw: unknown): GradeState | null {
   if (typeof raw !== 'object' || raw === null) return null
@@ -118,11 +155,11 @@ export function normalizeGradeState(raw: unknown): GradeState | null {
   const gradeLevel = readGradeLevel(record.gradeLevel)
   if (gradeLevel === null) return null
 
-  const reason = typeof record.reason === 'string' && record.reason.trim().length > 0
-    ? record.reason.trim()
-    : null
-
-  return { gradeLevel, origin: record.origin === 'inferred' ? 'inferred' : 'default', reason }
+  return {
+    gradeLevel,
+    origin:
+      record.origin === 'inferred' || record.origin === 'explicit' ? record.origin : 'default'
+  }
 }
 
 /** 字符串 → 学段字面量（认不出返回 `null`，不映射、不猜测）。 */

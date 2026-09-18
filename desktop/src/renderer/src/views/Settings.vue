@@ -14,10 +14,12 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { EMBEDDING_MODE_LABELS, MANUAL_PRESET_ID, type EmbeddingMode } from '../api/settings'
+import { GRADE_LEVELS } from '../api/grade'
 import { useChatStore } from '../stores/chat'
 import { useSettingsStore } from '../stores/settings'
 import { useSidecarStore } from '../stores/sidecar'
 import { useStudyStore } from '../stores/study'
+import type { GradeLevel } from '@shared/ipc-events'
 
 const sidecar = useSidecarStore()
 const chat = useChatStore()
@@ -29,14 +31,25 @@ const EMBEDDING_MODES: readonly EmbeddingMode[] = ['local_fastembed', 'cloud_api
 const probeTitle = computed(() => (settings.probeAt ? `探测结果（${settings.probeAt}）` : '探测结果'))
 const cloudEmbedding = computed(() => settings.embedding.mode === 'cloud_api')
 
+/* ── 学段（手动指定入口二；入口一在对话页顶栏的 GradeIndicator）────────────
  *
+ * ★ 两个入口**共用同一个 store action** `chat.setGrade`（走 `grade:set` 独立通道）。
  *   各自写一份写路径的话，迟早出现「在设置页改了、顶栏指示器还显示旧值」——
  *   学生据此判断改没改成，一处不同步就等于告诉他没改成。
  * ★ 这里只传「学生选了什么」：生效逻辑（写库 + 冷却 10 轮）在服务端，前端不推断、不预判。
  */
+const gradeBusy = ref(false)
+const gradeError = ref<string | null>(null)
 
+async function chooseGrade(level: GradeLevel): Promise<void> {
+  if (gradeBusy.value) return
+  gradeBusy.value = true
+  gradeError.value = null
   try {
+    const result = await chat.setGrade(level)
+    if (!result.ok) gradeError.value = result.message ?? '设定学段失败。'
   } finally {
+    gradeBusy.value = false
   }
 }
 
@@ -51,6 +64,7 @@ const cloudEmbedding = computed(() => settings.embedding.mode === 'cloud_api')
 /**
  */
 watch(
+  () => chat.currentGrade,
   (level, previous) => {
   }
 )
@@ -437,21 +451,35 @@ onMounted(() => {
       </div>
     </section>
 
+    <!-- ─────────────────────── 学段（手动指定入口二） ───────────────────────
          放在「本地数据服务」卡片**之前**：这是一项可操作的功能，不是诊断信息 ——
          埋在状态/端口/PID 中间会让需要它的学生根本找不到。
+         ★ 入口一在对话页顶栏（GradeIndicator 的「自己指定学段」），两处共用 store 的 setGrade。 -->
+    <section class="card" data-testid="settings-grade-block">
+      <h3 class="card__title">学段</h3>
       <p class="field__hint">系统会根据你问的问题自动判断；你也可以自己指定，指定后 10 轮内系统不再自动改。</p>
+      <div class="grade-picker">
         <button
           v-for="level in GRADE_LEVELS"
           :key="level"
           type="button"
+          :data-testid="`settings-grade-option-${level}`"
+          :data-active="String(chat.currentGrade === level)"
+          :disabled="chat.streaming || gradeBusy"
+          @click="chooseGrade(level)"
         >
           {{ GRADE_LABELS[level] }}
         </button>
       </div>
+      <!-- 学段没判出/没选过时 `currentGrade` 为 null → 这里自然显示「待判定」：
            `data-active` 全为 false 是**对的**（不拿默认值冒充学生的选择）。 -->
+      <p class="field__hint" data-testid="settings-grade-source">
+        当前：{{ chat.currentGradeLabel ?? GRADE_UNKNOWN_LABEL }}（{{ gradeOriginLabel(chat.gradeOrigin) }}）
       </p>
+      <p v-if="gradeError" class="notice notice--danger" data-testid="settings-grade-error">{{ gradeError }}</p>
     </section>
 
+         与学段区块并列：都是「学生显式指定」的软偏好，指完立刻生效（不进检索契约）。
       </p>
 
       </p>
@@ -801,13 +829,16 @@ select.field__input:disabled {
   color: var(--danger);
 }
 
+/* ── 学段选择（按钮组，不用 <select>：原生下拉与页内其它控件的视觉语言不一致）── */
 
+.grade-picker {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
 }
 
+.grade-picker button {
   padding: 6px 14px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
@@ -818,15 +849,18 @@ select.field__input:disabled {
   cursor: pointer;
 }
 
+.grade-picker button:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
 }
 
+.grade-picker button:disabled {
   cursor: not-allowed;
   color: var(--text-faint);
 }
 
 /* 当前生效的那一档（含学生刚选中的）：与对话页顶栏的徽章同一视觉语言 */
+.grade-picker button[data-active='true'] {
   border-color: rgba(47, 111, 208, 0.45);
   background: var(--accent-soft);
   color: var(--accent-strong);

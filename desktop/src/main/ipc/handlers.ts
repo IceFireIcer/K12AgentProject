@@ -39,6 +39,7 @@ import {
   type CodeExecuteResult,
   type FetchModelsResult,
   type GradeCallResult,
+  type GradeSetResult,
   type GradeState,
   type ProbeRequest,
   type ProbeResult,
@@ -83,21 +84,29 @@ const rendererCodeRunner = createRendererCodeRunner({
 bindCodeRunner(rendererCodeRunner.runner)
 
 /**
- * 当前学段（**只读展示用**，D-020）。
+ * 当前学段（**读**给界面用）。
  *
  * ★ 这里**没有写入函数**，也不该有：学段由推断引擎独占（`agent/extensions/grade.ts`
  *   把每轮证据上交到 sidecar，规则引擎决定后写 `learning.db`）。前端连"请求改学段"
- *   的能力都不提供 —— 所以这条通道只有读。
+ * ★ 写入只有一条，走 `grade:set`（见下面的 handler）：学生显式设定学段时，
  * ★ 缓存只为「值没变就不推送」，真值永远以 sidecar 的 `learning.db` 为准。
  */
 let currentGrade: GradeState | null = null
 
+/** 四学段字面量（与 `shared/ipc-events.ts` 的 `GradeLevel` 同源，此处只做运行期校验）。 */
+const GRADE_LEVELS = ['primary_low', 'primary_high', 'junior', 'senior'] as const
+/** 字符串 → 学段（认不出返回 `null`，不映射、不猜测、不兜底成最近的一个）。 */
+function readGradeLevel(value: unknown): GradeState['gradeLevel'] | null {
+  return typeof value === 'string' && (GRADE_LEVELS as readonly string[]).includes(value)
 /**
  * 从 sidecar 读当前学段。
  *
  * ★ `origin` 的判定是刻意的：`lastTurn === 0` 表示**还没发生过任何推断**，
  *   此时显示为 `default`，前端渲染成「待判定」而不是假装系统已经判过。
  *   拿冷启动默认值冒充推断结果，演示时会被一眼看穿。
+ *   - `source === 'explicit'` → `explicit`（学生手动选的）；
+ * ★ **来源以服务端 `GradeStateOut.source` 为准，前端/主进程都不自己猜**：
+ *   在界面上彻底隐身（学生改完学段，指示器却说这是系统判的）。
  */
 async function readGradeState(instance: ChatRuntime): Promise<GradeState | null> {
   try {
@@ -106,14 +115,21 @@ async function readGradeState(instance: ChatRuntime): Promise<GradeState | null>
     const body = (await response.json()) as {
       grade?: unknown
       lastTurn?: unknown
-      reason?: unknown
+      source?: unknown
     }
-    if (typeof body.grade !== 'string' || body.grade.length === 0) return null
+    // ★ 四学段**白名单**（不是「非空字符串就算数」）：同一边界的另外三处（`preload/index.ts`、
+    //   不存在的学段，而 `as GradeState['gradeLevel']` 这种断言让 TypeScript 完全看不见。
+    const gradeLevel = readGradeLevel(body.grade)
     const lastTurn = typeof body.lastTurn === 'number' ? body.lastTurn : 0
+    // ★ 读的是契约里**真实存在**的 `GradeStateOut.source`（写入来源，例如 `inferred` / `explicit`）。
+    const source =
+      typeof body.source === 'string' && body.source.trim().length > 0 ? body.source.trim() : null
     return {
       gradeLevel: body.grade as GradeState['gradeLevel'],
       origin: lastTurn > 0 ? 'inferred' : 'default',
       reason: typeof body.reason === 'string' ? body.reason : null
+      origin: source === 'explicit' ? 'explicit' : lastTurn > 0 ? 'inferred' : 'default',
+      source
     }
   } catch {
     return null
@@ -136,6 +152,10 @@ function pushGradeState(next: GradeState | null): void {
   }
 }
 
+ * ★ 与 `readGradeState` 同一纪律：**主进程这一侧也要校验**，不拿 `as` 断言糊过去 ——
+ *   后端字段风格一变，指示器就会显示一个不存在的学段或一段脏标题，而 TypeScript 看不见。
+  const gradeLevel = readGradeLevel(record.gradeLevel)
+/** 值变了才推送 —— 与 {@link pushGradeState} 同一手法（否则指示器会反复闪动）。 */
 /**
  * ★ 默认学生 id（票 09：一人一目录、一人一库）。
  *
@@ -173,6 +193,7 @@ let runtime: ChatRuntime | null = null
 /** 正在装配中的 Promise（并发首条消息只装配一次）。 */
 let runtimePending: Promise<ChatRuntime> | null = null
 
+ * 为什么需要它 —— 装配是异步的（要先去 sidecar 读设置），而渲染进程一挂载就会读学段
 /**
  * 取当前会话（没有就装配）。**Pi 只在真的发消息时被加载**。
  * `userDataDir` 用 Electron 的 `app.getPath('userData')`，绝不回退 `~/.pi`（票 03/09 的硬约束）。
@@ -198,6 +219,7 @@ export async function ensureChatRuntime(): Promise<ChatRuntime> {
   return await runtimePending
 }
 
+ *   渲染进程一挂载就会读学段（只读徽章），那条路径也走 `ensureChatRuntime()`，
  * 拿到了就 `applyLlmConfig()` 切过去，没拿到就什么都不做（下一轮再试）。
   let llm: RuntimeLlmConfig | null = null
     llm = await refreshRuntimeLlmConfig()
@@ -206,6 +228,7 @@ export async function ensureChatRuntime(): Promise<ChatRuntime> {
 /**
  * ★ `before-quit` 必须调用它（`session.dispose()` → JSONL flush）。
  * 幂等：重复调用安全（`ChatRuntime.dispose()` 自身也幂等）。
+ * ★★ **必须等「正在装配中」的会话**（G1）：渲染进程一挂载就读学段 → `ensureChatRuntime()`，
  */
 export async function disposeChatRuntime(): Promise<void> {
   const instance = runtime
@@ -366,7 +389,10 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   })
 
   // ---------------------------------------------------------------- 学段（只读）
-  // ★ 只有读，**没有写**：学段由推断引擎独占（D-020）。前端拿它渲染只读徽章。
+  // ---------------------------------------------------------------- 学段（读 + 一条写）
+  // ★ 写：只有一条，走 `grade:set`（见下方）；**绝不混进 `ChatSendRequest`** ——
+  //   那个请求的字段集合被守卫 G6c 钉死为 `['text']`，学段一旦混进去，
+  //   每轮对话都会顺带写一次学段，「发消息」与「改学段」两件事就再也分不开了。
   ipcMain.handle(IPC.gradeGet, async (): Promise<GradeCallResult<GradeState>> => {
     let instance: ChatRuntime
     try {
@@ -381,6 +407,19 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
     currentGrade = state
     return { ok: true, data: state }
   })
+   * ★ 学生**手动设定学段**（唯一的人工作用点）。
+   * 三件事的顺序（与 `ChatRuntime.setGradeLevel` 的分工）：
+   *   ① 入参**白名单校验**：渲染进程递来的值一律不信任（`readGradeLevel` 认不出就拒），
+    IPC.gradeSet,
+    async (_event, payload: unknown): Promise<GradeCallResult<GradeSetResult>> => {
+      const level = readGradeLevel((payload as { gradeLevel?: unknown } | undefined)?.gradeLevel)
+        return { ok: false, message: '设定学段失败：学段取值不合法（只接受四个学段之一）。' }
+          message: `设定学段失败：对话运行时尚未就绪（${describeRuntimeFailure(error)}）`
+        const result = await instance.setGradeLevel(level)
+        //   带上 `source: 'explicit'`，让指示器说的是「你选的」而不是「AI 推的」。
+        pushGradeState({ gradeLevel: level, origin: 'explicit', source: 'explicit' })
+        return { ok: false, message: '设定学段失败：' + (error instanceof Error ? error.message : String(error)) }
+  // ★ 与学段那一对**完全对称**：读一条、写一条、写成功即推。
 }
 
 /** 读/存设置的单次请求超时（本机回环，正常在毫秒级；超了就是 sidecar 卡住）。 */

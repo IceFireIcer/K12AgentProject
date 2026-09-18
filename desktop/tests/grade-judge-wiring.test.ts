@@ -36,6 +36,32 @@ import type { GradeLevel } from '../src/shared/ipc-events.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DESKTOP_ROOT = resolve(HERE, '..')
 
+/**
+ * 去掉注释，只留**可执行代码**（接线守卫一律在 strip 之后的文本上匹配）。
+ *
+ * 为什么必须去（`architecture-guards.test.ts` 的同一条口径）：接线守卫的本质是
+ * 「这行调用真的在生产路径上」。拿**原文**做 `includes`，那么「注释掉调用再写一行
+ * `// TODO: 恢复 useJudge(...)`」也能满足守卫 —— 守卫当场变成装饰。
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/.*$/gm, '$1')
+}
+
+/** 读 runtime.ts 的**可执行代码**（去注释）。 */
+function runtimeCode(): string {
+  return stripComments(readFileSync(join(DESKTOP_ROOT, 'src', 'main', 'agent', 'runtime.ts'), 'utf8'))
+}
+
+/**
+ * 取「从 `startIndex` 到下一个顶层声明之前」的那一段（在 strip 后的文本上取）。
+ * 替代 `slice(at, at + 1400)` 这种定长窗口：窗口落点会随代码挪动而漂。
+ */
+function snippetUntilNextDeclaration(source: string, startIndex: number): string {
+  const rest = source.slice(startIndex)
+  const match = /\n(?:export\s|async\s+function\s|function\s|const\s|let\s|var\s)/.exec(rest.slice(1))
+  return match ? rest.slice(0, match.index + 1) : rest
+}
+
 /* ================================================================== *
  * J1 模型补全原语
  * ================================================================== */
@@ -234,22 +260,66 @@ test('J3 no key 世界：完全不接线（useJudge(null)）→ no_llm，且第�
  * J4 接线守卫
  * ================================================================== */
 
-test('★ J4 接线守卫：runtime.ts 用同一套零件装 judge，且无 Key 时传 null', () => {
-  const source = readFileSync(join(DESKTOP_ROOT, 'src', 'main', 'agent', 'runtime.ts'), 'utf8')
+test('★ J4 接线守卫：runtime.ts 用同一套零件装 judge，且无 Key 时干净降级', () => {
+  // ★ 在**去注释**的源码上匹配（否则注释掉调用、写一行 TODO 也能满足守卫）
+  const source = runtimeCode()
   const at = source.indexOf('gradeExtension.useJudge(')
   assert.ok(at > 0, 'runtime.ts 必须调用 gradeExtension.useJudge')
-  const snippet = source.slice(at, at + 900)
+  const snippet = snippetUntilNextDeclaration(source, at)
 
   assert.ok(snippet.includes('buildJudgePrompt('), '必须复用 buildJudgePrompt（不另写一份 prompt）')
   assert.ok(snippet.includes('parseProposal('), '必须复用 parseProposal（不另写一份解析）')
   assert.ok(snippet.includes('lazyComplete('), '判定要走 `lazyComplete`（无 Key 时抛可读错误 → judge_error）')
-  assert.match(
-    snippet,
-    /:\s*null\s*\)/,
-    '无凭证/未就绪/探针时必须传 null（走 no_llm，不假装有通道）'
+
+  /**
+   * ★★ **形态在改造中变过，这里断言的是新形态**（旧断言是 `useJudge(<expr> : null)`）。
+   *
+   * 为什么改成「总是接线、在调用时判可达性」：`useJudge()` 只建会话时调一次，
+   * 传 `null` 等于把第二层**永久**关掉 —— 而会话可能是「sidecar 还没起来」时降级建出来的
+   * （渲染进程挂载就读学段，早于 sidecar 就绪），那种会话即便后来配好了 Key 也再不会判学段。
+   * 现在传的是「调用时再判」的函数：不可达就 `return null`，扩展照常走 `no_llm` 降级。
+   *
+   * 所以断言换成三件事：① 收尾不是 `: null`；② 不可达时**确实**返回 `null`；
+   * ③ 可达性判据与补全器共用同一套口径（hasKey / authReady / !useProbe）。
+   */
+  assert.ok(
+    snippet.includes('async ({ turns, currentGrade })'),
+    'judge 必须是「调用时再判」的函数（不是建会话时算出来的 null）'
+  )
+  assert.ok(
+    /if\s*\([^)]*\)\s*return null/.test(snippet),
+    '不可达（无 Key / 未就绪 / 探针）时必须 return null —— 走 no_llm，不假装有通道'
   )
   // 判据必须与补全器的填充判据一致（三处共用同一个「有 Key 吗」口径）
-  assert.ok(snippet.includes('credentials.apiKey'), 'judge 的可达性由 apiKey 判定')
-  assert.ok(snippet.includes('authReady'), 'judge 的可达性还要过 checkAuth')
-  assert.ok(snippet.includes('!useProbe'), '探针（假 Key）不算可用通道')
+  assert.ok(
+    snippet.includes('credentialState.hasKey'),
+    'judge 的可达性由 credentialState.hasKey 判定（可变状态：热切换补 Key 后要能跟着变）'
+  )
+  assert.ok(snippet.includes('credentialState.authReady'), 'judge 的可达性还要过 checkAuth')
+  // 探针（假 Key + 不可达地址）不算可用通道。新形态里它是 `if (... || useProbe) return null`
+  // 的正向条件，所以这里断言「出现 useProbe」而不是旧的 `!useProbe`。
+  assert.ok(snippet.includes('useProbe'), '探针（假 Key）不算可用通道')
+})
+
+test('★ J4b 接线守卫：补全器可被「补填」，热切换补上 Key 后三条链路一起恢复', () => {
+  const source = runtimeCode()
+
+  // 补全器必须是可重复调用的函数（不是一次性 inline 的 if）
+  assert.ok(
+    /const fillCompleter\s*=/.test(source),
+    '补全器要抽成 fillCompleter(...)，否则热切换拿到 Key 之后没法重新填'
+  )
+  assert.ok(source.includes('fillCompleter(effectiveModel)'), '建会话时要填一次')
+
+  const applyAt = source.indexOf('async applyLlmConfig(')
+  assert.ok(applyAt > 0, 'runtime.ts 必须有 applyLlmConfig（保存设置后热切换）')
+  const applySnippet = snippetUntilNextDeclaration(source, applyAt)
+  assert.ok(
+    applySnippet.includes('fillCompleter('),
+    '热切换后必须重新填补全器：否则「配好了 Key 也只有对话能用」，自审/判学段/动画仍降级'
+  )
+  assert.ok(
+    applySnippet.includes('checkAuth('),
+    '热切换后必须重算 authReady：它是每轮门禁的判据，用过期的值会显示「已配置却没配」'
+  )
 })

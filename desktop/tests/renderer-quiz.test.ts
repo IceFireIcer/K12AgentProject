@@ -1,11 +1,12 @@
 /**
- * 票 14 的**渲染进程**单测：练习卡片 + 学段（只读）在 store 里的行为。
+ * 票 14 的**渲染进程**单测：练习卡片 + 学段（读 + 一条写）在 store 里的行为。
  *
  * 覆盖三块：
  *   1. `cards/quiz.ts` —— 载荷投影（★ 答案泄漏防线：白名单投影后**不可能**带出 `answer`）、
  *      批改结果收集、提交消息生成；
- *   2. `stores/chat.ts` —— **学段不再由学生选择**：`sendChat` 只发文本，
- *      「当前学段」只能来自主进程推送（`grade:changed`），且没有写入口；
+ *   2. `stores/chat.ts` —— **`sendChat` 只发文本**（`ChatSendRequest` 只有 `text`），
+ *      「当前学段」来自主进程推送（`grade:changed`）；学生手动指定走**另一条**通道
+ *      `chat.setGrade` → `window.api.setGrade`（`grade:set`），两件事永不互为副作用；
  *   3. `labels.ts` —— 掌握度变化的展示口径与学段提示语（只格式化，不重算、不判分）。
  *
  * 跑法：`npm test`（`node --test`，Node 内置类型擦除 + 内置断言，不引入测试框架）。
@@ -254,20 +255,25 @@ test('掌握度变化只为展示做格式化（正负号 / 两位小数 / 零�
 
 interface SentRequest {
   text: string
-  /** ★ 设计已变更：`ChatSendRequest` 里不该再有 `gradeLevel`（学段由系统判定）。 */
+  /** ★ 设计已变更：`ChatSendRequest` 里不该再有 `gradeLevel`（学段只走 `grade:set`）。 */
   gradeLevel?: string
 }
 
-/** 造一个假的 `window.api`（白名单里的方法）并把发送的请求 / 学段推送记下来。 */
+/** 假 `window.api` 的记录面（发送的请求 / 手动设定的学段 / 两条推送通道）。 */
 function installFakeBridge(): {
   sent: SentRequest[]
+  gradeSet: string[]
   emit: (event: unknown) => void
   emitGrade: (state: unknown) => void
+  /** 让下一次 `setGrade` 失败（默认成功），用于覆盖「失败不撒谎」那条路径。 */
+  failGradeWith: (message: string | null) => void
 } {
   const sent: SentRequest[] = []
+  const gradeSet: string[] = []
   const listeners: Array<(event: unknown) => void> = []
   const gradeListeners: Array<(state: unknown) => void> = []
   let counter = 0
+  let gradeFailure: string | null = null
 
   const api = {
     getSidecarInfo: async () => ({ phase: 'ready', port: 1, pid: 2, mode: 'dev', errorText: null }),
@@ -284,8 +290,14 @@ function installFakeBridge(): {
         if (index >= 0) listeners.splice(index, 1)
       }
     },
-    // 学段：只读推送（`grade:changed`）+ 可选的初始拉取（`grade:get`）
+    // 学段：只读推送（`grade:changed`）+ 可选的初始拉取（`grade:get`）+ 手动写入（`grade:set`）
     getGrade: async () => ({ ok: false as const, message: '测试里不提供初始值' }),
+    setGrade: async (level: string) => {
+      // ★ 记的是**渲染进程实际递出去的值**：学生选什么就传什么，前端不改写、不映射
+      gradeSet.push(level)
+      if (gradeFailure !== null) return { ok: false as const, message: gradeFailure }
+      return { ok: true as const, data: { changed: true, cooldownRemainingTurns: 10 } }
+    },
     onGradeChanged: (listener: (state: unknown) => void) => {
       gradeListeners.push(listener)
       return () => {
@@ -299,6 +311,10 @@ function installFakeBridge(): {
   runtime.window = { api }
   return {
     sent,
+    gradeSet,
+    failGradeWith: (message) => {
+      gradeFailure = message
+    },
     emit: (event) => {
       for (const listener of [...listeners]) listener(event)
     },
@@ -320,15 +336,32 @@ test('★ 发一轮对话只发文本：sendChat 的入参里没有 gradeLevel',
   assert.equal(bridge.sent[0].text, '人工智能是怎么认出一只猫的？')
 })
 
-test('★ store 里没有「选学段」的写入口（学生改不了学段）', () => {
-  installFakeBridge()
+test('★ store 里**有**唯一的人工写入口 setGrade，且它只经 window.api.setGrade 走（不改 sendChat 的入参）', async () => {
+  const bridge = installFakeBridge()
   setActivePinia(createPinia())
-  const chat = chatModule.useChatStore() as unknown as Record<string, unknown>
+  const chat = chatModule.useChatStore()
 
-  const writers = Object.keys(chat).filter((key) => /^set(Grade|GradeLevel)/.test(key))
-  assert.deepEqual(writers, [], '学段是只读状态：store 不允许存在 setGrade* 写入口')
-  assert.equal(chat.currentGrade, null, '还没收到判定时当前学段为 null（不拿默认值冒充）')
-  assert.equal(chat.currentGradeLabel, null)
+  // ① 写入口存在且是函数（学生在界面上能手动指定学段）
+  assert.equal(typeof chat.setGrade, 'function', '学生手动指定学段要有唯一的人工写入口')
+
+  // ② 它把「学生选了什么」原样递交给 preload 白名单（`grade:set`），前端不推断、不改写
+  const result = await chat.setGrade('senior')
+  assert.deepEqual(bridge.gradeSet, ['senior'], '手动设定必须经 window.api.setGrade 递出去，且原样传递')
+
+  // ③ ★ 最重要的一条：手动设定**没有**混进对话请求 ——
+  //    `ChatSendRequest` 的字段集合被守卫 G6c 钉死为 ['text']，
+  //    学段一旦混进去，「发一条消息」就成了「写一次学段」的副作用（重发同一句话会再写一遍）。
+  await chat.send('再讲讲函数是什么')
+  assert.equal(bridge.sent.length, 1)
+  assert.deepEqual(
+    Object.keys(bridge.sent[0]).sort(),
+    ['text'],
+    '手动设定学段之后，对话请求的入参仍然恰好是 [text]（学段不随每轮请求走）'
+  )
+
+  assert.deepEqual(result, { ok: true })
+  assert.equal(chat.currentGrade, 'senior', '设定成功后当前学段由服务端回执落实')
+  assert.equal(chat.gradeOrigin, 'explicit', '来源必须标成「学生手动选的」，而不是 AI 推算')
 })
 
 test('学段判定推送：指示器显示判定结果，并在变化时给一句提示', () => {
@@ -358,6 +391,32 @@ test('学段判定推送：指示器显示判定结果，并在变化时给一�
   bridge.emitGrade({ gradeLevel: 'senior', origin: 'inferred' })
   assert.equal(chat.currentGrade, 'senior')
   assert.equal(chat.gradeNotice, '我按高中的说法来讲。')
+})
+
+test('学段推送：学生手动设定（origin=explicit）也照常上屏，来源显示为「手动选中」', () => {
+  const bridge = installFakeBridge()
+  setActivePinia(createPinia())
+  const chat = chatModule.useChatStore()
+  chat.connect()
+
+  // 学生点完「自己指定学段」后，主进程立刻推来的那一条。
+  // ★ 与 `inferred` 对称：这条**必须被采纳** —— 丢掉它就是「点了没反应」
+  //   （界面停在上一个状态，学生会以为自己没点中而反复点）。
+  chat.gradeNotice = null
+  bridge.emitGrade({ gradeLevel: 'senior', origin: 'explicit', source: 'explicit' })
+  assert.equal(chat.currentGrade, 'senior', '手动设定后的推送必须上屏（否则点了看不出生效）')
+  assert.equal(chat.gradeOrigin, 'explicit')
+  assert.equal(chat.currentGradeLabel, '高中')
+
+  // ★ 但**不给**「我按高中的说法来讲。」那句：它的主语是系统，而这一档是学生自己定的
+  //   （手动那个动作的回执由 store 的 setGrade 给：「已按你选的…」）。
+  assert.equal(chat.gradeNotice, null, '手动设定的推送不该改写成「系统自动适配」的语气')
+
+  // 覆盖上一条测试留下的显式状态：再来一条系统判定，照旧要给自动提示
+  bridge.emitGrade({ gradeLevel: 'junior', origin: 'inferred' })
+  assert.equal(chat.currentGrade, 'junior')
+  assert.equal(chat.gradeOrigin, 'inferred')
+  assert.equal(chat.gradeNotice, '我按初中的说法来讲。')
 })
 
 test('学段推送：认不出的值忽略（不猜测、不映射到最近似的学段）', () => {

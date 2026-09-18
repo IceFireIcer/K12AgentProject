@@ -91,6 +91,26 @@ export const gradeStatePath = (studentId: string): string =>
   `/api/grade/state/${encodeURIComponent(studentId)}`
 export const gradeTurnsPath = (studentId: string): string =>
   `/api/grade/turns/${encodeURIComponent(studentId)}`
+export const gradeOverridePath = (studentId: string): string =>
+  `/api/grade/override/${encodeURIComponent(studentId)}`
+
+/**
+ * 单次 sidecar 调用的超时（F9）。
+ *
+ * ★ 为什么学段这条链**特别**不能没有超时：上交是**串行排队**的（{@link createGradeExtension}
+ *   的 `queue`），一次假死的请求会把队首占住 —— 之后**每一轮都不再上交**，
+ *   而 `runtime.dispose()` 里的 `await gradeExtension.flush()` 会跟着一起挂住。
+ *   数值与 `rag-search.ts` 的 `RAG_SEARCH_TIMEOUT_MS` 同一口径。
+ */
+export const GRADE_TIMEOUT_MS = 8_000
+
+/**
+ * `flush()` 的等待上限（F9）。
+ *
+ * 队列里的每一项都已经带上了 `GRADE_TIMEOUT_MS`，所以正常情况远早于这个上限；
+ * 上限只对付「某项卡在一个不受我们控制的 await 上」的意外 —— 退出流程不能被无限拖住。
+ */
+export const GRADE_FLUSH_TIMEOUT_MS = 10_000
 
 /**
  * 追加式权威段的标题（`buildGradeSystemPrompt` 的产物里**始终**有它）。
@@ -148,6 +168,16 @@ export interface GradeStateSnapshot {
   suggestedLevel?: GradeLevel | null
 }
 
+/** `POST /api/grade/override/{studentId}` 的出参（只声明本扩展用得到的字段）。 */
+export interface GradeOverrideResponse {
+  gradeLevel: GradeLevel
+  previousLevel: GradeLevel
+  changed: boolean
+  turn: number
+  /** 手动冷却还剩几轮（冷却期内规则引擎不再自动调整学段）。 */
+  cooldownRemainingTurns: number
+}
+
 /** 上交出口（默认走 `apiFetch`；测试注入假实现）。 */
 export type TurnSubmitter = (
   studentId: string,
@@ -188,6 +218,8 @@ export interface GradeExtensionStats {
   /** 最近一次服务端判定的结论（可读中文，进日志与验收记录）。 */
   lastReason: string
   lastChangedAtTurn: number | null
+  /** 最近一次**学生手动设定**带来的冷却剩余轮数（没手动改过就是 `0`）。 */
+  cooldownRemainingTurns: number
   lastError?: string
 }
 
@@ -223,6 +255,16 @@ export interface GradeExtension {
   appliedGrade(): GradeLevel
   /** 接线第二层判定通道（`runtime.ts` 建会话后调用；不接线 = 干净降级）。 */
   useJudge(judge: Layer2Judge | null): void
+  /**
+   * ★ 采纳学生的手动选择（服务端已写库之后调用）。
+   *
+   * 与「下一轮生效」的 {@link GradeExtension.observeTurn} 不同，它**立即生效**：
+   * 学生刚点了「初中」，下一句话就该按初中作答 —— 再等一轮等于没改。
+   * 同时清掉 `pendingGrade`（那是「服务端判出来、下一轮生效」的载体，
+   * 与「学生现在就要生效」是两种语义，混在一起会出现「我明明选了初中，它又跳回去」）。
+   * 并且 **bump epoch**：把在途推断结论作废（见 `submitTurn` 里的 epoch 检查）。
+   */
+  adoptOverride(gradeLevel: GradeLevel, cooldownRemainingTurns: number): void
   snapshot(): GradeExtensionStats
   /** 清空会话状态（换学生时用；**不会**删除已落库的数据）。 */
   reset(): void
@@ -343,6 +385,35 @@ export function swapKnownGradeTemplate(incoming: string, target: string): string
 }
 
 /**
+ * ★★ 剥掉 Pi 无条件追加的宿主 cwd 尾巴（F15，Pi issue #6308）。
+ *
+ * Pi 的 `buildSystemPrompt()` 在给了 `customPrompt` / 被覆盖之后**仍然**会在**最后**
+ * 追加一行 `Current working directory: <绝对路径>`（含盘符与用户名）—— 这一行会把宿主
+ * 安装路径泄漏给模型（AGENTS §5.11 / 风险 #19）。上游修复之前只能自己剥。
+ *
+ * 两道防线（两侧各一道，任一侧漏了另一侧兜住）：
+ *   ① `runtime.ts` 在 `before_agent_start` 接线里先剥一遍（代理 E 负责）；
+ *   ② **本函数在返回前再剥一遍** —— 即使调用方没剥干净，权威段前面也不会留下尾巴。
+ *
+ * 判据写成**纯函数**是为了可单测：匹配**末尾**的该行（允许行首缩进、允许后面跟空行），
+ * 中间的正文里偶然出现同样字样时不动它（那不是 Pi 的尾巴，是别人 prompt 的内容）。
+ */
+export const CWD_TAIL_RE = /(?:^|\n)[ \t]*Current working directory:[^\n]*(?:\n[ \t]*)*$/i
+
+/** 去掉末尾的 cwd 尾巴（没有就原样返回；纯函数，可单测）。 */
+export function stripCwdTail(prompt: string): string {
+  if (typeof prompt !== 'string' || prompt.length === 0) return prompt
+  let out = prompt
+  // 上限 4 次是防御性的：一次拼装最多追加一次，但真重复时不该只剥一半（也不该死循环）
+  for (let index = 0; index < 4; index += 1) {
+    const next = out.replace(CWD_TAIL_RE, '')
+    if (next === out) break
+    out = next
+  }
+  return out
+}
+
+/**
  * 本轮 system prompt 的组装（**纯函数**，链式语义全在这里）。
  *
  * ★ 与旧实现（`mergeGradePrompt`）的关键差异：**学段没变时也要追加权威段**。
@@ -357,6 +428,9 @@ export function swapKnownGradeTemplate(incoming: string, target: string): string
  *   作答」在提示词里**始终可审计**。目标模板不在基座里时才在权威段里补上，避免同一份
  *   模板在一个 prompt 里出现两遍（约 2.5k token，不能白花）。
  *
+ * ★ 进与出一律先过 {@link stripCwdTail}（F15）：Pi 追加的 `Current working directory: …`
+ *   尾巴既不进模板替换的判断，也不留在最终产物里（**输出侧那道是最后防线**）。
+ *
  * 权威段是**幂等**的：重复拼装不会叠出第二段（见 {@link stripGradeOverride}）。
  */
 export function buildGradeSystemPrompt(params: {
@@ -366,11 +440,13 @@ export function buildGradeSystemPrompt(params: {
   const target = gradePromptFor(params.inferredGrade)
   const incoming = params.incoming
   if (typeof incoming !== 'string' || incoming.trim() === '') {
-    return withGradeOverride(target, params.inferredGrade, false)
+    return stripCwdTail(withGradeOverride(target, params.inferredGrade, false))
   }
-  const bare = stripGradeOverride(incoming)
+  // ★ 先剥尾巴再比模板：不然「尾巴」会跟着模板一起被 swap 带走或留在原地
+  const bare = stripCwdTail(stripGradeOverride(incoming))
   const merged = bare.includes(target) ? bare : (swapKnownGradeTemplate(bare, target) ?? bare)
-  return withGradeOverride(merged, params.inferredGrade, !merged.includes(target))
+  // ★ 输出侧再剥一次（**最后防线**）：即便上游漏了，尾巴也不会到达模型
+  return stripCwdTail(withGradeOverride(merged, params.inferredGrade, !merged.includes(target)))
 }
 
 /**
@@ -416,7 +492,9 @@ export async function postGradeTurns(
   const response = await apiFetch(gradeTurnsPath(studentId), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    // ★ 显式超时（F9）：学段上交是串行排队的，卡住队首会让之后每一轮都不再上交
+    signal: AbortSignal.timeout(GRADE_TIMEOUT_MS)
   })
   if (!response.ok) {
     throw new Error(`学段判定请求失败：HTTP ${response.status}${await readSnippet(response)}`)
@@ -427,11 +505,43 @@ export async function postGradeTurns(
 /** 读当前学段（冷启动/刷新用）。 */
 export async function fetchGradeState(studentId: string): Promise<GradeStateSnapshot> {
   const { apiFetch } = await import('../../bridge/client.ts')
-  const response = await apiFetch(gradeStatePath(studentId), { method: 'GET' })
+  // ★ 显式超时（F9）：否则 sidecar 假死时 `refresh()` 会把启动路径一起吊住
+  const response = await apiFetch(gradeStatePath(studentId), {
+    method: 'GET',
+    signal: AbortSignal.timeout(GRADE_TIMEOUT_MS)
+  })
   if (!response.ok) {
     throw new Error(`读取当前学段失败：HTTP ${response.status}${await readSnippet(response)}`)
   }
   return (await response.json()) as GradeStateSnapshot
+}
+
+/**
+ * 学生手动设定学段（`grade:set` 那条链的 HTTP 出口）。
+ *
+ * ★ `body` 按 **camelCase** 发：后端入参是 snake_case 模型 + `CamelModel` alias，
+ *   按 alias 发才认得出（与 `postGradeTurns` 的 body 形状同一约定）。
+ * ★ 与 `postGradeTurns` 一样动态 import `bridge/client.ts`（理由见 `learning-log.ts` 的同名注释：
+ *   那个模块有一处缺 `.ts` 的导入，静态 import 会让 `node --test` 整个模块导入失败）。
+ * ★ 失败**抛可读异常**（不是回一个 `{ok:false}`）：调用方（runtime → handlers）负责把它
+ *   翻成中文回执；在这一层吞掉的话，「为什么没改成」就查不出来了。
+ */
+export async function postGradeOverride(
+  studentId: string,
+  gradeLevel: GradeLevel
+): Promise<GradeOverrideResponse> {
+  const { apiFetch } = await import('../../bridge/client.ts')
+  const response = await apiFetch(gradeOverridePath(studentId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ gradeLevel }),
+    // ★ 显式超时（F9）：这是学生在界面上等回执的一条路，卡住会让「设定中…」永远转下去
+    signal: AbortSignal.timeout(GRADE_TIMEOUT_MS)
+  })
+  if (!response.ok) {
+    throw new Error(`设定学段失败：HTTP ${response.status}${await readSnippet(response)}`)
+  }
+  return (await response.json()) as GradeOverrideResponse
 }
 
 async function readSnippet(response: Response): Promise<string> {
@@ -460,6 +570,23 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
   /** 服务端已判定、**下一轮**生效的学段。 */
   let pendingGrade: GradeLevel | null = null
 
+  /**
+   * ★★ **手动设定的代际**（本波的核心）。
+   *
+   * 解决什么：学生手动选了学段之后，**之前已经在飞的那次 `submitTurn`** 回来时，
+   * 带的是按**旧学段**算出来的结论。不改它就会把学生刚选的学段悄悄顶掉 ——
+   * 学生的体感是「我明明选了初中，它又跳回小学高年级了」，而且他做什么都改不回来
+   * （每次手动设定都会被另一次在途结论覆盖）。
+   *
+   * 手法与已有的 `isDiscarded()`（跨学生丢弃）**同一个套路，只是换了一个维度**：
+   * 提交前快照 → await 之后再比对 → 不一致就整条作废。
+   * 那个维度防的是「A 的证据以 B 的身份上交」，这个维度防的是「旧学段的结论覆盖新选择」。
+   */
+  let epoch = 0
+
+  /** 最近一次手动设定带来的冷却剩余轮数（`snapshot()` 给诊断与验收用）。 */
+  let overrideCooldownRemaining = 0
+
   let turn = 0
   let currentSessionId = ''
   let currentStudentId = ''
@@ -475,6 +602,28 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
   /** 会话内的串行化：每一轮的上交排队执行，避免同一进程里并发写库。 */
   let queue: Promise<void> = Promise.resolve()
 
+  /**
+   * ★★ 排队中的上交项（F3）：**身份在提交那一刻就快照下来**，队列内不再读全局。
+   *
+   * 曾经的写法是「任务执行时才 `sessionProvider()`」：这两个请求**带超时之后也可能慢**
+   * （sidecar 假死 8 秒），而切学生（`runtime.ts` 的 `bindAgentSession`）只做绑定、
+   * **不会取消队列**。于是排在后面的任务会拿**新学生**的身份，把**旧学生**的 `text`
+   * 发到 `POST /api/grade/turns/{新学生}` —— A 的原话进 B 的 `grade_signals`，
+   * 违反「每个学生独立存储」硬约束。
+   *
+   * 现在：① 快照进 `PendingTurn`；② 切学生时把 studentId 不匹配的待发项标成 `discarded`，
+   * 轮到它时**直接跳过**（读都不读新身份）。
+   */
+  interface PendingTurn {
+    studentId: string
+    sessionId: string
+    turn: number
+    text: string
+    /** 切学生时被丢弃：执行到它时直接跳过（**绝不用新学生的身份发旧学生的证据**）。 */
+    discarded: boolean
+  }
+  let pending: PendingTurn[] = []
+
   const snapshot = (): GradeExtensionStats => ({
     turn,
     appliedGrade,
@@ -484,6 +633,7 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     failed,
     lastReason,
     lastChangedAtTurn,
+    cooldownRemainingTurns: overrideCooldownRemaining,
     lastError
   })
 
@@ -500,7 +650,13 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     failed = 0
     lastReason = ''
     lastChangedAtTurn = null
+    // ★ 手动设定的冷却也是**学生级**状态：换学生时一起归零，绝不把上一个学生的冷却
+    //   显示到下一个学生的界面上（与 appliedGrade 必须一起重置是同一条纪律）。
+    overrideCooldownRemaining = 0
     lastError = undefined
+    // ★ 已排队的项也一并作废（F3）：重置之后它们携带的身份已经不再代表「当前学生」
+    for (const item of pending) item.discarded = true
+    pending = []
     queue = Promise.resolve()
   }
 
@@ -521,11 +677,36 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     layer2 = 'not_due'
   }
 
-  /** 换学生：**连学段一起重置**（绝不把上一个学生的学段带到下一个学生头上）。 */
-  const resetForStudent = (): void => {
+  /**
+   * 换学生：**连学段一起重置**（绝不把上一个学生的学段带到下一个学生头上）。
+   *
+   * ★ F3：同时把队列里那些「属于上一个学生」的待发项丢弃 —— 队列没有取消机制，
+   *   只清计数的话，A 的提问会被排在队尾、以 B 的身份发出去（跨学生数据污染）。
+   *   判据用**传入的新学生 id**（调用点此刻还没更新 `currentStudentId`）。
+   */
+  const resetForStudent = (nextStudentId: string): void => {
     resetWindow()
     appliedGrade = DEFAULT_GRADE_LEVEL
     pendingGrade = null
+    // ★ 冷却与学生绑定：换学生必须归零，否则新学生的界面会显示上一个学生的「冷却剩余」。
+    overrideCooldownRemaining = 0
+    let dropped = 0
+    const kept: PendingTurn[] = []
+    for (const item of pending) {
+      if (item.studentId !== nextStudentId) {
+        item.discarded = true
+        dropped += 1
+        continue
+      }
+      kept.push(item)
+    }
+    pending = kept
+    if (dropped > 0) {
+      log(
+        `[grade] 切换学生：队列里 ${dropped} 条属于上一个学生的学段证据已丢弃（绝不用新学生的身份上交）`,
+        'warn'
+      )
+    }
   }
 
   /** 跟踪会话/学生边界（每轮开始调用；返回本轮的学生身份是否已切换）。 */
@@ -534,7 +715,7 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     if (session.studentId !== currentStudentId) {
       if (currentStudentId) {
         log(`[grade] 切换学生：${currentStudentId} → ${session.studentId}，学段回到冷启动默认值并重新推断`)
-        resetForStudent()
+        resetForStudent(session.studentId)
       }
       currentStudentId = session.studentId
       currentSessionId = session.sessionId
@@ -558,21 +739,23 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     }
   }
 
-  const submitTurn = async (turnIndex: number, text: string, sessionId: string): Promise<void> => {
-    const session = sessionProvider()
-    if (!session) {
-      failed += 1
-      lastError = '未绑定当前学生'
-      log(
-        '[grade] 未绑定当前学生，本轮学段证据未上交（应由 runtime.ts 每轮调用 bindAgentSession）——' +
-          '本轮不会更新学段。',
-        'warn'
-      )
+  /**
+   * 上交一轮证据。
+   *
+   * ★ F3：**身份由参数传入（提交那一刻的快照），函数内不再读 `sessionProvider()`**。
+   *   队列执行到它时可能已经切过学生了 —— 那时读全局会拿到新学生，
+   *   把旧学生的 `text` 发到新学生的端点（跨学生数据污染）。
+   */
+  const submitTurn = async (item: PendingTurn, isDiscarded: () => boolean): Promise<void> => {
+    // ★ 切学生时被标成丢弃的项：**读都不读**，直接跳过（日志留痕，绝不静默）
+    if (isDiscarded()) {
+      log(`[grade] 队列里的第 ${item.turn} 轮证据属于上一个学生，已跳过（切学生时丢弃）`, 'warn')
       return
     }
+    const sessionId = item.sessionId
 
     const decision = shouldRequestLayer2({
-      turn: turnIndex,
+      turn: item.turn,
       usableTurns: countUsableTurns(buffer),
       windowHasProposal,
       judgeAvailable: judge !== null
@@ -585,6 +768,11 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     } else {
       layer2 = decision.status
     }
+    // ★ 判完之后再查一次：判定过程本身要 await（LLM），期间可能切换了学生
+    if (isDiscarded()) {
+      log(`[grade] 第 ${item.turn} 轮证据在判定期间检测到学生切换，已丢弃（不上交）`, 'warn')
+      return
+    }
     if (decision.status === 'no_llm' && !warnedNoJudge) {
       warnedNoJudge = true
       log(
@@ -596,16 +784,38 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     }
 
     try {
-      const response = await submitter(session.studentId, {
+      // ★ 快照 epoch（在 await 之前）：这条结论是按**此刻**的学段算出来的。
+      //   手动设定会 bump epoch —— 回来时对不上就说明学生已经改过学段，这条结论已过期。
+      const epochAtSubmit = epoch
+      const response = await submitter(item.studentId, {
         turns: [
           {
-            turn: turnIndex,
-            text: clampTurnText(text),
-            sessionId: sessionId || session.sessionId,
+            turn: item.turn,
+            text: clampTurnText(item.text),
+            sessionId: sessionId || '',
             ...(proposal ? { proposal } : {})
           }
         ]
       })
+      /**
+       * ★★ 学生手动设定的在途作废（与上面那次 `isDiscarded()` 同一个套路，另一个维度）：
+       *   那边防的是「A 的证据以 B 的身份上交」，这边防的是
+       *   **「按旧学段算出来的结论覆盖学生刚做的手动选择」**。
+       *
+       * 不复用 `pendingGrade` 的「下一轮生效」路径，因为手动选择是**立即**生效的：
+       * 让学生看到「我刚选了初中，它又跳回小学高年级」，比不做手动选择更糟。
+       *
+       * ⚠️ `submitted` / `lastReason` 都放在这个 return **之后**：这个计数描述的是
+       *   「有几轮结论进了学段决策链路」，被作废的那些没进（HTTP 确实成功了，
+       *   但结果被我们主动丢弃）—— 算进去会让「提交成功数」与「学段真的动过几次」对不上号。
+       */
+      if (epochAtSubmit !== epoch) {
+        log(
+          `[grade] 第 ${item.turn} 轮的上交结论在途中被学生手动切换学段作废（已丢弃，不覆盖手动选择）`,
+          'warn'
+        )
+        return
+      }
       submitted += 1
       lastReason = response.reason
       const nextGrade = normalizeGradeLevel(response.grade)
@@ -642,6 +852,18 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
       const session = sessionProvider()
       trackBoundary(session)
 
+      if (!session) {
+        // ★ 身份是**提交那一刻**取的（F3）：没绑定就当场记失败，绝不把「稍后读全局」当成身份来源
+        failed += 1
+        lastError = '未绑定当前学生'
+        log(
+          '[grade] 未绑定当前学生，本轮学段证据未上交（应由 runtime.ts 每轮调用 bindAgentSession）——' +
+            '本轮不会更新学段。',
+          'warn'
+        )
+        return
+      }
+
       applyPending()
       turn += 1
       const turnIndex = turn
@@ -650,15 +872,32 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
         if (buffer.length > LAYER2_WINDOW_TURNS) buffer = buffer.slice(-LAYER2_WINDOW_TURNS)
       }
 
+      // ★★ 身份快照（F3）：**在这里**取好 studentId / sessionId，队列里不再读全局。
+      //   切学生（`bindAgentSession`）不会取消队列，排在后面的任务若在执行时才读全局，
+      //   就会拿新学生的身份把旧学生的原话发过去 —— A 的话进 B 的 `grade_signals`。
+      const item: PendingTurn = {
+        studentId: session.studentId,
+        sessionId: session.sessionId ?? '',
+        turn: turnIndex,
+        text: clean,
+        discarded: false
+      }
+      pending.push(item)
+
       // ★ 串行排队：这一轮的判定结果下一轮才用，绝不让本轮对话等它
       //   （`.catch` 只是保住队列：`submitTurn` 自己已经兜了异常，这里再兜一次是防止
       //    队列被一个漏网的 reject 卡死 —— 卡死之后所有轮次都不再上交，且没有任何报错）
       queue = queue
-        .then(() => submitTurn(turnIndex, clean, session?.sessionId ?? ''))
+        .then(() => submitTurn(item, () => item.discarded))
         .catch((error: unknown) => {
           failed += 1
           lastError = error instanceof Error ? error.message : String(error)
           log(`[grade] 学段证据上交队列异常（已恢复）：${lastError}`, 'warn')
+        })
+        .finally(() => {
+          // 出队（同引用 removed，不是按下标删：并发入队时下标会错位）
+          const at = pending.indexOf(item)
+          if (at >= 0) pending.splice(at, 1)
         })
     } catch (error) {
       // 调用方在主进程的对话路径上：这里绝不抛（Pi 与 UI 同进程）
@@ -683,6 +922,35 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
   }
 
   /**
+   * 采纳学生的手动选择（**立即生效**，见 {@link GradeExtension.adoptOverride}）。
+   *
+   * 三步的顺序是有意的（任一步少做都会留下可观察的错）：
+   *   ① `appliedGrade` 换成新值 → **本轮起**的 prompt 与 `runtime.gradeLevel` 立刻是新学段；
+   *   ② `pendingGrade = null` → 清掉「服务端判出来、下一轮生效」的那份，否则学生刚选完
+   *      下一轮 `applyPending()` 会把它顶回来（体感就是「我选了它又跳回去」）；
+   *   ③ `epoch += 1` → 把**已经在飞**的上交结论作废（见 `submitTurn` 里的 epoch 检查）。
+   *
+   * `normalizeGradeLevel` 兜底：渲染进程递来的值在 IPC 边界已被白名单校验过，
+   * 但这一层是纯逻辑出口（也会被单测/未来的别的调用方直接调），脏值必须收敛到四学段之一，
+   * 绝不让 `'college'` 之类的东西流进 `GRADE_PROMPTS[...]`（那是 undefined）。
+   */
+  const adoptOverride = (gradeLevel: GradeLevel, cooldownRemainingTurns: number): void => {
+    const next = normalizeGradeLevel(gradeLevel)
+    const previous = appliedGrade
+    appliedGrade = next
+    pendingGrade = null
+    epoch += 1
+    lastReason = 'override'
+    overrideCooldownRemaining = Number.isFinite(cooldownRemainingTurns)
+      ? Math.max(0, Math.trunc(cooldownRemainingTurns))
+      : 0
+    log(
+      `[grade] 学生手动设定学段：${previous} → ${next}` +
+        `（冷却 ${overrideCooldownRemaining} 轮内不再自动调整；立即生效）`
+    )
+  }
+
+  /**
    * 工厂**故意为空**：本扩展的能力全部经 {@link GradeExtension.observeTurn} /
    * {@link GradeExtension.systemPromptFor} 由 `runtime.ts` 显式驱动（理由见文件头）。
    *
@@ -700,10 +968,35 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     judge = next
     warnedNoJudge = false
   }
+  extension.adoptOverride = adoptOverride
   extension.snapshot = snapshot
   extension.reset = reset
+  /**
+   * 等排队的上交全部走完（切换学生 / 退出前调用）。
+   *
+   * ★ `Promise.race` 上限（F9）：队列里的每一项都已经带了 `GRADE_TIMEOUT_MS` 超时，
+   *   所以正常情况远早于 {@link GRADE_FLUSH_TIMEOUT_MS} 就返回；上限只用来兜
+   *   「某一项卡在不受我们控制的 await 上」—— `runtime.dispose()` 不能被无限拖住。
+   *   超时**不抛**（退出流程里抛异常会把别的收尾步骤一起带走），只记一行日志。
+   */
   extension.flush = async (): Promise<void> => {
-    await queue
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const limit = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), GRADE_FLUSH_TIMEOUT_MS)
+      // 计时器不该拖住退出（Node 的 timers 会 ref，这里主动 unref）
+      ;(timer as unknown as { unref?: () => void }).unref?.()
+    })
+    try {
+      const outcome = await Promise.race([queue.then(() => 'done' as const), limit])
+      if (outcome === 'timeout') {
+        log(
+          `[grade] 等学段上交队列超过 ${GRADE_FLUSH_TIMEOUT_MS}ms 仍未排空（已放弃等待，退出流程继续）`,
+          'warn'
+        )
+      }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
   }
   extension.refresh = async (): Promise<GradeLevel | null> => {
     const session = sessionProvider()

@@ -390,7 +390,8 @@ test('G6c: 面向渲染进程的 IPC 请求/回执类型里没有 token（chat �
   }
 
   // 正向断言：`chat:send` 的入参**只有文本** —— 没有通道参数、没有鉴权参数，
-  // 也**没有学段**：学段由系统推断（D-020），前端连请求改学段的能力都不提供
+  // 也**没有学段**：学段的手动写入走 `grade:set` 这条独立通道（`IPC.gradeSet`），
+  // 对话请求永远只有 `text`（发消息与改学段是两件事，不能互为副作用）。
   assert.deepEqual([...requestFields].sort(), ['text'])
 })
 
@@ -491,6 +492,9 @@ const EXPECTED_API_METHODS = [
   'readProviderCatalog',
   'fetchProviderModels',
   'getGrade',
+  // ★ 学段**唯一的手动写入口**（学生显式设定，走 grade:set 独立通道）。
+  //   刻意不混进 `ChatSendRequest`：发消息与改学段是两件事（G6c 钉着请求只有 text）。
+  'setGrade',
   'onGradeChanged',
   // 票 18：代码执行桥（主进程只**下发**代码，渲染进程在 Pyodide Worker 里跑，结果回传）
   'onCodeExecute',

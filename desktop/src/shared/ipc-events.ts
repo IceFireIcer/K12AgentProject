@@ -15,6 +15,8 @@
  *   error    ← provider 异常 / Tool 异常 / 降级路径
  */
 
+import type { components } from './api-types'
+
 /** 事件名（冻结的 6 个）。 */
 export type IpcEventName = 'delta' | 'citation' | 'payload' | 'blocked' | 'done' | 'error'
 
@@ -33,19 +35,20 @@ export const IPC_EVENT_NAMES: readonly IpcEventName[] = [
 
 /**
  * 四学段（冻结的字面量，§6.2 的 `GradeLevel`）。
- * 票 04 之后应改由 `src/shared/api-types.ts`（OpenAPI 生成物）提供，此处先手写占位。
+ *
+ * ★ 从**生成物派生**（不手写副本）：`src/shared/api-types.ts` 是
+ *   `contracts.py → OpenAPI → TS` 的产物，`npm run check:api` 保证它不漂移 ——
+ *   这里每多手写一份联合类型，就多一个「契约改了、事件边界没跟着改」的静默漂移口。
+ * ★ 导出名保持 `GradeLevel` 不变（`channels.ts` / `preload` / 渲染进程都 import 这个名字），
+ *   取值也仍是 `contracts.py` 里那四个字符串（`primary_low | primary_high | junior | senior`）。
  */
-export type GradeLevel = 'primary_low' | 'primary_high' | 'junior' | 'senior'
+export type GradeLevel = components['schemas']['GradeLevel']
 
-/** `citation` 事件的检索来源条目（检索严格按学段隔离，向上兼容须显式标注）。 */
-export interface Citation {
-  chunkId: string
-  chapterTitle: string
-  sectionTitle: string
-  gradeLevel: GradeLevel
-  /** 是否为「向上兼容」取用的更高学段内容（跨学段时必须显式标注）。 */
-  compat: boolean
-}
+/**
+ * `citation` 事件的检索来源条目（检索严格按学段隔离，向上兼容须显式标注）。
+ *   与 `contracts.py` 的 `Citation`（「只有这 5 个字段，一字不改」）逐字一致。
+ */
+export type Citation = components['schemas']['Citation']
 
 /** 一轮请求内的文本增量。 */
 export interface DeltaEvent {

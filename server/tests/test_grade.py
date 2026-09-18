@@ -14,6 +14,9 @@
    且**第一层照常完成调整**（无 API Key 也能跑、也能改学段）；
 5. ★ **合规**：学生原话经 HTTP 传进来但**不入库** —— 断言整库文件里找不到那句话
    （``grade_signals.raw`` 只写自有词表的命中项）。
+6. ★ **2026-09-17 修复回归**（见 ``architecture/review-2026-09-17.md`` 的 D1/D2/D3/D8）：
+   课堂用语不再产生下调信号、概念提问不误判成推导档、冷却期不被跨会话拉长、
+   ``DECISION_ORDER`` 与实现顺序一致。
 
 跑法::
 
@@ -22,6 +25,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 import tempfile
@@ -39,6 +43,7 @@ from app.contracts import GradeSignal  # noqa: E402
 from app.grade.rules import (  # noqa: E402
     CONFIDENCE_THRESHOLD,
     COOLDOWN_TURNS,
+    DECISION_ORDER,
     DEGRADED_NO_LLM,
     LAYER2_FIRST_TURN,
     LAYER2_RETRY_TURN,
@@ -57,8 +62,12 @@ from app.grade.rules import (  # noqa: E402
     decide,
     quiz_performance_from_history,
 )
+from app.grade import rules as rules_module  # noqa: E402
 from app.grade.signals import (  # noqa: E402
+    DEFAULT_QUESTION_LEVEL,
+    MIN_QUESTION_CONTENT_CHARS,
     QuizPerformance,
+    classify_depth,
     consecutive_same_direction,
     decode_turn_raw,
     encode_turn_raw,
@@ -67,6 +76,7 @@ from app.grade.signals import (  # noqa: E402
     extract_quiz_perf_signal,
     extract_turn_signals,
     extract_vocab_signal,
+    has_question_content,
 )
 from app.main import create_app  # noqa: E402
 from app.routes.grade import router as grade_router  # noqa: E402
@@ -74,6 +84,9 @@ from app.routes.students import open_learning_store, student_learning_db_path  #
 from app.store.learning import LearningStore  # noqa: E402
 
 TOKEN = "test-token-grade"
+
+#: ``app/grade/rules.py`` 的源码（只用于 D8 那条「常量与实现顺序一致」的结构断言）。
+RULES_SOURCE = (ROOT / "app" / "grade" / "rules.py").read_text(encoding="utf-8")
 
 #: 学生原话（测试专属的句子，便于在整库字节里搜「有没有被写进 SQLite」）。
 CHILD_TURN_1 = "我家的小猫很可爱，电脑是怎么认图片的呀？"
@@ -142,6 +155,74 @@ class TestSignalExtraction(unittest.TestCase):
     def test_depth_statement_without_depth_word_is_not_guessed(self) -> None:
         reading = extract_depth_signal("今天我在公园里玩了一下午", "primary_high")
         self.assertFalse(reading.has_evidence)
+
+    # ------------------------------------------------------------------ D3 --
+    def test_d3_concept_questions_about_senior_topics_stay_in_the_concept_tier(self) -> None:
+        """★ D3 回归：「什么是 X」是**概念**提问，不因为 X 是高中词就变成推导档。
+
+        修复前：``classify_depth('什么是公式') == 'senior'``（``DEPTH_LEVELS`` 里 senior 排第一、
+        取首个命中，于是「公式」压过了「什么是」）→ 对初中生是一条
+        ``0.5 × 1.5 = 0.75 ≥ 0.6`` 的**上调**证据，三路同向就能把学段推上去。
+        对照组 ``什么是循环`` 落 primary_high，说明这是词表优先级问题而不是句式失效 ——
+        同一句式不该有两种档位。
+        """
+        self.assertEqual(classify_depth("什么是公式"), DEFAULT_QUESTION_LEVEL)
+        self.assertEqual(classify_depth("什么是矩阵"), DEFAULT_QUESTION_LEVEL)
+        self.assertEqual(classify_depth("什么是循环"), DEFAULT_QUESTION_LEVEL)
+        self.assertEqual(classify_depth("矩阵是什么"), DEFAULT_QUESTION_LEVEL)
+        self.assertEqual(classify_depth("什么是概率分布"), DEFAULT_QUESTION_LEVEL)
+        # 三条样本的**字面档位**断言（修复前全部是 senior）
+        for text in ("什么是公式", "什么是矩阵", "什么是循环"):
+            self.assertEqual(
+                extract_depth_signal(text, "junior").level_hint,
+                DEFAULT_QUESTION_LEVEL,
+                f"{text!r} 不该被判成推导档",
+            )
+
+    def test_d3_derivation_framing_still_wins(self) -> None:
+        """反向口径不变：真的在问推导/证明，仍然落推导档（别把 D3 修过头）。"""
+        self.assertEqual(classify_depth("链式法则怎么推导"), "senior")
+        self.assertEqual(classify_depth("正则化怎么证明能防止过拟合"), "senior")
+        self.assertEqual(classify_depth("神经网络的工作原理是什么"), "junior")
+
+    def test_d3_topic_terms_still_raise_the_tier_without_a_framing_word(self) -> None:
+        """没有框架词时，高中主题术语照旧兜底（陈述句也算深度表述）。"""
+        self.assertEqual(classify_depth("梯度和矩阵的关系"), "senior")
+        self.assertEqual(classify_depth("公式和矩阵的关系"), "senior")
+
+    # ------------------------------------------------------------------ D2 --
+    def test_d2_classroom_phrases_produce_no_signal(self) -> None:
+        """★ D2 回归：课堂用语（「我们开始吧」「好呀」「继续吧」）不得产生任何深度信号。
+
+        修复前：``classify_depth('我们开始吧') == 'primary_high'``（「吧」在
+        ``QUESTION_MARKERS`` 里 → 落默认档），``extract_depth_signal('我们开始吧','junior')``
+        返回 ``value=-0.5`` —— 每轮一条**下调**信号。初中/高中生每说一句「继续吧」
+        就累积一次，三五轮纯语气词就能触发真实的学段下移，而 D-020 之后
+        **没有人工纠正出口**：代价不对称。
+        """
+        phrases = ("好呀", "继续吧", "我们开始吧", "可以吗", "那我们做一道题吧", "现在开始上课吧")
+        for text in phrases:
+            with self.subTest(text=text):
+                self.assertIsNone(classify_depth(text), "课堂用语不是提问")
+                reading = extract_depth_signal(text, "junior")
+                self.assertFalse(reading.has_evidence, f"{text!r} 不该产生深度证据")
+                self.assertEqual(reading.value, 0.0, f"{text!r} 不该产生下调信号")
+        # 整轮聚合：三句课堂用语连续上交，不该有任何方向（修复前是 −0.5×3）
+        for index, text in enumerate(phrases[:3], start=1):
+            signals = extract_turn_signals(text=text, turn=index, current_level="junior")
+            self.assertEqual(signals.direction, 0, f"第 {index} 轮（{text!r}）方向必须是 0")
+
+    def test_d2_real_questions_with_a_filler_word_still_count(self) -> None:
+        """门槛只挡「剥完没有实词」的句子；带语气词的真问题照旧落默认档。"""
+        self.assertEqual(classify_depth("电脑怎么认图片呀？"), DEFAULT_QUESTION_LEVEL)
+        self.assertEqual(classify_depth("怎么认图片呢"), DEFAULT_QUESTION_LEVEL)
+        self.assertTrue(has_question_content("电脑怎么认图片呀？"))
+        self.assertFalse(has_question_content("我们开始吧"))
+
+    def test_d2_information_threshold_is_the_declared_constant(self) -> None:
+        """门槛是可读的具名常量，不是散在逻辑里的魔数。"""
+        self.assertGreaterEqual(MIN_QUESTION_CONTENT_CHARS, 2, "太低等于没有门槛")
+        self.assertLessEqual(MIN_QUESTION_CONTENT_CHARS, 8, "太高会漏掉真问题")
 
     def test_quiz_streak_up_and_down(self) -> None:
         up = extract_quiz_perf_signal(QuizPerformance(attempts=3, correct=3, current_streak=3), "", "junior")
@@ -317,6 +398,80 @@ class TestDecisionRules(unittest.TestCase):
         floor = decide(current_level="primary_low", turn=3, verdicts=self.down)
         self.assertFalse(floor.changed)
         self.assertEqual(floor.reason, REASON_AT_BOUNDARY)
+
+    # ------------------------------------------------------------------ D1 --
+    def test_d1_cooldown_never_exceeds_the_designed_window(self) -> None:
+        """★ D1 回归：``turn`` 小于 ``last_change_turn`` 时冷却**不得超过** ``COOLDOWN_TURNS``。
+
+        修复前：``elapsed = 1 - 8 = -7`` → ``remaining = 5 - (-7) = 12``，
+        冷却期从设计的 5 轮被**跨会话拉长**到 12 轮（轮次号是每会话计数器，
+        换会话就从 1 重来，而上一次的变更号长期留在 ``learning.db`` 里）。
+        """
+        for turn in (1, 3, 7, 8):
+            remaining = decide(
+                current_level="primary_low",
+                turn=turn,
+                verdicts=self.up,
+                last_change_turn=8,
+            ).cooldown_remaining
+            with self.subTest(turn=turn):
+                self.assertLessEqual(remaining, COOLDOWN_TURNS)
+                self.assertGreaterEqual(remaining, 0)
+
+    def test_d1_cooldown_still_counts_down_after_the_change_turn(self) -> None:
+        """钳位不改变正常方向：改在 8，第 9..12 轮仍在冷却、第 13 轮放行。"""
+        for turn in (9, 12):
+            blocked = decide(
+                current_level="primary_low", turn=turn, verdicts=self.up, last_change_turn=8
+            )
+            self.assertEqual(blocked.reason, REASON_COOLDOWN, f"第 {turn} 轮")
+            self.assertGreater(blocked.cooldown_remaining, 0)
+        allowed = decide(
+            current_level="primary_low", turn=13, verdicts=self.up, last_change_turn=8
+        )
+        self.assertTrue(allowed.changed, "第 8 + 5 = 13 轮刚好满冷却")
+
+    # ------------------------------------------------------------------ D8 --
+    def test_d8_decision_order_matches_the_implementation(self) -> None:
+        """★ D8 回归：``DECISION_ORDER`` 必须与 :func:`decide` 里 ``outcome(...)`` 的顺序一致。
+
+        修复前：常量写成 ``(no_direction, low_confidence, cooldown, at_boundary)`` ——
+        **漏了 ``llm_conflict``**，且 ``llm_conflict`` 实际排在 ``low_confidence`` 之前。
+        全仓没有任何代码或断言读它，所以漂移了也没人知道。
+        这里直接读 ``rules.py`` 源码里的 ``return outcome(REASON_*, ...)`` 出现顺序来比对
+        （比「再抄一份列表」更能挡住漂移：抄的那份照样会和实现一起漂）。
+        """
+        printed = [name for name in DECISION_ORDER]
+        self.assertIn(REASON_LLM_CONFLICT, printed, "D8：常量漏了 llm_conflict")
+        self.assertLess(
+            printed.index(REASON_LLM_CONFLICT),
+            printed.index(REASON_LOW_CONFIDENCE),
+            "实现里 llm_conflict 排在 low_confidence 之前",
+        )
+
+        body = RULES_SOURCE.split("def decide(", 1)[1].split("\ndef ", 1)[0]
+        # 源码里写的是常量名（``REASON_LLM_CONFLICT``）→ 用 rules 模块把它解析成字面值比对
+        actual = [
+            getattr(rules_module, name)
+            for name in re.findall(r"return outcome\(\s*(REASON_[A-Z_]+)", body)
+        ]
+        self.assertEqual(
+            actual,
+            printed,
+            "DECISION_ORDER 与 decide() 里的实际检查顺序漂移了（报告与演示脚本按它解释现象）",
+        )
+
+    def test_d8_conflict_still_beats_low_confidence_in_practice(self) -> None:
+        """顺序不只是文档：**反向提议 + 规则置信度不足**时应报 ``llm_conflict``。"""
+        weak = [TurnVerdict(turn=n, direction=1, strength=0.2) for n in (1, 2, 3)]
+        decision = decide(
+            current_level="primary_high",
+            turn=3,
+            verdicts=weak,
+            proposal=GradeProposal("primary_low", 0.9),
+        )
+        self.assertEqual(decision.reason, REASON_LLM_CONFLICT)
+        self.assertLess(decision.rule_confidence, CONFIDENCE_THRESHOLD, "规则这边本来就不够")
 
     def test_llm_only_proposes_and_is_vetoed_when_it_disagrees(self) -> None:
         conflict = decide(
@@ -568,6 +723,58 @@ class TestEnginePersistence(GradeEngineCase):
         self.store.add_history(kp_id="jr-ai-what", activity="quiz", is_correct=False)
         self.store.add_history(kp_id="jr-ai-what", activity="quiz", is_correct=False)
         self.assertEqual(quiz_performance_from_history(self.store).current_streak, -2)
+
+    # ------------------------------------------------------------------ D1 --
+    def test_d1_verdicts_bucket_by_session_and_turn(self) -> None:
+        """★ D1 ③ 回归：同号不同会话是**两次不同的交互**，不能求和成同一轮。
+
+        修复前 ``verdicts()`` 只按 ``turn`` 分桶：会话 A 的第 1 轮（童言，−0.5）
+        与会话 B 的第 1 轮（高中提问，+1.0）会相加成 ``+0.5`` —— 方向被平均、强度被叠加，
+        而实际证据是「上一次交互在往下、这一次在往上」。
+        """
+        for text in (CHILD_TURN_1, CHILD_TURN_2):
+            self.engine.observe_turn(
+                student_id=self.student_id, turn=1, text=text, session_id="sess-A"
+            )
+        self.engine.observe_turn(
+            student_id=self.student_id, turn=1, text=ADVANCED_TURN_1, session_id="sess-B"
+        )
+
+        rows = self.rows(
+            "SELECT session_id, value FROM grade_signals WHERE raw LIKE 't1|%' ORDER BY id"
+        )
+        self.assertGreaterEqual(len(rows), 4, "两个会话各自的第 1 轮都要留下读数")
+
+        verdicts = self.engine.verdicts()
+        self.assertEqual(len(verdicts), 2, "同号不同会话要分成两轮，而不是求和成一桶")
+        self.assertEqual([verdict.turn for verdict in verdicts], [1, 1])
+        self.assertEqual(
+            [verdict.direction for verdict in verdicts],
+            [-1, 1],
+            "各自的真实方向：会话 A 向下、会话 B 向上（修复前会被求和成一个方向）",
+        )
+
+    def test_d1_state_cooldown_is_capped_when_the_session_counter_restarts(self) -> None:
+        """整条链路：上一会话在第 8 轮改过学段，新会话第 1 轮读状态 → 冷却 ≤ 5。"""
+        for turn in range(1, 9):
+            self.engine.observe_turn(
+                student_id=self.student_id,
+                turn=turn,
+                text=CHILD_TURN_1,
+                session_id="sess-A",
+            )
+        self.assertIsNotNone(self.engine.last_change_turn(), "第 3 轮就该改过一次学段")
+
+        # 新会话：轮次号从 1 重来（桌面端的每会话计数器）
+        self.engine.observe_turn(
+            student_id=self.student_id, turn=1, text=ADVANCED_TURN_1, session_id="sess-B"
+        )
+        state = self.engine.state(self.student_id)
+        self.assertLessEqual(
+            state.cooldown_remaining,
+            COOLDOWN_TURNS,
+            "跨会话不得把冷却拉长到 COOLDOWN_TURNS 以上（修复前是 12）",
+        )
 
 
 # --------------------------------------------------------------------------- #

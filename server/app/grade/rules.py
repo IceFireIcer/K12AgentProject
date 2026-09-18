@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """学段推断的**规则引擎**（执行文档 §10.3，票 21）—— ★ **最终决策权在这里，不在 LLM**。
 
-新的（最终）设计：**没有人工选择学段这一说**，学段由系统推断并自动生效。
+设计：**默认由系统推断并自动生效**，学生也可以**手动覆盖**（§ ``override_level``）——
+手动是明确意图，写一条 ``grade_history(source="explicit")`` 的轨迹行，
+之后进入更长的冷却（:data:`MANUAL_COOLDOWN_TURNS`），冷却期满再平滑回归自动。
 
 - 第一层（每轮，**不调 LLM**）：``signals.py`` 的四路读数 → 写 ``grade_signals``；
 - 第二层（第 3 轮触发，证据不足则第 5 轮）：**一次**轻量 LLM 判定，产出
@@ -11,14 +13,16 @@
 
   ① 置信度 < :data:`CONFIDENCE_THRESHOLD`（0.6）→ 不改；
   ② 连续 :data:`SIGNALS_REQUIRED_FOR_CHANGE`（3）个**同方向**信号才够；
-  ③ 调整后 :data:`COOLDOWN_TURNS`（5）轮冷却期内不再调整；
+  ③ 调整后进入冷却期（自动 :data:`COOLDOWN_TURNS` = 5 轮、
+     手动 :data:`MANUAL_COOLDOWN_TURNS` = 10 轮）内不再调整；
   ④ 每次最多动 :data:`MAX_STEP_LEVELS`（1）级 —— 从小学低年级看到高中术语也只上一级。
 
   判定顺序是**冻结**的（:data:`DECISION_ORDER`）：一条证据同时被多个条件挡住时，
   ``reason`` 取最先失败的那条 —— 报告与演示脚本都按这个顺序解释现象。
 
-- 状态读写落在 ``learning.db``：``student.grade_level`` + ``grade_history(source="inferred")``
-  **原子性**写入（同一个事务）。改完之后，**下一轮**的 ``before_agent_start`` 会按新学段拼
+- 状态读写落在 ``learning.db``：``student.grade_level`` + ``grade_history``
+  （自动 ``source="inferred"`` / 手动 ``source="explicit"``）**原子性**写入（同一个事务）。
+  改完之后，**下一轮**的 ``before_agent_start`` 会按新学段拼
   system prompt，学生不会看到「学段切换」这种事件（执行文档 §10.4）。
 
 > ⚠️ 无 API Key 时第二层**整层跳过**（``proposal=None``）：第一层照常工作、照常能改学段，
@@ -27,6 +31,13 @@
 > ★ 阈值全部是**具名常量**（本模块唯一的数字来源）：不要在别处再写字面量 ``0.6`` / ``3`` / ``5``。
 > 桌面的 ``extensions/grade.ts`` 有第二层触发轮次（3 / 5），由 ``tests/grade-inference.test.ts``
 > 反向读本文件做一致性断言，防止两边各改一半。
+
+> ⚠️ **轮次号是每会话计数器**（桌面端换会话就从 1 重来），而 ``last_change_turn`` /
+> ``grade_signals`` 的轮次锚点跨会话长期留在 ``learning.db`` 里。这带来两处已知偏差
+> （D1）：冷却期在换会话后被拉长、同号不同会话的信号被当成同一轮。
+> 本次只做了**安全裁剪**（冷却钳到 ``≤ COOLDOWN_TURNS`` + 按会话分桶），
+> **跨会话的严格解（全局单调序号）尚未实施** —— 细节见 :func:`_cooldown_remaining`
+> 与 :meth:`GradeEngine.verdicts` 的注释，接手时先读那两处。
 """
 
 from __future__ import annotations
@@ -69,6 +80,13 @@ SIGNALS_REQUIRED_FOR_CHANGE = 3
 #: ③ 冷却期：调整后这么多轮内不再调整。
 COOLDOWN_TURNS = 5
 
+#: ③ 手动覆盖后的冷却期。比自动冷却长一倍：
+#: 手动设定是学生的**明确意图**，不该被两三轮信号立刻推翻 —— 否则学生刚选完，
+#: 下一轮两句童言又把它改回去，学生会觉得「选了不算数」；
+#: 但也不能永久停用自动（那一来学生选错就再没救，二来赛题要的是「智能体自适应」），
+#: 所以冷却期一满就照常回归自动推断。
+MANUAL_COOLDOWN_TURNS = 10
+
 #: ④ 单次最多动几级。
 MAX_STEP_LEVELS = 1
 
@@ -89,8 +107,13 @@ MAX_RULE_CONFIDENCE = 0.9
 #: 冷启动默认学段（无历史 → 小学高年级），与 ``routes.students.DEFAULT_COLD_START_GRADE`` 同一口径。
 DEFAULT_GRADE_LEVEL: GradeLevel = DEFAULT_COLD_START_GRADE
 
-#: ``grade_history.source``：系统推断（本设计里唯一可能的来源）。
+#: ``grade_history.source``：系统推断（规则引擎自己改的）。
 SOURCE_INFERRED = "inferred"
+
+#: ``grade_history.source``：学生手动选择（:meth:`GradeEngine.override_level` 写入）。
+#: 表结构当初就预留了这个取值（``app/store/migrations.py`` 的列注释里本来就写着
+#: ``explicit | inferred | confirmed``），所以放开它**不需要新增列或表**。
+SOURCE_EXPLICIT = "explicit"
 
 #: 从 ``grade_signals`` 里往回读多少行来还原「每轮方向」（够覆盖冷却期 + 连续窗口）。
 RECENT_SIGNAL_ROWS = 120
@@ -117,11 +140,22 @@ REASON_AT_BOUNDARY = "at_boundary"
 REASON_WRITE_FAILED = "write_failed"
 
 #: 判定的检查顺序（**冻结**：多条件同时挡住时，``reason`` 取最先失败的那条）。
+#:
+#: ★ 它必须与 :func:`decide` 里 ``outcome(...)`` 的实际顺序**逐项一致** ——
+#: 报告与演示脚本都按这个顺序解释现象（「为什么第 6 轮没改？因为冷却，不是置信度不够」）。
+#: 早先这份常量漏了 ``llm_conflict``、且把 ``low_confidence`` 写在它前面，
+#: 与实现不符（D8）。``tests/test_grade.py`` 有一条**读源码**的结构断言钉住两者一致，
+#: 改判定顺序却忘了改这里会直接红。
+#:
+#: 末项是 ``changed``：它是「没被任何条件挡住」时的出口，不是一条拦截条件；
+#: :data:`REASON_WRITE_FAILED` 是**落库阶段**的失败（判定已经通过），不在这条链上。
 DECISION_ORDER: tuple[str, ...] = (
     REASON_NO_DIRECTION,
+    REASON_LLM_CONFLICT,
     REASON_LOW_CONFIDENCE,
     REASON_COOLDOWN,
     REASON_AT_BOUNDARY,
+    REASON_CHANGED,
 )
 
 #: 降级标注（``GradeDecision.degraded``）：第二层本应触发却没有提议时可见。
@@ -238,10 +272,15 @@ def decide(
     verdicts: Sequence[TurnVerdict],
     proposal: GradeProposal | None = None,
     last_change_turn: int | None = None,
+    last_change_source: str | None = None,
 ) -> Decision:
     """规则引擎的决策核心（纯函数）。
 
     ``verdicts`` 是**按轮次升序**的读数序列（末尾是最近的轮）。判定顺序见 :data:`DECISION_ORDER`。
+
+    ``last_change_source`` 是最近一次写入 ``grade_history`` 的来源，只用来推导冷却**窗口长度**
+    （手动 :data:`MANUAL_COOLDOWN_TURNS` / 自动 :data:`COOLDOWN_TURNS`）。
+    默认 ``None`` = 按自动窗口处理（纯函数的老调用方不必传）。
     """
     level = as_grade_level(current_level)
     current_rank = rank_of(level)
@@ -265,8 +304,15 @@ def decide(
         changed: bool = False,
         target: str = level,
     ) -> Decision:
-        # 刚改过 → 冷却从头开始（报 5 而不是 0：前端与报告看到的是「接下来 5 轮不动」）
-        remaining = COOLDOWN_TURNS if changed else _cooldown_remaining(turn, last_change_turn)
+        # 刚改过 → 冷却从头开始（报一个完整窗口而不是 0：前端与报告看到的是「接下来 N 轮不动」）。
+        # ★ 这里固定用 COOLDOWN_TURNS 而不是按来源推导：`changed=True` 只可能来自**自动调整**
+        #   （手动覆盖压根不走这个纯函数，它自己写库、自己报 MANUAL_COOLDOWN_TURNS），
+        #   所以「刚改过」的窗口必然是自动窗口。
+        remaining = (
+            COOLDOWN_TURNS
+            if changed
+            else _cooldown_remaining(turn, last_change_turn, last_change_source)
+        )
         return Decision(
             changed=changed,
             reason=reason,
@@ -297,7 +343,7 @@ def decide(
         return outcome(REASON_LOW_CONFIDENCE, confidence=confidence)
 
     # ④ 冷却期
-    if _cooldown_remaining(turn, last_change_turn) > 0:
+    if _cooldown_remaining(turn, last_change_turn, last_change_source) > 0:
         return outcome(REASON_COOLDOWN, confidence=confidence)
 
     # ⑤ 单次最多动 MAX_STEP_LEVELS 级；到顶/到底则无可动
@@ -309,12 +355,39 @@ def decide(
     return outcome(REASON_CHANGED, confidence=confidence, changed=True, target=target)
 
 
-def _cooldown_remaining(turn: int, last_change_turn: int | None) -> int:
-    """距下次允许调整还剩几轮（``0`` = 现在就可以调）。"""
-    if last_change_turn is None:
+def _cooldown_remaining(
+    turn: int, anchor_turn: int | None, anchor_source: str | None
+) -> int:
+    """距下次允许调整还剩几轮（``0`` = 现在就可以调）。
+
+    ``anchor_turn`` / ``anchor_source`` 是**最近一次写入 ``grade_history`` 的锚点**：
+    前者是那次写入的轮次号、后者是它的 ``source``。窗口长度由来源推导 ——
+    手动（:data:`SOURCE_EXPLICIT`）用 :data:`MANUAL_COOLDOWN_TURNS`、其余用
+    :data:`COOLDOWN_TURNS`。**所以不需要为「手动冷却更长」新增列**：
+    来源本来就在那一行里，冷却长度是它的函数。
+
+    ★★ 轮次号是**每会话**计数器（桌面端换一个会话就从 1 重来），而 ``anchor_turn``
+    是上一会话写进库里、**长期保留**的那个号 —— 于是新会话的 ``turn`` 常常**小于**
+    ``anchor_turn``：
+
+    - 旧行为：``elapsed = 1 - 8 = -7`` → ``remaining = 5 - (-7) = 12``，
+      冷却期被跨会话**拉长到 12 轮**（设计只有 :data:`COOLDOWN_TURNS` = 5）；
+    - 现在：``elapsed`` 钳到 ``≥ 0`` → ``remaining`` **绝不会超过**本窗口的长度。
+      代价是「新会话会重新获得一段完整的冷却」，方向上是**保守**的
+      （宁可多观察几轮，也不要让冷却被无限拉长）。
+
+    ⚠️ **跨会话的严格解尚未实施**：正确做法是给信号与变更记一个**全局单调序号**
+    （或 ``(session_id, turn)`` 复合键 + 会话起始时刻），使冷却期是「真实的 N 轮交互」。
+    那需要改 ``grade_signals`` / ``grade_history`` 的表结构（归 ``app/store/**``）
+    与桌面端上交的口径，属于**跨端改动**，不在本次修复范围 —— 这里只做上面这一处安全裁剪。
+    读到这条注释的接手人：改的时候 ``DECISION_ORDER`` 的测试与 ``desktop/tests/grade-inference.test.ts``
+    里的常量一致性断言都要一起看。
+    """
+    if anchor_turn is None:
         return 0
-    elapsed = int(turn) - int(last_change_turn)
-    return max(0, COOLDOWN_TURNS - elapsed)
+    window = MANUAL_COOLDOWN_TURNS if anchor_source == SOURCE_EXPLICIT else COOLDOWN_TURNS
+    elapsed = max(0, int(turn) - int(anchor_turn))
+    return max(0, window - elapsed)
 
 
 def quiz_performance_from_history(
@@ -394,26 +467,40 @@ class GradeEngine:
         return as_grade_level(self.ensure_student(student_id))
 
     def verdicts(self, *, limit_rows: int = RECENT_SIGNAL_ROWS) -> list[TurnVerdict]:
-        """从 ``grade_signals`` 还原**每一轮**的方向与强度（按轮次升序）。
+        """从 ``grade_signals`` 还原**每一轮**的方向与强度（按**入库顺序** = 时间升序）。
 
         ★ 为什么按轮聚合：见 ``signals.TurnSignals`` 的说明 —— 一轮里的多条同向信号
         只算一轮，否则学生多说两句就能把学段推走一级。
         没有轮次锚点（``t<n>|``）的旧行会被跳过：它们不属于任何一轮，不该参与连续计数。
+
+        ★ 分桶键是 ``(session_id, turn)`` 而**不是**光看 ``turn``（D1 ③）：轮次号是**每会话**
+        计数器，换会话就从 1 重来，只按 ``turn`` 分桶会把「上一会话第 1 轮」与「本会话第 1 轮」
+        的读数**求和**成同一轮 —— 两次不同交互的强度被叠加（各 0.2 合成 0.4），
+        而 ``rule_confidence = 平均强度 × 1.5`` 直接吃这个和，于是**连续轮数**被虚报、
+        置信度被抬高；反过来若两轮方向相反，还会互相抵消成一条中性轮，白丢一轮证据。
+        按 ``(session_id, turn)`` 分桶后，一条信号只属于它真正的那个会话轮次。
+
+        ⚠️ 仍未解决的部分（**跨端改动，本次不做**）：这里的顺序是**入库顺序**，
+        而 ``turn`` 号本身仍然只是「会话内第几轮」—— 因此
+        :func:`decide` 里的 ``turn`` / ``last_change_turn`` 比较仍是跨会话不可比的
+        （靠 :func:`_cooldown_remaining` 钳位兜住）。严格解见那里。
         """
         rows = self.store.conn.execute(
-            "SELECT raw, value FROM grade_signals ORDER BY id DESC LIMIT ?",
+            "SELECT raw, value, session_id FROM grade_signals ORDER BY id DESC LIMIT ?",
             (int(limit_rows),),
         ).fetchall()
-        buckets: dict[int, list[float]] = {}
+        # 分桶键带上会话：同号不同会话是**两次不同的交互**，不能相加
+        buckets: dict[tuple[str, int], list[float]] = {}
         for row in reversed(rows):  # 还原成时间升序
             turn, _evidence = decode_turn_raw(row["raw"])
             if turn is None:
                 continue
-            buckets.setdefault(turn, []).append(float(row["value"] or 0.0))
+            session = str(row["session_id"] or "")
+            buckets.setdefault((session, turn), []).append(float(row["value"] or 0.0))
 
         verdicts: list[TurnVerdict] = []
-        for turn in sorted(buckets):
-            total = sum(buckets[turn])
+        for (_session, turn), values in buckets.items():  # dict 保序 = 入库顺序
+            total = sum(values)
             verdicts.append(
                 TurnVerdict(turn=turn, direction=direction_of(total), strength=min(1.0, abs(total)))
             )
@@ -427,6 +514,52 @@ class GradeEngine:
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
         return int(row["turn"]) if row is not None and row["turn"] is not None else None
+
+    def last_cooldown_anchor(self) -> tuple[int | None, str | None]:
+        """最近一条 ``from_level`` 非空的 ``grade_history`` 行 → ``(turn, source)``。
+
+        与 :meth:`last_change_turn` 的区别：它把「学生显式确认了当前学段」
+        （``from_level == to_level`` 的 ``explicit`` 行）**也算作锚点** ——
+        那种行当然不改变学段，但它是冷却期的起点（学生刚说「我就是初中」，
+        系统当然不该马上把学段推走）。所以冷却读的是这一条，而不是只认真正变更的那条。
+
+        返回 ``(None, None)`` = 库里还没有任何锚点（学生只有冷启动基线那一行）。
+        """
+        row = self.store.conn.execute(
+            "SELECT turn, source FROM grade_history "
+            "WHERE from_level IS NOT NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None, None
+        turn = int(row["turn"]) if row["turn"] is not None else None
+        source = str(row["source"]) if row["source"] is not None else None
+        return turn, source
+
+    def turn_watermark(self) -> int:
+        """当前轮次水位 = ``max(最近一轮信号里的轮次号, 最近一个冷却锚点的轮次号, 0)``。
+
+        ★ 为什么手动覆盖的 ``turn`` 非要用它来算：桌面端交上来的轮次号是**每会话**计数器，
+        服务端这一侧并不知道「现在第几轮」—— 只能从已知的痕迹里取一个**不小于**真实轮次的
+        水位。手动覆盖多半发生在学生刚输入完一句话之后，此时 ``grade_signals`` 里
+        正好有那一刻的轮次号；取两者较大值能保证写进 ``grade_history`` 的 ``turn``
+        至少与当下同量级。
+
+        不这么做的后果是实打实的：如果 override 图省事写 ``turn=0``，
+        而学生是在**第 3 轮**点的切换，``state()`` 一算 ``elapsed = 3 - 0 = 3``，
+        于是「冷却剩余 10」当场报成 7，第 3 轮再上交证据时直接报成 0 ——
+        「10 轮内不再自动改学段」这条验收会**假绿**（窗口其实只有 7 轮）。
+        """
+        # 取最近一段信号的**轮次号最大值**（不是「最后一行」：批量上交时行序与轮次
+        # 由调用方给定，取最大值才与 verdicts() 的口径一致）。
+        rows = self.store.conn.execute(
+            "SELECT raw FROM grade_signals ORDER BY id DESC LIMIT ?",
+            (int(RECENT_SIGNAL_ROWS),),
+        ).fetchall()
+        signal_turns = [
+            turn for turn, _evidence in (decode_turn_raw(row["raw"]) for row in rows) if turn is not None
+        ]
+        anchor_turn, _source = self.last_cooldown_anchor()
+        return max([*signal_turns, int(anchor_turn or 0), 0])
 
     def recent_signals(self, limit: int = SIGNAL_LIST_LIMIT) -> list[GradeSignal]:
         """最近若干条信号（按时间升序；``raw`` 原样带上轮次锚点，便于对齐演示脚本）。"""
@@ -445,7 +578,7 @@ class GradeEngine:
         ]
 
     def history(self, limit: int = HISTORY_LIMIT) -> list[dict]:
-        """``grade_history`` 轨迹（报告/答辩的叙事素材：「第 3 轮调为小学低年级（0.75）」）。"""
+        """``grade_history`` 轨迹（报告/汇报的叙事素材：「第 3 轮调为小学低年级（0.75）」）。"""
         rows = self.store.conn.execute(
             "SELECT ts, turn, from_level, to_level, source, confidence FROM grade_history "
             "ORDER BY id DESC LIMIT ?",
@@ -468,8 +601,10 @@ class GradeEngine:
         level = self.current_level(student_id)
         verdicts = self.verdicts()
         last_change = self.last_change_turn()
-        last_turn = max((verdict.turn for verdict in verdicts), default=0)
-        turn = max(last_turn, last_change or 0)
+        anchor_turn, anchor_source = self.last_cooldown_anchor()
+        # 轮次水位要**同时**看信号与冷却锚点：手动覆盖可以在没有任何信号的轮次发生
+        # （学生一进来就点切换），那时锚点就是唯一已知的轮次号（细节见 turn_watermark）。
+        turn = self.turn_watermark()
 
         direction, streak = consecutive_same_direction(verdicts)
         window = verdicts[-streak:] if streak else []
@@ -481,6 +616,7 @@ class GradeEngine:
             verdicts=verdicts,
             proposal=None,
             last_change_turn=last_change,
+            last_change_source=anchor_source,
         )
         suggested: GradeLevel | None = None
         if direction != 0 and streak >= SIGNALS_REQUIRED_FOR_CHANGE:
@@ -491,10 +627,14 @@ class GradeEngine:
         return GradeState(
             student_id=student_id,
             grade_level=level,
-            source=SOURCE_INFERRED,
+            # 来源跟着最近一次写入走：手动覆盖后就是 explicit（学生端据此显示「手动选中」）。
+            # 取不到（冷启动）**或取到历史遗留取值**（DDL 注释里还提过 ``confirmed``）时
+            # 一律报 inferred：契约把这一项收窄成两种取值，外面那一个不能因为一行旧数据
+            # 就把整个读接口打成 500。
+            source=_contract_source(anchor_source),
             last_turn=turn,
             last_change_turn=last_change,
-            cooldown_remaining=_cooldown_remaining(turn, last_change),
+            cooldown_remaining=_cooldown_remaining(turn, anchor_turn, anchor_source),
             streak=streak,
             direction=direction,
             confidence=round(confidence, 4),
@@ -541,12 +681,15 @@ class GradeEngine:
 
         verdicts = self.verdicts()
         last_change = self.last_change_turn()
+        # 冷却窗口按**最近一次写入的来源**推导（手动覆盖后是 10 轮，自动调整是 5 轮）。
+        _anchor_turn, anchor_source = self.last_cooldown_anchor()
         decision = decide(
             current_level=level,
             turn=turn,
             verdicts=verdicts,
             proposal=proposal,
             last_change_turn=last_change,
+            last_change_source=anchor_source,
         )
         if decision.changed:
             decision = self._apply(decision, student_id=student_id, turn=turn)
@@ -579,11 +722,19 @@ class GradeEngine:
         )
 
     def _apply(self, decision: Decision, *, student_id: str, turn: int) -> Decision:
-        """把变更**原子性**写进 ``student`` + ``grade_history``（同一事务）。"""
+        """把变更**原子性**写进 ``student`` + ``grade_history``（同一事务）。
+
+        ★ **学段一变就清空当前章节**（``current_chapter = NULL``）：学生选了小学低年级的
+          「第4章」，学段判定成初中之后那本教材就不存在了 —— 不清空就会出现
+          「学段已是初中、Prompt 还说在学小学低年级第4章」这条**第二处真相**。
+          ``current_chapter`` 是软偏好，清空只影响 Prompt 提示，不影响任何数据。
+          ⚠️ 只在**真的换了学段**时清：本方法只在 ``decision.changed`` 为真时被调用
+          （见 :meth:`decide_and_apply`），所以这条 UPDATE 天然不会误伤「学段没变」的情形。
+        """
         try:
             with self.store.conn:  # 事务：两条要么都成功，要么都不生效
                 self.store.conn.execute(
-                    "UPDATE student SET grade_level = ? WHERE student_id = ?",
+                    "UPDATE student SET grade_level = ?, current_chapter = NULL WHERE student_id = ?",
                     (decision.target_level, student_id),
                 )
                 self.store.conn.execute(
@@ -615,12 +766,91 @@ class GradeEngine:
             )
         return decision
 
+    def override_level(self, *, student_id: str, level: str, turn: int | None = None) -> dict:
+        """学生**手动**设定学段（唯一的人工写路径）。
+
+        与自动推断共用同一张表与同一种轨迹行，差别只有两处：``source="explicit"``
+        与更长的冷却窗口（:data:`MANUAL_COOLDOWN_TURNS`）。冷却机制不必改——
+        它读的是「最近一条 ``from_level`` 非空的行」的来源（:meth:`last_cooldown_anchor`），
+        这一行写下去就自动接管了。
+
+        ``from_level`` **一律写切换前的值**，即使它与 ``to_level`` 相同：
+        重复选同一个学段不改学段，但那一行仍然是「学生确认过当前学段」的留痕，
+        也仍然是冷却期的锚点（否则学生点两下就等于白点，系统下一轮照样把他推走）。
+
+        ``confidence = 1.0``：学生明确选择不是推断，不存在置信度这个量 ——
+        写它只是不让该列留空，**不要**把它读成「引擎很确定学生是这个学段」。
+
+        ``sqlite3.Error`` 不吞（照 :meth:`_apply` 的口径向上抛）：手动覆盖是学生按下去的
+        一次动作，写不进去必须让调用方看见（路由层翻 503），而不是假装成功。
+
+        ★ **换学段才清空当前章节**（``current_chapter = NULL``，与 :meth:`_apply` 同一口径）：
+          学生重复点自己现在的学段 = **确认现状**，不是换教材 —— 顺手清掉他已经选好的章节
+          会让学生「点一下学段，章节就没了」，那是纯粹的数据丢失。所以按 ``changed`` 分两条 SQL。
+        """
+        before = self.current_level(student_id)  # 顺带 ensure_student：冷启动学生也能切换
+        target = as_grade_level(level)
+        changed = before != target
+        # 缺省用轮次水位：写 0 会让冷却在下一轮直接算成「已经过了好几轮」，详见 turn_watermark。
+        effective_turn = self.turn_watermark() if turn is None else int(turn)
+        try:
+            with self.store.conn:  # 事务：student 与 grade_history 要么都成功，要么都不生效
+                if changed:
+                    self.store.conn.execute(
+                        "UPDATE student SET grade_level = ?, current_chapter = NULL "
+                        "WHERE student_id = ?",
+                        (target, student_id),
+                    )
+                else:
+                    self.store.conn.execute(
+                        "UPDATE student SET grade_level = ? WHERE student_id = ?",
+                        (target, student_id),
+                    )
+                self.store.conn.execute(
+                    "INSERT INTO grade_history(ts, turn, from_level, to_level, source, confidence) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (int(time.time()), effective_turn, before, target, SOURCE_EXPLICIT, 1.0),
+                )
+        except sqlite3.Error as exc:
+            # 日志里只有 id / 学段 / 轮次 —— 手动切换不带学生文本，这里也不许顺手加。
+            logger.error(
+                "学段手动切换写入失败：student=%s %s → %s（第 %s 轮）", student_id, before, target, effective_turn
+            )
+            raise
+        logger.info(
+            "学段手动切换：%s %s → %s（第 %d 轮，之后 %d 轮内不再自动调整）",
+            student_id,
+            before,
+            target,
+            effective_turn,
+            MANUAL_COOLDOWN_TURNS,
+        )
+        return {
+            "grade_level": target,
+            "previous_level": before,
+            "changed": changed,
+            "source": SOURCE_EXPLICIT,
+            "turn": effective_turn,
+            "cooldown_remaining_turns": MANUAL_COOLDOWN_TURNS,
+        }
+
 
 def _next_level(current: str, direction: int) -> GradeLevel | None:
     rank = rank_of(current)
     if rank is None:
         return None
     return level_at(rank + max(-MAX_STEP_LEVELS, min(MAX_STEP_LEVELS, direction)))
+
+
+def _contract_source(source: str | None) -> str:
+    """库里的 ``grade_history.source`` → 契约允许的两种取值之一。
+
+    ``GradeSignals.source`` 是收窄的 ``Literal["inferred", "explicit"]``，
+    而 ``grade_history`` 的列是宽松的 ``TEXT``（DDL 注释里还列着 ``confirmed``）。
+    一行历史遗留取值不该让整个读接口 500，所以这里收敛到 ``inferred``；
+    判定「手动还是自动」只看非 ``explicit`` 即非手动，收敛不会影响冷却窗口的选择。
+    """
+    return SOURCE_EXPLICIT if source == SOURCE_EXPLICIT else SOURCE_INFERRED
 
 
 __all__ = [
@@ -638,6 +868,7 @@ __all__ = [
     "HISTORY_LIMIT",
     "LAYER2_FIRST_TURN",
     "LAYER2_RETRY_TURN",
+    "MANUAL_COOLDOWN_TURNS",
     "MAX_RULE_CONFIDENCE",
     "MAX_STEP_LEVELS",
     "REASON_AT_BOUNDARY",
@@ -652,6 +883,7 @@ __all__ = [
     "QUIZ_HISTORY_WINDOW",
     "SIGNALS_REQUIRED_FOR_CHANGE",
     "SIGNAL_LIST_LIMIT",
+    "SOURCE_EXPLICIT",
     "SOURCE_INFERRED",
     "TurnVerdict",
     "decide",

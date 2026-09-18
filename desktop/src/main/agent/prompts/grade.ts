@@ -2,8 +2,9 @@
  * 学段 → System Prompt 的唯一查表点（票 06；执行文档 §10.5 / §9.4 #1）。
  *
  * ★ 用途：`before_agent_start` 每轮把本轮 system prompt **整段替换**成这里的模板。
- *   - 显式选择为权威：学段由渲染进程随 `chat:send` 传入（`ChatSendRequest.gradeLevel`），
- *     自动推断（票 21）**只写建议、不直接改**，因此这里只认「当前显式学段」。
+ *   - **学段由服务端推断引擎决定**（`server/app/grade/rules.py`），达到阈值时自动生效；
+ *     主进程只把**当前生效值**（`gradeExtension.appliedGrade()`）读出来查表。
+ *     `ChatSendRequest` 里没有学段字段，学生端也没有选择入口（D-020 翻转）。
  *   - 四份模板的共性纪律在 `rules.ts`，学段差异在各自文件里。
  *
  * ★ 为什么不复用 `baseline.ts`：baseline 是票 03 的**学段无关**冒烟基线（关卡 B₁ 用），
@@ -59,7 +60,7 @@ export function gradePromptFor(grade: GradeLevel | string | undefined): string {
   return GRADE_PROMPTS[DEFAULT_GRADE_LEVEL]
 }
 
-/** 归一化学段：非法值一律落到默认学段（显式选择为权威，脏值不往下传）。 */
+/** 归一化学段：非法值一律落到默认学段（脏值不往下传，绝不把非法值当成某个学段）。 */
 export function normalizeGradeLevel(grade: GradeLevel | string | undefined): GradeLevel {
   return typeof grade === 'string' && (GRADE_LEVELS as readonly string[]).includes(grade)
     ? (grade as GradeLevel)
