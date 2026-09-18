@@ -37,6 +37,7 @@ from app.contracts import (  # noqa: E402
     INTERNAL_MODELS,
     IPC_EVENT_NAMES,
     CamelModel,
+    ChatRequest,
     Citation,
     EmbeddingConfigIn,
     LlmConfig,
@@ -146,6 +147,37 @@ class TestContractRegistration(unittest.TestCase):
             CONTRACT_ENUMS["IpcEventName"],
             contracts.IpcEventName,
         )
+
+    def test_every_literal_alias_is_registered(self) -> None:
+        """★ A7：本模块里每个 ``Literal`` 别名都要登记进 `CONTRACT_ENUMS`。
+
+        漏登记的后果很隐蔽：它的取值会**以内联 enum** 出现在引用它的模型里
+        （OpenAPI 里看得见，但 TS 侧没有具名联合类型），于是前端只能手写一份
+        「和契约长得差不多的字符串联合」—— 防漂移链在这里断掉，而且没人会发现。
+        历史上漏过 `DepRelation` / `DepDirection` / `GradeSignalType` 三个。
+        """
+        aliases = {
+            name: value
+            for name, value in vars(contracts).items()
+            if not name.startswith("_")
+            and getattr(value, "__class__", None).__name__ == "_LiteralGenericAlias"
+        }
+        missing = sorted(set(aliases) - set(CONTRACT_ENUMS))
+        self.assertEqual(
+            missing,
+            [],
+            f"以下 Literal 别名没登记进 CONTRACT_ENUMS：{missing}（TS 侧会缺具名类型）",
+        )
+        for name, value in aliases.items():
+            self.assertIs(CONTRACT_ENUMS[name], value, f"CONTRACT_ENUMS[{name!r}] 与别名不是同一个对象")
+
+    def test_newly_registered_enums_are_exported_as_named_schemas(self) -> None:
+        """★ A7 的验收口径：三个漏登记的字面量要在生成物里**有具名 schema**。"""
+        schemas = build_openapi_document()["components"]["schemas"]
+        for name in ("DepRelation", "DepDirection", "GradeSignalType"):
+            self.assertIn(name, schemas, f"{name} 没有进 OpenAPI（TS 侧缺具名类型）")
+            self.assertEqual(schemas[name]["title"], name)
+            self.assertEqual(schemas[name]["enum"], list(contracts.CONTRACT_ENUMS[name].__args__))
 
 
 # ---------------------------------------------------------------- 答案泄漏 --
@@ -396,6 +428,82 @@ class TestApiKeyMasking(unittest.TestCase):
             LlmConfigIn(api_key="sk-new-key-123456", clear_api_key=True)
 
 
+# ---------------------------------------------------------------- 局部提交 --
+class TestPartialSubmitContracts(unittest.TestCase):
+    """★ A4：「**省略即保留**」是**契约层**的语义（不是路由层的顺带行为）。
+
+    入参模型一旦给出出厂默认值，`PUT {"llm": {"apiKey": "…"}}` 这种字段级局部提交
+    就会被解释成「其余字段按默认值保存」→ 用户自填的校内网关被静默换回 DeepSeek。
+    所以这里钉住「省略 = ``None``」，路由侧才有可能区分「没提交」与「提交了默认值」。
+    """
+
+    def test_optional_fields_default_to_none_not_to_factory_defaults(self) -> None:
+        llm = LlmConfigIn()
+        for field in ("provider_id", "provider_name", "base_url", "model_id"):
+            self.assertIsNone(
+                getattr(llm, field),
+                f"LlmConfigIn.{field} 的省略默认值必须是 None（出厂默认值会让局部 PUT 重置配置）",
+            )
+
+        embedding = EmbeddingConfigIn()
+        for field in ("mode", "base_url", "model_id"):
+            self.assertIsNone(
+                getattr(embedding, field),
+                f"EmbeddingConfigIn.{field} 的省略默认值必须是 None",
+            )
+
+    def test_placeholder_key_semantics_are_untouched(self) -> None:
+        """`api_key` 的语义**没有**跟着其它字段一起改（缺省仍是空串 = 保留已存值）。"""
+        self.assertEqual(LlmConfigIn().api_key, "")
+        self.assertEqual(EmbeddingConfigIn().api_key, "")
+        self.assertTrue(is_api_key_placeholder(LlmConfigIn().api_key))
+
+    def test_base_url_is_still_normalized_when_submitted(self) -> None:
+        self.assertEqual(
+            LlmConfigIn(base_url=" https://gw.example.com/v1/ ").base_url,
+            "https://gw.example.com/v1",
+        )
+        self.assertIsNone(LlmConfigIn(base_url=None).base_url, "没提交就保持没提交（不回填默认值）")
+        self.assertEqual(EmbeddingConfigIn(base_url=" ").base_url, "")
+
+    def test_exported_schema_marks_them_optional(self) -> None:
+        """★ 生成物口径：这些字段在 TS 侧必须是可省略的（`?`），否则前端会照着必填写。"""
+        schemas = build_openapi_document()["components"]["schemas"]
+
+        llm_required = schemas["LlmConfigIn"].get("required", [])
+        for field in ("providerName", "baseUrl", "modelId"):
+            self.assertNotIn(field, llm_required, f"LlmConfigIn.{field} 不该是必填")
+
+        embedding_required = schemas["EmbeddingConfigIn"].get("required", [])
+        self.assertEqual(embedding_required, [], "EmbeddingConfigIn 的字段全都可以省略")
+
+
+# ---------------------------------------------------------------- 对话入参 --
+class TestChatRequestContract(unittest.TestCase):
+    """★ A5：`ChatRequest` 是 IPC 入参形状，**不带学段**（学段完全自动推断）。"""
+
+    def test_chat_request_has_no_grade_field(self) -> None:
+        self.assertNotIn("grade_level", ChatRequest.model_fields)
+        # 连「名字里带 grade 的字段」都不许有（防改名绕过）
+        suspicious = [name for name in ChatRequest.model_fields if "grade" in name.lower()]
+        self.assertEqual(suspicious, [], f"ChatRequest 里出现疑似学段字段：{suspicious}")
+
+    def test_ipc_shape_matches_what_the_main_process_sends(self) -> None:
+        """主进程只发 ``{text}``（外加可选的 studentId/sessionId）—— 契约里也要能这么构造。"""
+        request = ChatRequest(student_id="student_001", text="什么是循环？")
+        self.assertEqual(request.text, "什么是循环？")
+        self.assertIsNone(request.session_id)
+        self.assertEqual(
+            sorted(request.model_dump(by_alias=True)),
+            ["sessionId", "studentId", "text"],
+        )
+
+    def test_exported_schema_does_not_require_a_grade(self) -> None:
+        schema = build_openapi_document()["components"]["schemas"]["ChatRequest"]
+        self.assertNotIn("gradeLevel", schema["properties"])
+        self.assertEqual(sorted(schema["required"]), ["studentId", "text"])
+
+
 # ---------------------------------------------------------------- HTTP 契约 --
 class TestSettingsRoute(unittest.TestCase):
     def setUp(self) -> None:
@@ -413,13 +521,19 @@ class TestSettingsRoute(unittest.TestCase):
 
         body = response.json()
         self.assertEqual(sorted(body), ["embedding", "llm"])
+        # ★ `providerId` 是 Pi 的 provider id（决定用哪份 provider 定义）；
+        #   `providerName` 只用于显示 —— 两者分工不同，都要在出参里。
         self.assertEqual(
             sorted(body["llm"]),
-            ["apiKey", "baseUrl", "hasKey", "modelId", "providerName"],
+            ["apiKey", "baseUrl", "hasKey", "modelId", "providerId", "providerName"],
         )
         self.assertFalse(body["llm"]["hasKey"])
         self.assertEqual(body["llm"]["apiKey"], "")
-        self.assertEqual(body["llm"]["baseUrl"], "https://api.deepseek.com/v1")
+        # ★ 默认值必须与 Pi 内置 deepseek provider 一致（无 /v1），否则首轮对话会「找不到模型」
+        self.assertEqual(body["llm"]["providerId"], "deepseek")
+        self.assertEqual(body["llm"]["baseUrl"], "https://api.deepseek.com")
+        # ★ 默认 ModelID 必须是 Pi 目录里**真实存在**的那个（老默认 `deepseek-chat` 不在目录里）
+        self.assertEqual(body["llm"]["modelId"], "deepseek-v4-flash")
         self.assertEqual(body["embedding"]["mode"], "local_fastembed")
 
     def test_put_stores_key_and_only_returns_the_mask(self) -> None:
@@ -522,8 +636,16 @@ class TestSettingsRoute(unittest.TestCase):
 
         刻意指向回环上的死端口：不经外网、秒级返回，且必须是**可读原因**
         而不是裸堆栈 —— 用户是老师/学生，不是开发者。
+
+        ⚠️ 已存地址也一起改成这个死端口：已存的明文 Key **只允许**用于保存它的那个
+        地址（A1 凭据边界），否则这里拿到的是「换了接口地址，请重新填写 API Key」
+        而不是网络层原因 —— 那属于另一条测试（`test_settings_store.py` 的
+        `TestProbeCredentialBoundary`）。
         """
-        self.client.put("/api/settings", json={"llm": {"apiKey": SECRET_KEY}})
+        self.client.put(
+            "/api/settings",
+            json={"llm": {"baseUrl": "http://127.0.0.1:9/v1", "apiKey": SECRET_KEY}},
+        )
         started = time.monotonic()
         response = self.client.post(
             "/api/settings/probe",
@@ -599,11 +721,20 @@ class TestStudentsRoute(unittest.TestCase):
         body = response.json()
         self.assertEqual(
             sorted(body),
-            ["createdAt", "gradeLevel", "lastActiveAt", "nickname", "studentId"],
+            [
+                "createdAt",
+                "currentChapter",
+                "gradeLevel",
+                "lastActiveAt",
+                "nickname",
+                "studentId",
+            ],
             "学生出参字段必须与契约一致（camelCase）",
         )
         self.assertEqual(body["studentId"], "student_001")
         self.assertEqual(body["gradeLevel"], "primary_high")
+        # ★ 新建学生一定「未选择章节」：空串而不是 null（前端只处理一种空值形态）
+        self.assertEqual(body["currentChapter"], "")
         self.assertGreater(body["createdAt"], 0)
 
     def test_created_student_appears_in_list(self) -> None:
@@ -697,8 +828,18 @@ class TestPayloadContracts(unittest.TestCase):
         )
         self.assertEqual(
             sorted(student.model_dump(by_alias=True)),
-            ["createdAt", "gradeLevel", "lastActiveAt", "nickname", "studentId"],
+            [
+                "createdAt",
+                "currentChapter",
+                "gradeLevel",
+                "lastActiveAt",
+                "nickname",
+                "studentId",
+            ],
+            "学生出参字段必须与契约一致（camelCase）",
         )
+        # 章节默认空串（未选择）；不传也不报错 —— 老调用点不必逐个补参数
+        self.assertEqual(student.current_chapter, "")
 
     def test_mastery_delta_is_clamped(self) -> None:
         """掌握度限幅 ±0.2（陷阱：不限幅一次答题就从 0 到 1）。"""

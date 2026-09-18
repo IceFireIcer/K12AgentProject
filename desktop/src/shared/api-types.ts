@@ -125,6 +125,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/grade/override/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 学生手动设定学段（写 grade_history(source=explicit)，之后进入更长冷却）
+         * @description ★ **唯一的人工写路径**：学生选定学段 → 立即生效 + 进入 :data:`MANUAL_COOLDOWN_TURNS` 冷却。
+         *
+         *     与 ``POST /grade/turns`` 的分工：那条路径收的是**证据**（可能改变学段，也可能不），
+         *     这条路径收的是**决定**（一定按学生的意思生效）。两者写的是同一张 ``grade_history``，
+         *     区别只有 ``source`` 与冷却窗口长度 —— 冷却期一过，自动推断照常接管。
+         */
+        post: operations["override_grade_api_grade_override__student_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/grade/signals/{student_id}": {
         parameters: {
             query?: never;
@@ -136,9 +160,10 @@ export interface paths {
          * 学段信号与待生效的推断建议
          * @description 当前学段 + 最近信号 + （够格但被挡住时的）待生效建议。
          *
-         *     ★ 与旧设计不同：这里**不再有「学生确认」这一步** —— 学段由系统自动生效，
-         *     ``source`` 恒为 ``inferred``。``suggested_level`` 的含义因此收窄为
-         *     「证据已够、但被冷却期或置信度挡住的下一个学段」，供前端显示「将在下一轮生效」。
+         *     ``source`` 现在有**两种**取值：默认是 ``inferred``（系统自动推断），
+         *     学生手动设定过则是 ``explicit``（见 ``POST /grade/override/{student_id}``）。
+         *     ``suggested_level`` 的含义不变：「证据已够、但被冷却期或置信度挡住的下一个学段」，
+         *     供前端显示「将在下一轮生效」。
          */
         get: operations["grade_signals_api_grade_signals__student_id__get"];
         put?: never;
@@ -159,6 +184,9 @@ export interface paths {
         /**
          * 当前学段状态（轻量）
          * @description 桌面端每轮取「当前学段」的入口（不含信号列表，载荷最小）。
+         *
+         *     当前学段可能是**推断引擎自动写入**的，也可能是**学生手动设定**的
+         *     （后者 ``source="explicit"``、``cooldownRemainingTurns`` 更长）。
          *
          *     学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，
          *     而不是 404 —— 学段推断从第一轮就要开始工作。
@@ -223,6 +251,59 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/graph/overview/{grade_level}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 某学段依赖图全览（学习地图用）
+         * @description 把某学段的知识点与**两端都在本学段内**的依赖边整张吐出来。
+         *
+         *     ★ 为什么按学段切片而不是给全图：学习地图是要**看**的，一次画 33 个节点还行，
+         *       跨学段全画（含边）会变成一团糊。跨学段的边在这里被**刻意丢掉** ——
+         *       它们在单学段视图里没有落点，传出去只会画出悬空的线。
+         *
+         *     ★ ``layer``（分层）由服务端算：前端拿到的是一张已排好层次的图，
+         *       不必自己再做一次拓扑排序（两处各算一遍必然不一致）。算法见 ``_assign_layers``。
+         *
+         *     - 学段名非法 → **422**；知识库缺失 → **503**（与章节接口同一口径）。
+         */
+        get: operations["graph_overview_api_graph_overview__grade_level__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/knowledge/chapters/{grade_level}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 列出某学段的全部章节（可选带该学生的掌握进度）
+         * @description 按学段列出章节，顺序**就是教材顺序**（见 ``kb.chapters_by_grade`` 的排序注释）。
+         *
+         *     - 学段名非法 → **422**（不回空清单：空清单看起来像「这个学段没编教材」）；
+         *     - 知识库缺失 → **503**（可读中文：先跑 ``scripts/build_kb.py``）；
+         *     - 带 ``student_id`` 但该生还没有进度行 → 计数为 0，**不报错**（新学生是正常状态）。
+         */
+        get: operations["list_chapters_api_knowledge_chapters__grade_level__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/profile/{student_id}": {
         parameters: {
             query?: never;
@@ -244,6 +325,49 @@ export interface paths {
          */
         get: operations["student_profile_api_profile__student_id__get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/chapter": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 当前教材章节
+         * @description 读学生当前在学的章节（``chapterTitle`` 为空串 = 未选择）。
+         *
+         *     - ``studentId`` 非法 → 422（它会被拼进文件系统路径）；
+         *     - 学生行不存在 → **自动建行**（冷启动，见 :func:`_ensure_student_level`），
+         *       **不 404**：章节指示器在全新机器上要能显示「未选择章节」。
+         *       因此本端点对**全新学生**是「建行 + 读」，对已存在的学生才是纯读。
+         *     - 读库失败 → 503（可读中文）。
+         */
+        get: operations["read_chapter_api_profile__student_id__chapter_get"];
+        /**
+         * 设定或清除当前教材章节
+         * @description 设定/清除当前章节（**学生显式选择的唯一落点**）。
+         *
+         *     规则：
+         *
+         *     - ``chapterTitle`` 为空串 → **清除**（写 NULL，回到「不限章节，自由问答」）；
+         *       清除**不需要 kb**（清掉一个值不需要先查清单）。
+         *     - 非空 → 必须命中该生**当前学段**的章标题（清单来自 ``kb.sqlite``），
+         *       不在清单里 → **422**（否则 Prompt 里会出现一本不存在的教材）；
+         *     - kb 不可用且要设非空标题 → **503**（提示 ``build_kb``，**不猜、不静默接受**）。
+         *
+         *     ★ **不做 SQL 硬过滤**：章节是软偏好，检索契约（``RagSearchRequest``）一个字没改，
+         *       学生选了第 4 章之后再问第 9 章的内容，``rag_search`` 照常检索。
+         *     ★ 学段一变，章节由 ``app/grade/rules.py`` 清空（那本教材已经不存在了）——
+         *       本端点**不负责**这件事，也不要在读的时候「顺手修正」。
+         */
+        put: operations["write_chapter_api_profile__student_id__chapter_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -274,6 +398,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/profile/{student_id}/preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 写入学习偏好（兴趣 / 讲解方式 / 节奏）
+         * @description 写一条学习偏好（``profile_pref`` 的**唯一生产写入口**）。
+         *
+         *     需求要求「根据答题表现**和兴趣偏好**动态调整后续推荐」：「答题表现」那条链路
+         *     （判分 → 掌握度 → 推荐）本就是通的，而「兴趣偏好」此前是条断头路 ——
+         *     ``profile_pref`` 表建好了、``GET /profile`` 也读它，但**生产代码从不写**。
+         *     本端点补上这一半：写入的偏好会经 ``GET /profile`` 进入画像，
+         *     再由 ``get_student_profile`` Tool 拼进每轮 Prompt。
+         *
+         *     ★ **为什么是 PUT 而不是 POST**：单键 upsert 是**幂等**操作 —— 同一个 key 提交两次，
+         *       库里的状态完全相同（``key`` 是主键，第二次是覆盖）。POST 会暗示「追加一条记录」，
+         *       与实际语义正好相反，调用方会以为「多写几条偏好更完整」而反复 POST。
+         *
+         *     ★ **为什么键是封闭词表**（``contracts.PreferenceKey``：``interest | explain_style |
+         *       pace | note``）：见该 Literal 的注释 —— 关键是「写掌握度」在**类型层面**就不可能。
+         *       掌握度是判分规则算出来的客观量，一旦模型能通过偏好通道写它，
+         *       就会出现「模型觉得学生懂了就改分」。这类多写路径的教训见 D-020。
+         *
+         *     ★ **为什么不改 ``StudentProfile`` 的形状**：偏好已经在该模型的 ``preferences`` 里，
+         *       本端点只写不读；出参复用 :class:`LearningEventAck`（``{ok: true}``）。
+         *
+         *     冷启动兜底与 ``POST /events`` **完全一致**（学生行不存在时建一条）——
+         *     两条写路径必须同口径，否则学生会遇到「写记录能用、写偏好 404」这类无谓差异。
+         */
+        put: operations["update_preference_api_profile__student_id__preferences_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/profile/{student_id}/recommendation": {
         parameters: {
             query?: never;
@@ -293,6 +458,36 @@ export interface paths {
          *     回 404 会让前端显示一个空白页 —— 而冷启动必须能用是票 15/20 的明确验收项。
          */
         get: operations["student_recommendation_api_profile__student_id__recommendation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/report": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 学习报告（周窗口活动量 + 掌握度 + 闯关 + 章节 + 学段轨迹）
+         * @description 「这一周学得怎么样」的**唯一出口**（学生与家长看的是同一份）。
+         *
+         *     ★ 四张表在这里汇合：``mastery``（会什么）、``learning_history``（做了多少）、
+         *       ``progress``（闯到哪关了）、``grade_history``（学段怎么变的）。
+         *       此前它们各有零散出口，但没有一个「合起来看」的地方 ——
+         *       而 ``grade_history`` 的表注释里本来就写着「家长报告」，这是补上那处设计意图。
+         *
+         *     ★ **连续天数在服务端算**（``_streak_days``）：它跨「整段历史」而不是时间窗，
+         *       前端拿到的是已经算好的结论；同时前端也拿到 ``daily`` 明细，可以自己铺满整周。
+         *
+         *     - 学生不存在 → **404**；``days`` 越界 → **422**；库异常 → **503**。
+         */
+        get: operations["learning_report_api_profile__student_id__report_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -394,6 +589,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/quiz/mistakes/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 错题本（按知识点聚合，含题干前 120 字）
+         * @description 把 ``is_correct = 0`` 的学习记录按知识点聚合成错题。
+         *
+         *     - 学生不存在 → **404**（没有学习记录与「从没错过」是两件事，前端要能分开显示）；
+         *     - 学生 id 非法 → **422**；库读写失败 → **503**。
+         *
+         *     ★ ``without_stem`` 显式告诉前端「还有几条错题没有题干记录」：
+         *       QA / 编程轨答错时 ``question`` 是空串（那一轨不写题干），
+         *       静默丢掉的话，学生会觉得「我明明错过它，这里怎么没有」。
+         */
+        get: operations["list_mistakes_api_quiz_mistakes__student_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/quiz/progress/{student_id}": {
         parameters: {
             query?: never;
@@ -464,7 +686,8 @@ export interface paths {
          * @description 按学段检索教材片段。
          *
          *     :param body: ``{query, gradeLevel, topK?, allowCompat?, includeExpansion?}``
-         *         - ``gradeLevel``：学生当前学段（**显式选择优先**），学段隔离在 SQL 层按它执行；
+         *         - ``gradeLevel``：学生**当前生效**的学段（由服务端推断，见 ``app/grade/rules.py``；
+         *           学生端只读、**没有人工选择入口**），学段隔离在 SQL 层按它执行；
          *         - ``allowCompat``：是否允许取用更低学段的内容（命中标 ``compat=true``）；
          *         - ``includeExpansion``：是否把依赖图里的前置知识点补进上下文（有数量上限）。
          *
@@ -494,9 +717,43 @@ export interface paths {
          *     ``apiKey`` 提交空串或掩码（``…abcd``）**不会**抹掉已存 Key —— 用户没动这一栏时
          *     前端会把读回来的掩码原样提交；只有 ``clearApiKey=true`` 才删除。
          *     两栏都可省略（= 不动那一栏），但至少要提交一栏。
+         *
+         *     ★ **栏内也是「省略即保留」**：`PUT {"llm": {"baseUrl": "…"}}` 只改地址，
+         *     不会顺手重置 provider / 模型 / Key（见 `apply_llm` / `apply_embedding`）。
          */
         put: operations["update_settings_api_settings_put"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 拉取某个地址可见的模型清单（设置页的「拉取模型」）
+         * @description 拉取 ``GET {baseUrl}/models`` 的模型 id 清单（**设置页填 ModelID 的辅助**）。
+         *
+         *     与 ``/settings/probe`` 的分工：
+         *       - ``probe``  回答「这组配置**能不能用**」（成功/失败 + 可读原因）；
+         *       - ``models`` 回答「这个地址**有哪些模型可选**」（清单）。
+         *     两者共用同一套外呼实现（``ProbeTransport`` 注入点也相同），**不新增任何依赖**。
+         *
+         *     ``ok=False``（连不上 / 鉴权失败 / 端点没有模型清单）**不是致命错误**：
+         *     调用方（主进程）会把 Pi 内置预设清单与这里的实时结果合并后交给设置页，
+         *     所以这里失败时只需要给一句可读原因，界面照样能选到内置模型的候选。
+         *
+         *     ★ 与探测**共用同一条凭据边界**（`_resolve_probe_credentials`）：换了地址就不复用已存 Key。
+         */
+        post: operations["list_provider_models_api_settings_models_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -522,10 +779,45 @@ export interface paths {
          *     先原样探测（探测的就是「保存后会用的那个地址」），只有在**路径不存在**（404/405）时才拿
          *     另一种写法做一次诊断，并在失败原因里明确告诉用户该改成哪一个。
          *
-         *     探测的是**提交的候选配置**（先探测、满意再保存）；Key 提交掩码/空串时用已存 Key。
+         *     探测的是**提交的候选配置**（先探测、满意再保存）：未提交的字段回落到已存值
+         *     （与 `PUT /api/settings` 同一条「省略即保留」规则）。
+         *
+         *     ★★ **已存的明文 Key 只允许用于保存它的那个地址**（见 `_resolve_probe_credentials`）：
+         *     Key 提交掩码/空串时**不是无条件复用**，只在提交的地址与已存地址一致时才复用；
+         *     换了地址又没有提交新 Key，直接回一句可读中文而**不发出任何请求**。
          *     **探测失败不阻塞保存**（断网/离线演示仍要能存配置），失败原因一律是可读中文。
          */
         post: operations["probe_settings_api_settings_probe_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * ★ 主进程专用：真正生效的那份 LLM 配置（**含明文 Key**）
+         * @description ★★ **只给主进程用**：Pi 建会话 / 热切换时需要**明文 Key**。
+         *
+         *     ⚠️ 为什么必须有这条接口：Pi 在进程外无法读 ``config.json`` 的语义
+         *     （原子写、损坏备份、snake/camel 双写容忍都在本模块），而设置页的读接口
+         *     恒回掩码。没有它，「设置页改了配置 → Pi 用新配置」这条链路就断了
+         *     （实测：改完设置重启，Pi 仍用旧的 ``models.json``）。
+         *
+         *     ⚠️ **安全边界**（三条一起才成立，缺一不可）：
+         *       1. 与其它 ``/api/*`` 一样需要 ``X-Auth-Token``（token 只在主进程内存里）；
+         *       2. 渲染进程**没有**对应 IPC 通道、preload **没有**对应方法（架构守卫断言）；
+         *       3. 主进程拿到后只经 ``setRuntimeApiKey`` 放进内存，**不落盘、不进日志**。
+         */
+        get: operations["read_runtime_config_api_settings_runtime_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -607,19 +899,115 @@ export interface components {
             source: "template" | "generated";
         };
         /**
+         * ChapterInfo
+         * @description 一章教材（四学段共 24 章，来自知识点 front-matter 的 ``chapter_title``）。
+         */
+        ChapterInfo: {
+            /** Chaptertitle */
+            chapterTitle: string;
+            /**
+             * Kpcount
+             * @default 0
+             */
+            kpCount: number;
+            /** Kpids */
+            kpIds?: string[];
+            /**
+             * Masteredcount
+             * @default 0
+             */
+            masteredCount: number;
+        };
+        /**
+         * ChapterListResponse
+         * @description ``GET /api/knowledge/chapters/{grade_level}``：某学段的章节清单。
+         */
+        ChapterListResponse: {
+            /** Chapters */
+            chapters?: components["schemas"]["ChapterInfo"][];
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /**
+             * Withprogress
+             * @default false
+             */
+            withProgress: boolean;
+        };
+        /**
+         * ChapterProgress
+         * @description 一章的闯关进度（把 ``progress`` 按 ``chapter_title`` 聚合）。
+         */
+        ChapterProgress: {
+            /** Chaptertitle */
+            chapterTitle: string;
+            /**
+             * Kpcount
+             * @default 0
+             */
+            kpCount: number;
+            /**
+             * Masteredcount
+             * @default 0
+             */
+            masteredCount: number;
+            /**
+             * Quizzedcount
+             * @default 0
+             */
+            quizzedCount: number;
+        };
+        /**
+         * ChapterStateOut
+         * @description ``GET`` / ``PUT /api/profile/{student_id}/chapter``：当前章节状态（**读写同形**）。
+         *
+         *     ``chapter_title`` 的语义统一为「**空串 = 未选择**」（不是 ``None``）——
+         *     前端只需要处理一种空值形态，少一个「空串还是 null」的分支。
+         */
+        ChapterStateOut: {
+            /**
+             * Chaptertitle
+             * @default
+             */
+            chapterTitle: string;
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+        };
+        /**
+         * ChapterUpdateRequest
+         * @description ``PUT /api/profile/{student_id}/chapter``：设定/清除当前章节。
+         *
+         *     ★ **章节是软偏好，不是过滤条件**：它只会出现在画像 Prompt 里（「优先围绕本章」），
+         *       **不改 ``RagSearchRequest``、不做 SQL 硬过滤** —— 学生问别的章节照常回答。
+         *     ★ **为什么是学生显式选择而不是模型写**：与 ``PreferenceKey`` 同一条纪律 ——
+         *       把「学生在学哪一章」交给模型猜，会同时污染 Prompt 与学习地图；
+         *       而且模型写是**第二处真相**（学生自己点的那一下才是最权威的）。
+         */
+        ChapterUpdateRequest: {
+            /**
+             * Chaptertitle
+             * @default
+             */
+            chapterTitle: string;
+        };
+        /**
          * ChatRequest
          * @description 一轮对话请求（**渲染进程 → 主进程 IPC**，不是 HTTP 端点）。
          *
          *     §6.3 v2 变更：``POST /api/chat/stream`` 已从 Python 侧移除，对话改由主进程的
          *     Pi Agent 处理；这里冻结的是 IPC 入参形状，供票 05/06 的主进程处理器与前端共用。
          *     ``requestId`` 由**主进程**生成并贯穿一轮（§9.4），所以不在请求体里。
+         *
+         *     ⚠️ **没有学段字段**（AGENTS §5.1 / D-020）：学段完全由系统自动推断、自动生效，
+         *     请求里带学段与硬约束直接冲突。历史上这里有过 ``grade_level: GradeLevel``
+         *     （必填），与它自己的注释正好相反 —— 已删除，且测试钉住「不许再加回来」。
          */
         ChatRequest: {
-            /**
-             * Gradelevel
-             * @enum {string}
-             */
-            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
             /**
              * Sessionid
              * @default null
@@ -755,10 +1143,38 @@ export interface components {
             level: 1 | 2 | 3;
         };
         /**
+         * DailyActivity
+         * @description 某一天的活动量（按**本地日期**聚合，不是 UTC —— 跨零点学习不该被算到前一天）。
+         */
+        DailyActivity: {
+            /**
+             * Correctcount
+             * @default 0
+             */
+            correctCount: number;
+            /**
+             * Count
+             * @default 0
+             */
+            count: number;
+            /** Day */
+            day: string;
+            /**
+             * Quizcount
+             * @default 0
+             */
+            quizCount: number;
+        };
+        /**
          * Degraded
          * @enum {string}
          */
         Degraded: "vector" | "cloud" | "fts" | "outline";
+        /**
+         * DepDirection
+         * @enum {string}
+         */
+        DepDirection: "successor" | "prerequisite";
         /**
          * DepNode
          * @description 依赖图查询结果条目（``GET /api/graph/deps/{kp_id}``）。
@@ -800,6 +1216,11 @@ export interface components {
             weight: number;
         };
         /**
+         * DepRelation
+         * @enum {string}
+         */
+        DepRelation: "prerequisite" | "related";
+        /**
          * EmbeddingConfig
          * @description 嵌入配置的**出参形态**（§6.2）。``mode="none"`` 表示不用嵌入（检索走 FTS5 兜底）。
          */
@@ -828,6 +1249,10 @@ export interface components {
         /**
          * EmbeddingConfigIn
          * @description 嵌入配置的**入参形态**（``mode="cloud_api"`` 时才有 base_url/api_key/model_id）。
+         *
+         *     ★ **四个字段都是「省略即保留」**（与 :class:`LlmConfigIn` 同一条规则）：
+         *     只提交某一个字段（例如只换 API Key）不会顺手把 ``mode`` 退回 ``local_fastembed``，
+         *     也不会清掉云端地址与模型 ID。
          */
         EmbeddingConfigIn: {
             /**
@@ -844,12 +1269,8 @@ export interface components {
             clearApiKey: boolean;
             /** Haskey */
             hasKey?: boolean | null;
-            /**
-             * Mode
-             * @default local_fastembed
-             * @enum {string}
-             */
-            mode: "local_fastembed" | "cloud_api" | "none";
+            /** Mode */
+            mode?: ("local_fastembed" | "cloud_api" | "none") | null;
             /** Modelid */
             modelId?: string | null;
         };
@@ -884,6 +1305,14 @@ export interface components {
         /**
          * GradeHistoryEntry
          * @description ``grade_history`` 的一行（学段变化轨迹）。
+         *
+         *     ★ **为什么它在 ``contracts.py`` 而不在 ``routes/grade.py``**：学习报告的
+         *       ``GET /api/profile/{id}/report`` 要**复用同一份**轨迹模型。留在路由文件里的话，
+         *       报告轨只能「再定义一个同形模型」——那就违背了「pydantic 是唯一契约来源」，
+         *       两边的字段迟早分叉（``routes/grade.py`` 的模块注释原本就把这条列为待补项）。
+         *     ★ 冷启动基线那行 ``from_level`` 为空（学生还没有「上一段」，不是从一个学段变过来的）。
+         *     ★ **手动覆盖重复选同一学段时也会写一行**（``from_level == to_level``，
+         *       ``source="explicit"``）：那一行不改变学段，但它是「学生确认过」的留痕与冷却锚点。
          */
         GradeHistoryEntry: {
             /**
@@ -908,6 +1337,10 @@ export interface components {
         /**
          * GradeHistoryResponse
          * @description ``grade_history`` 轨迹（报告叙事：「第 3 轮调为小学低年级（0.75）」）。
+         *
+         *     ★ ``entries`` 用契约里的 :class:`app.contracts.GradeHistoryEntry`：学习报告的
+         *       ``/api/profile/{id}/report`` 要给出**同一份**轨迹，两处各定义一个同形模型迟早分叉
+         *       （这原是本文件模块头「需要 contracts.py 补的模型」第 2 条，现已兑现）。
          */
         GradeHistoryResponse: {
             /**
@@ -925,6 +1358,54 @@ export interface components {
          * @enum {string}
          */
         GradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+        /**
+         * GradeOverrideRequest
+         * @description ``POST /api/grade/override/{student_id}`` 的请求体。
+         *
+         *     ★★ **刻意不提供 ``note``（留痕说明）字段** —— 这是取舍，不是省事：
+         *     ``grade_history`` 只有 ``(ts, turn, from_level, to_level, source, confidence)``
+         *     这几列（"不许新增表或列" 是硬约束），多出来的文本**没有地方落盘**；
+         *     退而求其次写进日志又违反「日志里不出现学生文本」的合规要求。
+         *     收下一个**写不进去**的字段等于让接口撒谎：调用方以为自己留了痕，其实内容被静默丢弃，
+         *     之后排查时还会以为「日志里没有是因为没填」。宁可不提供。
+         */
+        GradeOverrideRequest: {
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+        };
+        /**
+         * GradeOverrideResponse
+         * @description 学生手动设定学段的结果（**立即生效**，不依赖任何信号）。
+         */
+        GradeOverrideResponse: {
+            /** Changed */
+            changed: boolean;
+            /** Cooldownremainingturns */
+            cooldownRemainingTurns: number;
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /**
+             * Previouslevel
+             * @enum {string}
+             */
+            previousLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /**
+             * Source
+             * @default explicit
+             * @constant
+             */
+            source: "explicit";
+            /** Studentid */
+            studentId: string;
+            /** Turn */
+            turn: number;
+        };
         /**
          * GradeProposalInput
          * @description 第二层 LLM 的**提议**（``{suggestedGrade, confidence}``）。
@@ -963,12 +1444,19 @@ export interface components {
             value: number;
         };
         /**
+         * GradeSignalType
+         * @enum {string}
+         */
+        GradeSignalType: "vocab" | "depth" | "quiz_perf" | "meta_cognition";
+        /**
          * GradeSignals
-         * @description ``GET /api/grade/signals/{student_id}``：学段信号与推断建议。
+         * @description ``GET /api/grade/signals/{student_id}``：学段信号与推断检视面。
          *
-         *     ⚠️ **自动推断只写「建议」，不直接改**（AGENTS §5.1）：``suggested_level`` 供前端弹
-         *     达到阈值时**自动生效**并写 `grade_history(source="inferred")`；
-         *     学生端只读展示当前学段，**没有选择器、没有确认动作**（§10.3）。
+         *     ⚠️ 学段**默认由系统自动推断、自动生效**，学生也可以**手动覆盖**：
+         *     规则引擎（``app/grade/rules.py``）达到阈值时会直接改写 ``student.grade_level``
+         *     并写 ``grade_history(source="inferred")``；学生手动切换则写 ``source="explicit"``
+         *     并进入更长的冷却（``MANUAL_COOLDOWN_TURNS``）。``suggested_level`` 只是
+         *     **本轮检视用的建议值**（置信度 < 0.6 时 ``None``），**不是**等待确认的动作入口。
          */
         GradeSignals: {
             /**
@@ -986,9 +1474,9 @@ export interface components {
             /**
              * Source
              * @default inferred
-             * @constant
+             * @enum {string}
              */
-            source: "inferred";
+            source: "inferred" | "explicit";
             /** Studentid */
             studentId: string;
             /** Suggestedlevel */
@@ -1104,6 +1592,79 @@ export interface components {
             /** Turns */
             turns: components["schemas"]["GradeTurnInput"][];
         };
+        /**
+         * GraphEdge
+         * @description 一条依赖边。**``from`` 是前置、``to`` 是后继**（全项目一致，方向搞反是静默错）。
+         */
+        GraphEdge: {
+            /** Fromkpid */
+            fromKpId: string;
+            /**
+             * Relation
+             * @default prerequisite
+             * @enum {string}
+             */
+            relation: "prerequisite" | "related";
+            /** Tokpid */
+            toKpId: string;
+            /**
+             * Weight
+             * @default 1
+             */
+            weight: number;
+        };
+        /**
+         * GraphNode
+         * @description 依赖图里的一个知识点（学习地图的节点）。
+         */
+        GraphNode: {
+            /**
+             * Chaptertitle
+             * @default
+             */
+            chapterTitle: string;
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Kpid */
+            kpId: string;
+            /**
+             * Layer
+             * @default 0
+             */
+            layer: number;
+            /**
+             * Mastered
+             * @default false
+             */
+            mastered: boolean;
+            /** Name */
+            name: string;
+        };
+        /**
+         * GraphOverview
+         * @description ``GET /api/graph/overview/{grade_level}``：某学段依赖图的**全览**（学习地图用）。
+         *
+         *     ★ 与 ``/api/graph/deps/{kp_id}``（单点邻域）的分工：那个接口回答「这个点的前后是什么」，
+         *       这个回答「整张图长什么样」。**遍历逻辑仍只有一份**（``app.knowledge.deps``），
+         *       本模型只是它的出参形状。
+         *
+         *     ⚠️ ``edges`` 只包含**两端都在 ``nodes`` 里**的边：跨学段的边在单学段视图里没有落点，
+         *       画不出来（传进来只会画出悬空的线）。
+         */
+        GraphOverview: {
+            /** Edges */
+            edges?: components["schemas"]["GraphEdge"][];
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Nodes */
+            nodes?: components["schemas"]["GraphNode"][];
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -1137,7 +1698,11 @@ export interface components {
         LearningActivity: "qa" | "animation" | "coding" | "quiz";
         /**
          * LearningEventAck
-         * @description 学习记录写入的回执（§6.3：``{ok}``）。
+         * @description 写入类端点的回执（§6.3：``{ok}``）：学习记录回流与学习偏好写入**共用同一形状**。
+         *
+         *     ★ 偏好写入**复用**本模型而不是再造一个等价的 ``PreferenceAck``：两者的出参形状
+         *       一字不差（``{ok: true}``），同形状两个模型名只会让 OpenAPI/TS 多一个语义重复的
+         *       类型、让前端多写一个分支去认同一个 ``{ok}``。**新增写入型端点时也复用它。**
          */
         LearningEventAck: {
             /**
@@ -1177,6 +1742,77 @@ export interface components {
             sessionId?: string | null;
         };
         /**
+         * LearningReport
+         * @description ``GET /api/profile/{student_id}/report``：学习报告（学生 / 家长）。
+         *
+         *     ★ **四张表都在里面**（``mastery`` / ``learning_history`` / ``progress`` / ``grade_history``），
+         *       此前它们各自只有零散出口，没有一个「这一周学得怎么样」的汇合点。
+         *     ★ ``grade_history`` 直接复用 :class:`GradeHistoryEntry`（见该模型的注释）。
+         */
+        LearningReport: {
+            /** Badges */
+            badges?: string[];
+            /** Chapters */
+            chapters?: components["schemas"]["ChapterProgress"][];
+            /** Daily */
+            daily?: components["schemas"]["DailyActivity"][];
+            /**
+             * Days
+             * @default 7
+             */
+            days: number;
+            /**
+             * Generatedat
+             * @default 0
+             */
+            generatedAt: number;
+            /** Gradehistory */
+            gradeHistory?: components["schemas"]["GradeHistoryEntry"][];
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Mastery */
+            mastery?: components["schemas"]["Mastery"][];
+            /**
+             * Nickname
+             * @default
+             */
+            nickname: string;
+            /**
+             * Quizcorrect
+             * @default 0
+             */
+            quizCorrect: number;
+            /**
+             * Quiztotal
+             * @default 0
+             */
+            quizTotal: number;
+            /** Stagecounts */
+            stageCounts?: {
+                [key: string]: number;
+            };
+            /**
+             * Streakdays
+             * @default 0
+             */
+            streakDays: number;
+            /** Studentid */
+            studentId: string;
+            /**
+             * Todaystudied
+             * @default false
+             */
+            todayStudied: boolean;
+            /**
+             * Totalactivities
+             * @default 0
+             */
+            totalActivities: number;
+        };
+        /**
          * LlmConfig
          * @description LLM 配置的**出参形态**（发给渲染进程 / 与磁盘一致的只读视图）。
          *
@@ -1192,7 +1828,7 @@ export interface components {
             apiKey: string;
             /**
              * Baseurl
-             * @default https://api.deepseek.com/v1
+             * @default https://api.deepseek.com
              */
             baseUrl: string;
             /**
@@ -1202,9 +1838,14 @@ export interface components {
             hasKey: boolean;
             /**
              * Modelid
-             * @default deepseek-chat
+             * @default deepseek-v4-flash
              */
             modelId: string;
+            /**
+             * Providerid
+             * @default deepseek
+             */
+            providerId: string;
             /**
              * Providername
              * @default DeepSeek
@@ -1215,6 +1856,12 @@ export interface components {
          * LlmConfigIn
          * @description LLM 配置的**入参形态**（``PUT /api/settings``）。
          *
+         *     ★ **字段级「省略即保留」**：除 ``api_key`` 外每个字段都是 ``X | None = None``，
+         *     **没提交**（或提交空白）就保留已存值，只有真提交了非空值才覆盖。
+         *     ⚠️ 这里**不许再出现出厂默认值**：`PUT {"llm": {"apiKey": "…"}}` 这种字段级局部提交
+         *     （设置页分栏保存 / 只换 Key）若被当成「未提交字段取默认值」，就会把用户自填的
+         *     校内网关静默换回 DeepSeek 默认值 —— 改一次 Key 丢一次配置。
+         *
          *     ``api_key`` 语义见模块头的「API Key 掩码语义」：
          *     空串/掩码/纯符号 = 保留已存值；明文 = 覆盖；``clear_api_key=true`` = 显式删除。
          */
@@ -1224,11 +1871,8 @@ export interface components {
              * @default
              */
             apiKey: string;
-            /**
-             * Baseurl
-             * @default https://api.deepseek.com/v1
-             */
-            baseUrl: string;
+            /** Baseurl */
+            baseUrl?: string | null;
             /**
              * Clearapikey
              * @default false
@@ -1236,11 +1880,53 @@ export interface components {
             clearApiKey: boolean;
             /** Haskey */
             hasKey?: boolean | null;
+            /** Modelid */
+            modelId?: string | null;
+            /** Providerid */
+            providerId?: string | null;
+            /** Providername */
+            providerName?: string | null;
+        };
+        /**
+         * LlmRuntimeConfig
+         * @description ★★ **主进程专用**：真正生效的那份 LLM 配置（**含明文 Key**）。
+         *
+         *     ⚠️⚠️ 与 :class:`LlmConfig` 的关键差异：``api_key`` 在这里**是明文**。
+         *     它是「设置 → Pi」这条链路的唯一载体（Pi 需要明文 Key 才能发请求），
+         *     因此**只允许主进程取用**：
+         *
+         *     - 路由只有 ``GET /api/settings/runtime``，与其它 ``/api/*`` 一样需要 ``X-Auth-Token``；
+         *     - **渲染进程没有对应 IPC 通道、preload 也没有对应方法**（架构守卫会断言这一点）；
+         *     - 主进程拿到后**只经 ``setRuntimeApiKey`` 放进内存**，不落盘、不进日志。
+         *
+         *     ``repr=False`` 兜住「异常里打印 dataclass/model」这类常见事故。
+         */
+        LlmRuntimeConfig: {
+            /**
+             * Apikey
+             * @default
+             */
+            apiKey: string;
+            /**
+             * Baseurl
+             * @default https://api.deepseek.com
+             */
+            baseUrl: string;
+            /**
+             * Haskey
+             * @default false
+             */
+            hasKey: boolean;
             /**
              * Modelid
-             * @default deepseek-chat
+             * @default deepseek-v4-flash
              */
             modelId: string;
+            /**
+             * Providerid
+             * @default deepseek
+             */
+            providerId: string;
             /**
              * Providername
              * @default DeepSeek
@@ -1273,10 +1959,109 @@ export interface components {
             score: number;
         };
         /**
+         * MistakeItem
+         * @description 一条错题（按知识点聚合后的一条）。
+         *
+         *     ★★ **合规口径（两条，都是刻意的）**：
+         *       ① ``stem`` 来自 ``learning_history.question``，库里存的是**题干前 120 字**
+         *          （``routes/quiz.py`` 的 ``_record_attempt`` 写入 ``stem[:120]``）——题干是题目本身，
+         *          **不是学生原话**；学生作答与模型回答一律不入库（§8.1 合规红线），
+         *          所以这个模型**结构上就没有**「你的答案」字段，不是忘了加。
+         *       ② **绝不 join ``generated_question`` 取完整题干**：那张表带 ``reference_answer``（标准答案），
+         *          把它读进对外响应会直接踩答案泄漏红线（``INTERNAL_MODELS`` / 答案属性白名单都在守这条）。
+         *          120 字足够让学生认出「是这道题」，而认出之后要的是「再练一遍」而不是看答案。
+         */
+        MistakeItem: {
+            /**
+             * Chaptertitle
+             * @default
+             */
+            chapterTitle: string;
+            /** Kpid */
+            kpId: string;
+            /**
+             * Kpname
+             * @default
+             */
+            kpName: string;
+            /**
+             * Lastqid
+             * @default
+             */
+            lastQid: string;
+            /**
+             * Lastwrongat
+             * @default 0
+             */
+            lastWrongAt: number;
+            /**
+             * Stem
+             * @default
+             */
+            stem: string;
+            /**
+             * Wrongcount
+             * @default 0
+             */
+            wrongCount: number;
+        };
+        /**
+         * MistakeListResponse
+         * @description ``GET /api/quiz/mistakes/{student_id}``：错题本（按知识点聚合）。
+         */
+        MistakeListResponse: {
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Items */
+            items?: components["schemas"]["MistakeItem"][];
+            /** Studentid */
+            studentId: string;
+            /**
+             * Totalwrong
+             * @default 0
+             */
+            totalWrong: number;
+            /**
+             * Withoutstem
+             * @default 0
+             */
+            withoutStem: number;
+        };
+        /**
          * PayloadKind
          * @enum {string}
          */
         PayloadKind: "animation" | "coding" | "quiz";
+        /**
+         * PreferenceKey
+         * @enum {string}
+         */
+        PreferenceKey: "interest" | "explain_style" | "pace" | "note";
+        /**
+         * PreferenceUpdateRequest
+         * @description ``PUT /api/profile/{student_id}/preferences``：写一条学习偏好。
+         *
+         *     值只承载**学习方式**（喜好领域 / 讲解方式 / 节奏 / 一句备注），不承载任何个人信息。
+         *
+         *     ★ **为什么是 PUT 而不是 POST**：单键 upsert 是**幂等**操作 —— 同一个 key 提交两次，
+         *       库里的状态完全相同（``profile_pref.key`` 是主键，第二次是覆盖而不是追加）。
+         *       POST 会暗示「新增一条记录」，与实际的覆盖语义正好相反。
+         *
+         *     ★ **为什么 key 是封闭词表**：见 :data:`PreferenceKey` —— 写掌握度/学段这类
+         *       由规则引擎算出来的客观量，在**类型层面**就不可能（不是靠调用方自觉）。
+         */
+        PreferenceUpdateRequest: {
+            /**
+             * Key
+             * @enum {string}
+             */
+            key: "interest" | "explain_style" | "pace" | "note";
+            /** Value */
+            value: string;
+        };
         /**
          * ProbeRequest
          * @description ``POST /api/settings/probe`` 的请求体（**票 07 实现探测**）。
@@ -1304,6 +2089,32 @@ export interface components {
          * @enum {string}
          */
         ProgressStage: "locked" | "learning" | "quizzed" | "mastered";
+        /**
+         * ProviderModelsRequest
+         * @description ``POST /api/settings/models`` 的请求体：**拉取某个地址可见的模型清单**。
+         *
+         *     与探测同一条设计：提交的是**候选配置**（先看模型清单、满意再保存），
+         *     ``api_key`` 允许是占位（== 用已存 Key），实现方用 :func:`resolve_api_key` 解析。
+         */
+        ProviderModelsRequest: {
+            llm: components["schemas"]["LlmConfigIn"];
+        };
+        /**
+         * ProviderModelsResult
+         * @description ``POST /api/settings/models`` 的响应。
+         *
+         *     ``ok=False`` 时 ``message`` 必须**可读**（与 ``ProbeResult`` 同一条口径）；
+         *     ``ok=True`` 时 ``models`` 是端点 ``/models`` 报出来的模型 id（可能为空列表 ——
+         *     有些兼容服务实现了端点但不返回清单，那不是错误）。
+         */
+        ProviderModelsResult: {
+            /** Message */
+            message: string;
+            /** Models */
+            models?: string[];
+            /** Ok */
+            ok: boolean;
+        };
         /**
          * QuizGradeRequest
          * @description ``POST /api/quiz/grade`` 的请求体：提交答案并批改（判分只走后端）。
@@ -1627,6 +2438,11 @@ export interface components {
             /** Createdat */
             createdAt: number;
             /**
+             * Currentchapter
+             * @default
+             */
+            currentChapter: string;
+            /**
              * Gradelevel
              * @enum {string}
              */
@@ -1879,6 +2695,41 @@ export interface operations {
             };
         };
     };
+    override_grade_api_grade_override__student_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GradeOverrideRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GradeOverrideResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     grade_signals_api_grade_signals__student_id__get: {
         parameters: {
             query?: never;
@@ -2012,6 +2863,74 @@ export interface operations {
             };
         };
     };
+    graph_overview_api_graph_overview__grade_level__get: {
+        parameters: {
+            query?: {
+                /** @description 带上就标注每个知识点是否已掌握（读该学生的 progress） */
+                student_id?: string | null;
+            };
+            header?: never;
+            path: {
+                grade_level: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GraphOverview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_chapters_api_knowledge_chapters__grade_level__get: {
+        parameters: {
+            query?: {
+                /** @description 带上就补每章的已掌握数（读该学生的 learning.db）；不带给纯教材清单 */
+                student_id?: string | null;
+            };
+            header?: never;
+            path: {
+                grade_level: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChapterListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     student_profile_api_profile__student_id__get: {
         parameters: {
             query?: never;
@@ -2030,6 +2949,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StudentProfile"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_chapter_api_profile__student_id__chapter_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChapterStateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    write_chapter_api_profile__student_id__chapter_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChapterUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChapterStateOut"];
                 };
             };
             /** @description Validation Error */
@@ -2078,6 +3063,41 @@ export interface operations {
             };
         };
     };
+    update_preference_api_profile__student_id__preferences_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreferenceUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LearningEventAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     student_recommendation_api_profile__student_id__recommendation_get: {
         parameters: {
             query?: {
@@ -2099,6 +3119,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RecommendationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    learning_report_api_profile__student_id__report_get: {
+        parameters: {
+            query?: {
+                /** @description 时间窗天数（按本地日期切天） */
+                days?: number;
+            };
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LearningReport"];
                 };
             };
             /** @description Validation Error */
@@ -2203,6 +3257,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["QuizResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_mistakes_api_quiz_mistakes__student_id__get: {
+        parameters: {
+            query?: {
+                /** @description 返回的知识点数上限 */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MistakeListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2374,6 +3462,39 @@ export interface operations {
             };
         };
     };
+    list_provider_models_api_settings_models_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ProviderModelsRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderModelsResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     probe_settings_api_settings_probe_post: {
         parameters: {
             query?: never;
@@ -2403,6 +3524,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_runtime_config_api_settings_runtime_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmRuntimeConfig"];
                 };
             };
         };

@@ -18,9 +18,10 @@
 - 设置：`LlmConfig` / `LlmConfigIn` / `SettingsResponse` / `SettingsUpdateRequest`，
   **含 API Key 掩码语义**（读回恒为掩码，占位值不覆盖已存 Key，清除必须显式；
   Key 不出现在 `repr()` 里）；
-- 学生与画像：`Student` / `Mastery` / `StudentProfile`；
+- 学生与画像：`Student` / `Mastery` / `StudentProfile` / `PreferenceUpdateRequest`
+  （学习偏好的**唯一写入口径**：封闭键词表 `PreferenceKey` + ≤ 40 字单行值）；
 - 检索与图：`Citation` / `RagSearchRequest` / `RagSearchResult` / `DepNode`；
-- 学段信号：`GradeSignal` / `GradeSignals`；
+- 学段信号：`GradeSignal` / `GradeSignals` / `GradeOverrideRequest` / `GradeOverrideResponse`；
 - 六个 Extension 的 payload（§6.5）：`AnimationPayload` / `CodeTemplate` / `CodingHint` /
   `CodeError` / `CodeEvaluation` / `QuizQuestion`(内部) / `QuizQuestionOut`(对外) /
   `QuizPayload` / `QuizResult`。
@@ -43,7 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic.alias_generators import to_camel
 
 # ---------------------------------------------------------------------------
-# 四学段（赛题硬要求，不要增删）
+# 四学段（需求硬性要求，不要增删）
 # ---------------------------------------------------------------------------
 GradeLevel = Literal["primary_low", "primary_high", "junior", "senior"]
 
@@ -89,20 +90,52 @@ DepDirection = Literal["successor", "prerequisite"]
 #: 学段判定信号四类（§10.2）。
 GradeSignalType = Literal["vocab", "depth", "quiz_perf", "meta_cognition"]
 
+#: ★ 允许写入的学习偏好键（**固定词表，不接受自由键**），对应 ``profile_pref.key``。
+#: 为什么必须是封闭集合：``profile_pref`` 的 ``key`` 是主键 → 总条数天然 ≤ 4，
+#: **不需要任何清理逻辑**；更重要的是「写掌握度」在类型层面就不可能
+#: —— 掌握度是判分规则算出来的客观量，一旦模型能写，就会出现
+#: 「模型觉得学生懂了就改分」的漏洞（D-020 那类多写路径的教训）。
+PreferenceKey = Literal["interest", "explain_style", "pace", "note"]
+
 #: 掌握度单次变化限幅（陷阱：不限幅则一次答题就从 0 到 1）。
 MASTERY_DELTA_LIMIT = 0.2
+
+#: 学习偏好值的长度上限（``profile_pref.value``）。
+#: ★ 40 字是**上限而不是建议**：偏好值会按 ``key=value`` 拼进**每一轮** Prompt，
+#:   一段长文会稳定挤掉真正相关的教材上下文（与画像里掌握度截断同一条纪律）。
+PREFERENCE_VALUE_MAX_CHARS = 40
+
+#: 章标题长度上限（``student.current_chapter`` / ``ChapterUpdateRequest.chapter_title``）。
+#: ★ 与桌面端 ``study/chapter.ts`` 的 ``readChapterTitle`` 的 80 **同一个数**：
+#:   学生当前章节会作为**软偏好**拼进每一轮 System Prompt（画像块），
+#:   所以它同样是「上限而不是建议」—— 一段长文会稳定挤掉教材上下文。
+CHAPTER_TITLE_MAX_CHARS = 80
 
 # ---------------------------------------------------------------------------
 # 设置默认值（§6.2 的 BaseURL 规范化约定）
 #
-# 默认填 `https://api.deepseek.com/v1`（OpenAI 兼容习惯）；
-# Pi 内置 DeepSeek provider 用的是 `https://api.deepseek.com`（**无 /v1**），
-# 两种形式都要能连通 —— 所以这里**不自动补 /v1**，只在保存/探测时如实回显结果（票 07）。
-# 默认值只是「设置页初始值」，**不得写死供应商**：四项必须可改（赛题硬要求）。
+# ★ 默认值**必须与 Pi 内置 provider 目录一字不差**，否则首轮对话直接抛
+#   「Pi 里找不到模型」：
+#     - `provider_id` = Pi 内置 provider 的 id（预设清单里的键，见
+#       `desktop/src/main/agent/pi-bootstrap.ts` 的 `builtinCatalog()`）；
+#     - `base_url`    = Pi 内置 DeepSeek provider 的 baseUrl，**无 /v1**；
+#     - `model_id`    = Pi 内置 deepseek 目录里**真实存在**的模型。
+#   ⚠️ 历史上这三项分别是 `DeepSeek` / `https://api.deepseek.com/v1` / `deepseek-chat`，
+#   后两者在 Pi 目录里都**不存在**（Pi 的 deepseek 只有 `deepseek-v4-flash` /
+#   `deepseek-v4-flash-vision-exp` / `deepseek-v4-pro`）—— 实测踩到过。
+#
+# `provider_id` 与 `provider_name` 的分工（不要合并）：
+#   - `provider_id`   进 Pi：决定用哪一份 provider 定义（认证方式 / 模型目录 / 协议）；
+#   - `provider_name` **只用于显示与排查**，填什么都行。
+#   自定义网关（需求要求「不写死供应商」）用 `provider_id="custom"` 这类自己的 id。
+#
+# 仍然**不自动补 /v1**：`https://api.deepseek.com` 与 `https://api.deepseek.com/v1`
+# 两种形式都可能连通，静默改写会重新制造「默认值能跑、用户改一下就连不上」（票 07 / D-022）。
 # ---------------------------------------------------------------------------
+DEFAULT_LLM_PROVIDER_ID = "deepseek"
 DEFAULT_LLM_PROVIDER_NAME = "DeepSeek"
-DEFAULT_LLM_BASE_URL = "https://api.deepseek.com/v1"
-DEFAULT_LLM_MODEL_ID = "deepseek-chat"
+DEFAULT_LLM_BASE_URL = "https://api.deepseek.com"
+DEFAULT_LLM_MODEL_ID = "deepseek-v4-flash"
 DEFAULT_EMBEDDING_MODEL_ID = "BAAI/bge-small-zh-v1.5"
 
 # ---------------------------------------------------------------------------
@@ -214,6 +247,9 @@ class LlmConfig(CamelModel):
     **请一律经 :meth:`from_plain` 构造**，别手拼 ``api_key=`` 把明文漏出去。
     """
 
+    #: ★ Pi 的 provider id（预设清单里的键）：决定用哪一份 provider 定义。
+    #: 与 ``provider_name``（纯显示）**分工不同，不要合并** —— 见模块顶部的默认值注释。
+    provider_id: str = DEFAULT_LLM_PROVIDER_ID
     provider_name: str = DEFAULT_LLM_PROVIDER_NAME
     base_url: str = DEFAULT_LLM_BASE_URL
     #: 掩码（``…abcd``）；空串 = 未配置。**不是明文**。
@@ -225,6 +261,7 @@ class LlmConfig(CamelModel):
     def from_plain(
         cls,
         *,
+        provider_id: str = DEFAULT_LLM_PROVIDER_ID,
         provider_name: str = DEFAULT_LLM_PROVIDER_NAME,
         base_url: str = DEFAULT_LLM_BASE_URL,
         api_key: str = "",
@@ -232,6 +269,7 @@ class LlmConfig(CamelModel):
     ) -> "LlmConfig":
         """由明文配置构造出参：明文**只**经由这里变成掩码。"""
         return cls(
+            provider_id=provider_id,
             provider_name=provider_name,
             base_url=base_url,
             api_key=mask_api_key(api_key),
@@ -243,15 +281,27 @@ class LlmConfig(CamelModel):
 class LlmConfigIn(CamelModel):
     """LLM 配置的**入参形态**（``PUT /api/settings``）。
 
+    ★ **字段级「省略即保留」**：除 ``api_key`` 外每个字段都是 ``X | None = None``，
+    **没提交**（或提交空白）就保留已存值，只有真提交了非空值才覆盖。
+    ⚠️ 这里**不许再出现出厂默认值**：`PUT {"llm": {"apiKey": "…"}}` 这种字段级局部提交
+    （设置页分栏保存 / 只换 Key）若被当成「未提交字段取默认值」，就会把用户自填的
+    校内网关静默换回 DeepSeek 默认值 —— 改一次 Key 丢一次配置。
+
     ``api_key`` 语义见模块头的「API Key 掩码语义」：
     空串/掩码/纯符号 = 保留已存值；明文 = 覆盖；``clear_api_key=true`` = 显式删除。
     """
 
-    provider_name: str = DEFAULT_LLM_PROVIDER_NAME
-    base_url: str = DEFAULT_LLM_BASE_URL
+    #: ★ **占位即保留**（``None``/空串 = 不改已存的 provider id），与嵌入那栏同一条规则：
+    #: 否则「只改 BaseURL 的局部 PUT」会把 provider 静默重置回默认值。
+    provider_id: str | None = None
+    #: 只用于显示；省略/空白 = 保留现值（**不回落** ``DEFAULT_LLM_PROVIDER_NAME``）。
+    provider_name: str | None = None
+    #: 省略 = 保留现值；提交了就照提交的用（**不自动补 `/v1`**，只做规范化）。
+    base_url: str | None = None
     #: ⚠️ 明文只在这里出现。``repr=False`` —— **Key 绝不出现在 repr()/str()/日志里**。
     api_key: str = Field(default="", repr=False)
-    model_id: str = DEFAULT_LLM_MODEL_ID
+    #: 省略/空白 = 保留现值（空 ModelID 调不通，不允许被静默清空）。
+    model_id: str | None = None
     #: 显式清除已存 Key 的唯一方式（只有它能让 Key 变成空）。
     clear_api_key: bool = False
     #: **只作出参回显，入参忽略**：设置页会把 `GET` 读到的整个对象改完再提交回来，
@@ -261,8 +311,8 @@ class LlmConfigIn(CamelModel):
 
     @field_validator("base_url")
     @classmethod
-    def _normalize_base_url(cls, value: str) -> str:
-        return normalize_base_url(value)
+    def _normalize_base_url(cls, value: str | None) -> str | None:
+        return None if value is None else normalize_base_url(value)
 
     @model_validator(mode="after")
     def _reject_conflicting_clear(self) -> "LlmConfigIn":
@@ -302,9 +352,15 @@ class EmbeddingConfig(CamelModel):
 
 
 class EmbeddingConfigIn(CamelModel):
-    """嵌入配置的**入参形态**（``mode="cloud_api"`` 时才有 base_url/api_key/model_id）。"""
+    """嵌入配置的**入参形态**（``mode="cloud_api"`` 时才有 base_url/api_key/model_id）。
 
-    mode: EmbeddingMode = "local_fastembed"
+    ★ **四个字段都是「省略即保留」**（与 :class:`LlmConfigIn` 同一条规则）：
+    只提交某一个字段（例如只换 API Key）不会顺手把 ``mode`` 退回 ``local_fastembed``，
+    也不会清掉云端地址与模型 ID。
+    """
+
+    #: 省略 = 保留已存的模式（**不回落** ``local_fastembed``）。
+    mode: EmbeddingMode | None = None
     base_url: str | None = None
     #: ⚠️ 明文只在这里出现（``repr=False``）。
     api_key: str = Field(default="", repr=False)
@@ -371,6 +427,52 @@ class ProbeResult(CamelModel):
     message: str
 
 
+class ProviderModelsRequest(CamelModel):
+    """``POST /api/settings/models`` 的请求体：**拉取某个地址可见的模型清单**。
+
+    与探测同一条设计：提交的是**候选配置**（先看模型清单、满意再保存），
+    ``api_key`` 允许是占位（== 用已存 Key），实现方用 :func:`resolve_api_key` 解析。
+    """
+
+    llm: LlmConfigIn
+
+
+class ProviderModelsResult(CamelModel):
+    """``POST /api/settings/models`` 的响应。
+
+    ``ok=False`` 时 ``message`` 必须**可读**（与 ``ProbeResult`` 同一条口径）；
+    ``ok=True`` 时 ``models`` 是端点 ``/models`` 报出来的模型 id（可能为空列表 ——
+    有些兼容服务实现了端点但不返回清单，那不是错误）。
+    """
+
+    ok: bool
+    models: list[str] = Field(default_factory=list)
+    message: str
+
+
+class LlmRuntimeConfig(CamelModel):
+    """★★ **主进程专用**：真正生效的那份 LLM 配置（**含明文 Key**）。
+
+    ⚠️⚠️ 与 :class:`LlmConfig` 的关键差异：``api_key`` 在这里**是明文**。
+    它是「设置 → Pi」这条链路的唯一载体（Pi 需要明文 Key 才能发请求），
+    因此**只允许主进程取用**：
+
+    - 路由只有 ``GET /api/settings/runtime``，与其它 ``/api/*`` 一样需要 ``X-Auth-Token``；
+    - **渲染进程没有对应 IPC 通道、preload 也没有对应方法**（架构守卫会断言这一点）；
+    - 主进程拿到后**只经 ``setRuntimeApiKey`` 放进内存**，不落盘、不进日志。
+
+    ``repr=False`` 兜住「异常里打印 dataclass/model」这类常见事故。
+    """
+
+    provider_id: str = DEFAULT_LLM_PROVIDER_ID
+    provider_name: str = DEFAULT_LLM_PROVIDER_NAME
+    base_url: str = DEFAULT_LLM_BASE_URL
+    #: ★ 明文（**只有这一处**）。绝不进日志、绝不发渲染进程。
+    api_key: str = Field(default="", repr=False)
+    has_key: bool = False
+    model_id: str = DEFAULT_LLM_MODEL_ID
+
+
 # ---------------------------------------------------------------------------
 # 学生与画像（§8.3 `student` / `mastery` / `profile_pref`）
 # ---------------------------------------------------------------------------
@@ -383,6 +485,12 @@ class Student(CamelModel):
     #: Unix 毫秒（与 JS ``Date.now()`` 同尺度，避免前端再做单位换算）
     created_at: int
     last_active_at: int
+    #: 学生当前学习的章节标题（= ``ChapterInfo.chapter_title``）；**空串 = 未选择**。
+    #: ★ 它是**软偏好**：只进画像 Prompt，**不进检索契约、不做 SQL 硬过滤**
+    #:   （学生问别的章节照常回答）。学段一变就清空 —— 那本教材已经不存在了。
+    #: ★ 写入口只有 ``PUT /api/profile/{student_id}/chapter``（学生显式选择）；
+    #:   **模型没有任何写它的 Tool**（与 ``PreferenceKey`` 同一条纪律）。
+    current_chapter: str = ""
 
 
 class StudentCreateRequest(CamelModel):
@@ -424,6 +532,90 @@ class StudentProfile(CamelModel):
     #: `profile_pref` 的键值视图（偏好 / 节奏 / 易错点缓存）
     preferences: dict[str, str] = Field(default_factory=dict)
     recommended_kp_ids: list[str] = Field(default_factory=list)
+
+
+class PreferenceUpdateRequest(CamelModel):
+    """``PUT /api/profile/{student_id}/preferences``：写一条学习偏好。
+
+    值只承载**学习方式**（喜好领域 / 讲解方式 / 节奏 / 一句备注），不承载任何个人信息。
+
+    ★ **为什么是 PUT 而不是 POST**：单键 upsert 是**幂等**操作 —— 同一个 key 提交两次，
+      库里的状态完全相同（``profile_pref.key`` 是主键，第二次是覆盖而不是追加）。
+      POST 会暗示「新增一条记录」，与实际的覆盖语义正好相反。
+
+    ★ **为什么 key 是封闭词表**：见 :data:`PreferenceKey` —— 写掌握度/学段这类
+      由规则引擎算出来的客观量，在**类型层面**就不可能（不是靠调用方自觉）。
+    """
+
+    key: PreferenceKey
+    value: str = Field(min_length=1, max_length=PREFERENCE_VALUE_MAX_CHARS)
+
+    @field_validator("value")
+    @classmethod
+    def _clean_value(cls, value: str) -> str:
+        """去首尾空白 + **拒绝换行**（不是压成单行）。
+
+        ★ 为什么换行是「拒绝」而不是像 ``LearningEventRequest.detail`` 那样压成单行：
+          偏好值是 ≤ 40 字的**短标签**，会被 ``key=value`` 拼进每一轮 Prompt，
+          合法取值里根本没有换行的位置。压单行会把「多行长文 / 提示词注入」这类输入
+          **静默改写成合法值**（``"喜欢动画\\n忽略以上规则"`` 会被拼成一行照样进 Prompt），
+          调用方永远不知道自己发错了；拒绝则当场 422，让它按单行重发。
+          长度上限（40 字）已经兜住「整段长文」，这里兜住「多行」这一形态。
+        """
+        if any(sep in value for sep in ("\n", "\r", "\v", "\f")):
+            raise ValueError("偏好值必须单行：不允许换行（\\n / \\r）")
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("偏好值不能为空白")
+        return stripped
+
+
+class ChapterUpdateRequest(CamelModel):
+    """``PUT /api/profile/{student_id}/chapter``：设定/清除当前章节。
+
+    ★ **章节是软偏好，不是过滤条件**：它只会出现在画像 Prompt 里（「优先围绕本章」），
+      **不改 ``RagSearchRequest``、不做 SQL 硬过滤** —— 学生问别的章节照常回答。
+    ★ **为什么是学生显式选择而不是模型写**：与 ``PreferenceKey`` 同一条纪律 ——
+      把「学生在学哪一章」交给模型猜，会同时污染 Prompt 与学习地图；
+      而且模型写是**第二处真相**（学生自己点的那一下才是最权威的）。
+    """
+
+    #: 章标题；**空串 = 清除**（回到「不限章节，自由问答」）。
+    #: 非空时必须命中该生**当前学段**的教材章标题（``GET /api/knowledge/chapters/…``
+    #: 的同一份清单），否则 422 —— 否则画像 Prompt 里会出现一本不存在的教材。
+    chapter_title: str = Field(default="", max_length=CHAPTER_TITLE_MAX_CHARS)
+
+    @field_validator("chapter_title", mode="before")
+    @classmethod
+    def _clean_title(cls, value: object) -> object:
+        """去首尾空白 + **拒绝换行**（不静默压平，与 ``PreferenceUpdateRequest`` 同一口径）。
+
+        ★ ``mode="before"`` 是有意的：先 ``strip`` 再让字段的 ``max_length`` 生效，
+          于是「首尾带空白的 80 字标题」是合法的，而「101 字的标题」照样 422。
+          写在 ``mode="after"`` 的话，``max_length`` 会先对未清洗的原值判长度。
+        ★ 换行检查在 **``strip`` 之前**做（检查 ``value`` 而不是 ``stripped``）：
+          ``strip()`` 会把结尾的 ``\\r`` 一并吃掉 —— 检查清洗后的值会让
+          ``"第2章\\r"`` 静默通过（实测踩到），而它与 ``"第2章\\n"`` 是同一种输入。
+        ★ 换行是**拒绝**而不是压平：它是「把长文/提示词注入塞进每轮 Prompt」的典型形态，
+          静默改写成合法值会让调用方永远不知道自己发错了。
+        """
+        if not isinstance(value, str):
+            return value
+        if any(sep in value for sep in ("\n", "\r", "\v", "\f")):
+            raise ValueError("章节名必须单行：不允许换行（\\n / \\r）")
+        return value.strip()
+
+
+class ChapterStateOut(CamelModel):
+    """``GET`` / ``PUT /api/profile/{student_id}/chapter``：当前章节状态（**读写同形**）。
+
+    ``chapter_title`` 的语义统一为「**空串 = 未选择**」（不是 ``None``）——
+    前端只需要处理一种空值形态，少一个「空串还是 null」的分支。
+    """
+
+    grade_level: GradeLevel
+    #: 章标题；空串 = 未选择
+    chapter_title: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -531,23 +723,250 @@ class GradeSignal(CamelModel):
 
 
 class GradeSignals(CamelModel):
-    """``GET /api/grade/signals/{student_id}``：学段信号与推断建议。
+    """``GET /api/grade/signals/{student_id}``：学段信号与推断检视面。
 
-    ⚠️ **自动推断只写「建议」，不直接改**（AGENTS §5.1）：``suggested_level`` 供前端弹
-    达到阈值时**自动生效**并写 `grade_history(source="inferred")`；
-    学生端只读展示当前学段，**没有选择器、没有确认动作**（§10.3）。
+    ⚠️ 学段**默认由系统自动推断、自动生效**，学生也可以**手动覆盖**：
+    规则引擎（``app/grade/rules.py``）达到阈值时会直接改写 ``student.grade_level``
+    并写 ``grade_history(source="inferred")``；学生手动切换则写 ``source="explicit"``
+    并进入更长的冷却（``MANUAL_COOLDOWN_TURNS``）。``suggested_level`` 只是
+    **本轮检视用的建议值**（置信度 < 0.6 时 ``None``），**不是**等待确认的动作入口。
     """
 
     student_id: str
-    #: 当前**生效**的学段（由推断引擎写入；无历史时是冷启动默认值）
+    #: 当前**生效**的学段（由推断引擎或学生手动切换写入；无历史时是冷启动默认值）
     current_level: GradeLevel
-    #: 当前学段来源。**只有 inferred 一种**：学段完全由系统推断，
-    #: `explicit` / `confirmed` 随手动选择入口一起废止（D-020）。
-    source: Literal["inferred"] = "inferred"
+    #: 当前学段来源：``inferred``（自动推断）| ``explicit``（学生手动选择）。
+    source: Literal["inferred", "explicit"] = "inferred"
     #: 推断建议（``None`` = 无建议；置信度 < 0.6 不调整，§10.3）
     suggested_level: GradeLevel | None = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     signals: list[GradeSignal] = Field(default_factory=list)
+
+
+class GradeOverrideRequest(CamelModel):
+    """``POST /api/grade/override/{student_id}`` 的请求体。
+
+    ★★ **刻意不提供 ``note``（留痕说明）字段** —— 这是取舍，不是省事：
+    ``grade_history`` 只有 ``(ts, turn, from_level, to_level, source, confidence)``
+    这几列（"不许新增表或列" 是硬约束），多出来的文本**没有地方落盘**；
+    退而求其次写进日志又违反「日志里不出现学生文本」的合规要求。
+    收下一个**写不进去**的字段等于让接口撒谎：调用方以为自己留了痕，其实内容被静默丢弃，
+    之后排查时还会以为「日志里没有是因为没填」。宁可不提供。
+    """
+
+    grade_level: GradeLevel
+
+
+class GradeOverrideResponse(CamelModel):
+    """学生手动设定学段的结果（**立即生效**，不依赖任何信号）。"""
+
+    student_id: str
+    #: 设定后的**当前生效**学段（= 请求里的 ``gradeLevel``）
+    grade_level: GradeLevel
+    #: 切换前的学段（与 ``gradeLevel`` 相同时 ``changed`` 为假，但仍会留一条轨迹行）
+    previous_level: GradeLevel
+    #: 手动设定必然是显式来源，这里收窄成唯一取值，调用方不必再判分支
+    source: Literal["explicit"] = "explicit"
+    changed: bool
+    #: 这条轨迹行记在第几轮（服务端按轮次水位推算，见 ``GradeEngine.turn_watermark``）
+    turn: int
+    #: 手动切换后的冷却剩余轮数（= ``MANUAL_COOLDOWN_TURNS``，供前端提示「多久后恢复自动」）
+    cooldown_remaining_turns: int
+
+
+class GradeHistoryEntry(CamelModel):
+    """``grade_history`` 的一行（学段变化轨迹）。
+
+    ★ **为什么它在 ``contracts.py`` 而不在 ``routes/grade.py``**：学习报告的
+      ``GET /api/profile/{id}/report`` 要**复用同一份**轨迹模型。留在路由文件里的话，
+      报告轨只能「再定义一个同形模型」——那就违背了「pydantic 是唯一契约来源」，
+      两边的字段迟早分叉（``routes/grade.py`` 的模块注释原本就把这条列为待补项）。
+    ★ 冷启动基线那行 ``from_level`` 为空（学生还没有「上一段」，不是从一个学段变过来的）。
+    ★ **手动覆盖重复选同一学段时也会写一行**（``from_level == to_level``，
+      ``source="explicit"``）：那一行不改变学段，但它是「学生确认过」的留痕与冷却锚点。
+    """
+
+    #: Unix 毫秒（与 JS ``Date.now()`` 同尺度；库里的 ts 是秒，出参一律经 to_contract_ms）
+    ts: int
+    #: 第几轮（1 起）
+    turn: int
+    from_level: GradeLevel | None = None
+    to_level: GradeLevel
+    #: 写入来源：``inferred``（规则引擎自动调整）| ``explicit``（学生手动切换）。
+    #: ★ 这里**刻意不收窄成 Literal**：库里可能已有更早版本写入的其它取值，
+    #: 收窄会让一行旧数据把整条轨迹接口打成 500（读接口不该被历史脏值拖垮）。
+    source: str
+    confidence: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# 学习档案（章节 / 依赖图全览 / 错题本 / 学习报告）
+#
+# ⚠️ 这一组**都是派生视图**，不是新的数据来源：章节来自 ``kb.sqlite`` 的 ``kp.chapter_title``、
+#    依赖图来自 ``knowledge_dependencies``、错题与报告来自该学生自己的 ``learning.db``。
+#    这里定义的是**出参形状**，不引入任何新表（见 ``app/store/learning.py`` 的模块头）。
+# ---------------------------------------------------------------------------
+class ChapterInfo(CamelModel):
+    """一章教材（四学段共 24 章，来自知识点 front-matter 的 ``chapter_title``）。"""
+
+    chapter_title: str
+    #: 该章包含的知识点数
+    kp_count: int = 0
+    #: 该章的知识点 id，**顺序 = 教材定义序**（kb.sqlite 的 rowid，不是字典序
+    #: —— 字典序会让「第 10 章」排在「第 2 章」前面）
+    kp_ids: list[str] = Field(default_factory=list)
+    #: 已掌握（``progress.stage == "mastered"``）的知识点数。
+    #: ★ 只有查询时带了 ``student_id`` 才有意义，否则恒为 0（见 ``with_progress``）。
+    mastered_count: int = 0
+
+
+class ChapterListResponse(CamelModel):
+    """``GET /api/knowledge/chapters/{grade_level}``：某学段的章节清单。"""
+
+    grade_level: GradeLevel
+    chapters: list[ChapterInfo] = Field(default_factory=list)
+    #: 本次是否带上了学生进度。**显式给出来**，前端据此决定显示「3/5 已掌握」还是「5 个知识点」
+    #: —— 不做「mastered_count 全是 0 = 没传学生」这种猜测（真有学生一关没过时也会全是 0）。
+    with_progress: bool = False
+
+
+class GraphNode(CamelModel):
+    """依赖图里的一个知识点（学习地图的节点）。"""
+
+    kp_id: str
+    name: str
+    grade_level: GradeLevel
+    chapter_title: str = ""
+    #: 分层（0 = 该子图里的入口节点）。**在同一学段的子图内**按最长前置链算出，
+    #: 前端据此横向分层；跨学段的边不参与（否则「入口」会落在别的学段里）。
+    layer: int = 0
+    #: 学生是否已掌握（查 ``/overview`` 时带了 ``student_id`` 才有意义）
+    mastered: bool = False
+
+
+class GraphEdge(CamelModel):
+    """一条依赖边。**``from`` 是前置、``to`` 是后继**（全项目一致，方向搞反是静默错）。"""
+
+    from_kp_id: str
+    to_kp_id: str
+    relation: DepRelation = "prerequisite"
+    weight: float = 1.0
+
+
+class GraphOverview(CamelModel):
+    """``GET /api/graph/overview/{grade_level}``：某学段依赖图的**全览**（学习地图用）。
+
+    ★ 与 ``/api/graph/deps/{kp_id}``（单点邻域）的分工：那个接口回答「这个点的前后是什么」，
+      这个回答「整张图长什么样」。**遍历逻辑仍只有一份**（``app.knowledge.deps``），
+      本模型只是它的出参形状。
+
+    ⚠️ ``edges`` 只包含**两端都在 ``nodes`` 里**的边：跨学段的边在单学段视图里没有落点，
+      画不出来（传进来只会画出悬空的线）。
+    """
+
+    grade_level: GradeLevel
+    nodes: list[GraphNode] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+
+
+class MistakeItem(CamelModel):
+    """一条错题（按知识点聚合后的一条）。
+
+    ★★ **合规口径（两条，都是刻意的）**：
+      ① ``stem`` 来自 ``learning_history.question``，库里存的是**题干前 120 字**
+         （``routes/quiz.py`` 的 ``_record_attempt`` 写入 ``stem[:120]``）——题干是题目本身，
+         **不是学生原话**；学生作答与模型回答一律不入库（§8.1 合规红线），
+         所以这个模型**结构上就没有**「你的答案」字段，不是忘了加。
+      ② **绝不 join ``generated_question`` 取完整题干**：那张表带 ``reference_answer``（标准答案），
+         把它读进对外响应会直接踩答案泄漏红线（``INTERNAL_MODELS`` / 答案属性白名单都在守这条）。
+         120 字足够让学生认出「是这道题」，而认出之后要的是「再练一遍」而不是看答案。
+    """
+
+    kp_id: str
+    #: 知识点的**人类可读名**（「循环」这类）；取不到时退化成 kp_id
+    kp_name: str = ""
+    chapter_title: str = ""
+    #: 题干前 120 字（题目原文）
+    stem: str = ""
+    #: 该知识点答错的次数
+    wrong_count: int = 0
+    #: 最近一次答错的时间（Unix 毫秒）
+    last_wrong_at: int = 0
+    #: 最近一次答错的题号（供「再练一遍」定位变式题；题号不是答案）
+    last_qid: str = ""
+
+
+class MistakeListResponse(CamelModel):
+    """``GET /api/quiz/mistakes/{student_id}``：错题本（按知识点聚合）。"""
+
+    student_id: str
+    grade_level: GradeLevel
+    items: list[MistakeItem] = Field(default_factory=list)
+    #: 答错总次数（同一个知识点错三次算三次）
+    total_wrong: int = 0
+    #: ★ **有错题但取不到题干的条数**（QA / 编程轨答错：``is_correct=0`` 但没有题干，
+    #: 因为 ``profile.events`` 那一轨恒写空串）。**显式报出来而不是静默丢掉** ——
+    #: 否则「错题比学生记得的少」会被当成 bug 查半天。
+    without_stem: int = 0
+
+
+class DailyActivity(CamelModel):
+    """某一天的活动量（按**本地日期**聚合，不是 UTC —— 跨零点学习不该被算到前一天）。"""
+
+    #: ``YYYY-MM-DD``（本地日期）
+    day: str
+    #: 全部活动条数
+    count: int = 0
+    quiz_count: int = 0
+    correct_count: int = 0
+
+
+class ChapterProgress(CamelModel):
+    """一章的闯关进度（把 ``progress`` 按 ``chapter_title`` 聚合）。"""
+
+    chapter_title: str
+    kp_count: int = 0
+    #: ``progress.stage == "mastered"`` 的个数
+    mastered_count: int = 0
+    #: ``stage == "quizzed"`` 的个数（已测验但还没掌握）
+    quizzed_count: int = 0
+
+
+class LearningReport(CamelModel):
+    """``GET /api/profile/{student_id}/report``：学习报告（学生 / 家长）。
+
+    ★ **四张表都在里面**（``mastery`` / ``learning_history`` / ``progress`` / ``grade_history``），
+      此前它们各自只有零散出口，没有一个「这一周学得怎么样」的汇合点。
+    ★ ``grade_history`` 直接复用 :class:`GradeHistoryEntry`（见该模型的注释）。
+    """
+
+    student_id: str
+    nickname: str = ""
+    grade_level: GradeLevel
+    #: 时间窗口天数（查询参数回显，前端标题用它）
+    days: int = 7
+    #: 报告生成时间（Unix 毫秒）。★ 报告**不进 Prompt**，所以这里可以带时间
+    #: （D-032 的逐字节稳定只约束注入 system prompt 的内容）。
+    generated_at: int = 0
+    #: 时间窗内**有活动的那些天**（没有活动的日期不补 0 —— 前端自己铺满整周，
+    #: 补 0 会把「哪天没学」的表达权从界面挪到后端）。
+    daily: list[DailyActivity] = Field(default_factory=list)
+    total_activities: int = 0
+    quiz_total: int = 0
+    quiz_correct: int = 0
+    #: 连续学习天数（今天学过就从今天起算；今天还没学则算到最近一次学习那天）
+    streak_days: int = 0
+    today_studied: bool = False
+    #: 掌握度（按分数降序，与 ``GET /api/profile`` 同口径）
+    mastery: list[Mastery] = Field(default_factory=list)
+    #: 章节进度（按教材定义序）
+    chapters: list[ChapterProgress] = Field(default_factory=list)
+    #: ``progress.stage`` 计数（``locked`` / ``learning`` / ``quizzed`` / ``mastered``）
+    stage_counts: dict[str, int] = Field(default_factory=dict)
+    #: 已获得的徽章（去重；徽章一经授予不因后续答错而清除，见 ``store/learning.py``）
+    badges: list[str] = Field(default_factory=list)
+    #: 学段变化轨迹（「第 3 轮调为初中（0.75）」这类叙事就用它）
+    grade_history: list[GradeHistoryEntry] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -729,11 +1148,13 @@ class ChatRequest(CamelModel):
     §6.3 v2 变更：``POST /api/chat/stream`` 已从 Python 侧移除，对话改由主进程的
     Pi Agent 处理；这里冻结的是 IPC 入参形状，供票 05/06 的主进程处理器与前端共用。
     ``requestId`` 由**主进程**生成并贯穿一轮（§9.4），所以不在请求体里。
+
+    ⚠️ **没有学段字段**（AGENTS §5.1 / D-020）：学段完全由系统自动推断、自动生效，
+    请求里带学段与硬约束直接冲突。历史上这里有过 ``grade_level: GradeLevel``
+    （必填），与它自己的注释正好相反 —— 已删除，且测试钉住「不许再加回来」。
     """
 
     student_id: str
-    #: **学段不由这里决定**（§10.1）：请求不带学段，推断引擎是唯一写路径
-    grade_level: GradeLevel
     text: str
     #: 关联 Pi 会话（省略 = 用当前会话）
     session_id: str | None = None
@@ -755,11 +1176,30 @@ CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     SettingsUpdateRequest,
     ProbeRequest,
     ProbeResult,
+    ProviderModelsRequest,
+    ProviderModelsResult,
+    LlmRuntimeConfig,
     # 学生与画像
     Student,
     StudentCreateRequest,
     Mastery,
     StudentProfile,
+    PreferenceUpdateRequest,
+    ChapterUpdateRequest,
+    ChapterStateOut,
+    # 学段轨迹（报告与汇报的叙事素材；`routes/grade.py` 与报告轨**共用这一份**）
+    GradeHistoryEntry,
+    # 学习档案：章节 / 依赖图全览 / 错题本 / 学习报告
+    ChapterInfo,
+    ChapterListResponse,
+    GraphNode,
+    GraphEdge,
+    GraphOverview,
+    MistakeItem,
+    MistakeListResponse,
+    DailyActivity,
+    ChapterProgress,
+    LearningReport,
     # 检索与引用
     Citation,
     RagHit,
@@ -769,6 +1209,8 @@ CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     # 学段信号
     GradeSignal,
     GradeSignals,
+    GradeOverrideRequest,
+    GradeOverrideResponse,
     # 六个 Extension 的 payload
     AnimationPayload,
     CodeTemplate,
@@ -794,6 +1236,8 @@ INTERNAL_MODELS: tuple[type[BaseModel], ...] = (QuizQuestion,)
 #: 非 BaseModel 的冻结字面量：路由/TS 需要具名联合类型时登记在此，
 #: 导出脚本用 ``TypeAdapter`` 把它们补进 ``components.schemas``。
 #: 键 = OpenAPI 里的 schema 名（也是 TS 里的类型名）。
+#: ⚠️ 本模块里每个 `Literal` 别名都要登记（否则它只会以内联 enum 出现在别的模型里，
+#: TS 侧拿不到具名类型）—— `tests/test_contracts.py` 会逐个点名断言。
 CONTRACT_ENUMS: dict[str, object] = {
     "GradeLevel": GradeLevel,
     "IpcEventName": IpcEventName,
@@ -803,4 +1247,8 @@ CONTRACT_ENUMS: dict[str, object] = {
     "LearningActivity": LearningActivity,
     "ProgressStage": ProgressStage,
     "QuizQuestionType": QuizQuestionType,
+    "DepRelation": DepRelation,
+    "DepDirection": DepDirection,
+    "GradeSignalType": GradeSignalType,
+    "PreferenceKey": PreferenceKey,
 }

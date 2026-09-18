@@ -52,10 +52,49 @@
         "title": "AnimationPayload",
         "type": "object"
       },
-      "ChatRequest": {
+      "ChapterInfo": {
         "additionalProperties": false,
-        "description": "一轮对话请求（**渲染进程 → 主进程 IPC**，不是 HTTP 端点）。\n\n§6.3 v2 变更：``POST /api/chat/stream`` 已从 Python 侧移除，对话改由主进程的\nPi Agent 处理；这里冻结的是 IPC 入参形状，供票 05/06 的主进程处理器与前端共用。\n``requestId`` 由**主进程**生成并贯穿一轮（§9.4），所以不在请求体里。",
+        "description": "一章教材（四学段共 24 章，来自知识点 front-matter 的 ``chapter_title``）。",
         "properties": {
+          "chapterTitle": {
+            "title": "Chaptertitle",
+            "type": "string"
+          },
+          "kpCount": {
+            "default": 0,
+            "title": "Kpcount",
+            "type": "integer"
+          },
+          "kpIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Kpids",
+            "type": "array"
+          },
+          "masteredCount": {
+            "default": 0,
+            "title": "Masteredcount",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chapterTitle"
+        ],
+        "title": "ChapterInfo",
+        "type": "object"
+      },
+      "ChapterListResponse": {
+        "additionalProperties": false,
+        "description": "``GET /api/knowledge/chapters/{grade_level}``：某学段的章节清单。",
+        "properties": {
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/ChapterInfo"
+            },
+            "title": "Chapters",
+            "type": "array"
+          },
           "gradeLevel": {
             "enum": [
               "primary_low",
@@ -66,6 +105,92 @@
             "title": "Gradelevel",
             "type": "string"
           },
+          "withProgress": {
+            "default": false,
+            "title": "Withprogress",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "gradeLevel"
+        ],
+        "title": "ChapterListResponse",
+        "type": "object"
+      },
+      "ChapterProgress": {
+        "additionalProperties": false,
+        "description": "一章的闯关进度（把 ``progress`` 按 ``chapter_title`` 聚合）。",
+        "properties": {
+          "chapterTitle": {
+            "title": "Chaptertitle",
+            "type": "string"
+          },
+          "kpCount": {
+            "default": 0,
+            "title": "Kpcount",
+            "type": "integer"
+          },
+          "masteredCount": {
+            "default": 0,
+            "title": "Masteredcount",
+            "type": "integer"
+          },
+          "quizzedCount": {
+            "default": 0,
+            "title": "Quizzedcount",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chapterTitle"
+        ],
+        "title": "ChapterProgress",
+        "type": "object"
+      },
+      "ChapterStateOut": {
+        "additionalProperties": false,
+        "description": "``GET`` / ``PUT /api/profile/{student_id}/chapter``：当前章节状态（**读写同形**）。\n\n``chapter_title`` 的语义统一为「**空串 = 未选择**」（不是 ``None``）——\n前端只需要处理一种空值形态，少一个「空串还是 null」的分支。",
+        "properties": {
+          "chapterTitle": {
+            "default": "",
+            "title": "Chaptertitle",
+            "type": "string"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          }
+        },
+        "required": [
+          "gradeLevel"
+        ],
+        "title": "ChapterStateOut",
+        "type": "object"
+      },
+      "ChapterUpdateRequest": {
+        "additionalProperties": false,
+        "description": "``PUT /api/profile/{student_id}/chapter``：设定/清除当前章节。\n\n★ **章节是软偏好，不是过滤条件**：它只会出现在画像 Prompt 里（「优先围绕本章」），\n  **不改 ``RagSearchRequest``、不做 SQL 硬过滤** —— 学生问别的章节照常回答。\n★ **为什么是学生显式选择而不是模型写**：与 ``PreferenceKey`` 同一条纪律 ——\n  把「学生在学哪一章」交给模型猜，会同时污染 Prompt 与学习地图；\n  而且模型写是**第二处真相**（学生自己点的那一下才是最权威的）。",
+        "properties": {
+          "chapterTitle": {
+            "default": "",
+            "maxLength": 80,
+            "title": "Chaptertitle",
+            "type": "string"
+          }
+        },
+        "title": "ChapterUpdateRequest",
+        "type": "object"
+      },
+      "ChatRequest": {
+        "additionalProperties": false,
+        "description": "一轮对话请求（**渲染进程 → 主进程 IPC**，不是 HTTP 端点）。\n\n§6.3 v2 变更：``POST /api/chat/stream`` 已从 Python 侧移除，对话改由主进程的\nPi Agent 处理；这里冻结的是 IPC 入参形状，供票 05/06 的主进程处理器与前端共用。\n``requestId`` 由**主进程**生成并贯穿一轮（§9.4），所以不在请求体里。\n\n⚠️ **没有学段字段**（AGENTS §5.1 / D-020）：学段完全由系统自动推断、自动生效，\n请求里带学段与硬约束直接冲突。历史上这里有过 ``grade_level: GradeLevel``\n（必填），与它自己的注释正好相反 —— 已删除，且测试钉住「不许再加回来」。",
+        "properties": {
           "sessionId": {
             "anyOf": [
               {
@@ -89,7 +214,6 @@
         },
         "required": [
           "studentId",
-          "gradeLevel",
           "text"
         ],
         "title": "ChatRequest",
@@ -320,6 +444,36 @@
         "title": "CodingHint",
         "type": "object"
       },
+      "DailyActivity": {
+        "additionalProperties": false,
+        "description": "某一天的活动量（按**本地日期**聚合，不是 UTC —— 跨零点学习不该被算到前一天）。",
+        "properties": {
+          "correctCount": {
+            "default": 0,
+            "title": "Correctcount",
+            "type": "integer"
+          },
+          "count": {
+            "default": 0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "day": {
+            "title": "Day",
+            "type": "string"
+          },
+          "quizCount": {
+            "default": 0,
+            "title": "Quizcount",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "day"
+        ],
+        "title": "DailyActivity",
+        "type": "object"
+      },
       "Degraded": {
         "enum": [
           "vector",
@@ -328,6 +482,14 @@
           "outline"
         ],
         "title": "Degraded",
+        "type": "string"
+      },
+      "DepDirection": {
+        "enum": [
+          "successor",
+          "prerequisite"
+        ],
+        "title": "DepDirection",
         "type": "string"
       },
       "DepNode": {
@@ -389,6 +551,14 @@
         "title": "DepNode",
         "type": "object"
       },
+      "DepRelation": {
+        "enum": [
+          "prerequisite",
+          "related"
+        ],
+        "title": "DepRelation",
+        "type": "string"
+      },
       "EmbeddingConfig": {
         "additionalProperties": false,
         "description": "嵌入配置的**出参形态**（§6.2）。``mode=\"none\"`` 表示不用嵌入（检索走 FTS5 兜底）。",
@@ -441,7 +611,7 @@
       },
       "EmbeddingConfigIn": {
         "additionalProperties": false,
-        "description": "嵌入配置的**入参形态**（``mode=\"cloud_api\"`` 时才有 base_url/api_key/model_id）。",
+        "description": "嵌入配置的**入参形态**（``mode=\"cloud_api\"`` 时才有 base_url/api_key/model_id）。\n\n★ **四个字段都是「省略即保留」**（与 :class:`LlmConfigIn` 同一条规则）：\n只提交某一个字段（例如只换 API Key）不会顺手把 ``mode`` 退回 ``local_fastembed``，\n也不会清掉云端地址与模型 ID。",
         "properties": {
           "apiKey": {
             "default": "",
@@ -476,14 +646,20 @@
             "title": "Haskey"
           },
           "mode": {
-            "default": "local_fastembed",
-            "enum": [
-              "local_fastembed",
-              "cloud_api",
-              "none"
+            "anyOf": [
+              {
+                "enum": [
+                  "local_fastembed",
+                  "cloud_api",
+                  "none"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ],
-            "title": "Mode",
-            "type": "string"
+            "title": "Mode"
           },
           "modelId": {
             "anyOf": [
@@ -562,7 +738,7 @@
       },
       "GradeHistoryEntry": {
         "additionalProperties": false,
-        "description": "``grade_history`` 的一行（学段变化轨迹）。",
+        "description": "``grade_history`` 的一行（学段变化轨迹）。\n\n★ **为什么它在 ``contracts.py`` 而不在 ``routes/grade.py``**：学习报告的\n  ``GET /api/profile/{id}/report`` 要**复用同一份**轨迹模型。留在路由文件里的话，\n  报告轨只能「再定义一个同形模型」——那就违背了「pydantic 是唯一契约来源」，\n  两边的字段迟早分叉（``routes/grade.py`` 的模块注释原本就把这条列为待补项）。\n★ 冷启动基线那行 ``from_level`` 为空（学生还没有「上一段」，不是从一个学段变过来的）。\n★ **手动覆盖重复选同一学段时也会写一行**（``from_level == to_level``，\n  ``source=\"explicit\"``）：那一行不改变学段，但它是「学生确认过」的留痕与冷却锚点。",
         "properties": {
           "confidence": {
             "default": 0.0,
@@ -620,7 +796,7 @@
       },
       "GradeHistoryResponse": {
         "additionalProperties": false,
-        "description": "``grade_history`` 轨迹（报告叙事：「第 3 轮调为小学低年级（0.75）」）。",
+        "description": "``grade_history`` 轨迹（报告叙事：「第 3 轮调为小学低年级（0.75）」）。\n\n★ ``entries`` 用契约里的 :class:`app.contracts.GradeHistoryEntry`：学习报告的\n  ``/api/profile/{id}/report`` 要给出**同一份**轨迹，两处各定义一个同形模型迟早分叉\n  （这原是本文件模块头「需要 contracts.py 补的模型」第 2 条，现已兑现）。",
         "properties": {
           "currentLevel": {
             "enum": [
@@ -660,6 +836,85 @@
         ],
         "title": "GradeLevel",
         "type": "string"
+      },
+      "GradeOverrideRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/grade/override/{student_id}`` 的请求体。\n\n★★ **刻意不提供 ``note``（留痕说明）字段** —— 这是取舍，不是省事：\n``grade_history`` 只有 ``(ts, turn, from_level, to_level, source, confidence)``\n这几列（\"不许新增表或列\" 是硬约束），多出来的文本**没有地方落盘**；\n退而求其次写进日志又违反「日志里不出现学生文本」的合规要求。\n收下一个**写不进去**的字段等于让接口撒谎：调用方以为自己留了痕，其实内容被静默丢弃，\n之后排查时还会以为「日志里没有是因为没填」。宁可不提供。",
+        "properties": {
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          }
+        },
+        "required": [
+          "gradeLevel"
+        ],
+        "title": "GradeOverrideRequest",
+        "type": "object"
+      },
+      "GradeOverrideResponse": {
+        "additionalProperties": false,
+        "description": "学生手动设定学段的结果（**立即生效**，不依赖任何信号）。",
+        "properties": {
+          "changed": {
+            "title": "Changed",
+            "type": "boolean"
+          },
+          "cooldownRemainingTurns": {
+            "title": "Cooldownremainingturns",
+            "type": "integer"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "previousLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Previouslevel",
+            "type": "string"
+          },
+          "source": {
+            "const": "explicit",
+            "default": "explicit",
+            "title": "Source",
+            "type": "string"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "turn": {
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "studentId",
+          "gradeLevel",
+          "previousLevel",
+          "changed",
+          "turn",
+          "cooldownRemainingTurns"
+        ],
+        "title": "GradeOverrideResponse",
+        "type": "object"
       },
       "GradeProposalInput": {
         "additionalProperties": false,
@@ -743,9 +998,19 @@
         "title": "GradeSignal",
         "type": "object"
       },
+      "GradeSignalType": {
+        "enum": [
+          "vocab",
+          "depth",
+          "quiz_perf",
+          "meta_cognition"
+        ],
+        "title": "GradeSignalType",
+        "type": "string"
+      },
       "GradeSignals": {
         "additionalProperties": false,
-        "description": "``GET /api/grade/signals/{student_id}``：学段信号与推断建议。\n\n⚠️ **自动推断只写「建议」，不直接改**（AGENTS §5.1）：``suggested_level`` 供前端弹\n达到阈值时**自动生效**并写 `grade_history(source=\"inferred\")`；\n学生端只读展示当前学段，**没有选择器、没有确认动作**（§10.3）。",
+        "description": "``GET /api/grade/signals/{student_id}``：学段信号与推断检视面。\n\n⚠️ 学段**默认由系统自动推断、自动生效**，学生也可以**手动覆盖**：\n规则引擎（``app/grade/rules.py``）达到阈值时会直接改写 ``student.grade_level``\n并写 ``grade_history(source=\"inferred\")``；学生手动切换则写 ``source=\"explicit\"``\n并进入更长的冷却（``MANUAL_COOLDOWN_TURNS``）。``suggested_level`` 只是\n**本轮检视用的建议值**（置信度 < 0.6 时 ``None``），**不是**等待确认的动作入口。",
         "properties": {
           "confidence": {
             "default": 0.0,
@@ -772,8 +1037,11 @@
             "type": "array"
           },
           "source": {
-            "const": "inferred",
             "default": "inferred",
+            "enum": [
+              "inferred",
+              "explicit"
+            ],
             "title": "Source",
             "type": "string"
           },
@@ -1083,6 +1351,121 @@
         "title": "GradeTurnsRequest",
         "type": "object"
       },
+      "GraphEdge": {
+        "additionalProperties": false,
+        "description": "一条依赖边。**``from`` 是前置、``to`` 是后继**（全项目一致，方向搞反是静默错）。",
+        "properties": {
+          "fromKpId": {
+            "title": "Fromkpid",
+            "type": "string"
+          },
+          "relation": {
+            "default": "prerequisite",
+            "enum": [
+              "prerequisite",
+              "related"
+            ],
+            "title": "Relation",
+            "type": "string"
+          },
+          "toKpId": {
+            "title": "Tokpid",
+            "type": "string"
+          },
+          "weight": {
+            "default": 1.0,
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "fromKpId",
+          "toKpId"
+        ],
+        "title": "GraphEdge",
+        "type": "object"
+      },
+      "GraphNode": {
+        "additionalProperties": false,
+        "description": "依赖图里的一个知识点（学习地图的节点）。",
+        "properties": {
+          "chapterTitle": {
+            "default": "",
+            "title": "Chaptertitle",
+            "type": "string"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "layer": {
+            "default": 0,
+            "title": "Layer",
+            "type": "integer"
+          },
+          "mastered": {
+            "default": false,
+            "title": "Mastered",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kpId",
+          "name",
+          "gradeLevel"
+        ],
+        "title": "GraphNode",
+        "type": "object"
+      },
+      "GraphOverview": {
+        "additionalProperties": false,
+        "description": "``GET /api/graph/overview/{grade_level}``：某学段依赖图的**全览**（学习地图用）。\n\n★ 与 ``/api/graph/deps/{kp_id}``（单点邻域）的分工：那个接口回答「这个点的前后是什么」，\n  这个回答「整张图长什么样」。**遍历逻辑仍只有一份**（``app.knowledge.deps``），\n  本模型只是它的出参形状。\n\n⚠️ ``edges`` 只包含**两端都在 ``nodes`` 里**的边：跨学段的边在单学段视图里没有落点，\n  画不出来（传进来只会画出悬空的线）。",
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/GraphEdge"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/GraphNode"
+            },
+            "title": "Nodes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "gradeLevel"
+        ],
+        "title": "GraphOverview",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1145,7 +1528,7 @@
       },
       "LearningEventAck": {
         "additionalProperties": false,
-        "description": "学习记录写入的回执（§6.3：``{ok}``）。",
+        "description": "写入类端点的回执（§6.3：``{ok}``）：学习记录回流与学习偏好写入**共用同一形状**。\n\n★ 偏好写入**复用**本模型而不是再造一个等价的 ``PreferenceAck``：两者的出参形状\n  一字不差（``{ok: true}``），同形状两个模型名只会让 OpenAPI/TS 多一个语义重复的\n  类型、让前端多写一个分支去认同一个 ``{ok}``。**新增写入型端点时也复用它。**",
         "properties": {
           "ok": {
             "default": true,
@@ -1229,6 +1612,114 @@
         "title": "LearningEventRequest",
         "type": "object"
       },
+      "LearningReport": {
+        "additionalProperties": false,
+        "description": "``GET /api/profile/{student_id}/report``：学习报告（学生 / 家长）。\n\n★ **四张表都在里面**（``mastery`` / ``learning_history`` / ``progress`` / ``grade_history``），\n  此前它们各自只有零散出口，没有一个「这一周学得怎么样」的汇合点。\n★ ``grade_history`` 直接复用 :class:`GradeHistoryEntry`（见该模型的注释）。",
+        "properties": {
+          "badges": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Badges",
+            "type": "array"
+          },
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/ChapterProgress"
+            },
+            "title": "Chapters",
+            "type": "array"
+          },
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/DailyActivity"
+            },
+            "title": "Daily",
+            "type": "array"
+          },
+          "days": {
+            "default": 7,
+            "title": "Days",
+            "type": "integer"
+          },
+          "generatedAt": {
+            "default": 0,
+            "title": "Generatedat",
+            "type": "integer"
+          },
+          "gradeHistory": {
+            "items": {
+              "$ref": "#/components/schemas/GradeHistoryEntry"
+            },
+            "title": "Gradehistory",
+            "type": "array"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "mastery": {
+            "items": {
+              "$ref": "#/components/schemas/Mastery"
+            },
+            "title": "Mastery",
+            "type": "array"
+          },
+          "nickname": {
+            "default": "",
+            "title": "Nickname",
+            "type": "string"
+          },
+          "quizCorrect": {
+            "default": 0,
+            "title": "Quizcorrect",
+            "type": "integer"
+          },
+          "quizTotal": {
+            "default": 0,
+            "title": "Quiztotal",
+            "type": "integer"
+          },
+          "stageCounts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Stagecounts",
+            "type": "object"
+          },
+          "streakDays": {
+            "default": 0,
+            "title": "Streakdays",
+            "type": "integer"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "todayStudied": {
+            "default": false,
+            "title": "Todaystudied",
+            "type": "boolean"
+          },
+          "totalActivities": {
+            "default": 0,
+            "title": "Totalactivities",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "studentId",
+          "gradeLevel"
+        ],
+        "title": "LearningReport",
+        "type": "object"
+      },
       "LlmConfig": {
         "additionalProperties": false,
         "description": "LLM 配置的**出参形态**（发给渲染进程 / 与磁盘一致的只读视图）。\n\n⚠️ ``api_key`` 在这里**恒为掩码**（``…abcd``）或空串，绝不会是明文；\n需要明文的地方只有存储层，用 {@link LlmConfigIn} 提交。\n**请一律经 :meth:`from_plain` 构造**，别手拼 ``api_key=`` 把明文漏出去。",
@@ -1239,7 +1730,7 @@
             "type": "string"
           },
           "baseUrl": {
-            "default": "https://api.deepseek.com/v1",
+            "default": "https://api.deepseek.com",
             "title": "Baseurl",
             "type": "string"
           },
@@ -1249,8 +1740,13 @@
             "type": "boolean"
           },
           "modelId": {
-            "default": "deepseek-chat",
+            "default": "deepseek-v4-flash",
             "title": "Modelid",
+            "type": "string"
+          },
+          "providerId": {
+            "default": "deepseek",
+            "title": "Providerid",
             "type": "string"
           },
           "providerName": {
@@ -1264,7 +1760,7 @@
       },
       "LlmConfigIn": {
         "additionalProperties": false,
-        "description": "LLM 配置的**入参形态**（``PUT /api/settings``）。\n\n``api_key`` 语义见模块头的「API Key 掩码语义」：\n空串/掩码/纯符号 = 保留已存值；明文 = 覆盖；``clear_api_key=true`` = 显式删除。",
+        "description": "LLM 配置的**入参形态**（``PUT /api/settings``）。\n\n★ **字段级「省略即保留」**：除 ``api_key`` 外每个字段都是 ``X | None = None``，\n**没提交**（或提交空白）就保留已存值，只有真提交了非空值才覆盖。\n⚠️ 这里**不许再出现出厂默认值**：`PUT {\"llm\": {\"apiKey\": \"…\"}}` 这种字段级局部提交\n（设置页分栏保存 / 只换 Key）若被当成「未提交字段取默认值」，就会把用户自填的\n校内网关静默换回 DeepSeek 默认值 —— 改一次 Key 丢一次配置。\n\n``api_key`` 语义见模块头的「API Key 掩码语义」：\n空串/掩码/纯符号 = 保留已存值；明文 = 覆盖；``clear_api_key=true`` = 显式删除。",
         "properties": {
           "apiKey": {
             "default": "",
@@ -1272,9 +1768,15 @@
             "type": "string"
           },
           "baseUrl": {
-            "default": "https://api.deepseek.com/v1",
-            "title": "Baseurl",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseurl"
           },
           "clearApiKey": {
             "default": false,
@@ -1293,8 +1795,69 @@
             "title": "Haskey"
           },
           "modelId": {
-            "default": "deepseek-chat",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modelid"
+          },
+          "providerId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providerid"
+          },
+          "providerName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providername"
+          }
+        },
+        "title": "LlmConfigIn",
+        "type": "object"
+      },
+      "LlmRuntimeConfig": {
+        "additionalProperties": false,
+        "description": "★★ **主进程专用**：真正生效的那份 LLM 配置（**含明文 Key**）。\n\n⚠️⚠️ 与 :class:`LlmConfig` 的关键差异：``api_key`` 在这里**是明文**。\n它是「设置 → Pi」这条链路的唯一载体（Pi 需要明文 Key 才能发请求），\n因此**只允许主进程取用**：\n\n- 路由只有 ``GET /api/settings/runtime``，与其它 ``/api/*`` 一样需要 ``X-Auth-Token``；\n- **渲染进程没有对应 IPC 通道、preload 也没有对应方法**（架构守卫会断言这一点）；\n- 主进程拿到后**只经 ``setRuntimeApiKey`` 放进内存**，不落盘、不进日志。\n\n``repr=False`` 兜住「异常里打印 dataclass/model」这类常见事故。",
+        "properties": {
+          "apiKey": {
+            "default": "",
+            "title": "Apikey",
+            "type": "string"
+          },
+          "baseUrl": {
+            "default": "https://api.deepseek.com",
+            "title": "Baseurl",
+            "type": "string"
+          },
+          "hasKey": {
+            "default": false,
+            "title": "Haskey",
+            "type": "boolean"
+          },
+          "modelId": {
+            "default": "deepseek-v4-flash",
             "title": "Modelid",
+            "type": "string"
+          },
+          "providerId": {
+            "default": "deepseek",
+            "title": "Providerid",
             "type": "string"
           },
           "providerName": {
@@ -1303,7 +1866,7 @@
             "type": "string"
           }
         },
-        "title": "LlmConfigIn",
+        "title": "LlmRuntimeConfig",
         "type": "object"
       },
       "Mastery": {
@@ -1349,6 +1912,94 @@
         "title": "Mastery",
         "type": "object"
       },
+      "MistakeItem": {
+        "additionalProperties": false,
+        "description": "一条错题（按知识点聚合后的一条）。\n\n★★ **合规口径（两条，都是刻意的）**：\n  ① ``stem`` 来自 ``learning_history.question``，库里存的是**题干前 120 字**\n     （``routes/quiz.py`` 的 ``_record_attempt`` 写入 ``stem[:120]``）——题干是题目本身，\n     **不是学生原话**；学生作答与模型回答一律不入库（§8.1 合规红线），\n     所以这个模型**结构上就没有**「你的答案」字段，不是忘了加。\n  ② **绝不 join ``generated_question`` 取完整题干**：那张表带 ``reference_answer``（标准答案），\n     把它读进对外响应会直接踩答案泄漏红线（``INTERNAL_MODELS`` / 答案属性白名单都在守这条）。\n     120 字足够让学生认出「是这道题」，而认出之后要的是「再练一遍」而不是看答案。",
+        "properties": {
+          "chapterTitle": {
+            "default": "",
+            "title": "Chaptertitle",
+            "type": "string"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "kpName": {
+            "default": "",
+            "title": "Kpname",
+            "type": "string"
+          },
+          "lastQid": {
+            "default": "",
+            "title": "Lastqid",
+            "type": "string"
+          },
+          "lastWrongAt": {
+            "default": 0,
+            "title": "Lastwrongat",
+            "type": "integer"
+          },
+          "stem": {
+            "default": "",
+            "title": "Stem",
+            "type": "string"
+          },
+          "wrongCount": {
+            "default": 0,
+            "title": "Wrongcount",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kpId"
+        ],
+        "title": "MistakeItem",
+        "type": "object"
+      },
+      "MistakeListResponse": {
+        "additionalProperties": false,
+        "description": "``GET /api/quiz/mistakes/{student_id}``：错题本（按知识点聚合）。",
+        "properties": {
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MistakeItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "totalWrong": {
+            "default": 0,
+            "title": "Totalwrong",
+            "type": "integer"
+          },
+          "withoutStem": {
+            "default": 0,
+            "title": "Withoutstem",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "studentId",
+          "gradeLevel"
+        ],
+        "title": "MistakeListResponse",
+        "type": "object"
+      },
       "PayloadKind": {
         "enum": [
           "animation",
@@ -1357,6 +2008,44 @@
         ],
         "title": "PayloadKind",
         "type": "string"
+      },
+      "PreferenceKey": {
+        "enum": [
+          "interest",
+          "explain_style",
+          "pace",
+          "note"
+        ],
+        "title": "PreferenceKey",
+        "type": "string"
+      },
+      "PreferenceUpdateRequest": {
+        "additionalProperties": false,
+        "description": "``PUT /api/profile/{student_id}/preferences``：写一条学习偏好。\n\n值只承载**学习方式**（喜好领域 / 讲解方式 / 节奏 / 一句备注），不承载任何个人信息。\n\n★ **为什么是 PUT 而不是 POST**：单键 upsert 是**幂等**操作 —— 同一个 key 提交两次，\n  库里的状态完全相同（``profile_pref.key`` 是主键，第二次是覆盖而不是追加）。\n  POST 会暗示「新增一条记录」，与实际的覆盖语义正好相反。\n\n★ **为什么 key 是封闭词表**：见 :data:`PreferenceKey` —— 写掌握度/学段这类\n  由规则引擎算出来的客观量，在**类型层面**就不可能（不是靠调用方自觉）。",
+        "properties": {
+          "key": {
+            "enum": [
+              "interest",
+              "explain_style",
+              "pace",
+              "note"
+            ],
+            "title": "Key",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "PreferenceUpdateRequest",
+        "type": "object"
       },
       "ProbeRequest": {
         "additionalProperties": false,
@@ -1401,6 +2090,47 @@
         ],
         "title": "ProgressStage",
         "type": "string"
+      },
+      "ProviderModelsRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/settings/models`` 的请求体：**拉取某个地址可见的模型清单**。\n\n与探测同一条设计：提交的是**候选配置**（先看模型清单、满意再保存），\n``api_key`` 允许是占位（== 用已存 Key），实现方用 :func:`resolve_api_key` 解析。",
+        "properties": {
+          "llm": {
+            "$ref": "#/components/schemas/LlmConfigIn"
+          }
+        },
+        "required": [
+          "llm"
+        ],
+        "title": "ProviderModelsRequest",
+        "type": "object"
+      },
+      "ProviderModelsResult": {
+        "additionalProperties": false,
+        "description": "``POST /api/settings/models`` 的响应。\n\n``ok=False`` 时 ``message`` 必须**可读**（与 ``ProbeResult`` 同一条口径）；\n``ok=True`` 时 ``models`` 是端点 ``/models`` 报出来的模型 id（可能为空列表 ——\n有些兼容服务实现了端点但不返回清单，那不是错误）。",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "message"
+        ],
+        "title": "ProviderModelsResult",
+        "type": "object"
       },
       "QuizGradeRequest": {
         "additionalProperties": false,
@@ -1963,6 +2693,11 @@
             "title": "Createdat",
             "type": "integer"
           },
+          "currentChapter": {
+            "default": "",
+            "title": "Currentchapter",
+            "type": "string"
+          },
           "gradeLevel": {
             "enum": [
               "primary_low",
@@ -2236,7 +2971,7 @@
     }
   },
   "info": {
-    "title": "K12 AI 教学助手 · sidecar",
+    "title": "智团团 · sidecar",
     "version": "0.1.0"
   },
   "openapi": "3.1.0",
@@ -2444,9 +3179,62 @@
         ]
       }
     },
+    "/api/grade/override/{student_id}": {
+      "post": {
+        "description": "★ **唯一的人工写路径**：学生选定学段 → 立即生效 + 进入 :data:`MANUAL_COOLDOWN_TURNS` 冷却。\n\n与 ``POST /grade/turns`` 的分工：那条路径收的是**证据**（可能改变学段，也可能不），\n这条路径收的是**决定**（一定按学生的意思生效）。两者写的是同一张 ``grade_history``，\n区别只有 ``source`` 与冷却窗口长度 —— 冷却期一过，自动推断照常接管。",
+        "operationId": "override_grade_api_grade_override__student_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GradeOverrideRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GradeOverrideResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "学生手动设定学段（写 grade_history(source=explicit)，之后进入更长冷却）",
+        "tags": [
+          "grade"
+        ]
+      }
+    },
     "/api/grade/signals/{student_id}": {
       "get": {
-        "description": "当前学段 + 最近信号 + （够格但被挡住时的）待生效建议。\n\n★ 与旧设计不同：这里**不再有「学生确认」这一步** —— 学段由系统自动生效，\n``source`` 恒为 ``inferred``。``suggested_level`` 的含义因此收窄为\n「证据已够、但被冷却期或置信度挡住的下一个学段」，供前端显示「将在下一轮生效」。",
+        "description": "当前学段 + 最近信号 + （够格但被挡住时的）待生效建议。\n\n``source`` 现在有**两种**取值：默认是 ``inferred``（系统自动推断），\n学生手动设定过则是 ``explicit``（见 ``POST /grade/override/{student_id}``）。\n``suggested_level`` 的含义不变：「证据已够、但被冷却期或置信度挡住的下一个学段」，\n供前端显示「将在下一轮生效」。",
         "operationId": "grade_signals_api_grade_signals__student_id__get",
         "parameters": [
           {
@@ -2489,7 +3277,7 @@
     },
     "/api/grade/state/{student_id}": {
       "get": {
-        "description": "桌面端每轮取「当前学段」的入口（不含信号列表，载荷最小）。\n\n学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，\n而不是 404 —— 学段推断从第一轮就要开始工作。",
+        "description": "桌面端每轮取「当前学段」的入口（不含信号列表，载荷最小）。\n\n当前学段可能是**推断引擎自动写入**的，也可能是**学生手动设定**的\n（后者 ``source=\"explicit\"``、``cooldownRemainingTurns`` 更长）。\n\n学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，\n而不是 404 —— 学段推断从第一轮就要开始工作。",
         "operationId": "grade_state_api_grade_state__student_id__get",
         "parameters": [
           {
@@ -2661,6 +3449,128 @@
         ]
       }
     },
+    "/api/graph/overview/{grade_level}": {
+      "get": {
+        "description": "把某学段的知识点与**两端都在本学段内**的依赖边整张吐出来。\n\n★ 为什么按学段切片而不是给全图：学习地图是要**看**的，一次画 33 个节点还行，\n  跨学段全画（含边）会变成一团糊。跨学段的边在这里被**刻意丢掉** ——\n  它们在单学段视图里没有落点，传出去只会画出悬空的线。\n\n★ ``layer``（分层）由服务端算：前端拿到的是一张已排好层次的图，\n  不必自己再做一次拓扑排序（两处各算一遍必然不一致）。算法见 ``_assign_layers``。\n\n- 学段名非法 → **422**；知识库缺失 → **503**（与章节接口同一口径）。",
+        "operationId": "graph_overview_api_graph_overview__grade_level__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "grade_level",
+            "required": true,
+            "schema": {
+              "title": "Grade Level",
+              "type": "string"
+            }
+          },
+          {
+            "description": "带上就标注每个知识点是否已掌握（读该学生的 progress）",
+            "in": "query",
+            "name": "student_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "带上就标注每个知识点是否已掌握（读该学生的 progress）",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphOverview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "某学段依赖图全览（学习地图用）",
+        "tags": [
+          "graph"
+        ]
+      }
+    },
+    "/api/knowledge/chapters/{grade_level}": {
+      "get": {
+        "description": "按学段列出章节，顺序**就是教材顺序**（见 ``kb.chapters_by_grade`` 的排序注释）。\n\n- 学段名非法 → **422**（不回空清单：空清单看起来像「这个学段没编教材」）；\n- 知识库缺失 → **503**（可读中文：先跑 ``scripts/build_kb.py``）；\n- 带 ``student_id`` 但该生还没有进度行 → 计数为 0，**不报错**（新学生是正常状态）。",
+        "operationId": "list_chapters_api_knowledge_chapters__grade_level__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "grade_level",
+            "required": true,
+            "schema": {
+              "title": "Grade Level",
+              "type": "string"
+            }
+          },
+          {
+            "description": "带上就补每章的已掌握数（读该学生的 learning.db）；不带给纯教材清单",
+            "in": "query",
+            "name": "student_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "带上就补每章的已掌握数（读该学生的 learning.db）；不带给纯教材清单",
+              "title": "Student Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChapterListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "列出某学段的全部章节（可选带该学生的掌握进度）",
+        "tags": [
+          "knowledge"
+        ]
+      }
+    },
     "/api/profile/{student_id}": {
       "get": {
         "description": "读某学生的画像：基本身份 + 掌握度 + 偏好 + **依赖图推荐**（票 20 填充）。\n\n- 学生不存在 → **404**（空画像会让学生以为「我没学过任何东西」，两者必须区分）；\n- ``studentId`` 非法 → **422**（它会被拼进文件系统路径）；\n- 库读写失败 → **503**（可读中文；上层 Tool 会把它转成 `error` 事件而不是崩）。\n\n★ ``recommended_kp_ids`` 自票 20 起**不再是空的**：它由 :func:`build_recommendation`\n  算出（依赖图 + 掌握度 + 冷启动兜底）。**不要**在别处再算一份 ——\n  两套推荐算法会给出两个不同的「下一步」，而学生只会看到其中一个。",
@@ -2699,6 +3609,100 @@
           }
         },
         "summary": "画像与掌握度",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/chapter": {
+      "get": {
+        "description": "读学生当前在学的章节（``chapterTitle`` 为空串 = 未选择）。\n\n- ``studentId`` 非法 → 422（它会被拼进文件系统路径）；\n- 学生行不存在 → **自动建行**（冷启动，见 :func:`_ensure_student_level`），\n  **不 404**：章节指示器在全新机器上要能显示「未选择章节」。\n  因此本端点对**全新学生**是「建行 + 读」，对已存在的学生才是纯读。\n- 读库失败 → 503（可读中文）。",
+        "operationId": "read_chapter_api_profile__student_id__chapter_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChapterStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "当前教材章节",
+        "tags": [
+          "profile"
+        ]
+      },
+      "put": {
+        "description": "设定/清除当前章节（**学生显式选择的唯一落点**）。\n\n规则：\n\n- ``chapterTitle`` 为空串 → **清除**（写 NULL，回到「不限章节，自由问答」）；\n  清除**不需要 kb**（清掉一个值不需要先查清单）。\n- 非空 → 必须命中该生**当前学段**的章标题（清单来自 ``kb.sqlite``），\n  不在清单里 → **422**（否则 Prompt 里会出现一本不存在的教材）；\n- kb 不可用且要设非空标题 → **503**（提示 ``build_kb``，**不猜、不静默接受**）。\n\n★ **不做 SQL 硬过滤**：章节是软偏好，检索契约（``RagSearchRequest``）一个字没改，\n  学生选了第 4 章之后再问第 9 章的内容，``rag_search`` 照常检索。\n★ 学段一变，章节由 ``app/grade/rules.py`` 清空（那本教材已经不存在了）——\n  本端点**不负责**这件事，也不要在读的时候「顺手修正」。",
+        "operationId": "write_chapter_api_profile__student_id__chapter_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChapterUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChapterStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "设定或清除当前教材章节",
         "tags": [
           "profile"
         ]
@@ -2752,6 +3756,59 @@
           }
         },
         "summary": "学习记录写入（答题/代码/动画观看/答疑）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/preferences": {
+      "put": {
+        "description": "写一条学习偏好（``profile_pref`` 的**唯一生产写入口**）。\n\n需求要求「根据答题表现**和兴趣偏好**动态调整后续推荐」：「答题表现」那条链路\n（判分 → 掌握度 → 推荐）本就是通的，而「兴趣偏好」此前是条断头路 ——\n``profile_pref`` 表建好了、``GET /profile`` 也读它，但**生产代码从不写**。\n本端点补上这一半：写入的偏好会经 ``GET /profile`` 进入画像，\n再由 ``get_student_profile`` Tool 拼进每轮 Prompt。\n\n★ **为什么是 PUT 而不是 POST**：单键 upsert 是**幂等**操作 —— 同一个 key 提交两次，\n  库里的状态完全相同（``key`` 是主键，第二次是覆盖）。POST 会暗示「追加一条记录」，\n  与实际语义正好相反，调用方会以为「多写几条偏好更完整」而反复 POST。\n\n★ **为什么键是封闭词表**（``contracts.PreferenceKey``：``interest | explain_style |\n  pace | note``）：见该 Literal 的注释 —— 关键是「写掌握度」在**类型层面**就不可能。\n  掌握度是判分规则算出来的客观量，一旦模型能通过偏好通道写它，\n  就会出现「模型觉得学生懂了就改分」。这类多写路径的教训见 D-020。\n\n★ **为什么不改 ``StudentProfile`` 的形状**：偏好已经在该模型的 ``preferences`` 里，\n  本端点只写不读；出参复用 :class:`LearningEventAck`（``{ok: true}``）。\n\n冷启动兜底与 ``POST /events`` **完全一致**（学生行不存在时建一条）——\n两条写路径必须同口径，否则学生会遇到「写记录能用、写偏好 404」这类无谓差异。",
+        "operationId": "update_preference_api_profile__student_id__preferences_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferenceUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningEventAck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "写入学习偏好（兴趣 / 讲解方式 / 节奏）",
         "tags": [
           "profile"
         ]
@@ -2815,6 +3872,63 @@
         "summary": "下一步学什么（依赖图 + 掌握度 + 冷启动）",
         "tags": [
           "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/report": {
+      "get": {
+        "description": "「这一周学得怎么样」的**唯一出口**（学生与家长看的是同一份）。\n\n★ 四张表在这里汇合：``mastery``（会什么）、``learning_history``（做了多少）、\n  ``progress``（闯到哪关了）、``grade_history``（学段怎么变的）。\n  此前它们各有零散出口，但没有一个「合起来看」的地方 ——\n  而 ``grade_history`` 的表注释里本来就写着「家长报告」，这是补上那处设计意图。\n\n★ **连续天数在服务端算**（``_streak_days``）：它跨「整段历史」而不是时间窗，\n  前端拿到的是已经算好的结论；同时前端也拿到 ``daily`` 明细，可以自己铺满整周。\n\n- 学生不存在 → **404**；``days`` 越界 → **422**；库异常 → **503**。",
+        "operationId": "learning_report_api_profile__student_id__report_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "时间窗天数（按本地日期切天）",
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "description": "时间窗天数（按本地日期切天）",
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "学习报告（周窗口活动量 + 掌握度 + 闯关 + 章节 + 学段轨迹）",
+        "tags": [
+          "study"
         ]
       }
     },
@@ -2989,6 +4103,63 @@
         ]
       }
     },
+    "/api/quiz/mistakes/{student_id}": {
+      "get": {
+        "description": "把 ``is_correct = 0`` 的学习记录按知识点聚合成错题。\n\n- 学生不存在 → **404**（没有学习记录与「从没错过」是两件事，前端要能分开显示）；\n- 学生 id 非法 → **422**；库读写失败 → **503**。\n\n★ ``without_stem`` 显式告诉前端「还有几条错题没有题干记录」：\n  QA / 编程轨答错时 ``question`` 是空串（那一轨不写题干），\n  静默丢掉的话，学生会觉得「我明明错过它，这里怎么没有」。",
+        "operationId": "list_mistakes_api_quiz_mistakes__student_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "返回的知识点数上限",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "返回的知识点数上限",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MistakeListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "错题本（按知识点聚合，含题干前 120 字）",
+        "tags": [
+          "study"
+        ]
+      }
+    },
     "/api/quiz/progress/{student_id}": {
       "get": {
         "description": "读某学生的闯关进度。\n\n★ **冷启动兜底**（票 15/20 的验收项）：新学生 ``progress`` 表是空的，\n  这里按**依赖图的拓扑序**自动初始化默认路径（只插不覆盖），\n  再返回 —— 前端不会拿到空数组，也不会因为没数据而报错。\n``kpIds`` 用于「本次答题影响到的关卡」这种小范围回读。",
@@ -3109,7 +4280,7 @@
     },
     "/api/rag/search": {
       "post": {
-        "description": "按学段检索教材片段。\n\n:param body: ``{query, gradeLevel, topK?, allowCompat?, includeExpansion?}``\n    - ``gradeLevel``：学生当前学段（**显式选择优先**），学段隔离在 SQL 层按它执行；\n    - ``allowCompat``：是否允许取用更低学段的内容（命中标 ``compat=true``）；\n    - ``includeExpansion``：是否把依赖图里的前置知识点补进上下文（有数量上限）。\n\n响应里的 ``hits`` 带父块正文（注入 LLM 的上下文），``context`` 是拼好的可直接投喂文本，\n``degraded`` 说明本次落在降级链的哪一级（vector → cloud → fts → outline）。",
+        "description": "按学段检索教材片段。\n\n:param body: ``{query, gradeLevel, topK?, allowCompat?, includeExpansion?}``\n    - ``gradeLevel``：学生**当前生效**的学段（由服务端推断，见 ``app/grade/rules.py``；\n      学生端只读、**没有人工选择入口**），学段隔离在 SQL 层按它执行；\n    - ``allowCompat``：是否允许取用更低学段的内容（命中标 ``compat=true``）；\n    - ``includeExpansion``：是否把依赖图里的前置知识点补进上下文（有数量上限）。\n\n响应里的 ``hits`` 带父块正文（注入 LLM 的上下文），``context`` 是拼好的可直接投喂文本，\n``degraded`` 说明本次落在降级链的哪一级（vector → cloud → fts → outline）。",
         "operationId": "rag_search_api_rag_search_post",
         "requestBody": {
           "content": {
@@ -3170,7 +4341,7 @@
         ]
       },
       "put": {
-        "description": "保存设置。\n\n``apiKey`` 提交空串或掩码（``…abcd``）**不会**抹掉已存 Key —— 用户没动这一栏时\n前端会把读回来的掩码原样提交；只有 ``clearApiKey=true`` 才删除。\n两栏都可省略（= 不动那一栏），但至少要提交一栏。",
+        "description": "保存设置。\n\n``apiKey`` 提交空串或掩码（``…abcd``）**不会**抹掉已存 Key —— 用户没动这一栏时\n前端会把读回来的掩码原样提交；只有 ``clearApiKey=true`` 才删除。\n两栏都可省略（= 不动那一栏），但至少要提交一栏。\n\n★ **栏内也是「省略即保留」**：`PUT {\"llm\": {\"baseUrl\": \"…\"}}` 只改地址，\n不会顺手重置 provider / 模型 / Key（见 `apply_llm` / `apply_embedding`）。",
         "operationId": "update_settings_api_settings_put",
         "requestBody": {
           "content": {
@@ -3210,9 +4381,58 @@
         ]
       }
     },
+    "/api/settings/models": {
+      "post": {
+        "description": "拉取 ``GET {baseUrl}/models`` 的模型 id 清单（**设置页填 ModelID 的辅助**）。\n\n与 ``/settings/probe`` 的分工：\n  - ``probe``  回答「这组配置**能不能用**」（成功/失败 + 可读原因）；\n  - ``models`` 回答「这个地址**有哪些模型可选**」（清单）。\n两者共用同一套外呼实现（``ProbeTransport`` 注入点也相同），**不新增任何依赖**。\n\n``ok=False``（连不上 / 鉴权失败 / 端点没有模型清单）**不是致命错误**：\n调用方（主进程）会把 Pi 内置预设清单与这里的实时结果合并后交给设置页，\n所以这里失败时只需要给一句可读原因，界面照样能选到内置模型的候选。\n\n★ 与探测**共用同一条凭据边界**（`_resolve_probe_credentials`）：换了地址就不复用已存 Key。",
+        "operationId": "list_provider_models_api_settings_models_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProviderModelsRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderModelsResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "拉取某个地址可见的模型清单（设置页的「拉取模型」）",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
     "/api/settings/probe": {
       "post": {
-        "description": "真实连通性探测（票 07 落地）：``GET {baseUrl}/models``，必要时补一条 1-token 对话请求。\n\n★ **BaseURL 的 `/v1` 陷阱**：默认值历史上是 ``https://api.deepseek.com/v1``（OpenAI 兼容习惯），\n而 Pi 内置 DeepSeek provider 用的是 ``https://api.deepseek.com``（**无 `/v1`**）。\n两者都可能连通、也都可能只有一种能连通，所以这里**不自动改写**用户填的值：\n先原样探测（探测的就是「保存后会用的那个地址」），只有在**路径不存在**（404/405）时才拿\n另一种写法做一次诊断，并在失败原因里明确告诉用户该改成哪一个。\n\n探测的是**提交的候选配置**（先探测、满意再保存）；Key 提交掩码/空串时用已存 Key。\n**探测失败不阻塞保存**（断网/离线演示仍要能存配置），失败原因一律是可读中文。",
+        "description": "真实连通性探测（票 07 落地）：``GET {baseUrl}/models``，必要时补一条 1-token 对话请求。\n\n★ **BaseURL 的 `/v1` 陷阱**：默认值历史上是 ``https://api.deepseek.com/v1``（OpenAI 兼容习惯），\n而 Pi 内置 DeepSeek provider 用的是 ``https://api.deepseek.com``（**无 `/v1`**）。\n两者都可能连通、也都可能只有一种能连通，所以这里**不自动改写**用户填的值：\n先原样探测（探测的就是「保存后会用的那个地址」），只有在**路径不存在**（404/405）时才拿\n另一种写法做一次诊断，并在失败原因里明确告诉用户该改成哪一个。\n\n探测的是**提交的候选配置**（先探测、满意再保存）：未提交的字段回落到已存值\n（与 `PUT /api/settings` 同一条「省略即保留」规则）。\n\n★★ **已存的明文 Key 只允许用于保存它的那个地址**（见 `_resolve_probe_credentials`）：\nKey 提交掩码/空串时**不是无条件复用**，只在提交的地址与已存地址一致时才复用；\n换了地址又没有提交新 Key，直接回一句可读中文而**不发出任何请求**。\n**探测失败不阻塞保存**（断网/离线演示仍要能存配置），失败原因一律是可读中文。",
         "operationId": "probe_settings_api_settings_probe_post",
         "requestBody": {
           "content": {
@@ -3254,6 +4474,28 @@
           }
         },
         "summary": "探测 LLM 连通性（票 07 实现）",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/settings/runtime": {
+      "get": {
+        "description": "★★ **只给主进程用**：Pi 建会话 / 热切换时需要**明文 Key**。\n\n⚠️ 为什么必须有这条接口：Pi 在进程外无法读 ``config.json`` 的语义\n（原子写、损坏备份、snake/camel 双写容忍都在本模块），而设置页的读接口\n恒回掩码。没有它，「设置页改了配置 → Pi 用新配置」这条链路就断了\n（实测：改完设置重启，Pi 仍用旧的 ``models.json``）。\n\n⚠️ **安全边界**（三条一起才成立，缺一不可）：\n  1. 与其它 ``/api/*`` 一样需要 ``X-Auth-Token``（token 只在主进程内存里）；\n  2. 渲染进程**没有**对应 IPC 通道、preload **没有**对应方法（架构守卫断言）；\n  3. 主进程拿到后只经 ``setRuntimeApiKey`` 放进内存，**不落盘、不进日志**。",
+        "operationId": "read_runtime_config_api_settings_runtime_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmRuntimeConfig"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "★ 主进程专用：真正生效的那份 LLM 配置（**含明文 Key**）",
         "tags": [
           "settings"
         ]
