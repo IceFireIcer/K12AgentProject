@@ -6,31 +6,33 @@
  */
 import { GRADES, SATS, useThemeStore } from '@/stores/theme'
 import type { GradeKey, SatKey } from '@/stores/theme'
+import tokensSource from '../../../scripts/tokens.source.json'
 
 const theme = useThemeStore()
 
-/** 需要展示的 token 名（与 tokens.source.json 的主题化 token 对齐） */
-const TOKEN_KEYS = [
-  'bg', 'surface-2', 'accent', 'accent-2', 'accent-soft', 'accent-border',
-  'glow', 'hair', 'btn-from', 'btn-to', 'chip-bg', 'chip-fg', 'aurora-a', 'aurora-b', 'aurora-c'
-] as const
+/**
+ * 主题化 token 清单 —— **直接来自 `tokens.source.json`**，不手抄。
+ *
+ * ⚠️ 此前这里是一份手写的 15 项数组，注释还写着「与 tokens.source.json 对齐」，
+ * 但调色板早已改名（`bg`→`page`，`glow`/`hair`/`btn-from`/`btn-to`/`aurora-*` 全部移除，
+ * 新增 `surface`/`accent-ink`）。于是这一页——**专门给报告和答辩用的设计系统证据页**——
+ * 有 7 个格子取的是不存在的变量，渲染成空白圆点，而页面上还写着「15 个主题化变量」。
+ * 手抄的清单一定会漂移；改成从源头读，就再也不可能对不上。
+ */
+const TOKEN_KEYS = Object.keys(tokensSource.themed)
 
+/** 中文名：只给常见项写，缺的回落成 key 本身（新增 token 不会因此消失） */
 const TOKEN_LABEL: Record<string, string> = {
-  bg: '页面底',
+  page: '页面底',
+  surface: '主面',
   'surface-2': '次级面',
   accent: '主强调',
-  'accent-2': '次强调',
+  'accent-ink': '强调墨（可读文字）',
+  'accent-2': '次强调（数据可视化）',
   'accent-soft': '强调浅底',
   'accent-border': '强调描边',
-  glow: '辉光',
-  hair: '细线',
-  'btn-from': '按钮起',
-  'btn-to': '按钮止',
   'chip-bg': '胶囊底',
-  'chip-fg': '胶囊字',
-  'aurora-a': '极光 A',
-  'aurora-b': '极光 B',
-  'aurora-c': '极光 C'
+  'chip-fg': '胶囊字'
 }
 
 function preview(grade: GradeKey, sat: SatKey) {
@@ -45,13 +47,11 @@ function isActive(grade: GradeKey, sat: SatKey) {
 
 <template>
   <div class="pal">
+    <!-- 页面名在顶栏（取自路由 meta），这里只放这一页特有的说明 -->
     <header class="pal__head">
-      <div class="pal__title-block">
-        <h2 class="pal__title">配色总览</h2>
-        <p class="pal__sub">
-          两轴 token：grade（6）× sat（3）= 18 组，落成 <code>:root[data-grade][data-sat]</code>
-        </p>
-      </div>
+      <p class="pal__sub">
+        两轴 token：grade（6）× sat（3）= 18 组，落成 <code>:root[data-grade][data-sat]</code>
+      </p>
       <span class="pal__chip">{{ GRADES.length }} 学段档 × {{ SATS.length }} 饱和档</span>
     </header>
 
@@ -153,42 +153,40 @@ function isActive(grade: GradeKey, sat: SatKey) {
   align-items: center;
   gap: 12px;
 }
-.pal__title-block {
+.pal__sub {
   flex: 1;
   min-width: 0;
-}
-.pal__title {
-  font-size: var(--k12-fs-xl);
-  font-weight: 650;
-  color: var(--k12-fg);
-}
-.pal__sub {
-  margin-top: 3px;
-  font-size: var(--k12-fs-micro);
-  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-fg-2);
 }
 .pal__sub code {
   font-family: var(--k12-font-mono);
-  color: var(--k12-accent);
+  color: var(--k12-accent-ink);
 }
 .pal__chip {
   padding: 5px 11px;
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-soft);
-  color: var(--k12-accent);
+  color: var(--k12-accent-ink);
+  /* 页头汇总胶囊（渲染「6 学段档 × 3 饱和档」）：类名含 chip，形态是
+   * 填充胶囊 + 650 的**记号**，与 .fp__chip / .sb__badge 同族 → 留角标档 11px。
+   * ⚠️ 内容长于 4 字，是本页唯一"擦边"的一处：升到 12px 就与紧邻的说明行
+   * .pal__sub（12px）同权，页头「说明 / 记号」这层区分会被抹掉。理由见交付说明。 */
   font-size: var(--k12-fs-micro);
   font-weight: 650;
   flex: none;
 }
 
 .card {
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  box-shadow: var(--k12-shadow-card);
+  border-radius: var(--k12-r-card);
+
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 14px 16px;
-  border-radius: var(--k12-r-4xl);
-  background: var(--k12-glass);
-  border: 1px solid var(--k12-glass-border);
 }
 .card__head {
   display: flex;
@@ -202,16 +200,16 @@ function isActive(grade: GradeKey, sat: SatKey) {
 }
 .card__meta {
   margin-left: auto;
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted-2);
 }
 .card__note {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
 .card__note code {
   font-family: var(--k12-font-mono);
-  color: var(--k12-accent);
+  color: var(--k12-accent-ink);
 }
 
 .tokens {
@@ -228,7 +226,7 @@ function isActive(grade: GradeKey, sat: SatKey) {
   width: 22px;
   height: 22px;
   flex: none;
-  border-radius: var(--k12-r-sm);
+  border-radius: var(--k12-r-control);
   border: 1px solid var(--k12-border);
 }
 .token__text {
@@ -238,11 +236,11 @@ function isActive(grade: GradeKey, sat: SatKey) {
 }
 .token__name {
   font-family: var(--k12-font-mono);
-  font-size: 8.5px;
+  font-size: var(--k12-fs-xs);
   color: var(--k12-fg-2);
 }
 .token__label {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted-2);
 }
 
@@ -252,24 +250,26 @@ function isActive(grade: GradeKey, sat: SatKey) {
   gap: 10px;
 }
 .sat {
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  box-shadow: var(--k12-shadow-card);
+  border-radius: var(--k12-r-card);
+
   display: flex;
   flex-direction: column;
   gap: 7px;
   padding: 11px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-3xl);
-  background: var(--k12-surface);
   cursor: pointer;
   text-align: left;
 }
 .sat--on {
-  border-color: var(--k12-accent);
+  border-color: var(--k12-accent-ink);
   background: var(--k12-accent-soft);
 }
 .sat__bar {
   display: flex;
   height: 26px;
-  border-radius: var(--k12-r-md);
+  border-radius: var(--k12-r-control);
   overflow: hidden;
   border: 1px solid var(--k12-border);
 }
@@ -282,7 +282,7 @@ function isActive(grade: GradeKey, sat: SatKey) {
   color: var(--k12-fg);
 }
 .sat__desc {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
 
@@ -303,7 +303,7 @@ function isActive(grade: GradeKey, sat: SatKey) {
 }
 .matrix__cell--head {
   justify-content: center;
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   font-weight: 650;
   color: var(--k12-muted);
   padding: 4px 0;
@@ -319,7 +319,7 @@ function isActive(grade: GradeKey, sat: SatKey) {
   color: var(--k12-fg);
 }
 .matrix__layer {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted-2);
 }
 .matrix__cell--swatch {
@@ -327,12 +327,12 @@ function isActive(grade: GradeKey, sat: SatKey) {
   gap: 5px;
   padding: 8px 9px;
   border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-xl);
+  border-radius: var(--k12-r-card);
   cursor: pointer;
   overflow: hidden;
 }
 .matrix__cell--on {
-  border-color: var(--k12-accent);
+  border-color: var(--k12-accent-ink);
   box-shadow: 0 0 0 2px var(--k12-accent-ring);
 }
 .sw__bg,
@@ -340,14 +340,14 @@ function isActive(grade: GradeKey, sat: SatKey) {
 .sw__btn {
   width: 16px;
   height: 16px;
-  border-radius: var(--k12-r-xs);
+  border-radius: var(--k12-r-flat);
   flex: none;
 }
 .sw__name {
   margin-left: auto;
   font-family: var(--k12-font-mono);
-  font-size: 8px;
-  color: var(--k12-muted-2);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
 }
 
 /**
@@ -355,11 +355,11 @@ function isActive(grade: GradeKey, sat: SatKey) {
  * 组件内**不硬编码任何色值** —— 改色只改画布，再重新导出 token。
  */
 .matrix__cell--swatch {
-  background: var(--k12-bg);
+  background: var(--k12-surface-2);
 }
 
 .sw__bg {
-  background: var(--k12-bg);
+  background: var(--k12-surface-2);
   border: 1px solid var(--k12-border);
 }
 .sw__chip {

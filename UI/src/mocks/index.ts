@@ -12,6 +12,7 @@
 import type {
   AnimationPayload,
   Citation,
+  CodeEvaluation,
   CodingHint,
   CodeTemplate,
   DepNode,
@@ -94,7 +95,14 @@ export const retrievalHits: RagHit[] = [
     kpId: 'jr-data-features',
     score: 0.86,
     degraded: 'vector',
-    expanded: false
+    expanded: false,
+    text:
+      '我们身边到处都是数据：身高、体重、气温、一张照片里的像素亮度。\n\n' +
+      '但原始数据本身通常不能直接拿来用。比如「一张照片」，对电脑来说是一大张数字表；' +
+      '而我们要判断的是「这是猫还是狗」。从这张数字表里挑出真正对判断有用的那部分信息，' +
+      '得到的结果就叫「特征」。\n\n' +
+      '特征是从原始数据里「提取」出来的，不是凭空想出来的：先看原始数据里有什么，' +
+      '再想「哪一部分能帮我们把对象区分开」，那一部分就是特征。'
   },
   {
     chunkId: 'jr-data-features::s1::p1',
@@ -107,7 +115,13 @@ export const retrievalHits: RagHit[] = [
     kpId: 'jr-data-features',
     score: 0.79,
     degraded: 'vector',
-    expanded: false
+    expanded: false,
+    text:
+      '同一个对象，可以提取出很多组不同的特征，而选哪一组，直接决定模型能不能学好。\n\n' +
+      '判断特征选得好不好，有个简单的标准：「这组特征能不能把不同的对象区分开」。' +
+      '如果两类对象在这组特征上几乎一样，那模型再强也分不出来 —— 它只能看到你给它的数字。\n\n' +
+      '另一个标准是「能不能量出来」。名字的笔画数虽然也是个数字，' +
+      '但它和「这个同学跑得快不快」没有关系，这种特征对判断没有帮助。'
   }
 ]
 
@@ -236,7 +250,34 @@ export const codingHints: CodingHint[] = [
   { level: 3, hint: '写成：avg = sum(heights) / len(heights)，然后 print(avg)。' }
 ]
 
-export const codeRunResult = {
+/**
+ * 代码评估的**失败分支**（形状对齐 `CodeEvaluation`）。
+ *
+ * 为什么要单独准备一份：`CodeEvaluation.error`（CodeError：type / message / line /
+ * rawTraceback）与 `nextHint` 在界面上**从未渲染过**，于是"报错感知 + 分级求助"
+ * 这条核心链路在原型里完全看不见。这里给一支真实感的 Python 报错，
+ * 让失败分支可见、可验收。
+ */
+export const codeRunFailure: CodeEvaluation = {
+  ok: false,
+  stdout: '',
+  error: {
+    type: 'NameError',
+    message: "name 'totle' is not defined",
+    line: 9,
+    rawTraceback:
+      'Traceback (most recent call last):\n' +
+      '  File "<student>", line 9, in <module>\n' +
+      "    totle = sum(heights)\n" +
+      "NameError: name 'totle' is not defined"
+  },
+  feedback: '变量名拼写不一致：第 6 行定义的是 total，第 9 行用的是 totle。',
+  nextHint: { level: 1, hint: '检查一下你用的变量名和定义的变量名是否完全一致（Python 区分大小写，也不容忍拼写差异）。' }
+}
+
+/** 代码评估结果（形状对齐 `CodeEvaluation`；原来漏了 `ok` 且没有类型标注，TS 查不出来） */
+export const codeRunResult: CodeEvaluation = {
+  ok: true,
   stdout: '165.2',
   error: null,
   feedback: '输出正确，平均值算对了。你已经会用列表装特征、用内置函数求统计量。',
@@ -264,13 +305,20 @@ export const gradeHistory = [
   { at: '09-03', from: '小学低年级', to: '小学高年级', reason: '提问句式变长，开始追问原因', source: 'inferred' as const }
 ]
 
-/** 设置页默认值（注意：Pi 内置 DeepSeek baseUrl 无 /v1，与前端默认形如 /v1 不同，保存时须真实探测） */
+/**
+ * 设置页默认值：与 `server/app/contracts.py` 的默认值**一字不差**
+ * （provider_name=DeepSeek / base_url 无 `/v1` / model_id 必须在 Pi 目录里存在）。
+ *
+ * ⚠️ 历史默认是 `deepseek-chat` + `…/v1` —— 那两个在 Pi 的 deepseek 目录里都不存在
+ * （Pi 只有 `deepseek-v4-flash` / `-vision-exp` / `-pro`），会让首轮对话直接抛
+ * 「找不到模型」。此处不重复那个错值。
+ */
 export const settings: SettingsResponse = {
   llm: {
-    providerName: 'deepseek',
-    baseUrl: 'https://api.deepseek.com/v1',
+    providerName: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
     hasKey: true,
-    modelId: 'deepseek-chat'
+    modelId: 'deepseek-v4-flash'
   },
   embedding: {
     mode: 'local_fastembed',

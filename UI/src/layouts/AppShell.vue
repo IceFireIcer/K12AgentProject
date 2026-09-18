@@ -1,94 +1,93 @@
 <script setup lang="ts">
 /**
- * 应用外壳：极光背景 + 玻璃侧栏 + 顶栏 + 内容区。
+ * 应用外壳：桌面 + 侧栏 + 顶栏 + 内容区。纯结构，不含尺寸逻辑。
  *
- * 尺寸策略（用户决策）：**弹性 + 整体等比缩放**，两者各管一段，不要用其中一个顶替另一个：
- *  - 宽度 **≥ DESIGN_WIDTH(1440)**：scale 恒为 1，外壳宽度 `100%` —— **内容自然铺满宽屏**。
- *    （若把外壳宽度硬写成 1440px，1920 窗口右侧会留下 480px 空白。）
- *  - 宽度 **< 1440**：外壳仍固定 1440px，用 `transform: scale(w/1440)` 整体等比缩小，
- *    避免侧栏被压扁、阅读栏被挤窄，设计比例得以保留。
+ * 材质：外壳是**深色壳**（`--k12-surface`）—— 侧栏、顶栏、页面底都在这一层，
+ * 它退到背景；内容区是**亮面**（`--k12-surface` 系列），页面把内容摆上去。
+ * 明暗对比是这个界面建立层次的主要手段：壳暗、内容亮，结构自然后退。
  *
- * 缩放用 ResizeObserver 观测容器实际宽度，不监听 window.resize（避免 DPI 抖动）。
+ * 尺寸策略：**真响应式断点**，不做整体等比缩放。
+ *   - ≥1440：外壳铺满，阅读栏弹性；
+ *   - 1280–1439：右栏可折叠（在 ChatView 内）；
+ *   - <1280：侧栏收成 64px 图标条、对话右栏改浮层；
+ *   - <1120：出横向滚动（`#app { min-width }`，见 base.css）。
+ *
+ * 为什么废掉等比缩放：老做法在窗口窄于 1440 时对**整个界面**做 transform: scale(w/1440)，
+ * 连字号一起压 —— 1100px 窗口下正文只有 ~9.5px，1px 描边也糊掉。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import AuroraBackdrop from '@/components/AuroraBackdrop.vue'
 import AppSidebar from '@/components/AppSidebar.vue'
 import AppTopbar from '@/components/AppTopbar.vue'
+import FloatPanel from '@/components/FloatPanel.vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
-/** 设计基准宽度（画布都是 1440×900） */
-const DESIGN_WIDTH = 1440
+/**
+ * 滚动状态标记。
+ *
+ * `PageActions` 吸顶时需要知道「内容是否已滚过它」，才能决定要不要补那条分隔线 ——
+ * 纯 CSS 无法表达"sticky 是否已吸住"。所以在**滚动容器**（`.shell__content`）
+ * 上挂一个 `is-scrolled`，由它自己判断，而不是让每个使用页各写一份监听。
+ *
+ * 阈值 1px：只要离开原位就算滚过（0 → 1 的那一下正是分隔线该出现的时候）。
+ */
+const contentRef = ref<HTMLElement | null>(null)
+const scrolled = ref(false)
 
-const hostRef = ref<HTMLElement | null>(null)
-const hostWidth = ref(DESIGN_WIDTH)
+function onScroll() {
+  scrolled.value = (contentRef.value?.scrollTop ?? 0) > 1
+}
 
-let ro: ResizeObserver | null = null
+/**
+ * 换页归零。
+ *
+ * `router` 的 `scrollBehavior` 管的是 window 滚动，而这里滚的是**内层容器**
+ * （`.shell__content`），所以必须在换页时显式归零 —— 否则从"依赖图谱"切到"设置"
+ * 会停在上一页的滚动位置，看起来像是页面没加载完。
+ */
+const route = useRoute()
+function resetScroll() {
+  const el = contentRef.value
+  if (!el) return
+  el.scrollTop = 0
+  scrolled.value = false
+}
 
-onMounted(() => {
-  if (!hostRef.value) return
-  ro = new ResizeObserver((entries) => {
-    const w = entries[0]?.contentRect.width
-    if (typeof w === 'number' && w > 0) hostWidth.value = w
-  })
-  ro.observe(hostRef.value)
-})
+watch(() => route.fullPath, () => void resetScroll())
 
-onBeforeUnmount(() => {
-  ro?.disconnect()
-  ro = null
-})
-
-/** 只在窄于设计基准时才缩放，避免宽屏下多余放大 */
-const scale = computed(() => Math.min(1, hostWidth.value / DESIGN_WIDTH))
-
-const stageStyle = computed(() => {
-  // 宽屏：不缩放、宽度铺满，交给弹性布局
-  if (scale.value === 1) {
-    return { width: '100%', height: '100%' }
-  }
-  // 窄屏：固定设计宽度 + 等比缩小；高度按比例反算，避免底部留白
-  return {
-    transform: `scale(${scale.value})`,
-    transformOrigin: 'top left',
-    width: `${DESIGN_WIDTH}px`,
-    height: `calc(100% / ${scale.value})`
-  }
-})
+onMounted(() => contentRef.value?.addEventListener('scroll', onScroll, { passive: true }))
+onBeforeUnmount(() => contentRef.value?.removeEventListener('scroll', onScroll))
 </script>
 
 <template>
-  <div ref="hostRef" class="shell">
-    <AuroraBackdrop />
-
-    <div class="shell__stage" :style="stageStyle">
-      <AppSidebar />
-      <div class="shell__main">
-        <AppTopbar />
-        <main class="shell__content">
-          <RouterView v-slot="{ Component }">
-            <transition name="fade" mode="out-in">
-              <component :is="Component" />
-            </transition>
-          </RouterView>
-        </main>
-      </div>
+  <div class="shell">
+    <AppSidebar />
+    <div class="shell__main">
+      <AppTopbar />
+      <!-- `is-scrolled` 供 PageActions 吸顶时补分隔线（纯 CSS 判断不了是否已吸住） -->
+      <main ref="contentRef" class="shell__content" :class="{ 'is-scrolled': scrolled }">
+        <RouterView />
+      </main>
     </div>
+
+    <!-- 悬浮追问窗：挂在外壳上（而不是某张卡里），这样它在换页时不会被卸载，
+         位置与对话记录得以延续。Teleport 到 body，不受 shell 的 overflow 裁切。 -->
+    <FloatPanel />
   </div>
 </template>
 
 <style scoped>
+/* 外壳 = **页面底色**层（画布原 bg，带学段色）。
+ *
+ * ⚠️ 这里**不能**写死白底 —— 那会让页面底色消失，白卡片压在白底上就分不出边界。
+ * 画布的设计正是"带色的页面 + 白卡片"，这一层是全站层次的地基。
+ * 侧栏与顶栏自带自己的底色（见各自组件），不依赖这里。 */
 .shell {
   position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: var(--k12-bg);
-}
-.shell__stage {
-  position: relative;
-  z-index: 1;
   display: flex;
-  /* 缩放时高度按比例反算，保证填满视口 */
-  min-height: 100%;
+  background: var(--k12-page);
 }
 .shell__main {
   flex: 1;
@@ -101,14 +100,10 @@ const stageStyle = computed(() => {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  /* 内容区透出页面底色：卡片浮在它上面 */
+  background: var(--k12-page);
 }
 
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.16s ease;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
+/* 换页：瞬时切换，无过渡。
+ * 这是有意的 —— 设计和内容要能靠静态层次站住，动效不做掩护。 */
 </style>

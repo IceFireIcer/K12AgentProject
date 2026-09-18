@@ -51,13 +51,9 @@ function gradeLabelOf(key: string) {
 
 <template>
   <div class="gm">
+    <!-- 页面名在顶栏（取自路由 meta），这里只放这一页特有的说明 -->
     <header class="gm__head">
-      <div class="gm__title-block">
-        <h2 class="gm__title">四学段对照</h2>
-        <p class="gm__sub">
-          语气与认知定位的差异，不只在难度数字上 —— 学段由系统自动推断，无人工入口
-        </p>
-      </div>
+      <p class="gm__sub">语气与认知定位的差异，不只在难度数字上（学段由系统自动推断，无人工入口）</p>
       <span class="gm__chip">4 学段 · 全自动</span>
     </header>
 
@@ -148,38 +144,32 @@ function gradeLabelOf(key: string) {
   align-items: center;
   gap: 12px;
 }
-.gm__title-block {
+.gm__sub {
   flex: 1;
   min-width: 0;
-}
-.gm__title {
-  font-size: var(--k12-fs-xl);
-  font-weight: 650;
-  color: var(--k12-fg);
-}
-.gm__sub {
-  margin-top: 3px;
-  font-size: var(--k12-fs-micro);
-  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-fg-2);
 }
 .gm__chip {
   padding: 5px 11px;
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-soft);
-  color: var(--k12-accent);
+  color: var(--k12-accent-ink);
   font-size: var(--k12-fs-micro);
   font-weight: 650;
   flex: none;
 }
 
 .card {
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  box-shadow: var(--k12-shadow-card);
+  border-radius: var(--k12-r-card);
+
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 14px 16px;
-  border-radius: var(--k12-r-4xl);
-  background: var(--k12-glass);
-  border: 1px solid var(--k12-glass-border);
 }
 .card__head {
   display: flex;
@@ -193,11 +183,11 @@ function gradeLabelOf(key: string) {
 }
 .card__meta {
   margin-left: auto;
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted-2);
 }
 .card__note {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
 
@@ -207,19 +197,20 @@ function gradeLabelOf(key: string) {
   gap: 10px;
 }
 .axis__item {
+  background: var(--k12-surface-2);
+  border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
+  border-radius: var(--k12-r-inset);
+
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
   padding: 12px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-3xl);
-  background: var(--k12-bg);
   cursor: pointer;
   text-align: left;
 }
 .axis__item--on {
-  border-color: var(--k12-accent);
+  border-color: var(--k12-accent-ink);
   box-shadow: 0 0 0 2px var(--k12-accent-ring);
 }
 .axis__swatch {
@@ -239,12 +230,12 @@ function gradeLabelOf(key: string) {
   color: var(--k12-fg);
 }
 .axis__layer {
-  font-size: var(--k12-fs-micro);
-  color: var(--k12-accent);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-accent-ink);
   font-weight: 600;
 }
 .axis__tone {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
 
@@ -254,13 +245,14 @@ function gradeLabelOf(key: string) {
   gap: 10px;
 }
 .col {
+  background: var(--k12-surface-2);
+  border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
+  border-radius: var(--k12-r-inset);
+
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 12px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-3xl);
-  background: var(--k12-bg);
 }
 .col__head {
   display: flex;
@@ -282,28 +274,28 @@ function gradeLabelOf(key: string) {
 }
 .col__tone {
   margin-left: auto;
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted-2);
 }
 .col__k {
   margin-top: 4px;
-  font-size: 8.5px;
+  font-size: var(--k12-fs-xs);
   font-weight: 650;
-  color: var(--k12-muted-2);
+  color: var(--k12-muted);
   letter-spacing: 0.04em;
 }
 .col__v {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   line-height: 1.7;
   color: var(--k12-fg-2);
 }
 .col__quote {
   padding: 8px 9px;
-  border-radius: var(--k12-r-lg);
+  border-radius: var(--k12-r-control);
   background: var(--k12-accent-soft);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   line-height: 1.7;
-  color: var(--k12-chip-fg);
+  color: var(--k12-accent-ink);
 }
 .col__tags {
   display: flex;
@@ -312,8 +304,8 @@ function gradeLabelOf(key: string) {
 }
 .tag {
   padding: 2px 7px;
-  border-radius: var(--k12-r-xs);
-  font-size: 8.5px;
+  border-radius: var(--k12-r-flat);
+  font-size: var(--k12-fs-micro);
   font-weight: 600;
 }
 .tag--ok {
@@ -321,7 +313,7 @@ function gradeLabelOf(key: string) {
   color: var(--k12-good);
 }
 .tag--no {
-  background: color-mix(in srgb, var(--k12-bad) 10%, #fff);
+  background: color-mix(in srgb, var(--k12-bad) 10%, var(--k12-surface));
   color: var(--k12-bad);
   text-decoration: line-through;
 }

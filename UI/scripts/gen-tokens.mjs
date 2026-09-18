@@ -2,11 +2,18 @@
 /**
  * 由 scripts/tokens.source.json 生成 src/styles/tokens.generated.css
  *
- * 画布模型：grade 轴 × sat 轴（6 × 3 = 18 组），落在两轴属性选择器上：
- *   :root[data-grade="junior"][data-sat="vivid"] { --accent: #4F46E5; ... }
- * 改一个轴不会重写另一个轴，与画布的 theme 轴一一对应。
+ * 两轴模型：grade 轴 × sat 轴（6 × 3 = 18 组），落在两轴属性选择器上：
+ *   :root[data-grade="junior"][data-sat="vivid"] { --k12-accent: #4338CA; ... }
+ * 改一个轴不会重写另一个轴。
  *
- * 数值来源是 Pencil 画布文档变量，请勿在此脚本里硬编码颜色。
+ * 材质模型（「书桌与纸」）：
+ *   desk     = 桌面：应用底色 + 侧栏 / 顶栏 / 右栏等结构面
+ *   paper    = 纸面：对话回答卡、内联卡、输入条等**内容**面（恒为白，不随学段着色）
+ *   paper-2  = 纸上的嵌入块（hover 底、内嵌小块）
+ *   accent   = 学段墨：链接 / 当前项 / 主按钮 / 进度
+ *   accent-2 = 仅数据可视化用的第二色相（图表分段），不进 UI 骨架
+ *
+ * 数值请改 scripts/tokens.source.json（那才是一处来源），不要在此脚本里硬编码颜色。
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -26,8 +33,9 @@ const cssName = (key) => `--k12-${key}`
 const lines = []
 lines.push('/* ==========================================================================')
 lines.push(' * 本文件由 scripts/gen-tokens.mjs 自动生成，请勿手工编辑。')
-lines.push(' * 源数据：scripts/tokens.source.json（导出自 Pencil 画布文档变量）')
+lines.push(' * 源数据：scripts/tokens.source.json（本项目调色板，非画布直出）')
 lines.push(' * 两轴主题：grade × sat，共 ' + grades.length * sats.length + ' 组')
+lines.push(' * 对比度：npm run check:contrast -- --strict')
 lines.push(' * ========================================================================== */')
 lines.push('')
 
@@ -88,16 +96,12 @@ for (const sat of sats) {
 
 /** 4. 派生合成分级变量（由主色推导，避免在组件里重复写 color-mix） */
 lines.push('')
-lines.push('/* 由主色派生的玻璃拟态合成分级（组件统一引用这些，不要各自 color-mix） */')
+lines.push('/* 由主色派生的合成分级（组件统一引用这些，不要各自 color-mix）')
+lines.push(' * 只留两项：焦点环，以及**唯一**的浮层阴影。')
+lines.push(' * 纸与桌面都不用阴影——层次靠底色差与 1px 细线，这是「书桌与纸」的材质规则。 */')
 lines.push(':root {')
-lines.push('  --k12-accent-wash: color-mix(in srgb, var(--k12-accent) 6%, transparent);')
-lines.push('  --k12-accent-wash-strong: color-mix(in srgb, var(--k12-accent) 12%, transparent);')
 lines.push('  --k12-accent-ring: color-mix(in srgb, var(--k12-accent) 34%, transparent);')
-lines.push('  --k12-accent-2-wash: color-mix(in srgb, var(--k12-accent-2) 8%, transparent);')
-lines.push('  --k12-glass-blur: 22px;')
-lines.push('  --k12-shadow-sm: 0 1px 2px rgba(27, 34, 51, 0.04);')
-lines.push('  --k12-shadow-md: 0 6px 20px -10px rgba(27, 34, 51, 0.16);')
-lines.push('  --k12-shadow-lg: 0 18px 50px -24px rgba(27, 34, 51, 0.24);')
+lines.push('  --k12-shadow-float: 0 8px 28px -12px rgba(27, 34, 51, 0.22);')
 lines.push('}')
 
 /**

@@ -9,7 +9,10 @@
     "build": "vue-tsc --noEmit -p tsconfig.app.json && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit -p tsconfig.app.json",
-    "gen:tokens": "node scripts/gen-tokens.mjs"
+    "gen:tokens": "node scripts/gen-tokens.mjs",
+    "check:contrast": "node scripts/check-contrast.mjs",
+    "check:buttons": "node scripts/audit-buttons.mjs",
+    "check": "npm run typecheck && npm run check:contrast -- --strict && npm run check:buttons"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

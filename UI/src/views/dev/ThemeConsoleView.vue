@@ -42,11 +42,9 @@ function pickGrade(key: string) {
   <div class="dev">
     <header class="dev__head">
       <div class="dev__title-block">
-        <h2 class="dev__title">
-          <FlaskConical :size="18" />
-          <span>主题切换台</span>
-        </h2>
+        <!-- 页面名在顶栏（取自路由 meta），这里只放这一页特有的说明 -->
         <p class="dev__sub">
+          <FlaskConical :size="15" />
           开发期工具，非学生端页面。用于对比 grade × sat 的 18 组配色。
         </p>
       </div>
@@ -165,27 +163,23 @@ function pickGrade(key: string) {
   flex: 1;
   min-width: 0;
 }
-.dev__title {
+.dev__sub {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: var(--k12-fs-xl);
-  font-weight: 650;
-  color: var(--k12-fg);
-}
-.dev__sub {
-  margin-top: 3px;
-  font-size: var(--k12-fs-micro);
-  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-fg-2);
 }
 .dev__toggle {
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  box-shadow: var(--k12-shadow-card);
+  border-radius: var(--k12-r-card);
+
   display: inline-flex;
   align-items: center;
   gap: 7px;
   padding: 9px 14px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-lg);
-  background: var(--k12-surface);
   color: var(--k12-fg-2);
   font-size: var(--k12-fs-xs);
   font-weight: 650;
@@ -194,23 +188,24 @@ function pickGrade(key: string) {
 }
 .dev__toggle--on {
   background: var(--k12-accent);
-  border-color: var(--k12-accent);
-  color: #fff;
+  border-color: var(--k12-accent-ink);
+  color: var(--k12-surface);
 }
 
 .banner {
+  background: var(--k12-surface-2);
+  border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
+  border-radius: var(--k12-r-inset);
+
   display: flex;
   gap: 10px;
   padding: 12px 14px;
-  border-radius: var(--k12-r-3xl);
-  background: var(--k12-surface-2);
-  border: 1px solid var(--k12-border);
   color: var(--k12-muted);
 }
 .banner--on {
   background: var(--k12-good-soft);
   border-color: var(--k12-good-border);
-  color: #0b7a57;
+  color: var(--k12-good);
 }
 .banner__title {
   font-size: var(--k12-fs-xs);
@@ -218,7 +213,7 @@ function pickGrade(key: string) {
 }
 .banner__desc {
   margin-top: 3px;
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   line-height: 1.6;
 }
 
@@ -229,13 +224,15 @@ function pickGrade(key: string) {
   align-items: start;
 }
 .card {
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  box-shadow: var(--k12-shadow-card);
+  border-radius: var(--k12-r-card);
+
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 14px 16px;
-  border-radius: var(--k12-r-4xl);
-  background: var(--k12-glass);
-  border: 1px solid var(--k12-glass-border);
 }
 .card--wide {
   grid-column: 1 / -1;
@@ -253,28 +250,31 @@ function pickGrade(key: string) {
 }
 .card__meta {
   margin-left: auto;
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted-2);
 }
 .card__note {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
 .card__note code {
   font-family: var(--k12-font-mono);
-  color: var(--k12-accent);
+  color: var(--k12-accent-ink);
 }
 .reset {
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  box-shadow: var(--k12-shadow-card);
+  border-radius: var(--k12-r-card);
+
   margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 5px;
   padding: 5px 10px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-md);
-  background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-micro);
+  /* 按钮文字是 meta（判据：11px 只给 ≤4 字的角标）→ 12px */
+  font-size: var(--k12-fs-xs);
   font-weight: 600;
   cursor: pointer;
 }
@@ -288,13 +288,14 @@ function pickGrade(key: string) {
   opacity: 0.6;
 }
 .gbtn {
+  background: var(--k12-surface-2);
+  border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
+  border-radius: var(--k12-r-inset);
+
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 10px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-2xl);
-  background: var(--k12-bg);
   cursor: pointer;
   text-align: left;
 }
@@ -302,27 +303,29 @@ function pickGrade(key: string) {
   cursor: not-allowed;
 }
 .gbtn--on {
-  border-color: var(--k12-accent);
+  border-color: var(--k12-accent-ink);
   box-shadow: 0 0 0 2px var(--k12-accent-ring);
 }
 .gbtn__bar {
   display: flex;
   height: 14px;
-  border-radius: var(--k12-r-xs);
+  border-radius: var(--k12-r-flat);
   overflow: hidden;
 }
 .gbtn__seg {
   flex: 1;
 }
 .gbtn__label {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .gbtn__key {
+  /* 学段键名（primary-low / junior …）：名字里的 `key` 是角标词，且它是
+   * 名称下方的**次级键名**（mono），留角标档 11px。 */
   font-family: var(--k12-font-mono);
-  font-size: 8px;
-  color: var(--k12-muted-2);
+  font-size: var(--k12-fs-micro);
+  color: var(--k12-muted);
 }
 
 .sats {
@@ -331,13 +334,15 @@ function pickGrade(key: string) {
   gap: 7px;
 }
 .sbtn {
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  box-shadow: var(--k12-shadow-card);
+  border-radius: var(--k12-r-card);
+
   display: flex;
   flex-direction: column;
   gap: 3px;
   padding: 10px 11px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-2xl);
-  background: var(--k12-surface);
   cursor: pointer;
   text-align: left;
 }
@@ -351,27 +356,27 @@ function pickGrade(key: string) {
   color: var(--k12-fg);
 }
 .sbtn__desc {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
 
 .code {
   padding: 11px 12px;
-  border-radius: var(--k12-r-xl);
+  border-radius: var(--k12-r-card);
   background: var(--k12-fg);
   overflow-x: auto;
 }
 .code__line {
   font-family: var(--k12-font-mono);
   font-size: var(--k12-fs-xs);
-  color: #dbe2f5;
+  color: var(--k12-screen-fg);
   white-space: nowrap;
 }
 .code__a {
-  color: #8ab4ff;
+  color: var(--k12-screen-key);
 }
 .code__s {
-  color: #ffc98a;
+  color: var(--k12-screen-num);
 }
 .livedemo {
   display: flex;
@@ -381,21 +386,21 @@ function pickGrade(key: string) {
 }
 .ld__sample {
   padding: 8px 13px;
-  border-radius: var(--k12-r-lg);
+  border-radius: var(--k12-r-control);
   font-size: var(--k12-fs-xs);
   font-weight: 650;
 }
 .ld__sample--btn {
   background: var(--k12-accent);
-  color: #fff;
+  color: var(--k12-surface);
 }
 .ld__sample--chip {
-  background: var(--k12-chip-bg);
-  color: var(--k12-chip-fg);
+  background: var(--k12-surface-2);
+  color: var(--k12-accent-ink);
 }
 .ld__sample--soft {
   background: var(--k12-accent-soft);
-  color: var(--k12-accent);
+  color: var(--k12-accent-ink);
 }
 .ld__sample--fg {
   color: var(--k12-fg);
