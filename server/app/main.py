@@ -76,7 +76,7 @@ LOG_LEVELS = ("critical", "error", "warning", "info", "debug", "trace")
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="k12-agent-server",
-        description="K12 AI 教学助手 sidecar（数据 / RAG / 嵌入服务）",
+        description="智团团 sidecar（数据 / RAG / 嵌入 / 判分服务）",
     )
     # 不在这里用 choices 限制 host：非回环地址统一由 build_runtime_config 拒绝，
     # 这样错误信息是中文且只有一处规则。

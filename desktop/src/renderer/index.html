@@ -7,7 +7,10 @@
       CSP 暂未启用：票 01 只有本窗口，后续引入动画 iframe 沙箱 / Monaco / Pyodide 时再按沙箱边界统一收紧。
       唯一允许的来源必须始终是本地（无 CDN），否则断网演示会翻车。
     -->
-    <title>K12 AI 教学助手</title>
+    <!-- ⚠️ 品牌名的唯一来源是 src/shared/brand.ts（主进程与渲染进程共用）。
+         本文件与 desktop/electron-builder.yml 的 productName 是纯静态文件、无法 import，
+         所以改品牌名时**必须手工同步那两处**（brand.ts 已在本文件与 builder 配置里留了指引）。 -->
+    <title>智团团</title>
   </head>
   <body>
     <div id="app"></div>

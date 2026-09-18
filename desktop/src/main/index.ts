@@ -19,6 +19,7 @@ import { runPiSmoke } from './agent/pi-bootstrap.ts'
 import { IPC } from './ipc/channels.ts'
 import { disposeChatRuntime, registerIpcHandlers } from './ipc/handlers.ts'
 import { SidecarManager } from './sidecar/manager.ts'
+import { BRAND_NAME } from '@shared/brand'
 
 const APP_ID = 'com.k12agent.desktop'
 
@@ -65,7 +66,7 @@ function createWindow(): BrowserWindow {
     minWidth: 900,
     minHeight: 640,
     show: false,
-    title: 'K12 AI 教学助手',
+    title: BRAND_NAME,
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.js'),
@@ -179,10 +180,18 @@ function applyPortableDataDir(): boolean {
 
 // ★ 便携改道必须早于 whenReady（见函数注释）。返回值这里不用，
 //   但**绝不能省掉这次调用** —— 它决定了 userData 落在哪。
-applyPortableDataDir()
+// ★ 便携改道必须早于 whenReady（见函数注释）。返回值决定要不要再钉 slug（见下）。
+const portableDataDirApplied = applyPortableDataDir()
 
 void app.whenReady().then(async () => {
   electronApp.setAppUserModelId(APP_ID)
+ * ★★ 把 `userData` 的目录名**钉死**，与品牌名解耦。
+ * 作为 `%APPDATA%` 下的目录名。本项目的品牌名会改（例如「智团团」），
+ * 一改 `userData` 就换了目录 —— **学生的 config.json / learning.db / Pi 会话 JSONL
+ * 所以：品牌名只用于**界面展示**，存储目录名用固定的 slug。
+ * ⚠️ 与便携模式的关系：便携模式把 userData 指到 exe 同级 `data/`（**显式路径**），
+ *   `applyPortableDataDir()` 还认 `portable.marker`，只看 env 会漏掉 marker 那条路径）。
+const STABLE_USER_DATA_SLUG = 'k12-agent-desktop'
 
   // ★ 关卡 B₁：打包态冒烟模式。走完就退，不建窗口、不动 sidecar。
   if (smokeMode) {
@@ -205,7 +214,13 @@ void app.whenReady().then(async () => {
       // 落盘失败不影响退出码
     }
     app.exit(result.exitCode)
-    return
+function applyStableUserDataSlug(): void {
+  if (portableDataDirApplied) return
+  const current = app.getPath('userData')
+  const stable = join(dirname(current), STABLE_USER_DATA_SLUG)
+    app.setPath('userData', stable)
+    // 改道失败不能让应用起不来：退回 Electron 默认值（仍是可用状态，只是目录名随品牌）
+    console.error('[main] 固定 userData 目录名失败，沿用默认值：', error)
   }
 
   // 开发态：F12 开 DevTools、忽略菜单快捷键等
@@ -217,19 +232,23 @@ void app.whenReady().then(async () => {
     userDataDir: app.getPath('userData'),
     onStateChanged: () => pushSidecarState()
   })
-  registerIpcHandlers(sidecar)
+applyStableUserDataSlug()
 
   mainWindow = createWindow()
 
   // 窗口先起来（不白屏），sidecar 的状态经 `sidecar:changed` 推给渲染进程
   void sidecar.start().catch((error: unknown) => {
     console.error('[main] sidecar 启动流程异常：', error)
+ * （各自随机端口/token），但 `--data-dir` 是**同一个** `userData` —— 两个进程同时打开
   })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       mainWindow = createWindow()
+        userDataDir: app.getPath('userData'),
+        const dir = join(app.getPath('userData'), 'pi-agent', 'logs')
     }
+      userDataDir: app.getPath('userData'),
   })
 })
 

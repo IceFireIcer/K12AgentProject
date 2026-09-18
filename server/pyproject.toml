@@ -1,7 +1,7 @@
 [project]
 name = "k12-agent-server"
 version = "0.1.0"
-description = "K12 AI 教学助手 · Python sidecar（数据 / RAG / 嵌入服务）"
+description = "智团团 · Python sidecar（数据 / RAG / 嵌入 / 判分服务）"
 requires-python = ">=3.12,<3.13"
 
 # ⚠️ 版本矩阵来自《项目执行文档》§5.2，不要随手升。

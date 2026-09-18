@@ -30,7 +30,9 @@ import {
 const paths: SidecarPaths = {
   serverDir: 'E:\\repo\\server',
   resourcesPath: 'E:\\app\\resources',
-  dataDir: 'C:\\Users\\tester\\AppData\\Roaming\\K12AI教学助手'
+  // userData 的目录名是**固定 slug**（`src/main/index.ts` 的 applyStableUserDataSlug），
+  // 刻意与品牌名解耦 —— 所以这里照实写 slug，不要换成产品显示名。
+  dataDir: 'C:\\Users\\tester\\AppData\\Roaming\\k12-agent-desktop'
 }
 
 /** 测试用 token：64 位 hex（与 `randomBytes(32).toString('hex')` 同形）。 */
@@ -400,7 +402,7 @@ test('describeStartupFailure：每种失败都给非空中文句子，且不含�
 })
 
 test('describeStartupFailure：带日志路径时把路径写进文案（让用户知道去哪找线索）', () => {
-  const logPath = 'C:\\Users\\tester\\AppData\\Roaming\\K12AI教学助手\\logs\\sidecar.log'
+  const logPath = 'C:\\Users\\tester\\AppData\\Roaming\\k12-agent-desktop\\logs\\sidecar.log'
   const text = describeStartupFailure({ kind: 'timeout', timeoutMs: 30_000, port: null }, { logPath })
   assert.ok(text.includes(logPath), `文案里应当带上日志路径，实际为：${text}`)
 })

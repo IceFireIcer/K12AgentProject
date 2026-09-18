@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 APP_NAME = "k12-agent-server"
-APP_TITLE = "K12 AI 教学助手 · sidecar"
+APP_TITLE = "智团团 · sidecar"
 APP_VERSION = "0.1.0"
 
 # ---------------------------------------------------------------- 契约常量 --
@@ -22,6 +22,10 @@ EMBEDDING_MODEL_ID = "BAAI/bge-small-zh-v1.5"
 
 # ---------------------------------------------------------------- 网络约束 --
 # sidecar 只许绑回环：防本机其他进程与局域网访问（执行文档 §6.3 安全第 ① 条）。
+# ⚠️ 这三个取值**都必须真的绑得上**：``app/main.py`` 的 ``bind_listening_socket()``
+#    按 ``socket.getaddrinfo`` 选出正确的 family（IPv4 优先）——
+#    ``::1`` 是纯 IPv6，硬编码 ``AF_INET`` 会让它抛 ``[Errno 11001] getaddrinfo failed``。
+#    「允许的取值里混进一个一定绑不上的」正是审计发现的缺陷 C8，别把 family 选择改回硬编码。
 ALLOWED_HOSTS = ("127.0.0.1", "::1", "localhost")
 DEFAULT_HOST = "127.0.0.1"
 # 0 = 由系统分配空闲端口（执行文档 §7.4 第 1 条，自找端口有竞态）。

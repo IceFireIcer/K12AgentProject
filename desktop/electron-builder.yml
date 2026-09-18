@@ -1,5 +1,11 @@
 appId: com.k12agent.desktop
-productName: K12AI教学助手
+# ⚠️ 品牌名的唯一来源是 `src/shared/brand.ts`（主进程与渲染进程共用）。
+#    本文件与 `src/renderer/index.html` 的 <title> 是纯静态配置、无法 import，
+#    改品牌名时**必须手工同步那两处**（brand.ts 里也留了同样的指引）。
+# ★ 存储目录**不随品牌名变**：`src/main/index.ts` 的 applyStableUserDataSlug()
+#   把 userData 钉在固定 slug 上，否则改一次名字就等于把学生的
+#   config.json / learning.db / Pi 会话整体搬家（见那里的注释）。
+productName: 智团团
 directories:
   buildResources: build
   output: dist
@@ -53,6 +59,9 @@ extraResources:
   - from: ../server/dist/k12-agent-server
     to: server
 win:
+  # ★ 图标由 `server/scripts/make_brand_icons.py` 从 `logos/mainlogo.png` 生成
+  #   （裁透明边 + 多尺寸 .ico）。改了 logo 就重跑那个脚本，不要手工导出。
+  icon: build/icon.ico
   executableName: k12-agent-desktop
   target:
     - nsis
