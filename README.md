@@ -14,7 +14,7 @@
 [![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](#技术栈)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](#技术栈)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#技术栈)
-[![Tests](https://img.shields.io/badge/回归测试-1537%20项%20全绿-2ea44f)](#测试与质量守卫)
+[![Tests](https://img.shields.io/badge/回归测试-1546%20项%20全绿-2ea44f)](#测试与质量守卫)
 [![Local](https://img.shields.io/badge/数据-本地优先%20·%20一人一库-8957e5)](#设计与取舍)
 
 </div>
@@ -112,7 +112,7 @@ npm run dev
 ```bash
 cd desktop
 npm run typecheck        # vue-tsc，契约漂移的第一道防线
-npm test                 # 618 项 node --test + check:api + check:tool-schema
+npm test                 # 627 项 node --test + check:api + check:tool-schema
 npm run build            # 先确保 sidecar 最新（过期内自动重打）→ 再编主/渲染进程
 npm run build:unpack     # 免安装目录（★ 验证 esbuild 原生依赖是否解包、Pi 能否加载、后端是否最新）
 npm run build:win        # 出 .exe（NSIS 安装包 + 绿色便携版）
@@ -165,13 +165,13 @@ K12Agent/
 │  ├─ src/renderer/         Vue 3 界面：八页面 + 内联卡片
 │  ├─ src/shared/           跨进程类型 · 品牌名（唯一来源）· 供应商目录
 │  ├─ scripts/              构建联动（build-server.mjs）· 契约生成 · 各类冒烟与证据脚本
-│  ├─ tests/                618 项回归（含架构守卫 G1–G23 组）
+│  ├─ tests/                627 项回归（含架构守卫 G1–G13 · G18–G23 组）
 │  └─ build/ resources/     打包图标 · 学段 logo · Pyodide 运行时（本地自托管）
 ├─ server/                  Python sidecar
 │  ├─ app/                  FastAPI：contracts / routes / rag / safety / store / grade
 │  ├─ knowledge/            四学段教材（228 知识点 · 8 章 · 483 依赖边，由 K12KnowledgeBase/ 导入）
 │  ├─ knowledge-supplement/ 第 8 章「编程实践」（本项目自写，3 概念 × 四学段）——与用户源库分开存放
-│  ├─ resources/            题库（按章分片 ch01–ch08）· 动画模板 · 代码模板 · 敏感词表
+│  ├─ resources/            题库（`quizbank/`，按章分片 ch01–ch08）· 动画模板 · 代码模板 · 敏感词表
 │  ├─ scripts/              导入教材 / 建库 / 取模型 / 导出 OpenAPI / 打包+指纹 / 生成品牌图标
 │  └─ tests/                919 项回归
 ├─ K12KnowledgeBase/        教材源库（用户提供，54 概念 × 四学段；本项目只读地用 import_knowledge.py 导入）
@@ -216,7 +216,7 @@ K12Agent/
 
 ```bash
 cd server  && uv run python -m unittest discover -s tests   # 919 项
-cd desktop && npm test                                      # 618 项 + 契约漂移比对 + Tool schema 一致性
+cd desktop && npm test                                      # 627 项 + 契约漂移比对 + Tool schema 一致性 + 文档数字自检
 ```
 
 回归里有相当一部分是**架构守卫**，写成正向断言而不是「禁止某历史实现」：
@@ -227,10 +227,40 @@ cd desktop && npm test                                      # 618 项 + 契约�
 - 明文 API Key 只允许主进程取用：渲染进程既没有通道、preload 也没有方法。
 - 对话请求的字段集合被钉死为 `['text']`——学段、章节的手动修改只能走各自的独立通道。
 - **前端构建必须先确保 sidecar 最新**，出包命令必须在 electron-builder 之后校验包里那一份（G20 组）。
+- **本文档与 `architecture/index.html` 里登记的数字必须与磁盘一致**（`npm run check:docs`）——
+  逐处枚举「数字 + 关键词」，漏改任何一处都红，而不是「有一个对的就算过」。
 
 守卫**验证过会红**：故意改坏 `build` 链路、把校验提到 electron-builder 之前、
 在 `extraResources` 里排除 `build-info.json`——G20-1 / G20-2 / G20-3 各自如实失败。
 同理，过期产物对着 `build_server.py --verify` 会直接判不通过，而不是给个警告放行。
+
+### UX 体检（真机交互，与单测是**两件事**）
+
+单元测试覆盖的是「我们写下的逻辑」。有一整类缺陷**在逻辑之外** ——
+真实模型的输出习惯、真实时序、真实状态、渲染后的几何关系。
+`npm test` 与后端测试**全绿**时，下面这些都照样存在过：
+
+| 抓到过的缺陷 | 为什么单测测不到 |
+| --- | --- |
+| 模型输出里的 `**` 直接露给学生 | 单测样本是**我们自己造的**，模型的输出习惯不是我们定的 |
+| 引用块出现时视图掉队 759px | 只在**过程中**发生，终态是好的 |
+| 忙时按 Enter 零反馈 | 只在「上一轮还没结束」这个**状态**下发 |
+| 浮标压住输入框 17px / 表头被切一半 | 重叠与裁切是**关系**，不在任何单个元素的属性里 |
+| 两处下拉既不能 Esc 也不能点外部关闭 | **纯交互属性**，没有逻辑可断言 |
+
+```bash
+cd desktop
+K12_DEBUG_PORT=9222 npm run dev   # 另一个终端
+npm run ux                        # 对话页体检 23 项（键盘/滚动/触控目标/破坏性操作）
+npm run ux:pages                  # 逐页体检 28 项（八个页面各查四项）
+npm run ux:layout                 # 版式体检 24 格（3 视口 × 8 页：裁切/错位/表格对齐）
+npm run ux:scroll                 # 滚动行为 7 项     npm run ux:busy / ux:attribute
+```
+
+它抓到的每一条结论都会固化成**源码级守卫**（`tests/ux-*.test.ts`），
+且**每条都做过变异验证** —— 把修复改回坏写法，确认断言真的变红。
+⚠️ 跑探针前先 `npm run ux:reload`：HMR 改过 `onMounted` 后旧组件不会重跑它，
+量出来的现象是「改动完全没生效」，会把人带错方向。
 
 ## 文档地图
 
@@ -245,6 +275,10 @@ cd desktop && npm test                                      # 618 项 + 契约�
 | [`docs/对标/`](docs/对标) | 赛题原文与两份对标调研材料 |
 | [`AGENTS.md`](AGENTS.md) | 面向后续编码代理的工作区说明（本仓库特有、代码里看不出来的信息） |
 | [`docs/tool-trace.mmd`](docs/tool-trace.mmd) | 工具调用轨迹图（Agent 自主路由的证据） |
+
+> 另有一份**本地**的架构总览页 `architecture/index.html`（单文件、可离线打开，19 节 +
+> 21 条功能机制清单）—— 它是答辩用的探查产物，**不入库**（见 `.git/info/exclude`），
+> 里面的数字由上面的 `check:docs` 一并盯着。
 
 ## 备注
 
