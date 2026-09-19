@@ -34,10 +34,12 @@
  * 只在这里维护**一套**媒体查询监听（进窄屏自动收起、离开窄屏还原，
  * 但不覆盖学生自己主动关掉的选择）。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
+  ArrowDown,
   BookMarked,
   Clapperboard,
+  Clock,
   Code,
   MessageCircle,
   PanelRightClose,
@@ -75,30 +77,118 @@ const isEmpty = computed(() => turns.value.length === 0)
 /**
  * 自动滚到底。
  *
- * ★ 依赖三个量：轮数、最后一轮正文长度、最后一轮卡片数。
- *   只依赖文本长度不够 —— 一轮里先来卡片、正文不再增长时（模型先出卡片再补话）
- *   界面不会跟着滚，学生要自己往下拽。
+ * ★★ 这里有过一个**实测出来的缺陷**（`scripts/ux-audit.mjs` 的 B1 抓到的）：
+ *   旧实现靠 `watch` 依赖 `${轮数}:${正文长度}:${卡片数}` 来触发滚动 —— 那是一份
+ *   **手写的依赖清单**，而「会长高的东西」远不止这三样：
+ *   引用块（实测一次插入 376–663px）、安全提示、降级提示、卡片内部资源加载……
+ *   凡是没列进去的，长高了都不会滚，学生看到的就是「新内容在下面出来了，
+ *   视图却停在原来的消息上」。实测：引用块出现时视图**掉队 759px**。
+ *
+ *   现在改成 **ResizeObserver 观察内容容器本身** —— 不管是谁把高度撑大的
+ *   （正文、引用、卡片、iframe、图片……），只要内容区变了就触发。
+ *   这比维护一份清单可靠：新增一种内容块**不需要**记得来这里登记。
+ *
+ * ★★ 但「无脑跟随」同样是缺陷 —— 学生往上翻着想重读时，每一段新文字都把他拽回底部，
+ *   等于**回答生成期间无法阅读**。所以跟不跟随由 {@link stick} 决定：
+ *     - 学生**本来就在底部**（容差 {@link STICK_TOLERANCE_PX}）→ 跟随新内容；
+ *     - 学生**主动往上翻过** → 停住不动，并露出「回到最新」按钮（{@link showJump}）。
+ *   这不是「少做一点」，而是把人当人：**跟随是为了让他看到新内容，
+ *   停住是为了让他能读完旧内容**，两者都要有。
  */
 const colRef = ref<HTMLElement | null>(null)
+const innerRef = ref<HTMLElement | null>(null)
+/** 观察内容容器的高度变化（在 `onMounted` 里建、`onBeforeUnmount` 里断）。 */
+let resizeObserver: ResizeObserver | null = null
+
+/**
+ * 容差（px）：判定「学生是不是还贴着底」。
+ * 给 48px 而不是 0 —— 触控板滚动、字体渲染取整、卡片阴影都会造成几个像素的差，
+ * 用 0 判定会让「明明在底部」被误判成「翻上去了」，于是新内容不再跟随。
+ */
+const STICK_TOLERANCE_PX = 48
+/** 是否跟随新内容（学生滚上去就停下来等他）。 */
+const stick = ref(true)
+/** 停止跟随后是否露出「回到最新」按钮（内容确实还在长 / 已经长出来时才有意义）。 */
+const showJump = ref(false)
+
+function distanceFromBottom(el: HTMLElement): number {
+  return el.scrollHeight - el.scrollTop - el.clientHeight
+}
+
+/**
+ * 「这次滚动是我们自己发起的」标记。
+ *
+ * ★ 为什么必须有（消除一类**竞态**）：程序性赋值 `scrollTop` 也会派发 `scroll` 事件，
+ *   而它派发时机在**布局之后** —— 如果内容恰好在这中间又长高了（正在流式输出，
+ *   这是常态），`onColScroll` 量到的 `distanceFromBottom` 就是「新长出来的那段高度」，
+ *   可能超过容差 → 把 `stick` 误判成 false → **从此停止跟随**，
+ *   表现就是「视图停在旧消息上不动了」（正是要修的那个现象）。
+ *   这份标记让「我们自己滚的」事件不参与判定，只认学生**主动**滚的那次。
+ */
+const selfScrolled = ref(false)
+
 async function scrollToBottom(): Promise<void> {
   await nextTick()
   const el = colRef.value
-  if (el) el.scrollTop = el.scrollHeight
+  if (!el) return
+  selfScrolled.value = true
+  el.scrollTop = el.scrollHeight
+  // 到底了就等于「学生又回到最新」，恢复跟随
+  stick.value = true
+  showJump.value = false
 }
 
+/**
+ * 滚动容器的 scroll 事件：**学生自己的滚动**是唯一能关掉跟随的东西。
+ *
+ * ★ 这里同时负责「露出回到最新」—— 一开始把它只写在 ResizeObserver 里，
+ *   结果**学生往上翻时按钮根本不出现**（没有内容增长，观察器不触发）：
+ *   于是「停住不打扰」变成了「停住且没有任何回去的路」。实测抓到（探针 ②b）。
+ */
+function onColScroll(): void {
+  const el = colRef.value
+  if (!el) return
+  // 我们自己发起的滚动事件不参与判定（见 selfScrolled 的说明：它量到的是「刚长出来的那段高度」）
+  if (selfScrolled.value) {
+    selfScrolled.value = false
+    return
+  }
+  stick.value = distanceFromBottom(el) <= STICK_TOLERANCE_PX
+  // 翻上去了才给「回到最新」；贴着底时它没有意义（那里就是最新）
+  showJump.value = !stick.value
+}
+
+
+// ★★ 「有新的一轮开始了」= 学生正在等这条回答 → 无条件恢复跟随。
+//
+//   为什么不能只靠 `onSend`：排队的那条是**回答结束后由 store 自动发出**的
+//   （`stores/chat.ts` 里 `void send(pending)`），那条路**不经过本组件的 `onSend`**。
+//   实测后果：学生滚上去看了旧内容 → 排队 → 自动发出新问题 → 视图纹丝不动，
+//   回答在他看不见的地方生成完（B1 场景实测掉队 1527px）。
+//
+//   ⚠️ 这条 watch 依赖的是 `turns.length` —— **「新轮次」这个事件本身**，
+//      不是「内容变大」的代理量。两者性质不同：前者是离散的、有语义的
+//      （一轮 = 一次提问），后者永远追不全（引用块/提示/卡片都会撑高容器）。
+//      守卫（`tests/ux-queue-and-scroll.test.ts`）正是因为这条区别才放行它。
 watch(
-  () => {
-    const last = turns.value[turns.value.length - 1]
-    return `${turns.value.length}:${last?.text.length ?? 0}:${last?.cards.length ?? 0}`
-  },
-  () => void scrollToBottom(),
-  { immediate: true }
+  () => turns.value.length,
+  (now, before) => {
+    if (before !== undefined && now > before) {
+      stick.value = true
+      showJump.value = false
+      void scrollToBottom()
+    }
+  }
 )
 
 /* ── 发送：只把文字交给 store ───────────────────────────────────────────── */
 const composerRef = ref<{ fill?: (value: string) => void; focus?: () => void } | null>(null)
 
 function onSend(text: string): void {
+  // 立刻滚到底回应「我发了消息」这个动作（上面那条 watch 会在新轮次落库时再兜一次）
+  stick.value = true
+  showJump.value = false
+  void scrollToBottom()
   void chat.send(text)
 }
 
@@ -129,8 +219,40 @@ onMounted(() => {
   // 画像/推荐：空态与右栏都要用（store 会判「已有数据就不重复请求」）
   void insight.loadAll().catch(() => {})
   void scrollToBottom()
+
+  // ★ 进对话页**直接把光标放进输入框**（UX 体检 A1 抓到的缺失）：
+  //   对话是本应用的主界面，学生的第一个动作几乎一定是打字。
+  //   不自动聚焦的话，他得先找到输入框点一下 —— 每次进应用都多一步，
+  //   而且第一次用的人会盯着界面想「从哪儿开始」。
+  //   ⚠️ 只在**空对话**时做：带着历史回来时自动聚焦会抢走焦点，
+  //     让正在用键盘浏览/回看的学生莫名跳到输入框。
+  if (turns.value.length === 0) void nextTick(() => composerRef.value?.focus?.())
+
+  // ★ 内容区高度变化 → 跟随（见 scrollToBottom 上方那段说明：不再手写依赖清单）
+  if (innerRef.value && typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => {
+      if (!stick.value) {
+        // 学生正在往回读：**不打扰**，只把「回到最新」露出来
+        showJump.value = true
+        return
+      }
+      void scrollToBottom()
+    })
+    resizeObserver.observe(innerRef.value)
+  }
+  colRef.value?.addEventListener('scroll', onColScroll, { passive: true })
 })
-onBeforeUnmount(() => mql?.removeEventListener('change', onBreakpoint))
+// ★ 切回对话页（KeepAlive 的 onActivated）也补一次聚焦：学生去设置页改完东西回来，
+//   下一个动作还是打字。这里同样只在没有历史消息时做，理由同上。
+onActivated(() => {
+  if (turns.value.length === 0) void nextTick(() => composerRef.value?.focus?.())
+})
+onBeforeUnmount(() => {
+  mql?.removeEventListener('change', onBreakpoint)
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  colRef.value?.removeEventListener('scroll', onColScroll)
+})
 
 function toggleRail(): void {
   railOpen.value = !railOpen.value
@@ -152,6 +274,10 @@ async function newSession(): Promise<void> {
   }
   chat.resetConversation()
   await nextTick()
+  // 清空后回到「跟随 + 贴底」的初始状态：上一段对话留下的 stick=false 不该影响新会话
+  stick.value = true
+  showJump.value = false
+  await scrollToBottom()
 }
 
 /* ── 空态：四张能力入口 + 建议问题 ─────────────────────────────────────── */
@@ -272,7 +398,7 @@ const gradeSourceSentence = computed(() => {
 
       <!-- 对话区 -->
       <div ref="colRef" class="chat__col" data-testid="chat-log">
-        <div class="chat__inner">
+        <div ref="innerRef" class="chat__inner">
           <!-- ── 空态 ─────────────────────────────────────────────────── -->
           <div v-if="isEmpty" class="chat__empty" data-testid="chat-empty">
             <div class="chat__hello">
@@ -351,6 +477,46 @@ const gradeSourceSentence = computed(() => {
           </template>
         </div>
       </div>
+
+      <!-- 「回到最新」：只有学生**自己翻上去**时才会出现。
+           ★ 它出现的意义正是「不打扰」的配套：停住是为了让他读完旧内容，
+             那么这个按钮就是告诉他「下面还有新的，读完再点」。 -->
+      <Transition name="jump">
+        <button
+          v-if="showJump"
+          class="chat__jump"
+          type="button"
+          data-testid="chat-jump-latest"
+          @click="scrollToBottom"
+        >
+          <ArrowDown :size="15" />
+          回到最新
+        </button>
+      </Transition>
+
+      <!-- 待发送：回答还在生成时学生又发了一条 → 排队，并**看得见**。
+           ★ 这一条的存在就是「不再静默丢弃」的可见证据（见 stores/chat.ts 的 queuedText）：
+             输入框已清空，字在这里；学生知道系统收下了，回答讲完就轮到他。 -->
+      <Transition name="jump">
+        <div v-if="chat.queuedText" class="chat__queued" data-testid="chat-queued">
+          <Clock :size="14" />
+          <span class="chat__queued-text">
+            待发送：<b>{{ chat.queuedText }}</b>
+          </span>
+          <span class="chat__queued-note">回答讲完就发出去</span>
+          <button
+            type="button"
+            class="chat__queued-cancel"
+            data-testid="chat-queued-cancel"
+            @click="chat.cancelQueued()"
+          >
+            取消
+          </button>
+        </div>
+      </Transition>
+      <p v-if="chat.queueNotice" class="chat__queued-warn" data-testid="chat-queued-notice">
+        {{ chat.queueNotice }}
+      </p>
 
       <!-- 输入条 -->
       <div class="chat__composer">
@@ -503,6 +669,99 @@ const gradeSourceSentence = computed(() => {
   margin: 0 auto;
   flex: none;
   padding: 0 20px 16px;
+}
+
+/* ── 「回到最新」浮标 ─────────────────────────────────────────────────────
+ * 位置：**输入条正上方居中**（离输入框近 = 离学生的下一个动作近），
+ * 而不是右下角那种社交软件的固定悬浮球 —— 后者会盖住正文末段的字。
+ * 尺寸走 34px 高（≥28px 的触控下限，见 ux-audit 的 C1）。 */
+.chat__jump {
+  position: absolute;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-accent-border);
+  background: var(--k12-surface);
+  color: var(--k12-accent-ink);
+  font-size: var(--k12-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--k12-shadow-raise);
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat__jump:hover {
+    background: var(--k12-accent-soft);
+  }
+}
+.jump-enter-active,
+.jump-leave-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+.jump-enter-from,
+.jump-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(6px);
+}
+
+/* ── 待发送条 ─────────────────────────────────────────────────────────────
+ * 位置在输入条正上方（与「回到最新」同一带），是**状态**不是弹窗：
+ * 不遮挡正文、不抢焦点、也不需要学生关掉 —— 回答讲完它自己就变成一轮对话。 */
+.chat__queued {
+  width: 100%;
+  max-width: calc(var(--k12-w-reading) + 40px);
+  margin: 0 auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--k12-accent-border);
+  background: var(--k12-accent-soft);
+  color: var(--k12-accent-ink);
+  font-size: var(--k12-fs-sm);
+}
+.chat__queued-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat__queued-text b {
+  font-weight: 650;
+}
+.chat__queued-note {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
+}
+.chat__queued-cancel {
+  flex: none;
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid var(--k12-accent-border);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface);
+  color: var(--k12-accent-ink);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+/* 「上一条被替换」提示：比待发条低一档（它是一次性说明，不是持续状态） */
+.chat__queued-warn {
+  width: 100%;
+  max-width: calc(var(--k12-w-reading) + 40px);
+  margin: 0 auto;
+  flex: none;
+  padding: 6px 14px 8px;
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-warn);
+  background: var(--k12-warn-soft);
 }
 
 /* ── 空态 ─────────────────────────────────────────────────────────────── */

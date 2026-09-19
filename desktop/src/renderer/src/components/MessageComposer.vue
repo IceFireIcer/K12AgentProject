@@ -43,9 +43,22 @@ const draft = computed({
   }
 })
 
-/** 回答中不许再发：一轮没走完就发第二条会让两轮事件交织在同一个气泡里。 */
+/**
+ * 回答中「不许再发」的理由是**事件会交织**（两轮 delta 混进同一个气泡）——
+ * 这条理由仍然成立，所以不放开并发。
+ *
+ * ★ 但「不许发」不等于「按了没反应」（UX 体检抓到的缺陷）：
+ *   忙的时候 `submit()` 现在走**排队**（`stores/chat.ts` 的 `queuedText`），
+ *   于是 `canSend` 的语义从「能不能发」拆成两条：
+ *     - {@link hasText}：有没有内容可提交（决定按钮是否可点 / Enter 是否接管）；
+ *     - {@link busy}：忙不忙（决定提交后是「立刻发」还是「排队」，由 store 判定）。
+ *   旧写法把 `!busy` 并进 `canSend` 并让 `submit()` 直接 return ——
+ *   学生按了回车却什么都没发生，只会以为键盘坏了（`scripts/ux-probe-busy-send.mjs` 实测）。
+ */
 const busy = computed(() => chat.streaming)
-const canSend = computed(() => draft.value.trim().length > 0 && !busy.value)
+const hasText = computed(() => draft.value.trim().length > 0)
+/** 有内容就能提交（忙时进队列）—— 按钮的可点状态与 Enter 的接管条件都用它。 */
+const canSend = computed(() => hasText.value)
 
 const inputRef = ref<HTMLTextAreaElement | null>(null)
 
@@ -62,8 +75,12 @@ watch(draft, () => void nextTick(autoGrow))
 function submit(): void {
   if (!canSend.value) return
   const text = draft.value.trim()
-  draft.value = ''
-  void nextTick(autoGrow)
+  // 忙的时候**不要**在这里清空/清空由 store 负责（它要在排队成功后才清 draft，
+  // 并且清的是同一个 draft —— 两边都清会重复触发 autoGrow，也会让「排队失败」时字丢了）。
+  if (!busy.value) {
+    draft.value = ''
+    void nextTick(autoGrow)
+  }
   emit('send', text)
 }
 
@@ -247,8 +264,13 @@ defineExpose({ fill, focus })
   gap: 4px;
   /* ★ 高度不再写死（原 22px）：里面是 13px 等宽字 + 上下内边距，
    *   22px 是按旧字号（12px）定的 —— 字号一抬，固定高度就会把字**裁掉一半**。
-   *   改成由内边距撑开，字号再变也不会裁字。 */
-  padding: 4px 8px;
+   *   改成由内边距撑开，字号再变也不会裁字。
+   *
+   * ★★ 同样的理由再来一次（UX 体检 C1 抓到）：`4px 8px` 让它只有 **24px 高**，
+   *   低于「手指/触控板都点得准」的 28px 下限 —— 它是**可点的**（点了换模型），
+   *   而它就在发送键左边，点偏一下就会开出模型选择器。所以纵向补到 30px。 */
+  min-height: 30px;
+  padding: 6px 10px;
   border: none;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);

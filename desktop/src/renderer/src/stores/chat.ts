@@ -104,6 +104,38 @@ export const useChatStore = defineStore('chat', () => {
   const streaming = computed(() => turns.value.some((turn) => turn.status === 'streaming'))
 
   /**
+   * 待发的一条消息（回答还在生成时，学生又按了发送）。
+   *
+   * ★★ 为什么需要它（UX 体检抓到的真实问题）：学生在读回答的过程中把追问打好了，
+   *   读到一半觉得不对，回车就想再问一句。旧实现里 `send()` 遇到 `streaming` 直接
+   *   `return` —— **消息没发出去，也没有任何提示**：输入框里的字还在，界面毫无反应。
+   *   学生的结论不是「上一个回答还在生成」，而是「**键盘坏了 / 软件卡了**」。
+   *   实测脚本：`scripts/ux-probe-busy-send.mjs`（当时「有提示=否、轮次数不变」）。
+   *
+   * ★ 为什么是「排队」而不是「弹一句『请稍等』」：学生**已经**表达了意图（打完了按了回车），
+   *   让他等回答结束后再手动按一次，等于把系统的时序问题转嫁给他。
+   *   排队 = 举手，回答讲完就轮到他 —— 这也是他与其它聊天工具相处下来的预期。
+   *
+   * ★ 为什么只存**一条**：两条以上就成了「消息队列」，要面对排序、失败重试、
+   *   逐条取消这些真正的复杂度；而「边读边想好一句追问」是这里真实发生的场景。
+   *   多的部分不丢 —— 后来的会覆盖前一条，并把被覆盖的那条**告诉学生**（见 {@link queueNotice}）。
+   */
+  const queuedText = ref<string | null>(null)
+  /** 覆盖提示（一次性）：学生连按两次发送时，告诉他前一条没被静默丢掉。 */
+  const queueNotice = ref<string | null>(null)
+
+  /** 学生主动取消排队。 */
+  function cancelQueued(): void {
+    if (queuedText.value !== null) {
+      // 把内容**还回输入框**（而不是直接扔掉）：那是他自己敲的字
+      draft.value = queuedText.value
+      queuedText.value = null
+      queueNotice.value = null
+    }
+  }
+
+
+  /**
    * 整段对话里的卡片（**只在「卡片增删」时换引用**）。
    *
    * ★ 为什么不能写成 `computed(() => turns.value.flatMap((turn) => turn.cards))`：
@@ -201,7 +233,26 @@ export const useChatStore = defineStore('chat', () => {
     }
     bridgeReady.value = true
     unsubscribe = subscribeToChatEvents(window.api, (event) => {
+      const wasStreaming = streaming.value
       conversation.value = applyChatEvent(conversation.value, event)
+
+      // ★★ 一轮结束 → 把排队的那条发出去（见 queuedText 的说明）。
+      //
+      //   判据用「**之前**在流式、**现在**不流式」这个**边沿**，而不是「现在不流式」这个状态：
+      //   后者在每一轮的非流式事件（citation / payload 等）上都会命中，
+      //   会把队列在回答还没讲完时就提前发出去。
+      //
+      //   ⚠️ 只在**正常收尾**时发（`done`），`error` 结束时也发 —— 学生已经排了队，
+      //     没有理由因为上一轮报错就把他的问题一起丢掉；出错的是上一轮，不是他的。
+      //   ⚠️ 用 `void` 而不是 `await`：这是事件回调，不阻塞事件流本身。
+      if (wasStreaming && !streaming.value) {
+        const pending = queuedText.value
+        if (pending !== null) {
+          queuedText.value = null
+          queueNotice.value = null
+          void send(pending)
+        }
+      }
     })
   }
 
@@ -230,6 +281,9 @@ export const useChatStore = defineStore('chat', () => {
     localNotice.value = null
     gradeNotice.value = null
     chapterNotice.value = null
+    // 排队的那条一并清掉：新会话是「从头开始」，把上一段对话的待发内容带过来会很怪
+    queuedText.value = null
+    queueNotice.value = null
   }
 
   /**
@@ -466,12 +520,36 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  /** 发一轮对话：本地先落学生消息，拿到 `requestId` 后建立本轮（事件可能已在前头到达，会被回放）。 */
+  /**
+   * 发一轮对话：本地先落学生消息，拿到 `requestId` 后建立本轮（事件可能已在前头到达，会被回放）。
+   *
+   * ★ **忙的时候不再静默丢弃**（见 {@link queuedText}）：回答还在生成时再次发送 = 排队，
+   *   并立刻给出可见反馈（输入框清空 + 界面上出现「待发送」条）。
+   */
   async function send(rawText: string): Promise<void> {
     const text = rawText.trim()
-    if (text.length === 0 || streaming.value) return
+    if (text.length === 0) return
+
+    // ★ 正在回答：**排队**而不是丢掉。旧实现这里直接 `return` —— 学生按了回车却什么都没发生，
+    //   只会以为键盘坏了（`scripts/ux-probe-busy-send.mjs` 实测）。
+    if (streaming.value) {
+      // 已有排队内容 = 这一条把它替换掉了。**必须说出来**：
+      // 静默替换等于把学生刚敲的字扔掉，而他以为两条都排上了。
+      if (queuedText.value !== null && queuedText.value !== text) {
+        const shown = queuedText.value.length > 18 ? `${queuedText.value.slice(0, 18)}…` : queuedText.value
+        queueNotice.value = `上一条待发内容「${shown}」已被这一条替换（只保留最新一条）。`
+      } else {
+        queueNotice.value = null
+      }
+      queuedText.value = text
+      // 清空输入框：字已经**被接收**了（在排队条里看得见），
+      // 留在框里会让人以为没发出去而重复按。
+      draft.value = ''
+      return
+    }
 
     localNotice.value = null
+    queueNotice.value = null
     gradeNotice.value = null
     // ★ 章节的「被清空」提示与学段提示同一口径：**下一个问题发出时清掉**（一次性）。
     chapterNotice.value = null
@@ -532,6 +610,12 @@ export const useChatStore = defineStore('chat', () => {
     conversation,
     turns,
     streaming,
+    /** 回答还在生成时学生又发的那一条（`null` = 没有排队）。 */
+    queuedText,
+    /** 排队相关的可读说明（连按两次发送时的「已被替换」提示；一次性）。 */
+    queueNotice,
+    /** 学生主动取消排队（内容还回输入框）。 */
+    cancelQueued,
     cards,
     /** 最近一轮检索的降级档位（右栏四级链据此点亮；`null` = 至今没检索过）。 */
     lastCitationDegraded,
