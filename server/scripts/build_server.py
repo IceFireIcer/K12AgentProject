@@ -7,8 +7,9 @@
     cd server
     uv run python scripts/build_server.py            # 建库 + 打包 + 自检
     uv run python scripts/build_server.py --verify   # 只自检已有产物
+    uv run python scripts/build_server.py --if-stale # 产物已是当前源码打的就跳过（前端构建链用它）
 
-产物：``server/dist/k12-agent-server/k12-agent-server.exe``
+产物：``server/dist/k12-agent-server/k12-agent-server.exe`` + 同目录 ``build-info.json``
 
 **为什么要包一层脚本**：PyInstaller 打成功不代表**跑得起来**。历史上最常翻车的三件事是
 ① sqlite_vec 的 ``.dll`` 没进去；② fastembed 模型/onnxruntime 供应库没进去；
@@ -18,7 +19,13 @@
 PATH 只留 ``System32``、清掉 ``PYTHONHOME`` / ``PYTHONPATH``、不带 venv。
 终端用户不需要装 Python —— 这条必须由这个脚本证明，而不是靠相信。
 
-★ **还有第四件翻车的事（关卡 E 复验发现）**：产物**没带 ``kb.sqlite``**。
+ ★ **还有第五件（P-072）：产物本身是过期的。** sidecar 独立打包，不随 ``electron-vite build``
+  更新；``npm run build:win`` 只是把磁盘上现成的那份 exe 拷进安装包。所以本脚本现在会
+  在产物里写下 ``build-info.json``（``scripts/build_info.py`` 算的源码指纹），
+  并在自检里断言「**产物指纹 == 当前源码指纹**」—— 拿旧产物单独跑 ``--verify`` 会**响亮地失败**。
+  前端构建链（``desktop/package.json`` 的 ``build`` → ``build:server``）据此跳过无谓的重打。
+
+ ★ **还有第四件翻车的事（关卡 E 复验发现）**：产物**没带 ``kb.sqlite``**。
   ``resources/models`` 带了、``/health`` 的 ``embedderReady=true`` 也正常，
   但新机器 ``userData`` 是空的 → 检索一路降级到 ``outline``（**0 命中**），
   知识库实际上是空的，且**不会报任何错**。所以本脚本现在：
@@ -43,12 +50,14 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import build_info  # noqa: E402  （同一目录；实现只有这一份，JS 侧也调它）
 import smoke_api  # noqa: E402  （复用同一套断言，避免两份实现各改一边）
 
 ROOT = HERE.parent
 SPEC = ROOT / "packaging" / "k12-agent-server.spec"
 DIST_DIR = ROOT / "dist" / "k12-agent-server"
 EXE = DIST_DIR / "k12-agent-server.exe"
+BUILD_INFO_PATH = DIST_DIR / build_info.BUILD_INFO_FILENAME
 
 STARTUP_TIMEOUT_S = 60.0
 
@@ -116,6 +125,13 @@ def run_build() -> None:
     if not SPEC.exists():
         sys.exit(f"[FATAL] 找不到 spec 文件：{SPEC}")
 
+    # ★ 指纹必须在**起 PyInstaller 之前**算（P-072）：
+    #   若打包期间源码又被改动，产物里盖的是「它真正打出来的那份源码」的指纹，
+    #   下一次 --if-stale 会判过期并重打 —— 失败方向是「多重打一次」。
+    #   反过来（打完了再算）会把打包途中的改动一起认作新鲜，那正是最危险的失败方向。
+    info = build_info.compute_fingerprint(ROOT)
+    print(f"[stamp] 源码指纹 {info['fingerprint']}（{info['fileCount']} 个文件）")
+
     kill_stale_sidecar()
     build_bundled_kb()
 
@@ -138,6 +154,23 @@ def run_build() -> None:
     if proc.returncode != 0:
         sys.exit(f"[FATAL] 打包失败，退出码 {proc.returncode}")
     print(f"[build] 完成，耗时 {time.time() - started:.1f}s")
+
+    write_build_stamp(info)
+
+
+def write_build_stamp(info: dict[str, object]) -> Path:
+    """把「这份 exe 是拿哪份源码打的」写进产物目录的 ``build-info.json``。
+
+    写在 **dist 目录内**（而不是 spec 的 datas 里）：那样它天然随
+    ``electron-builder`` 的 ``extraResources`` 一起进安装包，
+    前端构建链的「装包后校验」才能对着**包里的那份**做断言 —— 而不是对着构建机上的 ``dist/``。
+    """
+    payload = build_info.build_info_payload(ROOT, info=info)
+    path = build_info.write_build_info(DIST_DIR, payload)
+    commit = payload.get("gitCommit") or "?"
+    dirty = "（工作区有未提交改动）" if payload.get("gitDirty") else ""
+    print(f"[stamp] 已写入 {path.name}：{payload['fingerprint']} @ {commit}{dirty}")
+    return path
 
 
 # --------------------------------------------------------------------------- #
@@ -347,11 +380,52 @@ def _check_packaged_rag(base: str, token: str) -> None:
     )
 
 
+def verify_build_stamp() -> bool:
+    """★ **P-072 的直接拦截点**：产物必须是**当前源码**打出来的。
+
+    这是「改了 server/ 却没重打包」的唯一自动拦路石 —— ``npm test`` 与 ``npm run typecheck``
+    全绿也发现不了它（它们测的是源码）。断言两端：
+
+    1. 产物目录里有 ``build-info.json``（本机制上线前的旧产物没有 → 判过期，正好触发重打）；
+    2. 指纹与**当前源码**逐字相同（schema 也相同）。
+    """
+    recorded = build_info.read_build_info(DIST_DIR)
+    fresh, current = build_info.is_fresh(DIST_DIR, root=ROOT)
+
+    if recorded is None:
+        smoke_api.check(
+            "★ 产物带源码指纹（build-info.json）", False,
+            f"{BUILD_INFO_PATH} 不存在 —— 这是本机制上线前打出来的旧产物，请重新打包",
+        )
+        return False
+
+    stamp = str(recorded.get("fingerprint") or "")
+    built_at = recorded.get("builtAt") or "?"
+    commit = recorded.get("gitCommit") or "?"
+
+    smoke_api.check(
+        "★ 产物带源码指纹（build-info.json）", True,
+        f"{stamp[:12]}… @ {commit} 构建于 {built_at}",
+    )
+    smoke_api.check(
+        "★★ 产物指纹 == 当前源码指纹（P-072：包里的后端必须是最新的）",
+        fresh,
+        f"产物与源码均为 {stamp[:16]}…" if fresh else (
+            f"产物 {stamp[:16]}… vs 源码 {str(current['fingerprint'])[:16]}… —— "
+            "源码改过但 exe 是旧的；重跑 uv run python scripts/build_server.py"
+        ),
+    )
+    return fresh
+
+
 def verify() -> bool:
     """在「没有 Python 的环境」下起一次打包产物，验证握手 / 接口 / 中文编码。"""
     if not EXE.exists():
         print(f"[FAIL] 产物不存在：{EXE}")
         return False
+
+    # ★ 新鲜度：产物必须是当前源码打的（放在最前 —— 过期产物后面所有断言都无意义）。
+    verify_build_stamp()
 
     # ★ 静态检查：产物里必须真有一份可用的只读 kb（关卡 E 缺陷的直接拦截点）。
     #   放在起进程之前 —— 缺库时应当**立刻**失败，不用等 60s 冷启动。
@@ -509,7 +583,44 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="打包 sidecar 并自检")
     parser.add_argument("--verify", action="store_true", help="跳过打包，只自检已有产物")
     parser.add_argument("--skip-verify", action="store_true", help="只打包，不自检")
+    parser.add_argument(
+        "--if-stale",
+        action="store_true",
+        help="产物已是当前源码打的就跳过（前端构建链用它，避免每次 npm run build 都重打 exe）",
+    )
+    parser.add_argument(
+        "--print-fingerprint",
+        action="store_true",
+        help="只打印当前源码指纹并退出（给外部脚本用；等价于 build_info.py --fingerprint）",
+    )
     args = parser.parse_args()
+
+    if args.print_fingerprint:
+        print(build_info.compute_fingerprint(ROOT)["fingerprint"])
+        return 0
+
+    if args.verify and args.if_stale:
+        sys.exit("[FATAL] --verify 与 --if-stale 互斥：--verify 的语义就是「不管新不新都查一遍」")
+
+    # ★ 新鲜度短路必须在**所有其他开关之前**判断，且不受 --skip-verify 影响：
+    #   它的语义就是「不用干活」——曾经写成 `if args.if_stale and not args.skip_verify`，
+    #   于是 `--if-stale --skip-verify` 会**每次都重打**（两开关一叠加，短路静默失效）。
+    if args.if_stale:
+        if not EXE.exists():
+            print(f"[stale] 产物不存在（{EXE}），需要打包")
+        else:
+            fresh, current = build_info.is_fresh(DIST_DIR, root=ROOT)
+            if fresh:
+                recorded = build_info.read_build_info(DIST_DIR) or {}
+                print(
+                    "[skip] sidecar 已是当前源码打的，跳过重打（P-072 的构建联动）\n"
+                    f"       指纹 {current['fingerprint']}（{current['fileCount']} 个文件）"
+                    f" @ {recorded.get('gitCommit') or '?'} "
+                    f"构建于 {recorded.get('builtAt') or '?'}\n"
+                    "       强制重打：uv run python scripts/build_server.py"
+                )
+                return 0
+            print(f"[stale] 源码指纹 {current['fingerprint'][:16]}… 与产物不符，重新打包")
 
     if not args.verify:
         run_build()

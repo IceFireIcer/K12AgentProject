@@ -22,9 +22,12 @@
     "trace:export": "node src/main/agent/trace.ts --repo-root ..",
     "check:tool-schema": "node scripts/check-tool-schema.mjs",
     "smoke:wire": "node scripts/wire-smoke.mjs",
-    "build": "npm run typecheck && electron-vite build",
-    "build:unpack": "npm run build && electron-builder --dir",
-    "build:win": "npm run build && electron-builder --win",
+    "build:server": "node scripts/build-server.mjs",
+    "check:server": "node scripts/build-server.mjs --check dist",
+    "check:server:packaged": "node scripts/build-server.mjs --check packaged",
+    "build": "npm run build:server && npm run typecheck && electron-vite build",
+    "build:unpack": "npm run build && electron-builder --dir && npm run check:server:packaged",
+    "build:win": "npm run build && electron-builder --win && npm run check:server:packaged",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {

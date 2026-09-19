@@ -426,30 +426,42 @@ uv run python scripts/export_openapi.py              # 导出 OpenAPI → 生成
 uv run python scripts/make_brand_icons.py            # 从 logos/ 生成打包图标 + 学段 logo（改了 logo 就跑）
 
 # 后端打包（--onedir，不用 onefile）——统一走脚本，不要手敲 pyinstaller
-# ★★ 改了 `server/` 下的任何东西**必须重跑这一条**，否则见下方警告
-uv run python scripts/build_server.py
+uv run python scripts/build_server.py                # 建库 + 打包 + 24 项产物自检（含指纹新鲜度）
+uv run python scripts/build_server.py --verify       # 只自检已有产物（产物过期会**响亮失败**）
+uv run python scripts/build_server.py --if-stale     # 产物已是当前源码打的就秒退（前端构建链用它）
+uv run python scripts/build_info.py --json           # 看源码指纹 / commit / 构建时间
 
 # ── 前端（含 Pi Agent 运行时）──
 cd desktop
 npm run dev            # electron-vite dev（会自动拉起 uv run 的 server）
 npm run typecheck      # vue-tsc --noEmit
-npm run build:win      # 打包 .exe（内嵌 server 产物 + Pi 运行时）
+npm run build          # ★ 先确保 sidecar 最新（过期内自动重打），再编主/渲染进程
+npm run build:win      # 出 .exe：构建 → 装包 → **校验包里那份后端是最新的**
 npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解包、Pi 能否加载
+
+# 只想单独查后端产物新旧（不构建）：
+npm run check:server              # 查 server/dist 里的那一份
+npm run check:server:packaged     # 查**已装进安装包**的那一份
 ```
 
-> ★★ **两条构建链是独立的，顺序不能反**（P-072，实测踩到）：
-> ```
-> 改了 server/  →  ① cd server && uv run python scripts/build_server.py
->                  ② cd desktop && npm run build:unpack
-> ```
-> `npm run build:unpack` **只是把磁盘上现成的那份 sidecar exe 拷进包里**
-> （`extraResources`）—— 它**不会**替你重建它。
-> 所以「改了 server 但没跑第 ① 步」= **安装包里跑的是旧后端**：
-> 源码里修好的 bug 在包里还活着、新加的端点回 404。
-> ⚠️ 而 `npm test`（870+ 项）与 `typecheck` **都是绿的** —— 它们测的是源码，
-> **没有一项**覆盖「包里的后端是不是最新的」。只能靠真跑一次交付物发现。
+> ★★ **两条构建链现在由代码联动，不再靠「记得先跑」（P-072 / D-045）**：
+> `desktop/package.json` 的 `build` **先**跑 `build:server`
+> （= `build_server.py --if-stale`：产物新鲜就秒退，过期才重打），
+> `build:win` / `build:unpack` 在 electron-builder **之后**再跑 `check:server:packaged`
+> 校验**装进包里的那一份**的源码指纹 —— 不对就**非零退出**，不会打出一个「跑的是旧后端」的包。
+>
+> 机制的三块拼图（改任何一块前先读它们顶部的注释）：
+> | 文件 | 职责 |
+> | --- | --- |
+> | `server/scripts/build_info.py` | **指纹的唯一实现**：对会进包的文件按路径排序做 sha256（`resources/models/` 只记大小；`tests/`、`dist/`、`resources/kb/` 不参与）|
+> | `server/scripts/build_server.py` | 打包**前**算指纹 → 打包 → 写 `<dist>/build-info.json`；`--verify` 断言「产物指纹 == 当前源码指纹」|
+> | `desktop/scripts/build-server.mjs` | JS 只**调用**上面的 Python，不自己算哈希（两套算法必然漂移）；`--check dist\|packaged` 做比对 |
+>
+> ⚠️ 逃生舱 `K12_SKIP_SERVER_BUILD=1` 会**打印警告**后跳过 —— 只在「刚单独打过、确实知道自己在干什么」时用。
 > ⚠️ 重打前先关掉正在运行的打包版，否则 `dist/win-unpacked` 的文件被占用删不掉
 > （报 `Device or resource busy`）。
+>
+> 守卫：`desktop/tests/build-pipeline.test.ts`（G20-1…G20-8）+ `server/tests/test_build_info.py`（23 条）。
 
 **纪律**：关卡不过不进下一阶段；每天结束做一次 git 提交（写清「票号 + 产出」）；
 每完成一步跑一次 `npm run typecheck`（契约漂移的第一道防线，不要攒到最后修）；

@@ -56,6 +56,14 @@ asarUnpack:
 extraResources:
   # 打包后的 Python sidecar（PyInstaller --onedir 产物）；
   # 运行期从 process.resourcesPath 解析：<resourcesPath>/server/k12-agent-server.exe
+  #
+  # ★★ 这里拷的是**磁盘上现成的那一份**，它**不随 electron-vite build 更新** ——
+  #   这就是 P-072 的成因（包里跑着一个过期的后端，且不报任何错）。所以：
+  #   ① `desktop/package.json` 的 `build` 先跑 `build:server`（= build_server.py --if-stale，
+  #      过期内自动重打），`build:win` / `build:unpack` 在 electron-builder **之后**
+  #      再跑 `check:server:packaged` 校验**包里的那一份**；
+  #   ② 产物目录里的 `build-info.json`（源码指纹 + commit + 时间）**必须一起拷进去**，
+  #      否则装包后的校验无从比对。**不要**在下面加排除规则把它挡掉。
   - from: ../server/dist/k12-agent-server
     to: server
 win:
