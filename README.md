@@ -14,7 +14,7 @@
 [![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](#技术栈)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](#技术栈)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#技术栈)
-[![Tests](https://img.shields.io/badge/回归测试-1403%20项%20全绿-2ea44f)](#测试与质量守卫)
+[![Tests](https://img.shields.io/badge/回归测试-1489%20项%20全绿-2ea44f)](#测试与质量守卫)
 [![Local](https://img.shields.io/badge/数据-本地优先%20·%20一人一库-8957e5)](#设计与取舍)
 
 </div>
@@ -37,13 +37,17 @@
 
 围绕这四条线，再加上三件「让老师省心、让家长看得见」的事：
 
-- **教材检索（RAG）**：四学段人工编写教材（**33 个知识点 / 24 章 / 46 条依赖边**）入 `kb.sqlite`，
+- **教材检索（RAG）**：四学段人工编写教材（**33 个知识点 / 24 章 / 47 条依赖边**）入 `kb.sqlite`，
   检索严格按学段隔离（写在 SQL 层），回答带 `citation` 出处；模型不可用时走
   **四级降级链 `vector → cloud → FTS5 → 依赖图/大纲`**，并如实告知「本次检索能力受限」。
 - **个性化闭环**：学生画像（掌握度 / 偏好 / 错题摘要）**每轮**进 Prompt；模型可主动记偏好；
   另有学习报告、错题本、章节进度、学习地图与历史会话回看组成的**学习档案**。
 - **学段与章节**：默认从对话里自动推断学段并生效，学生也可**手动指定**（手动后 10 轮冷却回归自动）；
   还可选定「当前在学哪一章教材」作为软偏好。
+
+界面分八个页面：对话 · 动画 · 编程 · 闯关 · 学习档案 · 教材知识库 · 依赖图谱 · 设置
+（导航不引入 `vue-router` —— Electron 单窗口没有 URL / 后退 / 深链需求，
+唯一真相是 `stores/ui.ts` 的 `PAGES` 表，见 `decisions.md` 的 D-040）。
 
 ## 架构
 
@@ -98,15 +102,56 @@ npm run dev
 首次启动后进 **设置** 页填供应商与 API Key（供应商 / BaseURL / ModelID / Key 四项都可自填，
 也可从 Pi 内置的 40 个供应商预设里挑一个，端点与模型清单会带出来），保存时会真去调一次该地址做连通性探测。
 
-打包与自检：
+## 构建
+
+**构建链是联动的**：`npm run build` 会**先确保 Python sidecar 是最新的**，再编前端；
+出包命令在 electron-builder **之后**校验**装进包里的那一份**后端，指纹不对就非零退出。
 
 ```bash
 cd desktop
 npm run typecheck        # vue-tsc，契约漂移的第一道防线
-npm test                 # 548 项 node --test + check:api + check:tool-schema
-npm run build:unpack     # 免安装目录（★ 验证 esbuild 原生依赖是否解包、Pi 能否加载）
+npm test                 # 585 项 node --test + check:api + check:tool-schema
+npm run build            # 先确保 sidecar 最新（过期内自动重打）→ 再编主/渲染进程
+npm run build:unpack     # 免安装目录（★ 验证 esbuild 原生依赖是否解包、Pi 能否加载、后端是否最新）
 npm run build:win        # 出 .exe（NSIS 安装包 + 绿色便携版）
 ```
+
+### 为什么需要「联动」这一步
+
+sidecar 是**独立打包的产物**（PyInstaller → `server/dist/k12-agent-server/`），
+它**不随** `electron-vite build` 更新；而 `electron-builder` 只是把磁盘上**现成的那份** exe
+拷进安装包（`extraResources`）。于是「改了 `server/` 却没重打」的包能顺利构建、
+能过**全部单测**（单测测的是源码），只是**包里跑着几天前的后端** ——
+新端点回 404、源码里早修好的 bug 还活着，且**不报任何错**。
+
+这不是假设，是实测踩到的坑（`docs/report-material/pitfalls.md` 的 **P-072**）：包里的 sidecar
+是 9-17 05:01 的，而修复是 9-18 13:52 才进的源码；同一份过期产物也缺 9-18 新增的 4 个知识库端点。
+
+所以现在由**构建链自己**保证，而不是靠「记得先跑」：
+
+| 机制 | 文件 | 作用 |
+| --- | --- | --- |
+| **源码指纹** | `server/scripts/build_info.py` | 对会进包的文件按路径排序做 sha256（`app/` `scripts/` `packaging/` `knowledge/` `resources/` + `pyproject.toml` `uv.lock`；`resources/models/` 的 91MB ONNX 只记大小；`tests/`、`dist/`、`resources/kb/` 不参与） |
+| **写指纹 + 自检** | `server/scripts/build_server.py` | 打包**前**算指纹 → 打包 → 写 `<dist>/build-info.json`；`--verify` 断言「产物指纹 == 当前源码指纹」；`--if-stale` 新鲜就秒退 |
+| **JS 侧比对** | `desktop/scripts/build-server.mjs` | 只**调用** Python 取指纹（不自己算哈希，两套算法必然漂移）；挂在 npm 脚本上 |
+
+```bash
+npm run check:server              # 查 server/dist 里的那一份是不是当前源码打的
+npm run check:server:packaged     # 查**已装进安装包**的那一份
+```
+
+构建链会在这些时刻自动拦住你：
+
+| 情形 | 行为 |
+| --- | --- |
+| 源码未动，跑 `npm run build` | **1.3s 秒退**（`[skip] sidecar 已是当前源码打的`） |
+| 改过 `server/` 任一文件 | 完整重打：建库 → PyInstaller → **26 项产物自检**（约 54s） |
+| 包里那份后端与源码不符 | **非零退出**，并给出可执行的修法 |
+
+四个刻意的设计选择：**缺指纹的旧产物一律判过期**（宁可多重打一次，也不要「过期却判新鲜」）；
+**`tests/` 不进指纹**（改个测试不该触发几分钟重打包，否则大家会想办法绕过检查）；
+**按文件内容而非 git commit 判新旧**（否则「改了没提交直接打包」会被判新鲜）；
+**逃生舱会响**（`K12_SKIP_SERVER_BUILD=1` 打印警告后跳过——静默跳过正是这套机制要消灭的东西）。
 
 ## 目录结构
 
@@ -115,18 +160,18 @@ K12Agent/
 ├─ desktop/                 Electron + Vue 桌面端
 │  ├─ src/main/             主进程：sidecar 生命周期 / Pi Agent 编排 / IPC / 6 事件映射
 │  ├─ src/preload/          IPC 白名单（渲染进程唯一的桥，token 永不进入渲染进程）
-│  ├─ src/renderer/         Vue 3 界面：对话、内联卡片、学习档案、设置
+│  ├─ src/renderer/         Vue 3 界面：八页面 + 内联卡片
 │  ├─ src/shared/           跨进程类型 · 品牌名（唯一来源）· 供应商目录
-│  ├─ tests/                548 项回归（含架构守卫 G1–G23 组）
+│  ├─ scripts/              构建联动（build-server.mjs）· 契约生成 · 各类冒烟与证据脚本
+│  ├─ tests/                585 项回归（含架构守卫 G1–G23 组）
 │  └─ build/ resources/     打包图标 · 学段 logo · Pyodide 运行时（本地自托管）
 ├─ server/                  Python sidecar
 │  ├─ app/                  FastAPI：contracts / routes / rag / safety / store / grade
-│  ├─ knowledge/            四学段教材（33 知识点 · 24 章）+ 依赖图 + 术语文表
+│  ├─ knowledge/            四学段教材（33 知识点 · 24 章 · 47 依赖边）
 │  ├─ resources/            题库 · 动画模板 · 代码模板 · 敏感词表
-│  ├─ scripts/              建库 / 取模型 / 导出 OpenAPI / 打包 / 生成品牌图标
-│  └─ tests/                855 项回归
-├─ UI/                      界面原型（Pencil 画布产物，受版本管理，含布局契约与自检脚本）
-├─ docs/                    设计文档 · 任务票 · 决策与踩坑素材 · 对标材料
+│  ├─ scripts/              建库 / 取模型 / 导出 OpenAPI / 打包+指纹 / 生成品牌图标
+│  └─ tests/                904 项回归
+├─ docs/                    设计文档 · 任务票 · 决策与踩坑素材 · 界面版式契约 · 对标材料
 ├─ logos/                   品牌原图（2048²，不入包）
 ├─ AGENTS.md                面向编码代理的工作区说明
 └─ 项目执行文档.md            唯一权威执行文档（范围 / 契约 / DDL / 排期 / 验收）
@@ -137,6 +182,7 @@ K12Agent/
 | 层 | 选型 |
 | --- | --- |
 | 桌面壳 | Electron 44 + electron-vite 5 + Vite 7 + Vue 3.5 + Pinia 4 + TypeScript 5.9（strict） |
+| 组件与样式 | Element Plus（按需引入）· lucide 图标 · 设计 token 由 `tokens.source.json` 生成（6 组配色 × 3 档饱和度 = 18 套，正文 16px 基准） |
 | Agent 编排 | Pi Agent SDK `@earendil-works/pi-coding-agent ^0.85.1`（主进程内嵌；6 个 Extension / 10 个 Tool） |
 | 后端 | Python 3.12（uv 锁定）+ FastAPI + uvicorn + pydantic v2（契约唯一来源） |
 | 数据 | `kb.sqlite`（只读知识库：chunk / 向量 / FTS5 / 依赖图 / 题库）· `learning.db`（一人一份）· Pi JSONL 会话树（一人一份） |
@@ -144,6 +190,7 @@ K12Agent/
 | 嵌入 | fastembed `BAAI/bge-small-zh-v1.5`（512 维 ONNX，纯 CPU，**不依赖 Ollama / torch**） |
 | 多模态 | Anime.js v3（sandboxed iframe）· Monaco Editor · Pyodide（独立 Web Worker） |
 | 传输 | 渲染进程 ↔ 主进程：IPC 事件流，事件词表冻结为 `delta / citation / payload / blocked / done / error`；主进程 ↔ sidecar：`127.0.0.1` HTTP + 随机 token |
+| 打包 | electron-builder（NSIS + 绿色便携版）· PyInstaller `--onedir` · **构建联动 + 源码指纹校验**（见上） |
 
 ## 设计与取舍
 
@@ -157,13 +204,15 @@ K12Agent/
   存储目录名与品牌名解耦（改品牌不会把学生的数据「改丢」）。
 - **内容安全的第二道是「先说完再撤」**：流式输出照常，生成结束后整段终审，违规则撤回并替换为安全提示；
   输入侧的匹配会先做归一化（零宽字符、全角、分隔符拆分都无法绕过）。
+- **把人记住改成机器检查**：构建链的顺序纪律（P-072）写进文档无效——文档没有退出码。
+  凡是「靠人记得」的环节，都要有一个会失败的检查兜底（见上面的「构建」一节）。
 - **明确不做**：绘本生成、多模态教学资源推荐（已砍单）；语音（P2 后置）；不引入 `pi-subagents` 等第三方 SubAgent 包。
 
 ## 测试与质量守卫
 
 ```bash
-cd server  && uv run python -m unittest discover -s tests   # 855 项
-cd desktop && npm test                                      # 548 项 + 契约漂移比对 + Tool schema 一致性
+cd server  && uv run python -m unittest discover -s tests   # 904 项
+cd desktop && npm test                                      # 585 项 + 契约漂移比对 + Tool schema 一致性
 ```
 
 回归里有相当一部分是**架构守卫**，写成正向断言而不是「禁止某历史实现」：
@@ -173,6 +222,11 @@ cd desktop && npm test                                      # 548 项 + 契约�
 - Pi 会话文件必须落在 `students/<id>/` 内（跨学生混放是合规硬伤）。
 - 明文 API Key 只允许主进程取用：渲染进程既没有通道、preload 也没有方法。
 - 对话请求的字段集合被钉死为 `['text']`——学段、章节的手动修改只能走各自的独立通道。
+- **前端构建必须先确保 sidecar 最新**，出包命令必须在 electron-builder 之后校验包里那一份（G20 组）。
+
+守卫**验证过会红**：故意改坏 `build` 链路、把校验提到 electron-builder 之前、
+在 `extraResources` 里排除 `build-info.json`——G20-1 / G20-2 / G20-3 各自如实失败。
+同理，过期产物对着 `build_server.py --verify` 会直接判不通过，而不是给个警告放行。
 
 ## 文档地图
 
@@ -183,10 +237,10 @@ cd desktop && npm test                                      # 548 项 + 契约�
 | [`docs/tickets/`](docs/tickets/README.md) | 任务切片（一票一文件，按依赖顺序） |
 | [`docs/report-material/`](docs/report-material/README.md) | 决策记录（D-0xx）与踩坑复盘（P-0xx），项目报告的一手素材 |
 | [`docs/agents/`](docs/agents/domain.md) | 工程技能约定：tracker 路径、triage 标签、领域文档消费方式 |
+| [`docs/ui/`](docs/ui/版式契约.md) | 界面版式契约与原型说明（层次、间距、组件边界） |
 | [`docs/对标/`](docs/对标) | 赛题原文与两份对标调研材料 |
 | [`AGENTS.md`](AGENTS.md) | 面向后续编码代理的工作区说明（本仓库特有、代码里看不出来的信息） |
 | [`docs/tool-trace.mmd`](docs/tool-trace.mmd) | 工具调用轨迹图（Agent 自主路由的证据） |
-| [`UI/LAYOUT-CONTRACT.md`](UI/LAYOUT-CONTRACT.md) | 界面原型的排版契约（层次、间距、组件边界） |
 
 ## 备注
 
@@ -194,3 +248,5 @@ cd desktop && npm test                                      # 548 项 + 契约�
   `docs/report-material/` 与执行文档里；已实现的边界同样如实标注，不粉饰。
 - 仓库内**不含**学生数据、API Key、嵌入模型（约 90MB）与 Pyodide 运行时（体积大，随包分发），
   这些分别由 `.gitignore` 与各自的获取脚本管理。
+- 构建产物（`server/dist/`、`desktop/dist/`、`out/`）不入库；安装包里的后端与前端**由构建链保证同源**
+  ——每一份 sidecar 都带着 `build-info.json`（源码指纹 + commit + 构建时间），随时可被校验。
