@@ -15,11 +15,14 @@
 K12Agent/
 ├─ AGENTS.md              # 本文件
 ├─ 项目执行文档.md         # 唯一权威执行文档 v3.0（从零重建版：混合后端 + IPC-only）
-├─ docs/                  # 5 份设计文档 + tickets/ + agents/ + report-material/，见第 3 节
+├─ docs/                  # 设计文档 + ui/（原型说明与版式契约）+ tickets/ + agents/ + report-material/
 └─ .gitignore  .gitattributes
 ```
 
-`desktop/` 与 `server/` **均已落地**（后端 650+ / 桌面 370+ 项测试全绿；安装包与绿色版可出）。
+`desktop/` 与 `server/` **均已落地**（后端 870+ / 桌面 570+ 项测试全绿；安装包与绿色版可出）。
+界面已按 **D-039** 换成原型的设计（原来的 `UI/` 目录**已删除**，产物在 `desktop/src/renderer`）。
+另有两条**只覆盖跨层**的验证：`npm run smoke:wire`（主进程真连 Python sidecar，需先起 sidecar）
+与 `node scripts/verify-ui.mjs`（CDP 看真实 DOM，需 `K12_DEBUG_PORT` 且**本机允许绑定调试端口**）。
 
 > **测试数字不要写死**（它会随每一票增长）：以后端 `uv run python -m unittest discover -s tests`
 > 与桌面 `npm test`（= `node --test` + `check:api` + `check:tool-schema`）的**实际输出**为准。
@@ -188,10 +191,29 @@ D-020 曾让需求「学生可选择学段」的字面要求被主动放弃，D-
     ⚠️ **学段变更即清空当前章节**（见第 5 节第 1 条）：章节属于某一本教材，学段换了那本书就不存在了。
     章节行只在**学生改动时**变 → 不违反 D-032；守卫：`server/tests/test_chapter_selection.py`、
     `desktop/tests/student-context.test.ts` 的 **G23 组**。
-- 前端（`desktop/`）：**Electron 44 + electron-vite 5 + vite 7 + Vue 3 + Pinia 4 + TypeScript 5.9（strict）**，
-  对话优先布局，内联卡片 + 展开/全屏。
+- 前端（`desktop/`）：**Electron 44 + electron-vite 5 + vite 7 + Vue 3 + Pinia 4 + TypeScript 5.9（strict）
+  + Element Plus 2（按需）+ lucide-vue-next**，对话优先布局，内联卡片 + 展开/全屏。
   **Electron 侧不得引入任何原生数据库模块**（刻意的风险隔离）——**Pi 迁移不影响此约束**。
   ⚠️ **不要升 vite 8**（`electron-vite@5` 的 peer 不收）、**不要升 TS 7**（`openapi-typescript` peer 为 `^5.x`）。
+  ★ **界面本体由 `UI/` 原型移植而来（该目录已删除）**，三条随之而来的约定：
+  - 别名 **`@/*` → `src/renderer/src/*`**（与 `@shared/*`、`@renderer/*` 并列），
+    所以源码里的 `@/stores/xxx` 是合法的；引用现成文件时优先跟随**该文件已有的**相对写法。
+  - **Element Plus 组件与 Vue/Pinia API 由 `unplugin-*` 自动导入**（`electron.vite.config.ts` 的 renderer 段）——
+    用 `<el-button>` 不必 import、写 `ref()` 不必 import。生成的两个 `.d.ts` 落在
+    `src/renderer/src/types/`（守卫会扫它们，实测干净；若哪天脏了，改 dts 输出路径到 `desktop/src/types/`）。
+  - **仍然没有 vue-router，且不引入**：导航的唯一真相是 `stores/ui.ts` 的 `PAGES` + `go(page)`。
+    Electron 单窗口没有 URL / 后退 / 深链需求；引进来会造成「router 与 store 双真相」，
+    并让 `ui-shell.test.ts` 与 `verify-ui.mjs` 的 `view-entry` 循环同时失效。
+  - 设计令牌是 **`--k12-*`**（`assets/tokens.generated.css` 由 `scripts/design/gen-tokens.mjs` 生成，
+    **不要手改**；改色改 `scripts/design/tokens.source.json` 再跑 `npm run gen:tokens`）。
+    版式契约见 `docs/ui/版式契约.md`。
+    ★★ **字号阶梯（D-043，改前必读）**：正文 **16px**，全 8 档写在 `assets/base.css` 的 `:root`，
+    **不要在页面里写 `font-size: <数字>px`**（写死的值在抬字号时会裁字 / 错位，见 P-071）。
+    三条关系必须成立：**顶栏页面名 17px < 内容区身份行 24px**；**正文 16px > 任何 meta 13px**；
+    **`--k12-fs-micro` 12px 只给 ≤4 字角标**（id / 说明 / 关系名一律 `--k12-fs-xs`）。
+    ★ 抬字号的连锁代价：**容器尺寸要跟着长**（侧栏 264 / 顶栏 72 / 阅读栏 880 都是这么来的），
+    并且要逐页真的看一遍 —— 固定高度会裁字、窄栏里的 `align-items: center` 单行会在折行后错位，
+    这两类问题 typecheck 与单测**都覆盖不到**。
 - 后端（`server/`）：**Python 3.12（uv 锁定）+ FastAPI + uvicorn + pydantic v2**。
   契约文件是 **`server/app/contracts.py`**；UTF-8 stdio 强制在 **`server/app/console.py`**。
 - 契约：**pydantic 模型是唯一契约来源**（`server/app/contracts.py`）→ FastAPI 自动产出 OpenAPI →
@@ -404,6 +426,7 @@ uv run python scripts/export_openapi.py              # 导出 OpenAPI → 生成
 uv run python scripts/make_brand_icons.py            # 从 logos/ 生成打包图标 + 学段 logo（改了 logo 就跑）
 
 # 后端打包（--onedir，不用 onefile）——统一走脚本，不要手敲 pyinstaller
+# ★★ 改了 `server/` 下的任何东西**必须重跑这一条**，否则见下方警告
 uv run python scripts/build_server.py
 
 # ── 前端（含 Pi Agent 运行时）──
@@ -413,6 +436,20 @@ npm run typecheck      # vue-tsc --noEmit
 npm run build:win      # 打包 .exe（内嵌 server 产物 + Pi 运行时）
 npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解包、Pi 能否加载
 ```
+
+> ★★ **两条构建链是独立的，顺序不能反**（P-072，实测踩到）：
+> ```
+> 改了 server/  →  ① cd server && uv run python scripts/build_server.py
+>                  ② cd desktop && npm run build:unpack
+> ```
+> `npm run build:unpack` **只是把磁盘上现成的那份 sidecar exe 拷进包里**
+> （`extraResources`）—— 它**不会**替你重建它。
+> 所以「改了 server 但没跑第 ① 步」= **安装包里跑的是旧后端**：
+> 源码里修好的 bug 在包里还活着、新加的端点回 404。
+> ⚠️ 而 `npm test`（870+ 项）与 `typecheck` **都是绿的** —— 它们测的是源码，
+> **没有一项**覆盖「包里的后端是不是最新的」。只能靠真跑一次交付物发现。
+> ⚠️ 重打前先关掉正在运行的打包版，否则 `dist/win-unpacked` 的文件被占用删不掉
+> （报 `Device or resource busy`）。
 
 **纪律**：关卡不过不进下一阶段；每天结束做一次 git 提交（写清「票号 + 产出」）；
 每完成一步跑一次 `npm run typecheck`（契约漂移的第一道防线，不要攒到最后修）；
@@ -527,6 +564,66 @@ npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解�
 - **工具调用轨迹导出**（票 08 产出，服务 25% 设计分）：从 `tool_execution_start`/`tool_execution_end`/`tool_call`
   记录 `{turn, toolName, args摘要, ok, latencyMs, degraded}` → `docs/tool-trace.mmd`。
   **这是「设计合理性」维度的核心证据**（取代已作废的状态流转图）。
+  ★ **同一条数据还有一条实时通路**：`agent/trace.ts` 的 `onRecord` 回调 → `ipc/handlers-data.ts` 的
+  `createTraceProjector` → **`trace:changed` 推送通道** → `stores/trace.ts` → 对话右栏「工具调用」页。
+  推的是**快照**（每条记录推一次全量），不是增量 —— 一轮只有几个 Tool，全量替换省掉一整套恢复协议。
+  ⚠️ 它与 6 事件词表**并列而非其中之一**：轨迹是工程证据，与对话状态机不是一回事。
+  往 6 事件里塞字段会让每个消费方都被迫理解一个它不关心的东西。
+- **教材知识库的写入**（唯一会写 kb 的地方）：`POST /api/knowledge/import`（导入一份 Markdown）与
+  `POST /api/knowledge/rebuild`（整库重建）。
+  ★★ **kb 解析顺序有个标记文件**（`app/rag/retriever.py` 的 `user_rebuild_marker_path`）：
+  默认「随包只读库优先于用户库」（升级后不该被旧库遮蔽，`test_kb_bundling.py` 钉着这条），
+  但**一旦学生重建过**，就写 `<data-dir>/shared/kb.rebuilt` 把用户库提到最前 ——
+  否则打包态下「重建成功但检索到的还是老教材」。用标记文件而不是加配置项：
+  删掉它就退回随包库，不需要额外的清理入口。
+  ★ 导入的教材落 `<data-dir>/knowledge-user/<学段>/`；重建时把它与随包 `knowledge/` 合成到
+  `shared/knowledge-staging/` 再喂给 `build()`（**用户导入覆盖同名**）。
+  ★ **重建是同步重活**（分块 + ONNX 嵌入，实测 ~6s）→ 必须 `run_in_threadpool`，
+  且主进程侧用**长超时**（`KNOWLEDGE_LONG_TASK_TIMEOUT_MS` = 180s）——
+  用 `bridge/client.ts` 的 8s 兜底会把一次**成功**的重建报成「响应超时」（最难查的假失败）。
+  ★ 统计接口的 `vecReady` 有个坑：`chunk_vec` 是 `vec0` 虚表，**不先加载 sqlite-vec 扩展**连
+  `COUNT(*)` 都会抛，于是行数恒为 0、界面会谎报「向量不可用」。`_vec_ready()` 负责加载并重数。
+- **数据面 IPC 通道**（本轮新增，18 条；细则见 `src/main/ipc/channels.ts` 的注释）：
+  画像/推荐/学段证据（`profile:read` / `profile:recommendation` / `grade:signals` / `grade:history`）·
+  闯关（`quiz:bank` / `quiz:grade` / `quiz:progress`）· 编程（`code:template` / `code:hint` / `code:run-hint`）·
+  动画（`animation:templates` / `animation:render` / `animation:host`）·
+  教材知识库（`knowledge:stats` / `knowledge:points` / `knowledge:import` / `knowledge:rebuild`）·
+  学生身份（`student:get`）。
+  ★★ 三条不许走样的纪律：
+  ① **学生 id 一律由主进程决定**（`resolveActiveStudentId()`），**绝不读渲染进程递来的值** ——
+     与 `chapter:get/set` 同一条：身份一旦可指定，就是「读别人的画像与学习记录」；
+  ② **题库的学段由主进程注入**（取自当前会话），前端递不进来 ——
+     否则「只取不高于学生学段的内容」这条隔离就被绕开了；
+  ③ **没有「执行代码」的通道**：`code:run-hint` 送的是**已经跑完**的代码与 stdout/stderr，
+     只用来做中文报错归一 + 定下一级提示。执行仍然只在渲染进程的 Pyodide Worker 里
+     （`code:execute` / `code:result` 那条老链路）。
+- **窗口控制通道**（4 条，`window:*`）：`window:minimize` / `window:toggle-maximize` /
+  `window:close` / `window:maximize-changed`（推送）。
+  ★★ 窗口是 **`frame: false`**（无边框，见 `main/index.ts` 的说明）：Windows 原生标题栏
+  与设计不是一套视觉，且会压掉一行纵向空间 —— 所以三个键做进页面（`components/WindowControls.vue`，
+  在顶栏最右端，由 `AppShell` 挂载）。
+  **三条硬约束（少任何一条窗口就会变得不好用）**：
+  1. **拖拽区**：`AppShell` 的 `.shell__head` 是 `-webkit-app-region: drag`，
+     其内**每个可交互元素**必须 `no-drag`，否则点击会被当成拖窗口吞掉且**不报错**（P-069）。
+     新增顶栏控件时别忘了这一条。
+  2. **最大化状态必须推送**：双击拖拽区、`Win+↑/↓`、拖到屏幕上边缘、系统菜单都会改变它，
+     渲染进程一个都观察不到 —— 不推的话按钮图标永远画错。
+  3. 三条 invoke 都**不接受参数**：作用对象由主进程从 `event.sender` 反查窗口，
+     渲染进程指不了别的窗口。`window:close` 走 `window.close()`（**不是** `destroy()`），
+     这样 `before-quit` 里的 `session.dispose()` 与 sidecar 收尾照常执行。
+  ★ **尺寸**：默认 **1440×900**（设计基准），`minWidth` **1120** ——
+  与 `assets/base.css` 的 `#app { min-width: 1120px }` 对齐，
+  免得「窗口能缩到多小」与「界面能排到多小」是两个数。
+  ⚠️ Windows 会给无边框窗口留约 7px **不可见缩放边框**：`GetWindowRect` 量到 1454×909
+  而内容区是 1440×900，**这不是 bug**，写验收脚本时别按外框断言。
+  ★ `/api/animation/*` 是 `include_in_schema=False` 的内部端点 → 不进 OpenAPI，
+  所以 `AnimationTemplatesView` / `AnimationHostView` / `QuizProgressView` 三个类型是
+  **手写的**（`api/data.ts` 里逐条写了为什么）—— Python 侧本来就只是 `JSONResponse` 的字面量 dict，
+  手写它们**不违反**「契约唯一来源」。哪天 Python 侧给它们补了 pydantic 模型，这三处就该换成生成类型。
+- **接线冒烟脚本**：`cd desktop && npm run smoke:wire`（**需先起 sidecar**）——
+  它覆盖的是 `npm test` 与 `server/tests` **都盖不到的那一层**：主进程取数层真连一次 Python，
+  验路径拼接、超时、错误归一化，以及几条易破的硬约束（题库无 `answer`、代码模板无 `solution`、
+  动画 HTML 无外部地址、RAG 命中带节级正文、学段隔离不越级）。跑法见脚本头部注释。
 
 ## 9. Git / 远程仓库工作流
 
