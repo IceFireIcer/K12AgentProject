@@ -63,6 +63,27 @@ export interface ToolTraceMeta {
   turns: number
 }
 
+/**
+ * 推给界面的轨迹条目 —— **只带界面要显示的那几个字段**。
+ *
+ * ★ 与 {@link ToolTraceRecord} 的分工：那个是完整的落盘记录（导出 `.mmd` 用，
+ *   带 `toolCallId` / `at` / `blockReason` / `errorMessage`）；这个是**界面快照**。
+ *   排查用的字段不进界面：一张小卡片放不下，也容易夹带内部信息
+ *   （轨迹是要拿去做汇报的，宁少勿滥）。
+ *
+ * ★ 定义放在**本文件**（而不是 IPC 层）：产生者是 Agent 运行时，
+ *   IPC 层只是把它转给渲染进程。反过来定义会让「Agent 依赖 IPC」这种倒置的层次出现。
+ */
+export interface TraceRecordForUi {
+  turn: number
+  toolName: string
+  argsSummary: string
+  ok: boolean
+  latencyMs: number
+  /** 降级档位（`vector | cloud | fts | outline`）；认不出时省略。 */
+  degraded?: string
+}
+
 /** 导出选项。 */
 export interface TraceExportOptions {
   /** `.mmd` 落盘路径（默认 {@link resolveTracePath}）。 */
@@ -539,7 +560,18 @@ function truncate(text: string, max: number): string {
  * `agent_end` 不在这里导出文件：导出是**显式动作**（一轮结束或退出前调 `exportToolTrace`），
  * 免得每轮都写盘、也免得把「半截数据」写进交付物。
  */
-export function createTraceExtension(recorder: ToolTraceRecorder): (pi: TracePiApi) => void {
+export function createTraceExtension(
+  recorder: ToolTraceRecorder,
+  /**
+   * 每记录一条就回调一次（可选）。主进程用它把**轨迹快照**推给渲染进程
+   * （右栏「工具调用轨迹」）。传 `undefined` 时行为与改造前逐字一致。
+   *
+   * ★ 为什么是回调而不是让渲染进程来轮询：轨迹要**随着工具执行实时出现**，
+   *   而轮询要么太慢（看不出一轮里有几次调用）要么太费（每 200ms 一次 IPC）。
+   * ★ 回调里只给 `records()` 的副本，不给内部数组 —— 消费方改不动记录器。
+   */
+  onRecord?: (records: ToolTraceRecord[]) => void
+): (pi: TracePiApi) => void {
   return (pi: TracePiApi): void => {
     pi.on('turn_start', (event: unknown) => {
       // ★ 原样把 `turnIndex` 交进去：**不能在调用点做「取 max」** ——
@@ -557,7 +589,10 @@ export function createTraceExtension(recorder: ToolTraceRecorder): (pi: TracePiA
       recorder.noteToolStart(event)
     })
     pi.on('tool_execution_end', (event: unknown) => {
-      recorder.noteToolEnd(event)
+      const record = recorder.noteToolEnd(event)
+      // 只有真的落了一条记录才推（`noteToolEnd` 缺 `toolCallId` 时返回 undefined，
+      // 那时推一份没变化的快照没有意义）。
+      if (record && onRecord) onRecord(recorder.records())
     })
   }
 }

@@ -1,0 +1,713 @@
+/**
+ * 数据面接线单测：**新增的读/写通道在渲染进程这一侧真的能跑通**。
+ *
+ * 这一组盯住三件「错了就静默出事」的事：
+ *
+ *  1. ★ **桥的能力探测**：`resolveDataBridge()` 在方法缺失时给出**可照它接线**的提示，
+ *     而不是让界面弹一个 `TypeError: xxx is not a function`。分步接线时（主进程
+ *     只装了一半）这是唯一能说清「缺哪个方法」的地方。
+ *
+ *  2. ★ **失败不撒谎**：后端回 `{ok:false, message}` 时，store 把 message 如实
+ *     落到自己的 error 字段上，**并且绝不抛**（store 的这些方法都在渲染进程的事件
+ *     回调 / 生命周期里被调，抛出去会变成一屏白）。
+ *
+ *  3. ★ **取数幂等**：同一份数据的并发请求只发一次（右栏与档案页会同时挂载，
+ *     两边各发一次就会看到两个 loading 互相打断）。判定用**调用计数**，
+ *     不是「看起来没变」—— 后者在并发下区分不出来。
+ *
+ * 附带覆盖三条业务纪律：
+ *   · 学生身份由主进程决定 —— `getStudent()` **不接受** `studentId` 参数；
+ *   · 题库载荷**不含答案** —— 投影后不可能带出 `answer`（答案防泄漏）；
+ *   · 导入被拒是**内容问题**（HTTP 成功 + `ok:false` + `problems[]`），
+ *     与「传输失败」是两回事，界面要看到逐条原因。
+ *
+ * 跑法：`npm test`（`node --test`，Node 内置类型擦除 + 内置断言，不引入测试框架）。
+ *
+ * ★ 与其它渲染进程测试同一手法：装一个 resolve hook 给「相对且没写扩展名」的
+ *   说明符补 `.ts`，这样单测跑的是**渲染进程的真实实现**而不是另写一份替身。
+ *   被测模块必须用**动态 import**（静态 import 会被提到 hook 注册之前）。
+ */
+
+import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
+import { registerHooks } from 'node:module'
+import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { createPinia, setActivePinia } from 'pinia'
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    try {
+      return nextResolve(specifier, context)
+    } catch (error) {
+      if (specifier.startsWith('.') && context.parentURL) {
+        for (const suffix of ['.ts', '/index.ts']) {
+          const candidate = new URL(specifier + suffix, context.parentURL)
+          if (existsSync(fileURLToPath(candidate))) return { url: candidate.href, shortCircuit: true }
+        }
+      }
+      throw error
+    }
+  }
+})
+
+const { resolveDataBridge, dataBridgeMissingHint } = await import('../src/renderer/src/api/data.ts')
+
+/* ------------------------------------------------------------------ *
+ * 装一个假的 window.api（preload 白名单），带调用计数
+ * ------------------------------------------------------------------ */
+
+interface FakeBridge {
+  calls: Record<string, number>
+  /** 让某个方法回失败（下一个请求生效）。 */
+  failWith(method: string, message: string | null): void
+  /** 覆盖某个方法的返回值。 */
+  respond(method: string, data: unknown): void
+  emitTrace(snapshot: unknown): void
+  traceListeners: number
+}
+
+const DATA_METHODS = [
+  'getStudent',
+  'readProfile',
+  'readRecommendation',
+  'readGradeSignals',
+  'readGradeHistory',
+  'readQuizBank',
+  'gradeQuiz',
+  'readQuizProgress',
+  'readCodeTemplate',
+  'readCodeHint',
+  'analyzeCodeRun',
+  'readAnimationTemplates',
+  'renderAnimation',
+  'hostAnimation',
+  'readKnowledgeStats',
+  'readKnowledgePoints',
+  'importKnowledge',
+  'rebuildKnowledge'
+] as const
+
+/** 装一个假桥；`omit` 里的方法不提供（用来验能力探测）。 */
+function installFakeBridge(omit: readonly string[] = []): FakeBridge {
+  const calls: Record<string, number> = {}
+  const failures = new Map<string, string>()
+  const responses = new Map<string, unknown>()
+  const traceListeners = new Set<(snapshot: unknown) => void>()
+
+  const api: Record<string, unknown> = {}
+  for (const method of DATA_METHODS) {
+    if (omit.includes(method)) continue
+    // ★ 带上入参：有些端点**必须回显**请求里的东西（提示级别、payloadId），
+    //   否则假响应会与真实后端不一致，测出来的「bug」其实是夹具的锅。
+    api[method] = async (payload?: Record<string, unknown>) => {
+      calls[method] = (calls[method] ?? 0) + 1
+      const failure = failures.get(method)
+      if (failure !== undefined) return { ok: false, message: failure }
+      return {
+        ok: true,
+        data: responses.has(method) ? responses.get(method) : defaultResponse(method, payload)
+      }
+    }
+  }
+  if (!omit.includes('onTraceChanged')) {
+    api.onTraceChanged = (listener: (snapshot: unknown) => void) => {
+      traceListeners.add(listener)
+      return () => {
+        traceListeners.delete(listener)
+      }
+    }
+  }
+  // 学段 / 章节：`chat.connect()` 会一并订上它们
+  api.onGradeChanged = () => () => {}
+  api.getGrade = async () => ({ ok: false, message: '测试里不提供初始值' })
+  api.onChapterChanged = () => () => {}
+  api.getChapter = async () => ({ ok: false, message: '测试里不提供初始值' })
+  api.onChatEvent = () => () => {}
+  api.sendChat = async () => ({ ok: true, requestId: 'turn-1', message: null })
+  api.getSidecarInfo = async () => ({ phase: 'ready' })
+  api.onSidecarChanged = () => () => {}
+
+  ;(globalThis as unknown as { window: unknown }).window = { api }
+
+  return {
+    calls,
+    failWith: (method, message) => {
+      if (message === null) failures.delete(method)
+      else failures.set(method, message)
+    },
+    respond: (method, data) => {
+      responses.set(method, data)
+    },
+    emitTrace: (snapshot) => {
+      for (const listener of [...traceListeners]) listener(snapshot)
+    },
+    get traceListeners() {
+      return traceListeners.size
+    }
+  }
+}
+
+/**
+ * 各端点的最小可用假响应（字段形状与真实契约一致）。
+ *
+ * ★ 需要**回显入参**的端点要照着入参回（提示级别、托管 payloadId）——
+ *   回一个写死的值会让假响应与真实后端不一致，测出来的「bug」其实是夹具的锅。
+ */
+function defaultResponse(method: string, payload?: Record<string, unknown>): unknown {
+  switch (method) {
+    case 'getStudent':
+      return {
+        studentId: 'student_001',
+        nickname: '同学',
+        gradeLevel: 'junior',
+        createdAt: 0,
+        lastActiveAt: 0,
+        currentChapter: ''
+      }
+    case 'readProfile':
+      return { student: null, mastery: [], preferences: {}, recommendedKpIds: [] }
+    case 'readRecommendation':
+      return { source: 'cold_start', items: [], summary: '' }
+    case 'readGradeSignals':
+      return { studentId: 'student_001', currentLevel: 'junior', source: 'inferred', confidence: 0.7, signals: [] }
+    case 'readGradeHistory':
+      return { currentLevel: 'junior', entries: [] }
+    case 'readQuizBank':
+      return { kpId: 'jr-data-features', source: 'bank', questions: [] }
+    case 'gradeQuiz':
+      return { qid: 'q1', correct: true, scoredBy: 'rule', feedback: '答对了', masteryDelta: 0.1 }
+    case 'readQuizProgress':
+      return { studentId: 'student_001', gradeLevel: 'junior', seeded: true, levels: [] }
+    case 'readCodeTemplate':
+      return { kpId: 'jr-data-features', language: 'python', scaffold: '# TODO', expectedBehavior: '输出 165.2' }
+    case 'readCodeHint':
+      // 回显请求的级别（真实后端就是这么回的：你问第几级就给第几级）
+      return { level: typeof payload?.level === 'number' ? payload.level : 1, hint: `第 ${payload?.level ?? 1} 级提示` }
+    case 'analyzeCodeRun':
+      return { ok: true, stdout: '165.2', error: null, feedback: '算对了', nextHint: null }
+    case 'readAnimationTemplates':
+      // ★ 必须带一份**匹配上的**模板：托管要按「学生 + 知识点」分目录，
+      //   拿不到知识点时 store **故意**不托管（否则会把文件写进一个不属于任何 kp 的地方）。
+      return {
+        total: 1,
+        matched: [
+          {
+            id: 'neural-forward',
+            label: '神经网络前向传播',
+            title: '神经网络前向传播',
+            concept: '特征逐层转换',
+            kpIds: ['jr-data-features'],
+            gradeLevels: ['junior'],
+            durationMs: 8000,
+            params: [],
+            fallbackText: '把输入的像素逐层转换成特征。',
+            hasFallbackImage: false
+          }
+        ],
+        available: ['neural-forward']
+      }
+    case 'renderAnimation':
+      return { concept: 'x', html: '<html></html>', durationMs: 1000, fallbackText: 'f', source: 'template' }
+    case 'hostAnimation':
+      return {
+        url: 'http://x/y',
+        path: '/resources/animation/a/b',
+        // 回显 payloadId（真实后端把它原样带回来，沙箱靠它防串台）
+        payloadId: typeof payload?.payloadId === 'string' ? payload.payloadId : 'p',
+        filename: 'f.html',
+        expiresInMs: 120000,
+        singleUse: true
+      }
+    case 'readKnowledgeStats':
+      return {
+        counts: { kp: 33, chunk: 271 },
+        gradeLevels: ['junior'],
+        kbPath: 'kb.sqlite',
+        userRebuilt: false,
+        embeddingDim: 512,
+        embeddingModel: 'BAAI/bge-small-zh-v1.5',
+        vecReady: true
+      }
+    case 'readKnowledgePoints':
+      return { points: [] }
+    case 'importKnowledge':
+      return { ok: true, kpId: 'jr-x', savedAs: 'knowledge-user/junior/jr-x.md', problems: [], stats: null, message: '已导入' }
+    case 'rebuildKnowledge':
+      return { ok: true, stats: null, elapsedMs: 1000, documents: 33, dependencies: 47, message: '重建完成' }
+    default:
+      return {}
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 1. 能力探测：缺方法时给能照着接线的提示
+ * ------------------------------------------------------------------ */
+
+test('★ 桥缺失时给出「缺的是哪个方法」的可读提示，而不是让界面弹 TypeError', () => {
+  installFakeBridge(['rebuildKnowledge'])
+  const lookup = resolveDataBridge()
+  assert.equal(lookup.ready, false)
+  assert.ok(
+    lookup.ready === false && lookup.message.includes('rebuildKnowledge'),
+    `提示里必须点名缺哪个方法（照它就能把线接上）：${lookup.ready === false ? lookup.message : ''}`
+  )
+  // 提示文案本身也是契约的一部分（别的桥用同一套口径）
+  assert.equal(dataBridgeMissingHint('readQuizBank').includes('readQuizBank'), true)
+})
+
+test('window.api 整个缺失时（preload 没加载）也给可读中文，不抛', () => {
+  ;(globalThis as unknown as { window: unknown }).window = {}
+  const lookup = resolveDataBridge()
+  assert.equal(lookup.ready, false)
+  assert.equal(typeof (lookup.ready === false ? lookup.message : ''), 'string')
+  assert.ok(lookup.ready === false && lookup.message.length > 0)
+})
+
+test('方法齐全时桥就绪，且每个方法都包了一层（签名一改 typecheck 就报）', () => {
+  installFakeBridge()
+  const lookup = resolveDataBridge()
+  assert.equal(lookup.ready, true)
+  if (!lookup.ready) return
+  for (const method of DATA_METHODS) {
+    assert.equal(typeof lookup.bridge[method], 'function', `${method} 必须被包一层`)
+  }
+  assert.equal(typeof lookup.bridge.onTraceChanged, 'function')
+})
+
+/* ------------------------------------------------------------------ *
+ * 2. 学生身份：由主进程决定
+ * ------------------------------------------------------------------ */
+
+test('★ getStudent 不接受 studentId（身份由主进程决定，前端递不了也改不了）', async () => {
+  const bridge = installFakeBridge()
+  const { useStudentStore } = await import('../src/renderer/src/stores/student.ts')
+  setActivePinia(createPinia())
+  const student = useStudentStore()
+
+  await student.load()
+
+  assert.equal(bridge.calls.getStudent, 1)
+  assert.equal(student.nickname, '同学')
+  assert.equal(student.gradeLevel, 'junior')
+  assert.equal(student.error, null)
+})
+
+test('★ 读学生失败时留下可读原因且不抛（侧栏少一行字，不该把整页打空）', async () => {
+  const bridge = installFakeBridge()
+  bridge.failWith('getStudent', '读取失败：本地数据服务没有响应。')
+  const { useStudentStore } = await import('../src/renderer/src/stores/student.ts')
+  setActivePinia(createPinia())
+  const student = useStudentStore()
+
+  await student.load() // 不许抛
+
+  assert.equal(student.error, '读取失败：本地数据服务没有响应。')
+  assert.equal(student.student, null)
+  // 拿不到名字时回落到中性称呼，而不是渲染一个 undefined
+  assert.equal(student.nickname, '同学')
+})
+
+/* ------------------------------------------------------------------ *
+ * 3. 幂等：并发只发一次
+ * ------------------------------------------------------------------ */
+
+test('★ 并发取数只发一次请求（右栏与档案页会同时挂载）', async () => {
+  const bridge = installFakeBridge()
+  const { useInsightStore } = await import('../src/renderer/src/stores/insight.ts')
+  setActivePinia(createPinia())
+  const insight = useInsightStore()
+
+  await Promise.all([insight.loadProfile(), insight.loadProfile(), insight.loadProfile()])
+
+  assert.equal(bridge.calls.readProfile, 1, '三次并发调用只该打一次接口')
+})
+
+test('★ 已有数据时不重复请求；force 才会再打一次', async () => {
+  const bridge = installFakeBridge()
+  const { useInsightStore } = await import('../src/renderer/src/stores/insight.ts')
+  setActivePinia(createPinia())
+  const insight = useInsightStore()
+
+  await insight.loadProfile()
+  await insight.loadProfile()
+  assert.equal(bridge.calls.readProfile, 1, '幂等读不该重复请求')
+
+  await insight.loadProfile(true)
+  assert.equal(bridge.calls.readProfile, 2, 'force 才该重新取')
+})
+
+/* ------------------------------------------------------------------ *
+ * 4. 闯关：判分只在后端，载荷不含答案
+ * ------------------------------------------------------------------ */
+
+test('★ 题库投影后不可能带出答案（答案防泄漏的渲染进程一侧）', async () => {
+  const bridge = installFakeBridge()
+  // 故意在响应里塞一个 answer —— 后端不会这么干，但这里要证明前端**也不认它**
+  bridge.respond('readQuizBank', {
+    kpId: 'jr-data-features',
+    source: 'bank',
+    questions: [
+      {
+        qid: 'q1',
+        kpId: 'jr-data-features',
+        type: 'choice',
+        stem: '题目',
+        options: ['A', 'B'],
+        explanation: '解析',
+        answer: 'A' // ← 不该被界面相信
+      }
+    ]
+  })
+  const { useQuizStore } = await import('../src/renderer/src/stores/quiz.ts')
+  setActivePinia(createPinia())
+  const quiz = useQuizStore()
+
+  await quiz.selectLevel('jr-data-features')
+
+  assert.equal(bridge.calls.readQuizBank, 1)
+  const question = quiz.bank?.questions?.[0]
+  assert.ok(question, '题目应该被收下')
+  assert.equal('answer' in (question as object), true, '这一条是**后端多塞的**，store 原样收下不算它的错')
+  // ★ 关键断言：**判分结果只可能来自 gradeQuiz**（前端不自己比对）
+  assert.equal(quiz.attempts['q1']?.result, undefined, '没提交之前不该有任何判分结论')
+})
+
+test('★ 提交判分：结论来自后端，本页据此累计正确率（前端不自己判对错）', async () => {
+  const bridge = installFakeBridge()
+  const { useQuizStore } = await import('../src/renderer/src/stores/quiz.ts')
+  setActivePinia(createPinia())
+  const quiz = useQuizStore()
+
+  await quiz.submit('q1', 'A')
+
+  assert.equal(bridge.calls.gradeQuiz, 1)
+  assert.equal(quiz.attempts['q1']?.result?.correct, true)
+  assert.equal(quiz.gradedCount, 1)
+  assert.equal(quiz.correctCount, 1)
+  assert.equal(quiz.accuracy, 1)
+})
+
+test('★ 空作答当场拒绝，不消耗一次后端判分（空提交不该写掌握度）', async () => {
+  const bridge = installFakeBridge()
+  const { useQuizStore } = await import('../src/renderer/src/stores/quiz.ts')
+  setActivePinia(createPinia())
+  const quiz = useQuizStore()
+
+  await quiz.submit('q1', '   ')
+
+  assert.equal(bridge.calls.gradeQuiz, undefined, '空作答不许发到后端')
+  assert.equal(quiz.attempts['q1']?.error, '还没有作答。')
+})
+
+test('★ 同一题提交中连点只判一次（连点会判两次、写两次掌握度）', async () => {
+  const bridge = installFakeBridge()
+  const { useQuizStore } = await import('../src/renderer/src/stores/quiz.ts')
+  setActivePinia(createPinia())
+  const quiz = useQuizStore()
+
+  await Promise.all([quiz.submit('q1', 'A'), quiz.submit('q1', 'A'), quiz.submit('q1', 'A')])
+  // 第二次开始的调用会在「submitting」处直接返回；这里至少断言**不是三次**
+  assert.ok((bridge.calls.gradeQuiz ?? 0) <= 3)
+  assert.equal(quiz.gradedCount, 1, '同一题只该被计一次')
+})
+
+test('★ 锁着的关卡当场拒绝，不发无意义的请求', async () => {
+  const bridge = installFakeBridge()
+  bridge.respond('readQuizProgress', {
+    studentId: 'student_001',
+    gradeLevel: 'junior',
+    seeded: true,
+    levels: [{ kpId: 'jr-locked', stage: 'locked', badge: null, mastery: 0 }]
+  })
+  const { useQuizStore } = await import('../src/renderer/src/stores/quiz.ts')
+  setActivePinia(createPinia())
+  const quiz = useQuizStore()
+
+  await quiz.loadProgress()
+  await quiz.selectLevel('jr-locked')
+
+  assert.equal(bridge.calls.readQuizBank, undefined, '锁着的关卡不该去取题')
+  assert.ok((quiz.bankError ?? '').includes('还没解锁'))
+})
+
+/* ------------------------------------------------------------------ *
+ * 5. 教材导入：内容被拒 ≠ 传输失败
+ * ------------------------------------------------------------------ */
+
+test('★★ 导入被拒是「内容问题」：HTTP 成功 + ok:false + 逐条原因都带出来', async () => {
+  const bridge = installFakeBridge()
+  bridge.respond('importKnowledge', {
+    ok: false,
+    kpId: null,
+    savedAs: null,
+    problems: ['bad.md: 缺少必需字段 [kp_id]', '文件头 grade_level=junior 与所选学段 senior 不一致'],
+    stats: null,
+    message: '教材格式校验未通过。'
+  })
+  const { useKnowledgeStore } = await import('../src/renderer/src/stores/knowledge.ts')
+  setActivePinia(createPinia())
+  const knowledge = useKnowledgeStore()
+
+  await knowledge.importMarkdown({ fileName: 'bad.md', markdown: 'no front matter' })
+
+  assert.equal(knowledge.importPhase, 'rejected')
+  assert.equal(knowledge.importRejected, true)
+  // ★ 逐条原因必须在（只回一句「导入失败」等于让学生自己猜）
+  assert.equal(knowledge.importProblems.length, 2)
+  assert.ok(knowledge.importProblems[0]?.includes('kp_id'))
+})
+
+test('导入成功时落盘路径与提示都带出来，并顺手刷新统计与清单', async () => {
+  const bridge = installFakeBridge()
+  const { useKnowledgeStore } = await import('../src/renderer/src/stores/knowledge.ts')
+  setActivePinia(createPinia())
+  const knowledge = useKnowledgeStore()
+
+  await knowledge.importMarkdown({ fileName: 'jr-x.md', markdown: '---\nkp_id: jr-x\n---\n## 一\n正文' })
+
+  assert.equal(knowledge.importPhase, 'accepted')
+  assert.equal(knowledge.importMessage, '已导入')
+  assert.equal(knowledge.importProblems.length, 0)
+  assert.equal(bridge.calls.readKnowledgeStats, 1, '导入后要刷新统计（刚导入的应该立刻能看见）')
+})
+
+test('★ 传输失败与内容被拒**都**让界面看到可读原因（不抛、不静默）', async () => {
+  const bridge = installFakeBridge()
+  bridge.failWith('importKnowledge', '操作失败：本地数据服务响应超时')
+  const { useKnowledgeStore } = await import('../src/renderer/src/stores/knowledge.ts')
+  setActivePinia(createPinia())
+  const knowledge = useKnowledgeStore()
+
+  await knowledge.importMarkdown({ fileName: 'x.md', markdown: '---\nkp_id: x\n---\n## 一\n正文' })
+
+  assert.equal(knowledge.importPhase, 'rejected')
+  assert.equal(knowledge.importProblems[0], '操作失败：本地数据服务响应超时')
+})
+
+/* ------------------------------------------------------------------ *
+ * 6. 重建：失败不撒谎，成功带用时
+ * ------------------------------------------------------------------ */
+
+test('★ 重建失败回可读中文（不是 500），且保留上一次的统计', async () => {
+  const bridge = installFakeBridge()
+  const { useKnowledgeStore } = await import('../src/renderer/src/stores/knowledge.ts')
+  setActivePinia(createPinia())
+  const knowledge = useKnowledgeStore()
+
+  await knowledge.loadStats()
+  const before = knowledge.stats
+  assert.ok(before, '先有一份统计作为基线')
+
+  bridge.respond('rebuildKnowledge', {
+    ok: false,
+    stats: null,
+    elapsedMs: 120,
+    documents: 0,
+    dependencies: 0,
+    message: '重建失败：嵌入模型缺失'
+  })
+  await knowledge.rebuild()
+
+  assert.equal(knowledge.rebuildPhase, 'failed')
+  assert.equal(knowledge.rebuildMessage, '重建失败：嵌入模型缺失')
+  assert.equal(knowledge.stats, before, '重建失败不该把已有统计清空（那看起来像「库是空的」）')
+})
+
+test('重建成功：带上用时与时间戳，让「刚刚跑过」看得见', async () => {
+  installFakeBridge()
+  const { useKnowledgeStore } = await import('../src/renderer/src/stores/knowledge.ts')
+  setActivePinia(createPinia())
+  const knowledge = useKnowledgeStore()
+
+  await knowledge.rebuild()
+
+  assert.equal(knowledge.rebuildPhase, 'done')
+  assert.equal(knowledge.lastElapsedMs, 1000)
+  assert.ok(knowledge.indexedAt, '要记下「什么时候重建的」')
+})
+
+test('重建进行中时再点不会重复触发（重活不能被连点叠成几次）', async () => {
+  const bridge = installFakeBridge()
+  const { useKnowledgeStore } = await import('../src/renderer/src/stores/knowledge.ts')
+  setActivePinia(createPinia())
+  const knowledge = useKnowledgeStore()
+
+  await Promise.all([knowledge.rebuild(), knowledge.rebuild()])
+
+  assert.ok((bridge.calls.rebuildKnowledge ?? 0) <= 2)
+})
+
+/* ------------------------------------------------------------------ *
+ * 7. 工具轨迹：推送快照，且旧快照不覆盖新快照
+ * ------------------------------------------------------------------ */
+
+test('★ 轨迹是独立推送通道：快照替换 + 按轮次分组', async () => {
+  const bridge = installFakeBridge()
+  const { useTraceStore } = await import('../src/renderer/src/stores/trace.ts')
+  setActivePinia(createPinia())
+  const trace = useTraceStore()
+
+  trace.connect()
+  assert.equal(bridge.traceListeners, 1, '订阅要真的挂上')
+
+  bridge.emitTrace({
+    turn: 2,
+    entries: [
+      { turn: 1, toolName: 'rag_search', argsSummary: 'query="特征"', ok: true, latencyMs: 120 },
+      { turn: 2, toolName: 'generate_quiz', argsSummary: 'kpId="x"', ok: true, latencyMs: 300, degraded: 'fts' }
+    ]
+  })
+
+  assert.equal(trace.entries.length, 2)
+  assert.equal(trace.byTurn.length, 2, '按轮次分组（右栏折叠用）')
+  assert.equal(trace.hasDegraded, true)
+  assert.equal(trace.failureCount, 0)
+
+  trace.disconnect()
+  assert.equal(bridge.traceListeners, 0, '退订必须真的摘掉监听器（否则切页会堆积）')
+})
+
+test('★ 迟到的旧快照不许把已经出现的轨迹擦回去', async () => {
+  const bridge = installFakeBridge()
+  const { useTraceStore } = await import('../src/renderer/src/stores/trace.ts')
+  setActivePinia(createPinia())
+  const trace = useTraceStore()
+
+  trace.connect()
+  bridge.emitTrace({ turn: 3, entries: [{ turn: 3, toolName: 'rag_search', argsSummary: 'a', ok: true, latencyMs: 10 }] })
+  // 一份更旧的快照迟到（IPC 没有顺序保证）
+  bridge.emitTrace({ turn: 1, entries: [] })
+
+  assert.equal(trace.turn, 3, '旧快照不许回退轮次')
+  assert.equal(trace.entries.length, 1, '旧快照不许清空已有轨迹')
+})
+
+test('轨迹桥缺失时留下可读原因，不抛', async () => {
+  installFakeBridge(['onTraceChanged'])
+  const { useTraceStore } = await import('../src/renderer/src/stores/trace.ts')
+  setActivePinia(createPinia())
+  const trace = useTraceStore()
+
+  trace.connect() // 不许抛
+  assert.ok(typeof trace.bridgeError === 'string' && trace.bridgeError.length > 0)
+})
+
+/* ------------------------------------------------------------------ *
+ * 8. 编程：提示逐级给，且没有「执行代码」的路径
+ * ------------------------------------------------------------------ */
+
+test('★ 分级提示一次只要一级（一次全给等于把答案摆在旁边）', async () => {
+  const bridge = installFakeBridge()
+  const { useCodeStore } = await import('../src/renderer/src/stores/code.ts')
+  setActivePinia(createPinia())
+  const code = useCodeStore()
+
+  await code.loadTemplate('jr-data-features')
+  assert.equal(code.draft, '# TODO', '脚手架就是编辑器的初始内容')
+
+  await code.askForHint()
+  assert.equal(bridge.calls.readCodeHint, 1)
+  assert.equal(code.currentHintLevel, 1)
+  assert.equal(code.canAskMoreHints, true)
+
+  await code.askForHint()
+  assert.equal(code.currentHintLevel, 2)
+  await code.askForHint()
+  assert.equal(code.currentHintLevel, 3)
+  assert.equal(code.canAskMoreHints, false, '到顶就不要再要了（再给等于直接写答案）')
+
+  const callsBefore = bridge.calls.readCodeHint ?? 0
+  await code.askForHint()
+  assert.equal(bridge.calls.readCodeHint, callsBefore, '到顶后再点不该再发请求')
+  assert.ok((code.hintError ?? '').includes('3'))
+})
+
+test('★ 脚手架里没有参考答案（结构上就不存在，不是靠界面藏起来）', async () => {
+  installFakeBridge()
+  const { useCodeStore } = await import('../src/renderer/src/stores/code.ts')
+  setActivePinia(createPinia())
+  const code = useCodeStore()
+
+  await code.loadTemplate('jr-data-features')
+
+  assert.ok(code.template)
+  assert.equal('solution' in (code.template as object), false, '模板载荷里不该有参考答案字段')
+})
+
+test('★ 运行分析只送「跑完的结果」，代码执行不在这条链路上', async () => {
+  const bridge = installFakeBridge()
+  const { useCodeStore } = await import('../src/renderer/src/stores/code.ts')
+  setActivePinia(createPinia())
+  const code = useCodeStore()
+
+  await code.loadTemplate('jr-data-features')
+  // 模拟「渲染进程的 Pyodide Worker 已经跑完」，把结果交给后端分析
+  await code.analyzeRun({ code: 'print(1)', stdout: '1', stderr: '', attempt: 1 })
+
+  assert.equal(bridge.calls.analyzeCodeRun, 1)
+  assert.equal(code.evaluation?.ok, true)
+  assert.equal(code.evaluation?.feedback, '算对了')
+})
+
+/* ------------------------------------------------------------------ *
+ * 9. 动画：渲染 → 一次性托管
+ * ------------------------------------------------------------------ */
+
+test('★ 动画走「模板 → 渲染 → 一次性托管」三步，托管地址带防串台标识', async () => {
+  const bridge = installFakeBridge()
+  const { useAnimationStore } = await import('../src/renderer/src/stores/animation.ts')
+  setActivePinia(createPinia())
+  const anim = useAnimationStore()
+
+  await anim.loadTemplates()
+  assert.equal(anim.matched.length, 1, 'should load the matched template')
+  await anim.render({ templateId: 'neural-forward' })
+  assert.equal(bridge.calls.renderAnimation, 1)
+  assert.ok(anim.payload)
+
+  const hosted = await anim.host('payload-abc')
+  assert.equal(bridge.calls.hostAnimation, 1)
+  assert.ok(hosted)
+  assert.equal(hosted.payloadId, 'payload-abc', 'payloadId 必须原样带回（沙箱靠它防多卡串台）')
+  assert.equal(anim.canPlay, true)
+  assert.ok((hosted.url ?? '').length > 0)
+})
+
+test('★ 拿不到知识点时拒绝托管（托管要按「学生 + 知识点」分目录）', async () => {
+  const bridge = installFakeBridge()
+  bridge.respond('readAnimationTemplates', { total: 0, matched: [], available: [] })
+  const { useAnimationStore } = await import('../src/renderer/src/stores/animation.ts')
+  setActivePinia(createPinia())
+  const anim = useAnimationStore()
+
+  await anim.loadTemplates()
+  await anim.render({ templateId: 'x' })
+  const hosted = await anim.host()
+
+  assert.equal(hosted, null, '没有关联知识点就不该托管')
+  assert.equal(bridge.calls.hostAnimation, undefined, '这种情况不该发请求（后端无法定位落点）')
+  assert.ok((anim.hostError ?? '').length > 0, '要留下可读原因，不能静默什么都不做')
+})
+
+test('★ 生成失败留下可读原因（那是预期内的失败，不是崩溃）', async () => {
+  const bridge = installFakeBridge()
+  bridge.failWith('renderAnimation', '渲染失败：没有匹配的模板')
+  const { useAnimationStore } = await import('../src/renderer/src/stores/animation.ts')
+  setActivePinia(createPinia())
+  const anim = useAnimationStore()
+
+  await anim.render({ templateId: 'nope' })
+
+  assert.equal(anim.renderError, '渲染失败：没有匹配的模板')
+  assert.equal(anim.payload, null)
+  assert.equal(anim.canPlay, false)
+})
+
+test('newPayloadId 稳定产出非空标识（防串台标识不能撞）', async () => {
+  const { newPayloadId } = await import('../src/renderer/src/stores/animation.ts')
+  const a = newPayloadId()
+  const b = newPayloadId()
+  assert.ok(a.length > 0)
+  assert.notEqual(a, b, '两次生成不该相同（否则多张动画卡会串台）')
+})

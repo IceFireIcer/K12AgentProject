@@ -130,7 +130,121 @@ export const IPC = {
    * ★ 文件名由主进程清理（去掉分隔符与 `..`、限长、强制 `.md`）。
    * ★ 它是 invoke（有回执，学生可能取消保存）；**不**登记进 `PUSH_CHANNELS`。
    */
-  fileExport: 'file:export'
+  fileExport: 'file:export',
+
+  // ── 窗口控制（无边框窗口的页面内按钮）─────────────────────────────────
+  //
+  // ★★ 为什么需要这一组：窗口是 `frame: false`（没有系统标题栏），
+  //   最小化 / 最大化 / 关闭只能由页面自己画。渲染进程没有 Node 能力，
+  //   所以必须经 IPC 要 —— 这也是「渲染进程不直连系统能力」那条约束的落点。
+  // ★ 三条都是 invoke（有回执不需要，但**失败要能看见**：窗口已销毁时不能静默什么都不发生）。
+  // ★ 它们**不接受任何参数**：作用对象由主进程从 `event.sender` 反查窗口 ——
+  //   渲染进程指不了「操作哪个窗口」，也就不会误伤别的窗口。
+  /** 渲染进程 → 主进程：最小化本窗口。 */
+  windowMinimize: 'window:minimize',
+  /** 渲染进程 → 主进程：在最大化与还原之间切换。 */
+  windowToggleMaximize: 'window:toggle-maximize',
+  /** 渲染进程 → 主进程：关闭本窗口（与点系统关闭按钮等价，走同一套退出流程）。 */
+  windowClose: 'window:close',
+  /**
+   * 主进程 → 渲染进程：**最大化状态变化**（按钮图标据此在「最大化/还原」之间换）。
+   * ★ 必须推送而不是让渲染进程自己算：双击拖拽区、Win+↑/↓、拖到屏幕上边缘、
+   *   系统菜单 —— 这些都会改变状态，而渲染进程一个都观察不到。
+   */
+  windowMaximizedChanged: 'window:maximized-changed',
+
+  // ── 工具调用轨迹（主进程 → 渲染进程的推送）────────────────────────────
+  /**
+   * 主进程 → 渲染进程：**本轮 Tool 调用轨迹快照**（右栏「工具调用轨迹」）。
+   *
+   * ★ 它不是 6 事件之一（见 `shared/ipc-events.ts` 的说明）：轨迹是工程证据，
+   *   与对话状态机不是一回事。混进词表会让每个消费方都被迫理解它。
+   * ★ 推送**快照**而不是增量：一轮只有几个 Tool，全量替换省掉一整套恢复协议。
+   */
+  traceChanged: 'trace:changed',
+
+  // ── 学生身份 ──────────────────────────────────────────────────────────
+  /**
+   * 渲染进程 → 主进程：读**当前学生**（昵称 / 学段 / 当前章节）。
+   *
+   * ★ 学生 id 由**主进程**决定（`resolveActiveStudentId`），渲染进程递不了、也改不了 ——
+   *   一旦它成为前端可填的参数，「读别人的画像」就只是改一个字符串的事。
+   * ★ 副作用：库里一个学生都没有时**建一个**（新装的机器首跑就是这种情况）。
+   */
+  studentGet: 'student:get',
+
+  // ── 画像与推荐 ────────────────────────────────────────────────────────
+  /** 渲染进程 → 主进程：读画像（`GET /api/profile/{id}`：掌握度 + 偏好 + 推荐点）。 */
+  profileRead: 'profile:read',
+  /** 渲染进程 → 主进程：读推荐下一步（`GET /api/profile/{id}/recommendation`）。 */
+  profileRecommendation: 'profile:recommendation',
+  /** 渲染进程 → 主进程：读学段信号（`GET /api/grade/signals/{id}`；右栏与档案页的判据展示）。 */
+  gradeSignals: 'grade:signals',
+  /** 渲染进程 → 主进程：读学段变化轨迹（`GET /api/grade/history/{id}`）。 */
+  gradeHistory: 'grade:history',
+
+  // ── 闯关（独立页面用；对话内的题卡仍走 chat 路径）─────────────────────
+  /**
+   * 渲染进程 → 主进程：取某知识点的题库题目（`GET /api/quiz/bank/{kp_id}`）。
+   * ★ 回来的载荷**不含标准答案**（`QuizQuestionOut`，答案只留 Python 侧）。
+   */
+  quizBank: 'quiz:bank',
+  /**
+   * 渲染进程 → 主进程：提交一题作答并判分（`POST /api/quiz/grade`）。
+   * ★ 判分**只在后端**：这里回来的 `correct` / `feedback` / `masteryDelta` 是权威结论。
+   */
+  quizGrade: 'quiz:grade',
+  /** 渲染进程 → 主进程：读闯关进度（`GET /api/quiz/progress/{id}`：每关的阶段与分数）。 */
+  quizProgress: 'quiz:progress',
+
+  // ── 编程 ──────────────────────────────────────────────────────────────
+  /**
+   * 渲染进程 → 主进程：取代码脚手架（`GET /api/code/templates/{kp_id}`）。
+   * ★ 载荷里**没有 `solution`**（结构上就不存在，§13 的答案防泄漏）。
+   */
+  codeTemplate: 'code:template',
+  /** 渲染进程 → 主进程：取一级提示（`GET /api/code/hint/{kp_id}?level=N`，逐级要）。 */
+  codeHint: 'code:hint',
+  /**
+   * 渲染进程 → 主进程：把**已经跑完**的代码与输出交给后端做中文报错归一 + 定下一级提示
+   * （`POST /api/code/run-hint`）。
+   * ★ ★ **后端绝不执行代码**：代码已经在渲染进程的 Pyodide Worker 里跑完了
+   *   （主进程也不许跑 —— 见 `codeExecute` 的注释）。这条通道只送「跑完的结果」。
+   */
+  codeRunHint: 'code:run-hint',
+
+  // ── 动画 ──────────────────────────────────────────────────────────────
+  /** 渲染进程 → 主进程：列出动画模板（`GET /api/animation/templates`，内网端点不进 OpenAPI）。 */
+  animationTemplates: 'animation:templates',
+  /** 渲染进程 → 主进程：按模板渲染一个自包含沙箱 HTML（`POST /api/animation/render`）。 */
+  animationRender: 'animation:render',
+  /**
+   * 渲染进程 → 主进程：把渲染好的 HTML 托管成**一次性 nonce 地址**
+   * （`POST /api/animation/host/{student_id}/{kp_id}`）。
+   * ★ iframe 带不了自定义 header，所以这条资源地址不能用 token 鉴权 —— 用一次性 nonce。
+   */
+  animationHost: 'animation:host',
+
+  // ── 教材知识库（数据层检视页）─────────────────────────────────────────
+  /** 渲染进程 → 主进程：知识库体检数字（`GET /api/knowledge/stats`）。 */
+  knowledgeStats: 'knowledge:stats',
+  /** 渲染进程 → 主进程：知识点清单（`GET /api/knowledge/points`，可按学段过滤）。 */
+  knowledgePoints: 'knowledge:points',
+  /**
+   * 渲染进程 → 主进程：导入一份教材 Markdown（`POST /api/knowledge/import`）。
+   *
+   * ★ 正文走 **JSON body**（渲染进程已用 `file.text()` 读到），不是 multipart ——
+   *   为此给 sidecar 加一个上传依赖不值得。
+   * ★ 校验失败回 `{ok:true, data:{ok:false, problems:[…]}}`：那是**内容**问题，
+   *   界面要在同一张卡片里逐条列出，不是「请求非法」。
+   */
+  knowledgeImport: 'knowledge:import',
+  /**
+   * 渲染进程 → 主进程：重建索引（`POST /api/knowledge/rebuild`）。
+   * ★ 重活（分块 + 嵌入整份教材，秒级到十几秒）→ **必须用长超时**，
+   *   否则会撞上 `bridge/client.ts` 的 8s 默认兜底，把一次成功的重建报成超时。
+   */
+  knowledgeRebuild: 'knowledge:rebuild'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
@@ -155,7 +269,9 @@ export const PUSH_CHANNELS: readonly IpcChannel[] = [
   IPC.chatEvent,
   IPC.gradeChanged,
   IPC.chapterChanged,
-  IPC.codeExecute
+  IPC.codeExecute,
+  IPC.traceChanged,
+  IPC.windowMaximizedChanged
 ]
 
 /**
@@ -324,3 +440,111 @@ export const MAX_EXPORT_BYTES = 1_048_576
 
 /** 导出内容的字符上限（防止渲染进程递一个巨大字符串把主进程写爆）。 */
 export const MAX_EXPORT_CHARS = 200_000
+
+/* ------------------------------------------------------------------ *
+ * 闯关 / 编程 / 动画 / 教材知识库：跨 IPC 的请求类型
+ *
+ * ★ 回执一律复用上面的 `StudyCallResult` 形态（`{ok:true,data} | {ok:false,message}`）：
+ *   新增一类 `XxxCallResult` 只是同一形状改名，消费方却要跟着多写一个分支。
+ *   数据形状全部来自 `@shared/api-types`（生成物），主进程只当搬运工。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 取题库的入参。
+ *
+ * ★ 学段**不在这里**：它由主进程从当前会话取（与 `rag_search` 的学段同一条纪律）——
+ *   前端如果能指定学段，就等于绕开了「只取不高于学生学段的内容」这条隔离。
+ */
+export interface QuizBankRequest {
+  kpId: string
+  /** 要几道题（1–10，与 `GET /api/quiz/bank` 的约束一致）。 */
+  count?: number
+}
+
+/** 提交一题作答。 */
+export interface QuizGradeRequest {
+  /** 题目 id（来自题库载荷）。 */
+  qid: string
+  /** 学生的作答（选择题是选项文本，填空题是填写内容）。 */
+  answer: string
+  /** 可选：会话 id（学习记录关联用）。 */
+  sessionId?: string
+}
+
+/** 读闯关进度（可选只查某几个知识点）。 */
+export interface QuizProgressRequest {
+  kpIds?: string[]
+}
+
+/** 取代码脚手架 / 提示。 */
+export interface CodeTemplateRequest {
+  kpId: string
+  /** 可选：按学段过滤兼容性（不带即不过滤）。 */
+  gradeLevel?: GradeLevel
+}
+
+export interface CodeHintRequest {
+  kpId: string
+  /** 提示级别 1–3（1 = 方向，3 = 接近脚手架）。 */
+  level?: number
+}
+
+/**
+ * 把**已经跑完**的代码与输出交给后端分析（`POST /api/code/run-hint`）。
+ *
+ * ★★ `code` 是**已经执行过**的文本，这条通道**不触发任何执行** ——
+ *   学生代码只在渲染进程的 Pyodide Worker 里跑（架构硬约束，有守卫测试）。
+ *   主进程把它转发给 sidecar，只为拿「中文报错 + 下一级提示」。
+ */
+export interface CodeRunHintRequest {
+  kpId: string
+  code: string
+  language: string
+  stdout: string
+  stderr: string
+  attempt: number
+}
+
+/** 动画模板列表的入参（都可选：不带就列全部）。 */
+export interface AnimationTemplatesRequest {
+  kpId?: string
+  gradeLevel?: GradeLevel
+}
+
+/** 按模板渲染动画的入参。 */
+export interface AnimationRenderRequest {
+  templateId?: string
+  kpId?: string
+  gradeLevel?: GradeLevel
+  params?: Record<string, unknown>
+  fallbackText?: string
+}
+
+/**
+ * 把渲染好的 HTML 托管成一次性 nonce 地址的入参。
+ *
+ * ★ `payloadId` 由**渲染进程**生成并回传：沙箱 iframe 的 `postMessage` 用它防串台
+ *   （多张动画卡同时在页面上时，消息必须能对上号）。
+ */
+export interface AnimationHostRequest {
+  kpId: string
+  html: string
+  payloadId: string
+}
+
+/** 导入教材的入参（正文走 JSON，不是 multipart —— 见通道注释）。 */
+export interface KnowledgeImportIpcRequest {
+  fileName: string
+  markdown: string
+  gradeLevel?: GradeLevel
+  /** 导入后是否立刻重建索引（默认 true）。 */
+  rebuild?: boolean
+}
+
+/** 教材导入 / 重建的**长超时**（重建要跑整份教材的嵌入）。 */
+export const KNOWLEDGE_LONG_TASK_TIMEOUT_MS = 180_000
+
+/** 教材清单的入参。 */
+export interface KnowledgePointsRequest {
+  gradeLevel?: GradeLevel
+}

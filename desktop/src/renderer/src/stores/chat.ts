@@ -25,7 +25,7 @@
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { GradeLevel } from '@shared/ipc-events'
+import type { CitationDetail, Degraded, GradeLevel } from '@shared/ipc-events'
 import { GRADE_LABELS, chapterLineLabel, gradeAdaptNotice, gradeManualNotice } from '../labels'
 import {
   GRADE_SET_MISSING_HINT,
@@ -134,6 +134,44 @@ export const useChatStore = defineStore('chat', () => {
   /** `cards` 的缓存（非响应式：只做「引用没变就别重算」的判据，不参与渲染）。 */
   let cardCache: { lists: readonly InlineCard[][]; value: InlineCard[] } | null = null
 
+  /**
+   * 最近一轮**检索**的降级档位（右栏「四级降级链」据此点亮）。
+   *
+   * ★ 从后往前找**第一轮有档位记录**的（不是「最后一轮」）：学生问一句寒暄时
+   *   那一轮根本没检索（档位为 `null`），若一取最后一轮，右栏就会在寒暄之后
+   *   把刚查过的那条链擦成「本轮未检索」—— 看起来像能力突然丢了。
+   * ★ `null` = 至今没有发生过检索。**不是失败**：四档都该显示「未走到」。
+   */
+  const lastCitationDegraded = computed<Degraded | null>(() => {
+    for (let index = turns.value.length - 1; index >= 0; index -= 1) {
+      const degraded = turns.value[index]?.citationDegraded
+      if (degraded !== undefined && degraded !== null) return degraded
+    }
+    return null
+  })
+
+  /**
+   * 全部轮次的引用细节，按 `chunkId` 建索引（「教材原文」抽屉据此查全文）。
+   *
+   * ★ 跨轮索引而不是只看最后一轮：学生点开第 2 轮回答里的某个引用时，
+   *   那一轮的细节与最后一轮无关。同一 `chunkId` 先到的赢（合并逻辑已经在
+   *   事件层做过「有内容的赢」，这里只要第一个即可）。
+   */
+  const citationDetails = computed<Map<string, CitationDetail>>(() => {
+    const map = new Map<string, CitationDetail>()
+    for (const turn of turns.value) {
+      for (const detail of turn.citationDetails) {
+        if (!map.has(detail.chunkId)) map.set(detail.chunkId, detail)
+      }
+    }
+    return map
+  })
+
+  /** 取某个引用 chunk 的详情（拿不到回 `null` → 界面显示「原文暂时取不到」）。 */
+  function citationDetailOf(chunkId: string): CitationDetail | null {
+    return citationDetails.value.get(chunkId) ?? null
+  }
+
   /** 指示器上的学段名（还没判出来时是「待判定」）。 */
   const currentGradeLabel = computed(() =>
     currentGrade.value === null ? null : GRADE_LABELS[currentGrade.value]
@@ -175,6 +213,23 @@ export const useChatStore = defineStore('chat', () => {
     unsubscribeGrade = null
     unsubscribeChapter?.()
     unsubscribeChapter = null
+  }
+
+  /**
+   * 开一段新会话：**只清界面上的这一份**。
+   *
+   * ★ 清的是什么：渲染进程手里这段对话的显示状态（轮次、卡片、引用）。
+   * ★ **不清**什么（有意为之）：学段与章节（它们是学生/系统的设定，不是这段对话的属性）、
+   *   也已经**不动 Pi 那一侧的会话**（它按 `sessionId` 落在该学生的 JSONL 里，
+   *   学习档案的「历史会话」照样能回看 —— 界面清空 ≠ 记录删除）。
+   *   「切一条新会话」要 dispose 当前 runtime 并处理代际竞态，是另一件事。
+   * ★ 调用方负责先确认（清空不可撤销，见 `views/Chat.vue` 的 `newSession`）。
+   */
+  function resetConversation(): void {
+    conversation.value = emptyConversation()
+    localNotice.value = null
+    gradeNotice.value = null
+    chapterNotice.value = null
   }
 
   /**
@@ -478,6 +533,12 @@ export const useChatStore = defineStore('chat', () => {
     turns,
     streaming,
     cards,
+    /** 最近一轮检索的降级档位（右栏四级链据此点亮；`null` = 至今没检索过）。 */
+    lastCitationDegraded,
+    /** 按 chunkId 索引的引用细节（「教材原文」抽屉据此查全文）。 */
+    citationDetails,
+    /** 取某个引用 chunk 的详情；拿不到回 `null`（界面据此说「原文暂时取不到」）。 */
+    citationDetailOf,
     bridgeReady,
     localNotice,
     draft,
@@ -495,6 +556,8 @@ export const useChatStore = defineStore('chat', () => {
     connectGrade,
     connectChapter,
     disconnect,
+    /** 清界面上的这段对话（学段/章节与 Pi 的后端会话都不动；调用方先确认）。 */
+    resetConversation,
     /** ★ 唯一的人工写入口：学生手动指定学段（走 `grade:set`，不碰对话请求）。 */
     setGrade,
     /** ★ 唯一的人工写入口：学生选择当前教材章节（走 `chapter:set`，不碰对话请求）。 */

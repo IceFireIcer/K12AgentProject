@@ -97,6 +97,7 @@ import { normalizeExportContent, sanitizeFileName } from '../study/export-naming
 //   两处各写一份的话规则会悄悄分叉（见那个文件的注释）。这里直接 import 共用。
 import { mergeModelCandidates } from '@shared/provider-catalog'
 import { parseChatSendRequest } from './chat-request.ts'
+import { createTraceProjector, registerDataHandlers, sendTraceTo } from './handlers-data.ts'
 import { ChatStreamRegistry, type StreamTarget, type TurnHandle } from './chat-stream.ts'
 
 const chatStreams = new ChatStreamRegistry()
@@ -453,7 +454,10 @@ export function chatRuntimeOptionsFromLlm(
   const base = {
     userDataDir: app.getPath('userData'),
     // ★ 票 09：会话与 JSONL 落 `<userData>/students/<id>/pi-agent/`（一人一份，显式改道）
-    studentId: resolveActiveStudentId()
+    studentId: resolveActiveStudentId(),
+    // ★ 工具调用轨迹的**实时**出口（右栏「工具调用轨迹」）：
+    //   与 `trace` 字段的分工是「过程里的快照」vs「退出时落盘的完整记录」。
+    onTraceRecord: pushTraceRecords
   }
   if (!llm) return base
   return {
@@ -849,7 +853,49 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   registerStudyHandlers()
   registerSessionHandlers()
   registerExportHandler()
+  registerWindowHandlers()
+  registerDataHandlers({
+    // ★ 学生身份由**主进程**决定（渲染进程递来的一律不当真）——
+    //   与学段/章节那两条通道同一条纪律：身份一旦可指定，就是「读别人的数据」。
+    resolveStudentId: resolveActiveStudentId,
+    // ★ 题库的学段取自**当前会话的生效学段**（不是渲染进程递来的值）：
+    //   前端若能指定学段，「只取不高于学生学段的内容」这条隔离就被绕开了。
+    currentGradeLevel: () => currentGradeLevelForReads()
+  })
 }
+
+/**
+ * 当前生效学段（供题库等**只读**通道注入）。
+ *
+ * ★ 只读快照，**不触发会话装配**：题库请求不该为了知道学段而把 Pi 会话拉起来
+ *   （那是几秒级的重活，而这里只是选几道题）。
+ * ★ 会话还没建或已销毁时回 `null` —— 调用方按冷启动默认值取题，
+ *   那与「学生还没被判出学段」时该看到的东西一致。
+ */
+function currentGradeLevelForReads(): string | null {
+  if (runtime === null) return null
+  try {
+    return runtime.gradeLevel
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 轨迹推送出口：把 Agent 运行时产出的记录投影成快照，发给所有窗口。
+ *
+ * 用法：`createChatRuntime({ onTraceRecord: pushTraceRecords })`。
+ *
+ * ★ 为什么推给**所有**窗口：单窗口应用里就是那一个窗口。写成「遍历所有窗口」
+ *   是为了不必在这里持有窗口引用，也顺带让「将来开第二个窗口」不用改这里。
+ * ★ `BrowserWindow.getAllWindows()` 在没有窗口时返回空数组（测试环境即如此），
+ *   于是这条链路在单测里天然是 no-op —— 不会因为「没有窗口」而抛。
+ */
+export const pushTraceRecords = createTraceProjector((snapshot) => {
+  for (const window of BrowserWindow.getAllWindows()) {
+    sendTraceTo(window.webContents, snapshot)
+  }
+})
 
 /* ------------------------------------------------------------------ *
  * 学习档案（章节 / 报告 / 错题本 / 学习地图）
@@ -965,6 +1011,51 @@ async function readTranscriptFrom(info: {
   } catch (error) {
     return { ok: false, message: `读取会话内容失败：${describeRuntimeFailure(error)}` }
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * 窗口控制（无边框窗口的页面内按钮）
+ *
+ * ★★ 作用对象**由主进程从 `event.sender` 反查**：渲染进程递不了窗口 id，
+ *   所以它既指不了「操作哪个窗口」，也不可能误伤别的窗口。
+ * ★ 三条都**不接受参数**，也没有回执载荷 —— 但都返回一个布尔：
+ *   窗口已销毁 / 正在退出时返回 false，渲染进程据此知道「点什么都不会发生」，
+ *   而不是让按钮看起来点了却毫无反应（那种沉默最难排查）。
+ * ------------------------------------------------------------------ */
+function registerWindowHandlers(): void {
+  /** 从事件来源反查发起它的窗口；拿不到（已销毁）返回 `null`。 */
+  const windowOf = (event: { sender: WebContents }): BrowserWindow | null => {
+    if (event.sender.isDestroyed()) return null
+    return BrowserWindow.fromWebContents(event.sender)
+  }
+
+  ipcMain.handle(IPC.windowMinimize, (event): boolean => {
+    const window = windowOf(event)
+    if (window === null || window.isDestroyed()) return false
+    window.minimize()
+    return true
+  })
+
+  ipcMain.handle(IPC.windowToggleMaximize, (event): boolean => {
+    const window = windowOf(event)
+    if (window === null || window.isDestroyed()) return false
+    // ★ 切换后**立刻推一次状态**：`maximize` / `unmaximize` 事件在部分平台上是异步的，
+    //   只靠监听会让按钮图标慢一拍（学生双击标题栏后看到图标没变）。
+    if (window.isMaximized()) window.unmaximize()
+    else window.maximize()
+    window.webContents.send(IPC.windowMaximizedChanged, window.isMaximized())
+    return true
+  })
+
+  ipcMain.handle(IPC.windowClose, (event): boolean => {
+    const window = windowOf(event)
+    if (window === null || window.isDestroyed()) return false
+    // ★ 走 `close()` 而不是 `destroy()`：前者会正常触发 `close` → `closed` 与
+    //   `before-quit`（`session.dispose()` 与 sidecar 收尾都在那里），
+    //   后者会跳过全部收尾 —— JSONL 半写与孤儿进程都从这条路上来。
+    window.close()
+    return true
+  })
 }
 
 /* ------------------------------------------------------------------ *

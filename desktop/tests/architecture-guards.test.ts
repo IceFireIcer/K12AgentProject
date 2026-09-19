@@ -518,7 +518,52 @@ const EXPECTED_API_METHODS = [
   'readSessionTranscript',
   'searchSessions',
   // 导出：回执**只有文件名**（完整路径不进渲染进程）
-  'exportMarkdown'
+  'exportMarkdown',
+  // 工具调用轨迹（**推送**；快照语义）。★ 它不是 6 事件之一：
+  //   轨迹是工程证据（哪次调了什么 Tool、多快、有没有降级），与对话状态机不是一回事。
+  'onTraceChanged',
+  // 学生身份 / 画像 / 学段证据。★ 一律不接受 `studentId`：身份由主进程决定，
+  //   递进一个 id 就等于允许读别人的画像与学习记录。
+  'getStudent',
+  'readProfile',
+  'readRecommendation',
+  'readGradeSignals',
+  'readGradeHistory',
+  // 闯关（独立页面用；对话内的题卡仍走 chat 路径）。
+  // ★ `readQuizBank` 的**学段由主进程注入**（前端指定不了它）——
+  //   否则「只取不高于学生学段的内容」这条隔离就被绕开了。
+  // ★ 题库载荷**不含标准答案**（`QuizQuestionOut`，答案只留 Python 侧）。
+  'readQuizBank',
+  'gradeQuiz',
+  'readQuizProgress',
+  // 编程（★ 注意这里**没有**「执行代码」的方法：执行只在渲染进程的 Pyodide Worker 里，
+  //   主进程只把代码**下发**下去，见 `onCodeExecute` / `sendCodeResult`）
+  'readCodeTemplate',
+  'readCodeHint',
+  // ★ 名字刻意不叫 `runCode`：它**不执行任何东西**，只把「已经跑完的代码与输出」
+  //   交给后端做中文报错归一 + 定下一级提示。叫 run 会让人以为代码在这里跑。
+  'analyzeCodeRun',
+  // 动画：模板 → 渲染 → 一次性 nonce 托管（iframe 带不了 header，所以不能用 token 鉴权）
+  'readAnimationTemplates',
+  'renderAnimation',
+  'hostAnimation',
+  // 教材知识库：读三条 + 写两条。
+  // ★ 写的那两条（导入 / 重建）用**长超时** —— 重建要跑整份教材的嵌入，
+  //   用默认 8s 会把一次成功的重建报成超时。
+  'readKnowledgeStats',
+  'readKnowledgePoints',
+  'importKnowledge',
+  'rebuildKnowledge',
+  // 窗口控制（无边框窗口的页面内按钮）。
+  // ★ 窗口是 `frame: false`，没有系统标题栏可画这三个键，所以只能由页面要 ——
+  //   而渲染进程没有 Node 能力，必须经 IPC。三条都**不接受参数**：
+  //   作用对象由主进程从 `event.sender` 反查窗口，所以渲染进程指不了别的窗口。
+  // ★ `onWindowMaximizedChanged` 是**推送**：双击拖拽区、Win+↑/↓、拖到屏幕上边缘
+  //   都会改变最大化状态，渲染进程自己观察不到，只能由主进程推。
+  'minimizeWindow',
+  'toggleMaximizeWindow',
+  'closeWindow',
+  'onWindowMaximizedChanged'
 ]
 
 /** preload 里绝不允许出现的通用转发方法名。 */

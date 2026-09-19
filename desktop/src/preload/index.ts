@@ -14,6 +14,9 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import {
   IPC,
+  type AnimationHostRequest,
+  type AnimationRenderRequest,
+  type AnimationTemplatesRequest,
   type ChapterCallResult,
   type ChapterSetResult,
   type ChapterState,
@@ -21,6 +24,9 @@ import {
   type ChatSendResult,
   type CodeExecuteRequest,
   type CodeExecuteResult,
+  type CodeHintRequest,
+  type CodeRunHintRequest,
+  type CodeTemplateRequest,
   type FetchModelsResult,
   type FileExportRequest,
   type FileExportResult,
@@ -28,9 +34,14 @@ import {
   type GradeSetResult,
   type GradeState,
   type IpcChannel,
+  type KnowledgeImportIpcRequest,
+  type KnowledgePointsRequest,
   type ProbeRequest,
   type ProbeResult,
   type ProviderCatalogEntry,
+  type QuizBankRequest,
+  type QuizGradeRequest,
+  type QuizProgressRequest,
   type SessionSearchRequest,
   type SettingsCallResult,
   type SettingsSnapshot,
@@ -40,7 +51,7 @@ import {
   type StudyReportRequest
 } from '../main/ipc/channels'
 import type { SidecarState } from '../main/sidecar/protocol'
-import type { GradeLevel } from '../shared/ipc-events'
+import type { GradeLevel, TraceSnapshot } from '../shared/ipc-events'
 import { IPC_EVENT_NAMES, type IpcEvent } from '../shared/ipc-events'
 
 export interface K12Api {
@@ -130,6 +141,84 @@ export interface K12Api {
    * ★ 学生取消保存时回 `{ok:false, canceled:true}` —— 那是正常路径，不是错误。
    */
   exportMarkdown(payload: FileExportRequest): Promise<FileExportResult>
+  /**
+   * 订阅**本轮 Tool 调用轨迹快照**（右栏「工具调用轨迹」），返回取消订阅函数。
+   * ★ 它是独立通道，不是 6 事件之一（轨迹是工程证据，与对话状态机不是一回事）。
+   */
+  onTraceChanged(listener: (snapshot: TraceSnapshot) => void): () => void
+  /**
+   * 读**当前学生**（昵称 / 学段 / 当前章节）。
+   * ★ 学生身份由主进程决定；库里没有学生时主进程会建一个（新机器首跑）。
+   */
+  getStudent(): Promise<StudyCallResult>
+  /** 读画像（掌握度 + 偏好 + 推荐知识点）。 */
+  readProfile(): Promise<StudyCallResult>
+  /** 读「推荐下一步」（依赖图 + 掌握度推导，聚合在 Python）。 */
+  readRecommendation(): Promise<StudyCallResult>
+  /** 读学段推断信号（当前学段、各信号分值、待生效建议）。 */
+  readGradeSignals(): Promise<StudyCallResult>
+  /** 读学段变化轨迹（含来源 inferred / explicit）。 */
+  readGradeHistory(): Promise<StudyCallResult>
+  /**
+   * 取某知识点的题库题目。
+   * ★ 学段由主进程注入（前端指定不了）；载荷**不含标准答案**。
+   */
+  readQuizBank(payload: QuizBankRequest): Promise<StudyCallResult>
+  /**
+   * 提交一题作答并判分（`POST /api/quiz/grade`）。
+   * ★ 判分只在后端 —— 回来的 `correct` / `feedback` / `masteryDelta` 是权威结论。
+   */
+  gradeQuiz(payload: QuizGradeRequest): Promise<StudyCallResult>
+  /** 读闯关进度（每关的阶段 locked/learning/quizzed/mastered 与分数）。 */
+  readQuizProgress(payload?: QuizProgressRequest): Promise<StudyCallResult>
+  /** 取代码脚手架（**载荷里没有 solution**）。 */
+  readCodeTemplate(payload: CodeTemplateRequest): Promise<StudyCallResult>
+  /** 取一级代码提示（1 = 方向，3 = 接近脚手架；逐级要，不一次给全）。 */
+  readCodeHint(payload: CodeHintRequest): Promise<StudyCallResult>
+  /**
+   * 把**已经跑完**的代码与输出交给后端（中文报错归一 + 定下一级提示）。
+   * ★★ **这条通道不执行任何代码**：学生代码只在渲染进程的 Pyodide Worker 里跑。
+   */
+  analyzeCodeRun(payload: CodeRunHintRequest): Promise<StudyCallResult>
+  /** 列出动画模板（含参数与默认值）。 */
+  readAnimationTemplates(payload?: AnimationTemplatesRequest): Promise<StudyCallResult>
+  /** 按模板渲染一个自包含沙箱 HTML。 */
+  renderAnimation(payload: AnimationRenderRequest): Promise<StudyCallResult>
+  /** 把动画 HTML 托管成一次性 nonce 地址（iframe 带不了 header，所以不能用 token）。 */
+  hostAnimation(payload: AnimationHostRequest): Promise<StudyCallResult>
+  /** 知识库体检数字（规模 / 学段 / 向量可用性 / 是否是用户重建的那一份）。 */
+  readKnowledgeStats(): Promise<StudyCallResult>
+  /** 知识点清单（教材知识库页的表格；可按学段过滤）。 */
+  readKnowledgePoints(payload?: KnowledgePointsRequest): Promise<StudyCallResult>
+  /**
+   * 导入一份教材 Markdown（严格校验 → 落盘 → 可选重建）。
+   * ★ 校验/审计失败回 `{ok:true, data:{ok:false, problems:[…]}}` —— 那是**内容**问题，
+   *   界面要在同一张卡片里逐条列出，不是「请求非法」。
+   */
+  importKnowledge(payload: KnowledgeImportIpcRequest): Promise<StudyCallResult>
+  /**
+   * 重建索引（重活：分块 + 嵌入整份教材，秒级到十几秒 → 主进程用长超时）。
+   * ★ 失败回 `{ok:true, data:{ok:false, message}}`（可读中文），不是异常。
+   */
+  rebuildKnowledge(): Promise<StudyCallResult>
+  /**
+   * 最小化本窗口（无边框窗口：没有系统标题栏，按钮只能由页面画）。
+   * ★ 不接收参数：作用对象由主进程从事件来源反查，渲染进程指不了别的窗口。
+   * ★ 回 `false` 表示「窗口已销毁 / 正在退出」—— 此时点什么都不会发生。
+   */
+  minimizeWindow(): Promise<boolean>
+  /** 在**最大化与还原之间切换**本窗口；回 `false` 同上。 */
+  toggleMaximizeWindow(): Promise<boolean>
+  /**
+   * 关闭本窗口。★ 与点系统关闭按钮**等价**：走的是 `window.close()`，
+   * 会正常触发退出流程（Pi 会话 flush + sidecar 收尾），不是强杀。
+   */
+  closeWindow(): Promise<boolean>
+  /**
+   * 订阅**最大化状态变化**（按钮图标据此换），返回取消订阅函数。
+   * ★ 必须推送：双击拖拽区、Win+↑/↓、拖到屏幕上边缘都会改变状态，渲染进程看不到。
+   */
+  onWindowMaximizedChanged(listener: (maximized: boolean) => void): () => void
 }
 
 /**
@@ -275,7 +364,102 @@ const api: K12Api = {
     ipcRenderer.invoke(IPC.sessionSearch, payload) as Promise<StudyCallResult>,
 
   exportMarkdown: (payload): Promise<FileExportResult> =>
-    ipcRenderer.invoke(IPC.fileExport, payload) as Promise<FileExportResult>
+    ipcRenderer.invoke(IPC.fileExport, payload) as Promise<FileExportResult>,
+
+  // ── 工具调用轨迹（推送；快照语义见 shared/ipc-events.ts）──────────────────
+  onTraceChanged: (listener): (() => void) => {
+    const handler = (_event: IpcRendererEvent, snapshot: unknown): void => {
+      // 边界处过滤：`entries` 必须是数组（半截对象直接丢掉，别让界面上出现一行空白轨迹）
+      if (!isTraceSnapshot(snapshot)) return
+      listener(snapshot)
+    }
+    ipcRenderer.on(IPC.traceChanged, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.traceChanged, handler)
+    }
+  },
+
+  // ── 学生身份 / 画像 / 学段证据 ───────────────────────────────────────────
+  // ★ 一律不带 studentId：身份由主进程决定（递进去就等于允许读别人的数据）。
+  getStudent: (): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.studentGet) as Promise<StudyCallResult>,
+
+  readProfile: (): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.profileRead) as Promise<StudyCallResult>,
+
+  readRecommendation: (): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.profileRecommendation) as Promise<StudyCallResult>,
+
+  readGradeSignals: (): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.gradeSignals) as Promise<StudyCallResult>,
+
+  readGradeHistory: (): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.gradeHistory) as Promise<StudyCallResult>,
+
+  // ── 闯关（独立页面用；对话内的题卡仍走 chat 路径）────────────────────────
+  readQuizBank: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.quizBank, payload) as Promise<StudyCallResult>,
+
+  gradeQuiz: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.quizGrade, payload) as Promise<StudyCallResult>,
+
+  readQuizProgress: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.quizProgress, payload) as Promise<StudyCallResult>,
+
+  // ── 编程（★ 没有「执行代码」的通道：那条走 code:execute → 渲染进程 Worker）──
+  readCodeTemplate: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.codeTemplate, payload) as Promise<StudyCallResult>,
+
+  readCodeHint: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.codeHint, payload) as Promise<StudyCallResult>,
+
+  analyzeCodeRun: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.codeRunHint, payload) as Promise<StudyCallResult>,
+
+  // ── 动画（模板 → 渲染 → 一次性 nonce 托管）───────────────────────────────
+  readAnimationTemplates: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.animationTemplates, payload) as Promise<StudyCallResult>,
+
+  renderAnimation: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.animationRender, payload) as Promise<StudyCallResult>,
+
+  hostAnimation: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.animationHost, payload) as Promise<StudyCallResult>,
+
+  // ── 教材知识库（读三条 + 写两条；写的那两条用长超时，见主进程）─────────────
+  readKnowledgeStats: (): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.knowledgeStats) as Promise<StudyCallResult>,
+
+  readKnowledgePoints: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.knowledgePoints, payload) as Promise<StudyCallResult>,
+
+  importKnowledge: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.knowledgeImport, payload) as Promise<StudyCallResult>,
+
+  rebuildKnowledge: (): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.knowledgeRebuild) as Promise<StudyCallResult>,
+
+  // ── 窗口控制（无边框窗口的页面内按钮）──────────────────────────────────
+  // ★ 三条都不带参数：作用对象由主进程从事件来源反查（渲染进程指不了别的窗口）。
+  minimizeWindow: (): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.windowMinimize) as Promise<boolean>,
+
+  toggleMaximizeWindow: (): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.windowToggleMaximize) as Promise<boolean>,
+
+  closeWindow: (): Promise<boolean> => ipcRenderer.invoke(IPC.windowClose) as Promise<boolean>,
+
+  onWindowMaximizedChanged: (listener): (() => void) => {
+    const handler = (_event: IpcRendererEvent, maximized: unknown): void => {
+      // 边界处过滤：只认布尔（半截载荷直接丢掉，别让按钮图标变成 undefined）
+      if (typeof maximized !== 'boolean') return
+      listener(maximized)
+    }
+    ipcRenderer.on(IPC.windowMaximizedChanged, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.windowMaximizedChanged, handler)
+    }
+  }
 }
 
 /**
@@ -313,6 +497,17 @@ function isCodeExecuteRequest(value: unknown): value is CodeExecuteRequest {
   if (typeof value !== 'object' || value === null) return false
   const record = value as { requestId?: unknown; code?: unknown }
   return typeof record.requestId === 'string' && typeof record.code === 'string'
+}
+
+/**
+ * 轨迹快照的最小形状检查。
+ * ★ 只认「`turn` 是数字 + `entries` 是数组」：轨迹是**装饰性证据**，
+ *   宁可整条丢掉，也不要让界面渲染出半截轨迹（那会让人以为工具没被调用）。
+ */
+function isTraceSnapshot(value: unknown): value is TraceSnapshot {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as { turn?: unknown; entries?: unknown }
+  return typeof record.turn === 'number' && Array.isArray(record.entries)
 }
 
 /** 四个学段字面量（与 `shared/ipc-events.ts` 的 `GradeLevel` 同源，此处只做运行期校验）。 */
@@ -355,7 +550,37 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.sessionTranscript,
   IPC.sessionSearch,
   // 导出（invoke；回执只有文件名）
-  IPC.fileExport
+  IPC.fileExport,
+  // 工具调用轨迹（**推送**：主进程每记录一条就推一次全量快照）
+  IPC.traceChanged,
+  // 学生身份 / 画像 / 学段证据（invoke；身份由主进程决定）
+  IPC.studentGet,
+  IPC.profileRead,
+  IPC.profileRecommendation,
+  IPC.gradeSignals,
+  IPC.gradeHistory,
+  // 闯关（invoke；判分只在后端，题库载荷不含答案）
+  IPC.quizBank,
+  IPC.quizGrade,
+  IPC.quizProgress,
+  // 编程（invoke；★ 没有任何「执行代码」的通道 —— 执行只在渲染进程 Worker 里）
+  IPC.codeTemplate,
+  IPC.codeHint,
+  IPC.codeRunHint,
+  // 动画（invoke；托管回一次性 nonce 地址）
+  IPC.animationTemplates,
+  IPC.animationRender,
+  IPC.animationHost,
+  // 教材知识库（invoke；导入/重建是写操作，用长超时）
+  IPC.knowledgeStats,
+  IPC.knowledgePoints,
+  IPC.knowledgeImport,
+  IPC.knowledgeRebuild,
+  // 窗口控制（三条 invoke + 一条**推送**：最大化状态变化）
+  IPC.windowMinimize,
+  IPC.windowToggleMaximize,
+  IPC.windowClose,
+  IPC.windowMaximizedChanged
 ]
 
 contextBridge.exposeInMainWorld('api', api)

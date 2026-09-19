@@ -132,6 +132,28 @@ export interface RagSearchDetails {
   kpIds: string[]
   /** 向上兼容命中的条数（前端要标「延伸阅读」，这里给轨迹留档）。 */
   compatCount: number
+  /**
+   * 检索命中的**完整条目**（比 `citations` 多带 `text` / `score` / `parentChunkId` /
+   * `expanded`），供界面的「查看教材原文」抽屉使用。
+   *
+   * ★ 它**不进 Prompt**：`renderSearchText` 用的是 `RagSearchResult.context`（父块正文拼接）。
+   *   这里留着是为了让引用行可点开 —— 此前这些字段在投影成 5 字段时被丢掉了，
+   *   学生看到「教材依据：一、从原始数据到特征」却看不到那句话到底出自哪里。
+   * ★ 体积考虑：一条命中的 `text` 是节级正文（数百到上千字），
+   *   它是**本轮的**载荷（随事件发一次、随即被折叠进轮次状态），不留档、不累积。
+   */
+  hits: RagHitDetail[]
+}
+
+/** 命中详情（界面「教材原文」抽屉的最小面）。 */
+export interface RagHitDetail {
+  chunkId: string
+  text: string
+  score: number | null
+  parentChunkId: string | null
+  degraded: string | null
+  kpId: string | null
+  expanded: boolean
 }
 
 /** 降级级别 → 给模型的一句中文说明（让它在回答里如实交代能力受限）。 */
@@ -232,9 +254,43 @@ export function renderSearchText(
   return `${header}\n来源：\n${sources}${kpLine}\n正文（节级完整内容）：\n${body}`
 }
 
+/**
+ * 把命中的**完整条目**投影成界面「教材原文」抽屉要的形状。
+ *
+ * ★ 只保留 `citations` 里认得的 `chunkId`：学段认不准的命中连引用行都没有
+ *   （见 {@link toCitations} 的注释），带上它们的原文会让界面上出现
+ *   「有原文可看、却没有对应引用行」的孤儿。
+ * ★ 逐字段读 + 兜底（响应是 sidecar 来的 JSON，字段可能缺席或类型不对）：
+ *   一个字段读不出来只影响那一项，**不影响整条引用**。
+ */
+export function toHitDetails(
+  response: RagSearchResponse,
+  citations: readonly RagCitation[]
+): RagHitDetail[] {
+  const hits = Array.isArray(response.hits) ? response.hits : []
+  const wanted = new Set(citations.map((citation) => citation.chunkId))
+  const out: RagHitDetail[] = []
+  const seen = new Set<string>()
+  for (const hit of hits) {
+    const chunkId = typeof hit?.chunkId === 'string' && hit.chunkId.trim() ? hit.chunkId : null
+    if (chunkId === null || !wanted.has(chunkId) || seen.has(chunkId)) continue
+    seen.add(chunkId)
+    out.push({
+      chunkId,
+      text: typeof hit?.text === 'string' ? hit.text : '',
+      score: typeof hit?.score === 'number' && Number.isFinite(hit.score) ? hit.score : null,
+      parentChunkId:
+        typeof hit?.parentChunkId === 'string' && hit.parentChunkId ? hit.parentChunkId : null,
+      degraded: typeof hit?.degraded === 'string' && hit.degraded ? hit.degraded : null,
+      kpId: typeof hit?.kpId === 'string' && hit.kpId ? hit.kpId : null,
+      expanded: hit?.expanded === true
+    })
+  }
+  return out
+}
+
 /** 读一小段响应体用于报错（**截断**，别把整页 HTML 塞进 Prompt）。 */
-async function readSnippet(response: Response): Promise<string> {
-  try {
+async function readSnippet(response: Response): Promise<string> {  try {
     const text = (await response.text()).replace(/\s+/g, ' ').trim()
     return text.length > 120 ? `${text.slice(0, 120)}…` : text
   } catch {
@@ -357,7 +413,10 @@ export function createRagSearchExtension(
                   .filter((id) => id.length > 0)
               )
             ],
-            compatCount: citations.filter((citation) => citation.compat).length
+            compatCount: citations.filter((citation) => citation.compat).length,
+            // ★ 只带**引用行认得出来**的那些命中（学段认不准的连引用行都没有，
+            //   带上它们的原文会让界面上出现「有原文、没有引用行」的孤儿）
+            hits: toHitDetails(payload, citations)
           }
           return succeeded(renderSearchText(payload, citations, degraded), details)
         } catch (error) {

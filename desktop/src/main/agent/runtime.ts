@@ -116,7 +116,13 @@ import {
   resolveStudentPiPaths,
   type StudentPiPaths
 } from './pi-paths.ts'
-import { createTraceExtension, exportToolTrace, ToolTraceRecorder, type TraceExportOptions } from './trace.ts'
+import {
+  createTraceExtension,
+  exportToolTrace,
+  ToolTraceRecorder,
+  type TraceExportOptions,
+  type TraceRecordForUi
+} from './trace.ts'
 
 /* ------------------------------------------------------------------ *
  * 选项与返回类型
@@ -149,6 +155,14 @@ export interface ChatRuntimeOptions {
    * **不发出任何真实请求、不写盘任何凭证**；只用于排查与验收。
    */
   offlineProbe?: boolean
+  /**
+   * 每记录一条 Tool 调用轨迹就回调一次（可选）。
+   *
+   * 主进程用它把**轨迹快照**推给渲染进程（右栏「工具调用轨迹」）。
+   * ★ 与 `trace` 字段的分工：那个是「最终落盘的完整记录」（退出时导出 `.mmd`），
+   *   这个是「过程里的实时快照」（界面要看见工具正在被调用）。
+   */
+  onTraceRecord?: (records: TraceRecordForUi[]) => void
 }
 
 export interface ChatTurnInput {
@@ -701,7 +715,23 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       },
       extra: [
         { name: 'rag-search', factory: ragSearchExtension },
-        { name: 'trace', factory: createTraceExtension(trace) }
+        {
+          name: 'trace',
+          factory: createTraceExtension(trace, (records) => {
+            // 投影成界面要的那几个字段（**不带** toolCallId / at / blockReason：
+            // 那些是排查用的，界面放不下，也容易夹带内部信息）。
+            options.onTraceRecord?.(
+              records.map((record) => ({
+                turn: record.turn,
+                toolName: record.toolName,
+                argsSummary: record.argsSummary,
+                ok: record.ok,
+                latencyMs: record.latencyMs,
+                ...(record.degraded ? { degraded: record.degraded } : {})
+              }))
+            )
+          })
+        }
       ],
       // ★ 开发态宽松（缺文件只告警，对话主线不受影响）；打包态严格（缺一个就抛）
       strict: app.isPackaged

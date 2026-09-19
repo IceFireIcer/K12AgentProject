@@ -44,7 +44,14 @@
  *    而 error 对 UI 是终态，结果界面显示"回答完了"却一个字的正文都没有）。
  */
 
-import type { Citation, GradeLevel, PayloadKind } from '@shared/ipc-events'
+import type {
+  Citation,
+  CitationDetail,
+  CitationEvent,
+  Degraded,
+  GradeLevel,
+  PayloadKind
+} from '@shared/ipc-events'
 import type { TurnEvent } from '../ipc/chat-stream.ts'
 import { kindForTool } from '../ipc/tool-kinds.ts'
 
@@ -250,7 +257,17 @@ function mapToolExecutionEnd(event: PiNativeEvent, state: TurnMapperState): Turn
   if (toolName === RAG_SEARCH_TOOL) {
     const citations = readCitations(event.result)
     // 检索无结果时**不发** citation（空来源列表对 UI 没有意义，前端也会忽略）
-    return citations.length > 0 ? [{ name: 'citation', data: { citations } }] : []
+    if (citations.length === 0) return []
+    const details = readCitationDetails(event.result, citations)
+    // ★ 降级档位**原样透传 Python 的判定**（`details.degraded`），TS 侧不重新推理 ——
+    //   四级降级链必须一次调用内在 Python 走完（混合后端硬边界）。认不出就整块省略，
+    //   界面据此显示「本轮没有检索降级信息」，而不是画一条猜出来的链路。
+    const degraded = readDegraded(readDetails(event.result)?.degraded)
+    const data: Omit<CitationEvent, 'requestId'> = { citations }
+    // 只在真有内容时带上可选字段（省略 = 「没有这项信息」，与「空数组」不是一回事）
+    if (details.length > 0) data.details = details
+    if (degraded !== null) data.degraded = degraded
+    return [{ name: 'citation', data }]
   }
 
   // ★ 表只有一份（`ipc/tool-kinds.ts`）；不在表内的 Tool 不发 payload，绝不猜 kind
@@ -528,6 +545,81 @@ export function readCitations(result: unknown): Citation[] {
   }
   return citations
 }
+
+/**
+ * 引用的**细节**（右栏「教材原文」抽屉用）：`result.details.hits` 里的检索命中。
+ *
+ * ★★ 这些字段**本来就在 Python 的 `RagSearchResult.hits` 里**（一直在返回），
+ *   之前只是在投影成 5 字段 `citations` 时丢掉了。补上它**不需要改任何 Python 契约** ——
+ *   所以这是「把已经传过来的东西用起来」，不是给契约开口子。
+ *
+ * ★ 按 `chunkId` 与 `citations` 对齐（前端按它把详情挂到引用行上）；
+ *   `citations` 里没有的 `chunkId`（认不准学段被丢掉的那些）**也不发详情** ——
+ *   否则界面上会出现「有原文可看、却没有对应引用行」的孤儿。
+ * ★ `text` 只在**点开原文**时用，不参与列表渲染，也不进 Prompt。
+ */
+export function readCitationDetails(result: unknown, citations: readonly Citation[]): CitationDetail[] {
+  const details = readDetails(result)
+  const raw = details?.citations
+  if (!Array.isArray(raw) || citations.length === 0) return []
+
+  const wanted = new Set(citations.map((citation) => citation.chunkId))
+  const emitted = new Set<string>()
+  const out: CitationDetail[] = []
+
+  // 细节来自 `hits`（比 `citations` 多带 text / score / parentChunkId / expanded）
+  const hits = Array.isArray(details?.hits) ? details.hits : []
+  for (const item of hits) {
+    if (!item || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const chunkId = readNonEmptyString(record.chunkId)
+    // 没有对应引用行的（学段认不准被丢掉的）+ 已经记过的，一律跳过
+    if (chunkId === null || !wanted.has(chunkId) || emitted.has(chunkId)) continue
+    emitted.add(chunkId)
+    out.push({
+      chunkId,
+      text: typeof record.text === 'string' ? record.text : '',
+      score: typeof record.score === 'number' && Number.isFinite(record.score) ? record.score : null,
+      parentChunkId: readNonEmptyString(record.parentChunkId),
+      degraded: readDegraded(record.degraded),
+      kpId: readNonEmptyString(record.kpId),
+      expanded: record.expanded === true
+    })
+  }
+
+  // ★ 兜底：`hits` 缺了某个 chunkId，但引用行在（例如老版本 sidecar 只回 citations）。
+  //   补一条「有出处、但拿不到原文」的详情，界面据此显示「原文暂时取不到」，
+  //   而不是让那个「原文」按钮点下去毫无反应。
+  for (const citation of citations) {
+    if (emitted.has(citation.chunkId)) continue
+    emitted.add(citation.chunkId)
+    out.push({
+      chunkId: citation.chunkId,
+      text: '',
+      score: null,
+      parentChunkId: null,
+      degraded: null,
+      kpId: null,
+      expanded: false
+    })
+  }
+  return out
+}
+
+/**
+ * 这一轮检索实际走到了降级链的哪一档（右栏「四级降级链」据此点亮）。
+ *
+ * ★ 四个取值之外的**一律回 `null`**（不是兜底成 `outline`）：那是「认不出」，
+ *   与「确实降到了大纲」是两回事 —— 兜底会让界面画出一条并不存在的降级路径。
+ */
+export function readDegraded(value: unknown): Degraded | null {
+  return typeof value === 'string' && (DEGRADED_LEVELS as readonly string[]).includes(value)
+    ? (value as Degraded)
+    : null
+}
+
+/** 降级链的四档（与 `extensions/rag-search.ts` 的 `DEGRADED_LEVELS` 同源）。 */
+const DEGRADED_LEVELS = ['vector', 'cloud', 'fts', 'outline'] as const
 
 /**
  * `payload` 事件的载荷：工具的结构化产出优先（`details`），没有就退回文本内容。

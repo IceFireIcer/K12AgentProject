@@ -11,7 +11,15 @@
  *   「忽略并计数」，绝不改变其它轮次的状态（旧轮事件不得污染新轮）。
  */
 
-import type { Citation, GradeLevel, IpcEvent, PayloadKind } from '@shared/ipc-events'
+import type {
+  Citation,
+  CitationDetail,
+  CitationEvent,
+  Degraded,
+  GradeLevel,
+  IpcEvent,
+  PayloadKind
+} from '@shared/ipc-events'
 
 /** 内容被安全撤回时，如果主进程没给 `safeText`，用这句兜底（UI 不允许出现空白气泡）。 */
 export const FALLBACK_SAFE_TEXT = '这条内容不适合直接展示，我们换个话题继续聊吧。'
@@ -80,6 +88,22 @@ export interface ChatTurn {
   /** `delta` 累积出的正文（撤回后为 `safeText`）。 */
   text: string
   citations: Citation[]
+  /**
+   * 引用的**细节**（右栏「教材原文」抽屉用）：节级正文、相关度、父块 id、检索方式。
+   *
+   * ★ 按 `chunkId` 与 `citations` 对齐；`citations` 里没有的 id 不会出现在这里
+   *   （否则界面上会出现「有原文可看、却没有对应引用行」的孤儿）。
+   * ★ 主进程认不出细节时是空数组（可选字段），消费方必须容忍它缺席 ——
+   *   那时「原文」按钮显示「原文暂时取不到」，而不是点下去毫无反应。
+   */
+  citationDetails: CitationDetail[]
+  /**
+   * 这一轮检索实际走到的降级链档位（`null` = 本轮没发生检索）。
+   *
+   * ★ **原样透传 Python 的判定**，渲染进程不重新推理（四级链必须一次走完）。
+   *   右栏的降级链据此点亮；`null` 时四档都显示「本轮未检索」（不是失败）。
+   */
+  citationDegraded: Degraded | null
   cards: InlineCard[]
   status: TurnStatus
   /** `done` 带来的消息 id（用于持久化/学习记录，票 09）。 */
@@ -120,6 +144,8 @@ export function createTurn(
     gradeLevel,
     text: '',
     citations: [],
+    citationDetails: [],
+    citationDegraded: null,
     cards: [],
     status: 'streaming',
     messageId: null,
@@ -227,8 +253,18 @@ function reduceTurn(turn: ChatTurn, event: IpcEvent): ChatTurn {
         seen.add(citation.chunkId)
         return true
       })
-      if (fresh.length === 0) return turn
-      return { ...turn, citations: [...turn.citations, ...fresh] }
+
+      // ★ 细节与降级档位**即使没有新引用也要收下**：
+      //   重复到达的 `citation` 事件里可能带着**更完整**的细节（同一个 chunkId 第二次
+      //   返回时 `text` 才补全），而 `degraded` 更是「本轮检索走成什么样」的唯一记录 ——
+      //   只因为它没有新增引用就整条丢掉，右栏的降级链会永远显示「本轮未检索」。
+      const details = mergeCitationDetails(turn.citationDetails, event.data.details ?? [])
+      const degraded = event.data.degraded ?? turn.citationDegraded
+      const citations = fresh.length === 0 ? turn.citations : [...turn.citations, ...fresh]
+      if (citations === turn.citations && details === turn.citationDetails && degraded === turn.citationDegraded) {
+        return turn
+      }
+      return { ...turn, citations, citationDetails: details, citationDegraded: degraded }
     }
 
     case 'payload':
@@ -315,7 +351,17 @@ export function normalizeIpcEvent(rawEvent: unknown): IpcEvent | null {
 
     case 'citation': {
       const citations = readCitations(data.citations)
-      return citations.length === 0 ? null : { name: 'citation', data: { requestId, citations } }
+      // ★ 没有引用也**可能是有效事件**：主进程只在「认得出的引用非空」时发 citation
+      //   （`agent/events.ts`），但同一轮的**第二次**检索可能命中同一批 chunkId ——
+      //   那时 `citations` 会被这边去重掉，而 `degraded` 与更完整的 `details`
+      //   仍要收下（否则右栏的降级链永远显示「本轮未检索」）。
+      const details = readCitationDetails(data.details)
+      const degraded = readDegraded(data.degraded)
+      if (citations.length === 0 && details.length === 0 && degraded === null) return null
+      const payload: CitationEvent = { requestId, citations }
+      if (details.length > 0) payload.details = details
+      if (degraded !== null) payload.degraded = degraded
+      return { name: 'citation', data: payload }
     }
 
     case 'payload': {
@@ -361,8 +407,96 @@ export function sanitizeNotice(raw: unknown): string {
   return flat.length > MAX_NOTICE_CHARS ? `${flat.slice(0, MAX_NOTICE_CHARS)}…` : flat
 }
 
-function readCitations(value: unknown): Citation[] {
+/**
+ * 读引用细节（右栏「教材原文」抽屉的数据源）。
+ *
+ * ★ 逐字段读 + 兜底：`text` 缺失时回空串（界面据此说「原文暂时取不到」），
+ *   `score` 认不出回 `null`（**不补 0** —— 0 分看起来像一个真实的坏结果，
+ *   而 `null` 诚实地表示「这次没给分数」）。
+ * ★ `chunkId` 是唯一的必需字段：它是与引用行对齐的键，缺了整条丢掉。
+ */
+function readCitationDetails(value: unknown): CitationDetail[] {
   if (!Array.isArray(value)) return []
+  const details: CitationDetail[] = []
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) continue
+    const record = item as Record<string, unknown>
+    const chunkId = readText(record.chunkId)
+    if (chunkId === null) continue
+    details.push({
+      chunkId,
+      text: typeof record.text === 'string' ? record.text : '',
+      score:
+        typeof record.score === 'number' && Number.isFinite(record.score) ? record.score : null,
+      parentChunkId: readText(record.parentChunkId),
+      degraded: readDegraded(record.degraded),
+      kpId: readText(record.kpId),
+      expanded: record.expanded === true
+    })
+  }
+  return details
+}
+
+/** 四个降级档位（与契约 `Degraded` 同源；认不出回 `null`，**不兜底成 outline**）。 */
+const DEGRADED_LEVELS = ['vector', 'cloud', 'fts', 'outline'] as const
+
+function readDegraded(value: unknown): Degraded | null {
+  return typeof value === 'string' && (DEGRADED_LEVELS as readonly string[]).includes(value)
+    ? (value as Degraded)
+    : null
+}
+
+/**
+ * 合并细节：同一 `chunkId` **后到的更完整的那份赢**。
+ *
+ * ★ 同一轮可能多次检索、同一 chunkId 被多次返回。第一次回来时 `text` 可能是空的
+ *   （主进程那一刻还没拿到父块正文），第二次才补全 —— 直接「后到覆盖」
+ *   会让先到的那份被一份更差的覆盖掉，所以按「有内容的赢」合并。
+ * ★ 返回**原数组**（引用不变）表示没有变化，调用方据此跳过重渲染。
+ */
+function mergeCitationDetails(
+  current: readonly CitationDetail[],
+  incoming: readonly CitationDetail[]
+): CitationDetail[] {
+  if (incoming.length === 0) return current as CitationDetail[]
+  const index = new Map(current.map((item, position) => [item.chunkId, position]))
+  let changed = false
+  const next = [...current]
+  for (const item of incoming) {
+    const position = index.get(item.chunkId)
+    if (position === undefined) {
+      index.set(item.chunkId, next.length)
+      next.push(item)
+      changed = true
+      continue
+    }
+    const existing = next[position] as CitationDetail
+    const merged: CitationDetail = {
+      chunkId: existing.chunkId,
+      // ★ 正文与分数：有内容的赢（空串 / null 视为「还没有」）
+      text: existing.text.length > 0 ? existing.text : item.text,
+      score: existing.score ?? item.score,
+      parentChunkId: existing.parentChunkId ?? item.parentChunkId,
+      degraded: existing.degraded ?? item.degraded,
+      kpId: existing.kpId ?? item.kpId,
+      expanded: existing.expanded || item.expanded
+    }
+    if (
+      merged.text !== existing.text ||
+      merged.score !== existing.score ||
+      merged.parentChunkId !== existing.parentChunkId ||
+      merged.degraded !== existing.degraded ||
+      merged.kpId !== existing.kpId ||
+      merged.expanded !== existing.expanded
+    ) {
+      next[position] = merged
+      changed = true
+    }
+  }
+  return changed ? next : (current as CitationDetail[])
+}
+
+function readCitations(value: unknown): Citation[] {  if (!Array.isArray(value)) return []
   const citations: Citation[] = []
   for (const item of value) {
     if (typeof item !== 'object' || item === null) continue
