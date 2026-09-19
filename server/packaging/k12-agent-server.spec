@@ -13,6 +13,7 @@
 打包成功 ≠ 运行得起来，这是本项目最容易「开发好好的、打包就炸」的地方。
 """
 
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -24,6 +25,20 @@ while not (ROOT / "app" / "main.py").exists() and ROOT.parent != ROOT:
     ROOT = ROOT.parent
 if not (ROOT / "app" / "main.py").exists():
     raise SystemExit(f"[spec][FATAL] 向上找不到 server/（含 app/main.py），起点 {SPECPATH}")
+
+# ★★ **必须在任何中文输出之前**把 stdio 切到 UTF-8（实现见 `app/console.py`）。
+#   实测（CI 首跑打包才暴露）：spec 是被 PyInstaller **exec** 的，继承的是
+#   **PyInstaller 进程**的 stdout —— 英文 runner 上那是 cp1252，于是下面那行
+#   `print("[spec] 项目根目录 = …")` 里的中文直接抛
+#   `UnicodeEncodeError: 'charmap' codec can't encode characters`，
+#   **整个打包当场失败**（本机中文 Windows 上永远不会发生）。
+#   ⚠️ 顺序要紧：先让 ROOT 进 sys.path，才 import 得到 app.console。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from app.console import install_utf8_stdio  # noqa: E402
+
+install_utf8_stdio()
+
 print(f"[spec] 项目根目录 = {ROOT}")
 
 # ---------------------------------------------------------------------------
@@ -33,10 +48,7 @@ print(f"[spec] 项目根目录 = {ROOT}")
 # （app/rag/retriever.default_kb_path）与构建期（本文件）必须指向**同一个常量**，
 # 否则「打包带了库但检索去别处找」这类缺陷会静默复现 —— 就是关卡 E 发现的那个。
 # ---------------------------------------------------------------------------
-import sys as _sys  # noqa: E402
-
-if str(ROOT) not in _sys.path:
-    _sys.path.insert(0, str(ROOT))
+# ★ `sys.path` 与 UTF-8 stdio 在文件顶部已经处理好（见那里的说明）——这里直接 import。
 from app.config import BUNDLED_KB_RELATIVE, BUNDLED_KB_STAGING  # noqa: E402
 
 if not BUNDLED_KB_STAGING.exists():
