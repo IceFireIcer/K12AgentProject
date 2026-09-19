@@ -14,7 +14,7 @@
 [![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](#技术栈)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](#技术栈)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#技术栈)
-[![Tests](https://img.shields.io/badge/回归测试-1489%20项%20全绿-2ea44f)](#测试与质量守卫)
+[![Tests](https://img.shields.io/badge/回归测试-1537%20项%20全绿-2ea44f)](#测试与质量守卫)
 [![Local](https://img.shields.io/badge/数据-本地优先%20·%20一人一库-8957e5)](#设计与取舍)
 
 </div>
@@ -37,7 +37,8 @@
 
 围绕这四条线，再加上三件「让老师省心、让家长看得见」的事：
 
-- **教材检索（RAG）**：四学段人工编写教材（**33 个知识点 / 24 章 / 47 条依赖边**）入 `kb.sqlite`，
+- **教材检索（RAG）**：四学段教材（**57 个概念 × 四学段 = 228 个知识点 / 8 章 / 483 条依赖边**，
+  由根目录 `K12KnowledgeBase/` 导入，第 8 章「编程实践」为本项目自写的补充章）入 `kb.sqlite`，
   检索严格按学段隔离（写在 SQL 层），回答带 `citation` 出处；模型不可用时走
   **四级降级链 `vector → cloud → FTS5 → 依赖图/大纲`**，并如实告知「本次检索能力受限」。
 - **个性化闭环**：学生画像（掌握度 / 偏好 / 错题摘要）**每轮**进 Prompt；模型可主动记偏好；
@@ -88,6 +89,7 @@ flowchart TB
 cd server
 uv sync                                              # Python 3.12 依赖（uv 锁定）
 uv run python scripts/fetch_embedding_model.py       # 取嵌入模型 bge-small-zh-v1.5（约 90MB）
+uv run python scripts/import_knowledge.py --write    # 教材由根目录 K12KnowledgeBase/ 导入（幂等，可重跑）
 uv run python scripts/build_kb.py                    # 教材 → kb.sqlite（分块 + 向量 + FTS5 + 依赖图）
 ```
 
@@ -110,7 +112,7 @@ npm run dev
 ```bash
 cd desktop
 npm run typecheck        # vue-tsc，契约漂移的第一道防线
-npm test                 # 585 项 node --test + check:api + check:tool-schema
+npm test                 # 618 项 node --test + check:api + check:tool-schema
 npm run build            # 先确保 sidecar 最新（过期内自动重打）→ 再编主/渲染进程
 npm run build:unpack     # 免安装目录（★ 验证 esbuild 原生依赖是否解包、Pi 能否加载、后端是否最新）
 npm run build:win        # 出 .exe（NSIS 安装包 + 绿色便携版）
@@ -163,14 +165,16 @@ K12Agent/
 │  ├─ src/renderer/         Vue 3 界面：八页面 + 内联卡片
 │  ├─ src/shared/           跨进程类型 · 品牌名（唯一来源）· 供应商目录
 │  ├─ scripts/              构建联动（build-server.mjs）· 契约生成 · 各类冒烟与证据脚本
-│  ├─ tests/                585 项回归（含架构守卫 G1–G23 组）
+│  ├─ tests/                618 项回归（含架构守卫 G1–G23 组）
 │  └─ build/ resources/     打包图标 · 学段 logo · Pyodide 运行时（本地自托管）
 ├─ server/                  Python sidecar
 │  ├─ app/                  FastAPI：contracts / routes / rag / safety / store / grade
-│  ├─ knowledge/            四学段教材（33 知识点 · 24 章 · 47 依赖边）
-│  ├─ resources/            题库 · 动画模板 · 代码模板 · 敏感词表
-│  ├─ scripts/              建库 / 取模型 / 导出 OpenAPI / 打包+指纹 / 生成品牌图标
-│  └─ tests/                904 项回归
+│  ├─ knowledge/            四学段教材（228 知识点 · 8 章 · 483 依赖边，由 K12KnowledgeBase/ 导入）
+│  ├─ knowledge-supplement/ 第 8 章「编程实践」（本项目自写，3 概念 × 四学段）——与用户源库分开存放
+│  ├─ resources/            题库（按章分片 ch01–ch08）· 动画模板 · 代码模板 · 敏感词表
+│  ├─ scripts/              导入教材 / 建库 / 取模型 / 导出 OpenAPI / 打包+指纹 / 生成品牌图标
+│  └─ tests/                919 项回归
+├─ K12KnowledgeBase/        教材源库（用户提供，54 概念 × 四学段；本项目只读地用 import_knowledge.py 导入）
 ├─ docs/                    设计文档 · 任务票 · 决策与踩坑素材 · 界面版式契约 · 对标材料
 ├─ logos/                   品牌原图（2048²，不入包）
 ├─ AGENTS.md                面向编码代理的工作区说明
@@ -211,8 +215,8 @@ K12Agent/
 ## 测试与质量守卫
 
 ```bash
-cd server  && uv run python -m unittest discover -s tests   # 904 项
-cd desktop && npm test                                      # 585 项 + 契约漂移比对 + Tool schema 一致性
+cd server  && uv run python -m unittest discover -s tests   # 919 项
+cd desktop && npm test                                      # 618 项 + 契约漂移比对 + Tool schema 一致性
 ```
 
 回归里有相当一部分是**架构守卫**，写成正向断言而不是「禁止某历史实现」：

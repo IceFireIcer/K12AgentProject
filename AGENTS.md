@@ -19,7 +19,7 @@ K12Agent/
 └─ .gitignore  .gitattributes
 ```
 
-`desktop/` 与 `server/` **均已落地**（后端 870+ / 桌面 570+ 项测试全绿；安装包与绿色版可出）。
+`desktop/` 与 `server/` **均已落地**（后端 900+ / 桌面 600+ 项测试全绿；安装包与绿色版可出）。
 界面已按 **D-039** 换成原型的设计（原来的 `UI/` 目录**已删除**，产物在 `desktop/src/renderer`）。
 另有两条**只覆盖跨层**的验证：`npm run smoke:wire`（主进程真连 Python sidecar，需先起 sidecar）
 与 `node scripts/verify-ui.mjs`（CDP 看真实 DOM，需 `K12_DEBUG_PORT` 且**本机允许绑定调试端口**）。
@@ -243,7 +243,32 @@ D-020 曾让需求「学生可选择学段」的字面要求被主动放弃，D-
 - 编程：**Monaco Editor** + **Pyodide**（独立 Web Worker，资源本地自托管，不依赖 CDN）。
 - 语音：**P2 后置**（Python 下可用 `sherpa-onnx` pip 包低成本回捡）。
 - 硬件：**纯 CPU，无 GPU**。所有本地模型/推理必须 CPU 可跑。
-- 教材来源：**人工编写的 Markdown + 元数据文件**，**不做 PDF 解析**。
+- 教材来源：**根目录 `K12KnowledgeBase/`（用户提供的成品库）经 `server/scripts/import_knowledge.py` 导入**，
+  加一章本项目自写的补充章（第 8 章「编程实践」，源在 `server/knowledge-supplement/`）。
+  **形态是人工编写的 Markdown + 元数据文件，不做 PDF 解析。**
+  ★ **当前规模（2026-09-19 整体替换后的唯一口径）**：**57 个概念 × 四学段 = 228 个知识点 / 8 章 / 483 条依赖边**；
+  每个学段各 57 个知识点（同一批概念、深浅不同），不再是「按学段分配不同知识点」的旧结构。
+  kp_id 形如 `<slug>-<pl|ph|jr|sr>`（`ai-definition-pl` / `prog-loop-jr` / `transformer-sr`）。
+  导入脚本把「1 概念 1 文件（内含四学段小节）」拆成「1 概念 1 学段 1 文件」写进
+  `server/knowledge/{primary-low,primary-high,junior,senior}/`，文件名 = kp_id，**幂等可重跑**。
+  依赖图由该脚本生成（概念内 `X-pl→X-ph→X-jr→X-sr` 成链 + 概念间按源库 related 连同学段，
+  每条边严格增大「概念序号, 学段序号」→ **结构上无环**，实测 `find_cycles()` 返回空）。
+  ⚠️ **不是「唯一根」**：实测有 **6 个入度为 0 的起点**（`ai-definition-pl` / `narrow-ai-pl` / `data-pl` /
+  `computing-power-pl` / `speech-recognition-pl` / `short-term-memory-pl`）——
+  「推荐路径」要按学生已掌握的前缀分别取后继，不要假设「一切都从 `ai-definition-pl` 展开」。
+  术语表 `server/knowledge/terminology.json` 的 `min_grade` 也由它**从正文实际位置推导**（当前 43 条）。
+  ⚠️ 由此有三条不可违背的推论：① **改教材 = 重跑 `import_knowledge.py --write` 再 `build_kb`**，
+  不要手改 `server/knowledge/` 下的文件（会被下次导入覆盖）；② 新增/改名概念必须同时更新
+  `import_knowledge.py` 的 `SLUGS`（全库 id 的唯一映射表）与依赖清单，否则题库 / 模板的 `kp_id` 对不上；
+  ③ 章节排序只认阿拉伯数字 `第N章`（`kb.py` 的 `_CHAPTER_NUMBER_RE`），
+  **源库的中文序号（`第一章.…`）由导入脚本 `normalize_chapter()` 转换** —— 中文序号会让章节排到列表末尾。
+  ⚠️ `server/knowledge/README.md` 正由另一处在改，**当前规模口径以本节为准**（它是导入前的旧版描述）。
+- 题库：`server/resources/quizbank/` 为**一章节一文件** `ch01.json`…`ch08.json`（共 684 题，每个 kp 恰好 3 题）。
+  `app/routes/quiz.py` 的 `load_bank()` 支持两种形态 —— 有文件级 `grade_level` 的旧形态，
+  与有 `chapter` 的章分片（逐题按 kp_id 后缀 `grade_from_kp_id()` 推学段）。**新库只有后者。**
+- 代码模板：`server/resources/code-templates/` 只有 **3 份、都是初中**（`prog-variable-jr` / `prog-loop-jr` / `prog-list-jr`）——
+  只有第 8 章「编程实践」配有模板（源库是通识概念课，没有编程内容）。
+- 动画模板 **8 份**（`server/resources/templates/`），`kp_ids` 已重挂到新知识点。
 - 范围裁剪：核心只做 4 种交互（对话问答、动画讲解、编程环境、游戏化练习）；**绘本生成、多模态教学资源推荐明确砍掉**。
   **不引入 `pi-subagents`**（非官方第三方包；Pi 官方哲学即「No sub-agents」），SubAgent 用自有 Extension 实现。
 
@@ -426,7 +451,7 @@ uv run python scripts/export_openapi.py              # 导出 OpenAPI → 生成
 uv run python scripts/make_brand_icons.py            # 从 logos/ 生成打包图标 + 学段 logo（改了 logo 就跑）
 
 # 后端打包（--onedir，不用 onefile）——统一走脚本，不要手敲 pyinstaller
-uv run python scripts/build_server.py                # 建库 + 打包 + 24 项产物自检（含指纹新鲜度）
+uv run python scripts/build_server.py                # 建库 + 打包 + 26 项产物自检（含指纹新鲜度）
 uv run python scripts/build_server.py --verify       # 只自检已有产物（产物过期会**响亮失败**）
 uv run python scripts/build_server.py --if-stale     # 产物已是当前源码打的就秒退（前端构建链用它）
 uv run python scripts/build_info.py --json           # 看源码指纹 / commit / 构建时间
@@ -461,7 +486,7 @@ npm run check:server:packaged     # 查**已装进安装包**的那一份
 > ⚠️ 重打前先关掉正在运行的打包版，否则 `dist/win-unpacked` 的文件被占用删不掉
 > （报 `Device or resource busy`）。
 >
-> 守卫：`desktop/tests/build-pipeline.test.ts`（G20-1…G20-8）+ `server/tests/test_build_info.py`（23 条）。
+> 守卫：`desktop/tests/build-pipeline.test.ts`（G20-1…G20-8）+ `server/tests/test_build_info.py`（25 条）。
 
 **纪律**：关卡不过不进下一阶段；每天结束做一次 git 提交（写清「票号 + 产出」）；
 每完成一步跑一次 `npm run typecheck`（契约漂移的第一道防线，不要攒到最后修）；
