@@ -51,6 +51,52 @@ def model_files_present(model_dir: str | Path | None = None) -> bool:
     return root.is_dir() and any(root.rglob("*.onnx"))
 
 
+def find_symlinks(root: str | Path) -> list[Path]:
+    """列出目录树里的**符号链接**（没有就回空表；目录不存在也回空表）。
+
+    打包链用它做一道**前置断言**：带符号链接的模型目录会让 7-Zip 硬失败
+    （见 :func:`materialize_symlinks`），所以「一个链接都没有」是可判定的。
+    """
+    base = Path(root)
+    if not base.is_dir():
+        return []
+    try:
+        return [p for p in base.rglob("*") if p.is_symlink()]
+    except OSError:  # pragma: no cover - 权限/竞态
+        return []
+
+
+def materialize_symlinks(root: str | Path) -> int:
+    """把模型目录里的**符号链接换成实体文件**（幂等；返回替换条数）。
+
+    ★★ 为什么必须有这一步（CI 实测，见 pitfalls P-107）：
+    HuggingFace 的缓存默认**用符号链接**把 ``snapshots/<rev>/x.json`` 指向 ``blobs/<hash>``。
+    **能不能建链接取决于权限**：
+
+      - 开发机（非管理员）建不了 → HF 老老实实复制实体文件 → 一切正常；
+      - GitHub runner **是管理员** → 真建了符号链接 → 打包时 7-Zip 把链接当成
+        「目录不存在」而**中止整个 zip/nsis 打包**：
+        ``WARNING: The directory name is invalid.`` +
+        ``.\\…\\snapshots\\…\\config.json\\ : The directory name is invalid.``
+        （⚠️ 路径末尾那个反斜杠是「被当成目录」的指纹。）
+
+    PyInstaller 会**原样搬运**这些链接进 onedir 产物，所以问题一定在打包链上暴露。
+
+    做法：逐个读链接指向的真文件、写成普通文件、删链接。实体文件原样跳过，
+    因此对「本来就是实体」的目录是零成本 no-op（开发机即如此）。
+    """
+    replaced = 0
+    for path in find_symlinks(root):
+        try:
+            data = path.resolve(strict=True).read_bytes()
+            path.unlink()
+            path.write_bytes(data)
+            replaced += 1
+        except OSError as exc:  # 单个条目坏掉不该让整步失败（后面还有前置断言兜）
+            logger.warning("无法实体化符号链接 %s：%s", path, exc)
+    return replaced
+
+
 # --------------------------------------------------------------------------- #
 # 本地：fastembed
 # --------------------------------------------------------------------------- #

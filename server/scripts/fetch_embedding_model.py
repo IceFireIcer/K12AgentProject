@@ -33,7 +33,11 @@ sys.path.insert(0, str(ROOT))
 
 from app.config import EMBEDDING_DIM, EMBEDDING_MODEL_DIR, EMBEDDING_MODEL_ID  # noqa: E402
 from app.console import install_utf8_stdio  # noqa: E402
-from app.rag.embedder import model_files_present, resolve_model_dir  # noqa: E402
+from app.rag.embedder import (  # noqa: E402
+    materialize_symlinks,
+    model_files_present,
+    resolve_model_dir,
+)
 
 install_utf8_stdio()
 
@@ -109,6 +113,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"目标目录 = {target}")
 
     if not args.force and verify(target):
+        # ★★ 幂等短路**也要**做一次去链接：老目录可能是上一版留下的（那时还没有本步），
+        #    而带符号链接的副本会让 CI 打包在 7-Zip 那一步硬失败（见 materialize_symlinks）。
+        materialize_symlinks(target)
         print("[跳过] 模型已就位且维度正确（幂等：不重复下载）")
         return 0
 
@@ -128,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # ★ 下载之后**必须**去链接：HF 在有权限的机器上（如 CI runner）会建符号链接。
+    materialize_symlinks(target)
     return 0 if verify(target) else 1
 
 

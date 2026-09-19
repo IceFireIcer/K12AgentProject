@@ -107,6 +107,34 @@ datas = [
 #   这里写成显式目标而不是整个目录，顺带杜绝把 build/ 里别的中间产物带进包。
 datas.append((str(BUNDLED_KB_STAGING), str(BUNDLED_KB_RELATIVE.parent)))
 
+# ---------------------------------------------------------------------------
+# ★★ 模型目录里的**符号链接必须清零**（前置断言，不是「顺手修一下」）
+#
+# 根因（CI 实测，见 pitfalls P-107）：HF 缓存默认用符号链接指向 blobs/，
+# 而**能不能建链接取决于权限** —— 开发机（非管理员）建不了所以是实体文件，
+# CI runner（管理员）建了链接 → PyInstaller 把链接原样搬进 onedir →
+# 7-Zip 把链接当「目录不存在」→ **中止整个 zip/nsis 打包**。
+#
+# 为什么在 spec 里再查一次（而不是只靠 fetch 脚本）：
+#   ① spec 是**打包的必经之路**，无论模型从哪来（联网下载 / --source 复制 /
+#      CI 缓存恢复）都会经过这里 —— 缓存恢复尤其绕过了 fetch 的修复逻辑；
+#   ② 断言失败立即 **raise**，而不是打一个「包里有链接、装完跑不起来」的包。
+# 修复动作放在这里而不是只报错：实体化是幂等且无损的（把链接换成它指向的内容）。
+# ---------------------------------------------------------------------------
+from app.rag.embedder import find_symlinks, materialize_symlinks  # noqa: E402
+
+_MODEL_ROOT = ROOT / "resources" / "models"
+_fixed = materialize_symlinks(_MODEL_ROOT)
+if _fixed:
+    print(f"[spec] {_fixed} 个符号链接已实体化（打包器不认链接）")
+_remaining = find_symlinks(_MODEL_ROOT)
+if _remaining:
+    raise SystemExit(
+        f"[spec][FATAL] models/ 下仍有 {len(_remaining)} 个符号链接，"
+        f"7-Zip 打包会失败。首个：{_remaining[0]}"
+    )
+print(f"[spec] models/ 无符号链接（{'实体化 ' + str(_fixed) + ' 个后' if _fixed else '本来就干净'}）")
+
 datas += _pkg_datas
 
 
