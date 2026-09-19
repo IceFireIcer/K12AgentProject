@@ -1,9 +1,0 @@
-# UI/ 本地产物（仓库根的 .gitignore 也覆盖了 dist/ 与 node_modules/，
-# 这里再声明一次是为了让「在这个目录里改东西」的人一眼看到什么不该提交）
-
-# 验收截图的工作目录：改造后逐页实拍核对用的，不是交付物
-.shots/
-
-node_modules/
-dist/
-*.tsbuildinfo
