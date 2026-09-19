@@ -830,6 +830,121 @@ class ChapterListResponse(CamelModel):
     with_progress: bool = False
 
 
+class KnowledgePointItem(CamelModel):
+    """教材里**一个知识点**的一行（教材知识库页的表格）。
+
+    ★ 与 :class:`ChapterInfo` 的关系：那个是「一章 = 多个知识点」，这个是「一个知识点 = 一行」。
+    表格要按知识点列，所以单开一个模型，而不是让后端把 ``ChapterInfo.kp_ids`` 展开成
+    「前端需要的样子」—— 拆解属于展示逻辑，不该由数据层代劳。
+    """
+
+    kp_id: str
+    name: str
+    grade_level: GradeLevel
+    chapter_title: str = ""
+    #: 内容类型：``concept`` / ``principle`` / ``practice`` / ``ethics`` / ``project``
+    content_type: str = ""
+    #: 该知识点在 kb 里的 chunk 总数（父子块都算）
+    chunk_count: int = 0
+    #: 该知识点是否有向量（``false`` = 该行只能靠 FTS/大纲命中，检索质量会降档）
+    embedded: bool = False
+
+
+class KnowledgePointListResponse(CamelModel):
+    """``GET /api/knowledge/points``：知识点清单（可按学段过滤）。"""
+
+    grade_level: GradeLevel | None = None
+    points: list[KnowledgePointItem] = Field(default_factory=list)
+
+
+class KnowledgeStats(CamelModel):
+    """``GET /api/knowledge/stats``：知识库体检数字（统计卡 + 版本信息）。
+
+    ★ 这些数字**必须由后端算**：它们来自 ``kb.sqlite`` 的表行数，
+      前端既读不到 SQLite（架构硬边界：数据域只在 Python），也不该自己数一遍已知的行。
+    """
+
+    #: 各表行数：``kp`` / ``parent_chunk`` / ``child_chunk`` / ``chunk_vec`` /
+    #: ``chunk_fts`` / ``dependencies``
+    counts: dict[str, int] = Field(default_factory=dict)
+    #: 有知识点数据的学段（按学段顺序）
+    grade_levels: list[GradeLevel] = Field(default_factory=list)
+    #: 当前生效的知识库文件路径。**只用于界面显示「用的是哪一份」**
+    #: （不含学生标识；路径由服务端自己决定，渲染进程只读不回传）。
+    kb_path: str = ""
+    #: 这份 kb 是**用户重建**的（true）还是随包分发的只读资产（false）。
+    #: ★ 学生重建完最想确认的就是「我刚才那次到底生效了没」，所以显式给出来。
+    user_rebuilt: bool = False
+    #: 嵌入维度（``EMBEDDING_DIM``；与 vec0 表维度不符时检索会整体降级）
+    embedding_dim: int = 512
+    #: 嵌入模型 id（如 ``BAAI/bge-small-zh-v1.5``）
+    embedding_model: str = ""
+    #: 向量引擎是否可用（``false`` = 只能靠 FTS/大纲降级）
+    vec_ready: bool = False
+
+
+class KnowledgeImportRequest(CamelModel):
+    """``POST /api/knowledge/import``：导入一份教材 Markdown。
+
+    ★ 为什么是**正文 JSON**而不是 multipart 文件上传：内容只有一份 Markdown 文本，
+      走 multipart 要给 sidecar 加 ``python-multipart`` 依赖、还要让主进程处理二进制，
+      换来的只是「省一次字符串传递」。渲染进程已经用 ``file.text()`` 读到了正文。
+    """
+
+    #: 文件名（**决定 kp_id**：约定「文件名 = kp_id.md」，与建库校验同一条规则）
+    file_name: str = Field(min_length=1, max_length=200)
+    #: Markdown 全文（含 ``---`` 文件头）
+    markdown: str = Field(min_length=1, max_length=400_000)
+    #: 期望学段。给定时必须与文件头 ``grade_level`` 一致（防止把初中的内容挂到高中）
+    grade_level: GradeLevel | None = None
+    #: 导入后是否立刻重建索引（默认 true：不重建的话这份内容检索不到，等于没导入）
+    rebuild: bool = True
+
+
+class KnowledgeImportResponse(CamelModel):
+    """导入回执。
+
+    ``ok=false`` 时 ``problems`` **逐条**列出未通过的原因（格式错 / 超纲术语 /
+    语气错位 / 跨学段搬运）—— 这类错误必须能定位到具体是哪一条，
+    只回一句「导入失败」等于让学生自己猜。
+    """
+
+    ok: bool = False
+    #: 校验通过后的知识点 id（``ok=false`` 时为 ``null``）
+    kp_id: str | None = None
+    #: 落盘的相对位置（**不含完整用户目录结构**）
+    saved_as: str | None = None
+    #: 未通过的原因（``ok=true`` 时为空）
+    problems: list[str] = Field(default_factory=list)
+    #: 重建结果（``rebuild=false`` 或失败时为 ``null``）
+    stats: KnowledgeStats | None = None
+    #: 给界面直接显示的一句话结论
+    message: str = ""
+
+
+class KnowledgeRebuildResponse(CamelModel):
+    """``POST /api/knowledge/rebuild``：重建索引的回执。
+
+    ★ 重建是**重活**（分块 + ONNX 嵌入整份教材，秒级到十几秒），所以：
+      ① 端点用线程池跑，不阻塞事件循环；
+      ② 回执带 ``elapsed_ms``（界面要显示「用时 3.2s」，否则看起来像卡死）；
+      ③ 失败必须给出**可读中文原因**（模型缺失 / 维度不符 / 教材格式错），而不是一个 500
+         —— 界面有专门的失败横幅要显示它。
+    """
+
+    ok: bool = False
+    #: 重建后的统计（``ok=false`` 时为 ``null``）
+    stats: KnowledgeStats | None = None
+    #: 重建耗时（毫秒）
+    elapsed_ms: float = 0.0
+    #: 本次重建涉及的教材文件数
+    documents: int = 0
+    #: 依赖边数
+    dependencies: int = 0
+    #: 失败原因 / 成功提示（界面直接显示）
+    message: str = ""
+
+
 class GraphNode(CamelModel):
     """依赖图里的一个知识点（学习地图的节点）。"""
 
@@ -1192,6 +1307,13 @@ CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     # 学习档案：章节 / 依赖图全览 / 错题本 / 学习报告
     ChapterInfo,
     ChapterListResponse,
+    # 教材知识库：知识点清单 / 体检数字 / 导入 / 重建
+    KnowledgePointItem,
+    KnowledgePointListResponse,
+    KnowledgeStats,
+    KnowledgeImportRequest,
+    KnowledgeImportResponse,
+    KnowledgeRebuildResponse,
     GraphNode,
     GraphEdge,
     GraphOverview,

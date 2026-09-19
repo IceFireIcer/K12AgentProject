@@ -144,6 +144,30 @@ def per_user_kb_path(data_dir: str | Path | None = None) -> Path:
     return base / "shared" / "kb.sqlite"
 
 
+def user_rebuild_marker_path(data_dir: str | Path | None = None) -> Path:
+    """「用户自己重建过知识库」的**标记文件**：``<data-dir>/shared/kb.rebuilt``。
+
+    ★★ 为什么需要这个标记（而不是简单地把 per-user 排在 bundled 前面）
+    ------------------------------------------------------------------
+    两级 kb 的优先级原本是「bundled 优先于 per-user」，理由很实在：升级后
+    用户目录里那份旧库不该盖住新版本随包分发的新教材（见
+    ``tests/test_kb_bundling.py::test_bundled_wins_over_per_user``）。
+
+    但教材导入页的「重建索引」恰恰要写 per-user 那一份。**若不区分这两件事**，
+    打包态下用户重建完会发现「检索到的还是老教材」—— 功能看起来成功，实际被遮蔽。
+
+    所以用**标记文件**把「用户显式重建过」这个事实记下来：
+      - 没有标记 → 维持 bundled 优先（升级路径照旧，回归测试不动）；
+      - 有标记   → per-user 优先（用户刚导入的教材立刻生效）。
+
+    标记是**文件存在性**而不是配置项：重建成功才写，删掉它就退回随包库，
+    不需要额外的手工清理入口。``/api/knowledge/rebuild`` 成功时写它，
+    检索层据此让新库生效 —— 两处必须同时改，否则重建完不生效。
+    """
+    base = Path(data_dir) if data_dir else resolve_data_dir(None)
+    return base / "shared" / "kb.rebuilt"
+
+
 def default_kb_path(data_dir: str | Path | None = None) -> Path:
     """**kb.sqlite 的唯一解析入口** —— 四级顺序，从「最权威」到「最兜底」：
 
@@ -153,32 +177,41 @@ def default_kb_path(data_dir: str | Path | None = None) -> Path:
     ① 环境变量     ``K12_KB_PATH`` 显式覆盖（开发 / 演示「故意弄坏那一份」用）。
                     **只要设了就无条件生效**，不再看后面三级 —— 显式覆盖必须能压过一切，
                     否则「指向坏库复现降级」这个演示手法会失效。
-    ② 随包只读库   ``app.config.bundled_kb_path()``：**随应用一起分发**的版本化内容资产。
+    ② 用户重建库   ``<data-dir>/shared/kb.sqlite`` —— **仅在标记文件存在时**生效
+                    （见 :func:`user_rebuild_marker_path`）。学生刚导入的教材必须能立刻检索到。
+    ③ 随包只读库   ``app.config.bundled_kb_path()``：**随应用一起分发**的版本化内容资产。
                     这是**新机器首跑走的那一条**（打包态在安装目录 ``_internal/resources/kb/``）。
-                    **必须排在 per-user 之前**：否则用户目录里一旦有一份旧库
-                    （上一次重建留下的），刚装的新版本反倒用不上自带的新内容。
-    ③ 每用户库     ``<data-dir>/shared/kb.sqlite``：开发态默认落点，也是用户**重建**的落点。
-    ④ 缺席        前三级都没有 → 返回③的路径（可能不存在）。**不抛异常**：
+                    排在「未被重建过的用户库」之前：否则用户目录里一旦有一份旧库
+                    （上一次建库留下的），刚装的新版本反倒用不上自带的新内容。
+    ④ 每用户库     ``<data-dir>/shared/kb.sqlite``：开发态默认落点，也是**重建**落点。
+    ⑤ 缺席        前四级都没有 → 返回④的路径（可能不存在）。**不抛异常**：
                     调用方（:meth:`RagService.search`）会诚实降级到 ``outline`` 并写日志。
                     「缺库」是部署问题，不该把编排层拽进来处理。
     ============ ================================================================
 
-    ★ **只读语义**：②是随安装包分发的资产，**绝不允许写入**（安装目录在 Windows 上
+    ★ **只读语义**：③是随安装包分发的资产，**绝不允许写入**（安装目录在 Windows 上
     普通用户本来就写不了；即便写得动也不许 —— 见 ``app/store/connections.py`` 的
-    ``readonly=True``）。③ 才是可写的那一份。构建期由 ``scripts/build_server.py`` 产出②。
+    ``readonly=True``）。②④ 是同一路径（可写的那一份）。构建期由
+    ``scripts/build_server.py`` 产出③。
     """
     # ① 显式覆盖：最高优先级
     override = os.environ.get(KB_PATH_ENV)
     if override:
         return Path(override).expanduser()
 
-    # ② 随包只读库：新机器首跑的主路径
+    per_user = per_user_kb_path(data_dir)
+
+    # ② 用户显式重建过 → 那份就是权威（否则「重建完检索到的还是老教材」）
+    if user_rebuild_marker_path(data_dir).exists():
+        return per_user
+
+    # ③ 随包只读库：新机器首跑的主路径
     bundled = bundled_kb_path()
     if bundled.exists():
         return bundled
 
-    # ③ 每用户库（dev / 重建）→ ④ 缺席时也返回它，由调用方诚实降级
-    return per_user_kb_path(data_dir)
+    # ④ 每用户库（dev / 重建）→ ⑤ 缺席时也返回它，由调用方诚实降级
+    return per_user
 
 
 class RagService:

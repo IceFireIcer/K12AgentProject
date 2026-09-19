@@ -304,6 +304,113 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/knowledge/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 导入一份教材 Markdown（严格校验 → 落盘 → 可选重建）
+         * @description 导入一份教材 Markdown。
+         *
+         *     **校验只有一处**（``library.parse_document``）：格式、必需字段、``content_type`` 白名单、
+         *     「文件名 = kp_id.md」，全都走建库时那一份实现 —— 若这里另写一份，
+         *     迟早出现「导入时通过、建库时失败」这种最难查的不一致。
+         *
+         *     之后再过 **学段错位自检**（``checker.audit_library``）：超纲术语 / 语气错位 / 跨学段搬运。
+         *     它不通过时**拒收**并逐条回报原因 —— 把初中的语气搬到高中是最典型的静默质量事故。
+         *
+         *     ★ 校验/审计失败回 **200 + ``ok=false``**（而不是 4xx）：失败原因是**内容问题**，
+         *       界面要在同一张卡片里逐条列出它们，不是「请求本身非法」。
+         *       这与「学段名拼错 → 422」是两回事（那是调用方写错了参数）。
+         *
+         *     ★ 导入**不覆盖**同名文件以外的任何东西；重建是**整库重建**（``build()`` 先清表再写），
+         *       所以导入后看到的是「随包教材 + 用户导入」的合并结果，而不是只剩导入的那一份。
+         */
+        post: operations["import_knowledge_api_knowledge_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/knowledge/points": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 知识点清单（教材知识库页的表格；可按学段过滤）
+         * @description 列出知识点（每个点一行：学段 / 章节 / 类型 / chunk 数 / 是否有向量）。
+         *
+         *     - 学段名非法 → **422**（与 ``list_chapters`` 同口径：不回空表假装没编教材）；
+         *     - 知识库缺失 → **503**。
+         */
+        get: operations["list_points_api_knowledge_points_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/knowledge/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 重建索引（分块 + 嵌入 + FTS + 依赖图）
+         * @description 重建整库索引（幂等：``build()`` 先清表再写）。
+         *
+         *     - 嵌入模型缺失 → ``ok=false`` + 可读中文（**不是 500**）：界面有失败横幅要显示它；
+         *     - 教材格式错 → 同样 ``ok=false`` + 原因；
+         *     - 成功 → 写**标记文件**（让用户库优先于随包库）+ 清理依赖图缓存 + 回统计数字。
+         *
+         *     ★ 重建是同步重活（分块 + ONNX 嵌入），跑在**线程池**里：直接 await 会阻塞事件循环，
+         *       把整台 sidecar 卡住（连 ``/health`` 都不响应，Electron 会以为它挂了）。
+         */
+        post: operations["rebuild_knowledge_api_knowledge_rebuild_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/knowledge/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 知识库体检数字（统计卡 / 版本信息 / 向量可用性）
+         * @description 知识库规模与状态。
+         *
+         *     - 知识库缺失 → **503**（与其它两个读接口同口径：这页本来就是来看库的，
+         *       回一份全 0 的统计会让人以为「库是空的」，而实际是「库不在」）。
+         */
+        get: operations["knowledge_stats_api_knowledge_stats_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/profile/{student_id}": {
         parameters: {
             query?: never;
@@ -1692,6 +1799,181 @@ export interface components {
          */
         IpcEventName: "delta" | "citation" | "payload" | "blocked" | "done" | "error";
         /**
+         * KnowledgeImportRequest
+         * @description ``POST /api/knowledge/import``：导入一份教材 Markdown。
+         *
+         *     ★ 为什么是**正文 JSON**而不是 multipart 文件上传：内容只有一份 Markdown 文本，
+         *       走 multipart 要给 sidecar 加 ``python-multipart`` 依赖、还要让主进程处理二进制，
+         *       换来的只是「省一次字符串传递」。渲染进程已经用 ``file.text()`` 读到了正文。
+         */
+        KnowledgeImportRequest: {
+            /** Filename */
+            fileName: string;
+            /** Gradelevel */
+            gradeLevel?: ("primary_low" | "primary_high" | "junior" | "senior") | null;
+            /** Markdown */
+            markdown: string;
+            /**
+             * Rebuild
+             * @default true
+             */
+            rebuild: boolean;
+        };
+        /**
+         * KnowledgeImportResponse
+         * @description 导入回执。
+         *
+         *     ``ok=false`` 时 ``problems`` **逐条**列出未通过的原因（格式错 / 超纲术语 /
+         *     语气错位 / 跨学段搬运）—— 这类错误必须能定位到具体是哪一条，
+         *     只回一句「导入失败」等于让学生自己猜。
+         */
+        KnowledgeImportResponse: {
+            /** Kpid */
+            kpId?: string | null;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /**
+             * Ok
+             * @default false
+             */
+            ok: boolean;
+            /** Problems */
+            problems?: string[];
+            /** Savedas */
+            savedAs?: string | null;
+            stats?: components["schemas"]["KnowledgeStats"] | null;
+        };
+        /**
+         * KnowledgePointItem
+         * @description 教材里**一个知识点**的一行（教材知识库页的表格）。
+         *
+         *     ★ 与 :class:`ChapterInfo` 的关系：那个是「一章 = 多个知识点」，这个是「一个知识点 = 一行」。
+         *     表格要按知识点列，所以单开一个模型，而不是让后端把 ``ChapterInfo.kp_ids`` 展开成
+         *     「前端需要的样子」—— 拆解属于展示逻辑，不该由数据层代劳。
+         */
+        KnowledgePointItem: {
+            /**
+             * Chaptertitle
+             * @default
+             */
+            chapterTitle: string;
+            /**
+             * Chunkcount
+             * @default 0
+             */
+            chunkCount: number;
+            /**
+             * Contenttype
+             * @default
+             */
+            contentType: string;
+            /**
+             * Embedded
+             * @default false
+             */
+            embedded: boolean;
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Kpid */
+            kpId: string;
+            /** Name */
+            name: string;
+        };
+        /**
+         * KnowledgePointListResponse
+         * @description ``GET /api/knowledge/points``：知识点清单（可按学段过滤）。
+         */
+        KnowledgePointListResponse: {
+            /** Gradelevel */
+            gradeLevel?: ("primary_low" | "primary_high" | "junior" | "senior") | null;
+            /** Points */
+            points?: components["schemas"]["KnowledgePointItem"][];
+        };
+        /**
+         * KnowledgeRebuildResponse
+         * @description ``POST /api/knowledge/rebuild``：重建索引的回执。
+         *
+         *     ★ 重建是**重活**（分块 + ONNX 嵌入整份教材，秒级到十几秒），所以：
+         *       ① 端点用线程池跑，不阻塞事件循环；
+         *       ② 回执带 ``elapsed_ms``（界面要显示「用时 3.2s」，否则看起来像卡死）；
+         *       ③ 失败必须给出**可读中文原因**（模型缺失 / 维度不符 / 教材格式错），而不是一个 500
+         *          —— 界面有专门的失败横幅要显示它。
+         */
+        KnowledgeRebuildResponse: {
+            /**
+             * Dependencies
+             * @default 0
+             */
+            dependencies: number;
+            /**
+             * Documents
+             * @default 0
+             */
+            documents: number;
+            /**
+             * Elapsedms
+             * @default 0
+             */
+            elapsedMs: number;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /**
+             * Ok
+             * @default false
+             */
+            ok: boolean;
+            stats?: components["schemas"]["KnowledgeStats"] | null;
+        };
+        /**
+         * KnowledgeStats
+         * @description ``GET /api/knowledge/stats``：知识库体检数字（统计卡 + 版本信息）。
+         *
+         *     ★ 这些数字**必须由后端算**：它们来自 ``kb.sqlite`` 的表行数，
+         *       前端既读不到 SQLite（架构硬边界：数据域只在 Python），也不该自己数一遍已知的行。
+         */
+        KnowledgeStats: {
+            /** Counts */
+            counts?: {
+                [key: string]: number;
+            };
+            /**
+             * Embeddingdim
+             * @default 512
+             */
+            embeddingDim: number;
+            /**
+             * Embeddingmodel
+             * @default
+             */
+            embeddingModel: string;
+            /** Gradelevels */
+            gradeLevels?: ("primary_low" | "primary_high" | "junior" | "senior")[];
+            /**
+             * Kbpath
+             * @default
+             */
+            kbPath: string;
+            /**
+             * Userrebuilt
+             * @default false
+             */
+            userRebuilt: boolean;
+            /**
+             * Vecready
+             * @default false
+             */
+            vecReady: boolean;
+        };
+        /**
          * LearningActivity
          * @enum {string}
          */
@@ -2927,6 +3209,111 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_knowledge_api_knowledge_import_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["KnowledgeImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeImportResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_points_api_knowledge_points_get: {
+        parameters: {
+            query?: {
+                /** @description 按学段过滤；不带给全部四个学段 */
+                grade_level?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgePointListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rebuild_knowledge_api_knowledge_rebuild_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeRebuildResponse"];
+                };
+            };
+        };
+    };
+    knowledge_stats_api_knowledge_stats_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KnowledgeStats"];
                 };
             };
         };

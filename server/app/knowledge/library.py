@@ -158,7 +158,35 @@ def split_sections(body: str) -> tuple[Section, ...]:
 def load_document(path: str | Path) -> KnowledgeDoc:
     """读一个知识点 Markdown 并做**严格校验**。"""
     p = Path(path)
-    meta, body = parse_front_matter(p.read_text(encoding="utf-8"))
+    # 目录名（`junior`）→ 学段值（`junior`）：用于校验「文件头学段与所在目录一致」。
+    # ⚠️ 只对**四个学段目录**做这条校验；导入路径（`import_document`）没有目录上下文的
+    #    约束（它按学生指定的学段落盘），所以这里把期望值算出来再传下去。
+    return parse_document(
+        p.read_text(encoding="utf-8"),
+        file_name=p.name,
+        expected_grade=GRADE_DIRS.get(p.parent.name),
+    )
+
+
+def parse_document(
+    raw: str,
+    *,
+    file_name: str,
+    expected_grade: str | None = None,
+) -> KnowledgeDoc:
+    """从**一段 Markdown 文本**解析并严格校验（`:func:`load_document` 的无文件版本）。
+
+    存在的理由：教材导入（``POST /api/knowledge/import``）拿到的是**已上传的正文**，
+    此刻它还没有落盘。如果导入端自己再写一份校验，两份规则必然分叉 ——
+    于是「导入时通过、建库时失败」这类最难查的不一致就出现了。
+    所以校验**只有这一处**，文件版本只是它的薄包装。
+
+    ``expected_grade`` 给定时校验「文件头学段与目录一致」（见调用点）；
+    导入路径传 ``None``（没有目录可依）。
+    """
+    # 装作一个路径只为拿到 `.name` 与 `.stem`（错误信息与 kp_id==文件名 那条约定要用）
+    p = Path(file_name)
+    meta, body = parse_front_matter(raw)
 
     missing = [k for k in REQUIRED_META if not meta.get(k)]
     if missing:
@@ -175,10 +203,9 @@ def load_document(path: str | Path) -> KnowledgeDoc:
         raise KnowledgeFormatError(f"{p.name}: grade_level={grade!r} 不在 {GRADE_LEVELS}")
 
     # 目录名与文件头学段必须一致 —— 学段错位是高危错误（检索隔离全按它走）
-    expected = GRADE_DIRS.get(p.parent.name)
-    if expected is not None and expected != grade:
+    if expected_grade is not None and expected_grade != grade:
         raise KnowledgeFormatError(
-            f"{p.name}: 文件头 grade_level={grade} 与所在目录 {p.parent.name}（应为 {expected}）不一致"
+            f"{p.name}: 文件头 grade_level={grade} 与所在目录（应为 {expected_grade}）不一致"
         )
 
     if p.stem != meta["kp_id"]:
