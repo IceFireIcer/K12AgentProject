@@ -475,10 +475,11 @@ npm run check:server:packaged     # 查**已装进安装包**的那一份
 ```bash
 cd desktop
 npm run dev                     # 另一个终端里带调试端口起：K12_DEBUG_PORT=9222 npm run dev
-npm run ux                      # ★ 体检 21 项：键盘/滚动/触控目标/破坏性操作/运行期健康
+npm run ux                      # ★ 对话页体检 23 项：键盘/滚动/触控目标/浮层几何/破坏性操作/运行期健康
 npm run ux:scroll               # 滚动行为 7 项（跟随 / 停住 / 回到最新 / 发消息必跟随）
 npm run ux:busy                 # 忙时发送（排队是否可见、是否自动发出）
 npm run ux:attribute            # 滚动掉队归因（B1 红了先跑它，看是哪类内容掉队）
+npm run ux:pages                # ★ 逐页体检 28 项（动画/编程/闯关/档案/知识库/依赖图/设置）
 npm run ux:reload               # ★ 跑探针前先重载：改过 onMounted 后 HMR 不会重跑它
 ```
 

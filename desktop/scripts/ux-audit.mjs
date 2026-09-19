@@ -494,6 +494,72 @@ async function main() {
     }
   }
 
+  /* ── H. 浮层不压住可交互元素（实测踩到过） ──────────────────── */
+  console.log('\n\u001b[1mH. 浮动元素会不会挡住别的东西\u001b[0m')
+
+  {
+    // ★ 为什么必须专门测这个：`回到最新` 初版用 `bottom: 92px` 这种**魔数**定位，
+    //   实测它的下边缘（810px）压住了输入条上边缘（793px）—— **重叠 17px**。
+    //   数字检查（「按钮存在吗」「点得动吗」）全都通过，只有量几何关系才发现。
+    //   学生体感：想点输入框却点到按钮，然后被滚到底部，一脸茫然。
+    await cdp.evaluate(`(() => {
+      const el = document.querySelector('[data-testid="chat-log"]')
+      el.scrollTop = Math.max(0, el.scrollTop - 600)
+      el.dispatchEvent(new Event('scroll', { bubbles: true }))
+      return true
+    })()`)
+    await sleep(600)
+
+    const geometry = await cdp.evaluate(`(() => {
+      const btn = document.querySelector('[data-testid="chat-jump-latest"]')
+      if (!btn) return { present: false }
+      const b = btn.getBoundingClientRect()
+      // 底部区里所有「可交互 + 可见」的元素：这些都不该被浮层压住
+      const targets = Array.from(
+        document.querySelectorAll(
+          '[data-testid="composer-input"], [data-testid="composer-send"], .cp__model, [data-testid="chat-queued"]'
+        )
+      ).map((el) => {
+        const r = el.getBoundingClientRect()
+        return {
+          id: el.getAttribute('data-testid') || el.className,
+          top: Math.round(r.top), bottom: Math.round(r.bottom),
+          left: Math.round(r.left), right: Math.round(r.right), h: Math.round(r.height)
+        }
+      }).filter((t) => t.h > 0)
+
+      const overlaps = targets.filter(
+        (t) => b.left < t.right && b.right > t.left && b.top < t.bottom && b.bottom > t.top
+      )
+      return {
+        present: true,
+        button: { top: Math.round(b.top), bottom: Math.round(b.bottom), left: Math.round(b.left), right: Math.round(b.right) },
+        // ⚠️ 这里**不能**用模板字符串：整个求值表达式本身就在反引号里（会提前终止）
+        overlaps: overlaps.map((t) => t.id + '(' + t.top + '-' + t.bottom + ')'),
+        targets
+      }
+    })()`)
+
+    if (!geometry.present) {
+      console.log('\u001b[2m  [SKIP] 「回到最新」没出现（内容不够长？）\u001b[0m')
+    } else {
+      check('H1', '「回到最新」不压住输入框 / 发送键 / 待发送条', geometry.overlaps.length === 0,
+        geometry.overlaps.length
+          ? `与这些元素重叠：${geometry.overlaps.join('、')}（按钮 ${geometry.button.top}–${geometry.button.bottom}）`
+          : `按钮 ${geometry.button.top}–${geometry.button.bottom}，底部元素均在下方`,
+        '浮层压住输入框时，学生想点输入框会点到按钮，然后被滚到底部 —— 他不知道发生了什么')
+
+      // ★ 补一条「有呼吸感」的检查：仅仅「不重叠」还不够 ——
+      //   贴着边（间距 0~2px）在视觉上就是「粘在一起」，而且 DPI 取整后随时可能变成重叠。
+      const gap = Math.min(
+        ...geometry.targets.map((t) => t.top - geometry.button.bottom).filter((g) => g > -Infinity)
+      )
+      check('H2', '浮标与下方控件留有余量（≥4px，不贴边）', gap >= 4,
+        `最小间距 ${gap}px`,
+        '贴边在视觉上像「粘住了」，而且 DPI 取整一旦变化就会变成重叠（实测踩到过 17px 重叠）')
+    }
+  }
+
   /* ── F. 运行期健康 ───────────────────────────────────────────── */
   console.log('\n\u001b[1mF. 运行期健康\u001b[0m')
 

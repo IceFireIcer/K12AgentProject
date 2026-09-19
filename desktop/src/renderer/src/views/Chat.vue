@@ -478,50 +478,61 @@ const gradeSourceSentence = computed(() => {
         </div>
       </div>
 
-      <!-- 「回到最新」：只有学生**自己翻上去**时才会出现。
-           ★ 它出现的意义正是「不打扰」的配套：停住是为了让他读完旧内容，
-             那么这个按钮就是告诉他「下面还有新的，读完再点」。 -->
-      <Transition name="jump">
-        <button
-          v-if="showJump"
-          class="chat__jump"
-          type="button"
-          data-testid="chat-jump-latest"
-          @click="scrollToBottom"
-        >
-          <ArrowDown :size="15" />
-          回到最新
-        </button>
-      </Transition>
-
-      <!-- 待发送：回答还在生成时学生又发了一条 → 排队，并**看得见**。
-           ★ 这一条的存在就是「不再静默丢弃」的可见证据（见 stores/chat.ts 的 queuedText）：
-             输入框已清空，字在这里；学生知道系统收下了，回答讲完就轮到他。 -->
-      <Transition name="jump">
-        <div v-if="chat.queuedText" class="chat__queued" data-testid="chat-queued">
-          <Clock :size="14" />
-          <span class="chat__queued-text">
-            待发送：<b>{{ chat.queuedText }}</b>
-          </span>
-          <span class="chat__queued-note">回答讲完就发出去</span>
+      <!-- ── 底部区（输入条 + 待发送 + 回到最新）─────────────────────────
+           ★★ 这三样必须**放在同一个定位上下文**里，否则会互相压住。
+           实测踩到过：`回到最新` 用 `bottom: 92px`（相对整个 .chat 定位）时，
+           它的下边缘落在 810px、而输入条的上边缘在 793px —— **重叠 17px**，
+           等于按钮压在输入框的边框上：学生想点输入框却点到按钮（然后被滚到底部，
+           一脸茫然），而输入条一变成多行、高度一变，这个魔数就彻底失效。
+           现在改成：按钮 `bottom: calc(100% + 8px)` 相对**这个 foot 容器**定位 ——
+           永远浮在整个底部区（含待发送条与多行输入条）**之上**，且不依赖任何高度常量。 -->
+      <div class="chat__foot">
+        <!-- 「回到最新」：只有学生**自己翻上去**时才会出现。
+             ★ 它出现的意义正是「不打扰」的配套：停住是为了让他读完旧内容，
+               那么这个按钮就是告诉他「下面还有新的，读完再点」。 -->
+        <Transition name="jump">
           <button
+            v-if="showJump"
+            class="chat__jump"
             type="button"
-            class="chat__queued-cancel"
-            data-testid="chat-queued-cancel"
-            @click="chat.cancelQueued()"
+            data-testid="chat-jump-latest"
+            @click="scrollToBottom"
           >
-            取消
+            <ArrowDown :size="15" />
+            回到最新
           </button>
-        </div>
-      </Transition>
-      <p v-if="chat.queueNotice" class="chat__queued-warn" data-testid="chat-queued-notice">
-        {{ chat.queueNotice }}
-      </p>
+        </Transition>
 
-      <!-- 输入条 -->
-      <div class="chat__composer">
-        <MessageComposer ref="composerRef" @send="onSend" />
+        <!-- 待发送：回答还在生成时学生又发了一条 → 排队，并**看得见**。
+             ★ 这一条的存在就是「不再静默丢弃」的可见证据（见 stores/chat.ts 的 queuedText）：
+               输入框已清空，字在这里；学生知道系统收下了，回答讲完就轮到他。 -->
+        <Transition name="jump">
+          <div v-if="chat.queuedText" class="chat__queued" data-testid="chat-queued">
+            <Clock :size="14" />
+            <span class="chat__queued-text">
+              待发送：<b>{{ chat.queuedText }}</b>
+            </span>
+            <span class="chat__queued-note">回答讲完就发出去</span>
+            <button
+              type="button"
+              class="chat__queued-cancel"
+              data-testid="chat-queued-cancel"
+              @click="chat.cancelQueued()"
+            >
+              取消
+            </button>
+          </div>
+        </Transition>
+        <p v-if="chat.queueNotice" class="chat__queued-warn" data-testid="chat-queued-notice">
+          {{ chat.queueNotice }}
+        </p>
+
+        <!-- 输入条 -->
+        <div class="chat__composer">
+          <MessageComposer ref="composerRef" @send="onSend" />
+        </div>
       </div>
+      <!-- /chat__foot -->
 
       <!-- 本地提示（桥缺失、发送被拒等；这些不是 6 事件里的 error） -->
       <p v-if="chat.localNotice" class="chat__notice" data-testid="local-notice">
@@ -671,14 +682,29 @@ const gradeSourceSentence = computed(() => {
   padding: 0 20px 16px;
 }
 
+/* ── 底部区（回到最新 + 待发送 + 输入条）─────────────────────────────────
+ * ★★ 这个容器存在的唯一理由是**给「回到最新」一个正确的定位上下文**。
+ *   旧写法把按钮直接挂在 `.chat` 上用 `bottom: 92px` —— 那是按「输入条大约 92px 高」
+ *   试出来的魔数，实测它的下边缘落在 810px、而输入条上边缘在 793px，**重叠 17px**：
+ *   按钮压在输入框边框上，学生想点输入框却点到按钮（然后被滚到底，一脸茫然）。
+ *   而且输入条一变成多行、高度一变，魔数就彻底失效。
+ *   现在按钮用 `bottom: calc(100% + 8px)` 相对本容器定位 —— 永远浮在整个底部区之上，
+ *   与输入条实际多高无关。 */
+.chat__foot {
+  position: relative;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+}
+
 /* ── 「回到最新」浮标 ─────────────────────────────────────────────────────
- * 位置：**输入条正上方居中**（离输入框近 = 离学生的下一个动作近），
+ * 位置：底部区**正上方居中**（离输入框近 = 离学生的下一个动作近），
  * 而不是右下角那种社交软件的固定悬浮球 —— 后者会盖住正文末段的字。
  * 尺寸走 34px 高（≥28px 的触控下限，见 ux-audit 的 C1）。 */
 .chat__jump {
   position: absolute;
   left: 50%;
-  bottom: 92px;
+  bottom: calc(100% + 8px);
   transform: translateX(-50%);
   z-index: 3;
   display: inline-flex;

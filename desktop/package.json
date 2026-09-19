@@ -27,6 +27,7 @@
     "ux:scroll": "node scripts/ux-probe-scroll-behavior.mjs",
     "ux:busy": "node scripts/ux-probe-busy-send.mjs",
     "ux:attribute": "node scripts/ux-scroll-attribution.mjs",
+    "ux:pages": "node scripts/ux-pages-audit.mjs",
     "build:server": "node scripts/build-server.mjs",
     "check:server": "node scripts/build-server.mjs --check dist",
     "check:server:packaged": "node scripts/build-server.mjs --check packaged",

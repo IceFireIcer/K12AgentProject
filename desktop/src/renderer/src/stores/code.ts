@@ -79,17 +79,50 @@ export const useCodeStore = defineStore('code', () => {
           // 脚手架就是编辑器的初始内容（学生的改动在 draft 里，不覆盖已有草稿）
           if (draft.value.length === 0) draft.value = template.value.scaffold
         } else {
-          templateError.value = result.message
+          templateError.value = studentFacingTemplateError(result.message)
           template.value = null
         }
       } catch (thrown) {
-        templateError.value = thrown instanceof Error ? thrown.message : String(thrown)
+        templateError.value = studentFacingTemplateError(
+          thrown instanceof Error ? thrown.message : String(thrown)
+        )
       } finally {
         templateLoading.value = false
         templateInFlight = null
       }
     })()
     await templateInFlight
+  }
+
+  /**
+   * ★★ 把「后端/开发者视角的失败原因」翻成**学生看得懂的一句话**。
+   *
+   * 为什么必须在界面这一层做（实测抓到的缺陷）：编程页的默认状态是
+   * 「这个知识点还没有预置模板」—— 后端为此回的是**面向排障**的 404 文案：
+   * ```
+   * 读取失败（HTTP 404）：知识点 'pl-ai-around-me' 还没有预置代码模板。
+   * 现有模板：jr-data-features、…（模板文件：server/resources/code-templates/）。
+   * ```
+   * 一个 10 岁的学生打开编程页，看到的是 **HTTP 状态码 + 内部 kp_id + 服务器上的文件路径**。
+   * 这既像「软件坏了」（他会关掉页面，而不是「换个知识点」），
+   * 又暴露了不该给学生看的内部结构。
+   *
+   * ★ 为什么不改后端文案：那句话对**排障**是有用的（开发/日志里正需要知道有哪些模板、
+   *   目录在哪），而且 `get_code_template` Tool 也会用到同一份错误。
+   *   正确做法是**在渲染层按受众改写** —— 内部细节留在内层，给学生的那层说人话。
+   *
+   * ★ 判据用「像不像技术信息」而不是精确匹配某一句：
+   *   后端文案会变（也可能换成别的 404 原因），而「含 HTTP 状态码 / 路径 / 引号 id」
+   *   这类特征稳定。命中就换成统一的可读文案，并把原文留在控制台（排查时要看）。
+   */
+  function studentFacingTemplateError(raw: string): string {
+    const text = (raw ?? '').trim()
+    const looksTechnical =
+      /HTTP\s*\d{3}|server[\\/]|\/api\/|[A-Za-z]:\\|'[a-z]{2}-[a-z-]+'|kp_id|traceback/i.test(text)
+    if (!looksTechnical) return text.length > 0 ? text : '暂时取不到这道题的代码模板。'
+    // 原文只进控制台（老师/开发者排障要看），界面上不出现
+    console.warn('[coding] 模板读取失败（原始原因，仅排查用）：', text)
+    return '这道题还没有配套的代码模板。换一个知识点试试，或者先让团团用文字讲讲。'
   }
 
   /**

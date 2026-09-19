@@ -446,6 +446,90 @@ a {
   border-radius: var(--k12-r-control);
   font-weight: 600;
 }
+
+/* ── ★★ 触控目标下限（K12 硬要求，见 ux-pages-audit 的检查）───────────────
+ * 为什么统一在这一层做，而不是逐页调：
+ *   逐页体检量出多个页面都有 22–27px 的可点元素 —— 单选框（Element Plus 默认 22px）、
+ *   「拉取模型清单」24px、模型候选 27px……它们分散在五六个页面里，
+ *   一处处改既会漏，也会让「下次新增页面」重新踩一遍。
+ *   这里是设计 token 层：**改了就是全站生效**，而且新增 EP 组件自动继承。
+ *
+ * 28px 是下限（不是 44px 那种移动端标准）：本项目是**桌面应用**，
+ * 精度由鼠标/触控板决定，44px 会让界面明显变松散；28px 是「不费劲点得中」的桌面阈值。
+ * ⚠️ 用 `min-height` 而不是 `height`：多行文字 / 大字号时要能自然撑高，不能被钉死裁掉。
+ */
+.el-button:not(.el-button--text):not(.el-button--link) {
+  min-height: 28px;
+}
+/* 单选框/复选框：EP 把可点区域画在 label 上（实测 46×22），所以补 label 而不是 input
+ * （input 本体只有 13×13，是它自己画的那个小圆点） */
+.el-radio-button__inner,
+.el-radio__label,
+.el-checkbox__label {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+}
+.el-radio-button__inner {
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+/* 可选中的卡片式标签（设置页的模型候选、章节选择等） */
+.el-check-tag,
+.el-tag--large {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* 分段控件（依赖图谱的学段切换等）：EP 默认 19px，实测低于触控下限 */
+.el-segmented__item,
+.el-radio-button__inner {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 表格列头（知识库的「分块」排序）：默认只有 24×14 —— 它**是**可点的（点了排序），
+ * 但看起来像一段普通文字，学生根本不知道能点，点也点不准。抬到 28px 起步。
+ * ⚠️ 真正小的是列头里的**排序按钮**（`button.caret-wrapper`，实测 24×14），
+ *   不是 `.cell` 那层 —— 只抬 `.cell` 是量不出来的（第一版就这么白改了一轮）。 */
+.el-table th .cell {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+}
+.el-table th .caret-wrapper {
+  min-width: 24px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.el-table th.is-sortable .cell {
+  cursor: pointer;
+}
+
+/* ── ★★ 触控目标下限：手写按钮那一半 ─────────────────────────────────────
+ * Element Plus 的组件（上面那几条）已经统一抬到 28px；但本项目还有一批
+ * **手写按钮** —— 每个卡片/页面各自写一份 `.btn`（`cards/AnimationCard.vue`、
+ * `cards/CodingCard.vue`、`cards/QuizCard.vue`、`study/MistakesTab.vue`、
+ * `study/SessionsTab.vue` 各定义一遍），它们的 padding 是按旧字号（12px）定的，
+ * 字号抬到 13–14px 后就掉到 **24–27px**，低于下限。
+ *
+ * 为什么不逐文件改 padding：五份 `.btn` 会各自漂移，而且**下次新增卡片还会再踩一遍**。
+ * 这里给一个 `.k12-tap`，各处加上类名即可；顺带把「为什么是 28px」写在一处。
+ * ⚠️ `min-height` 而非 `height`：多行文字要能自然撑高，钉死会裁字（踩过一次，见 P-071）。
+ */
+.k12-tap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+}
 .el-input__wrapper,
 .el-textarea__inner,
 .el-select__wrapper {

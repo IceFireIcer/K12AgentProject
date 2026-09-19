@@ -1112,6 +1112,13 @@ onBeforeUnmount(() => {
 .opt,
 .chip {
   padding: 4px 11px;
+  /* ★ 触控下限 28px（K12 硬要求，由 `ux-pages-audit.mjs` 量出：这里曾只有 27px）。
+   *   它们**都是可点的**（点了就选中那个模型 / 那一档），而旁边还有几个同样大小的兄弟，
+   *   点偏一下就选错 —— 学生不会发现，只会觉得「回答怎么变差了」。
+   *   `min-height` 而非 `height`：长模型名换行时要能撑高，不能被裁掉。 */
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
   border: 1px solid var(--k12-border-strong);
   border-radius: var(--k12-r-pill);
   background: var(--k12-surface);
