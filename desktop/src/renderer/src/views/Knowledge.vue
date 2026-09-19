@@ -328,18 +328,24 @@ onMounted(() => {
              固定列合计 190+96+100+80+88 = 554，余下的按 min-width 分给「知识点」与「章节」。
              「章节」给到 230+（最长的一条「第4章 用 Python 处理数据」约 200px）——
              它是这一行里唯一能说明"这条知识点在教材的哪里"的信息，不该被截断。
-             ⚠️ 最窄档（1120 窗口、侧栏收成 64）下内容区仍有 ~980 > 934（各列最小宽之和），
-                所以不会出现横向滚动。 -->
-        <el-table-column prop="kpId" label="kp_id" width="190">
+             ⚠️ **各列宽度之和必须 ≤ 最紧那一档的可用宽度**，否则表格横向溢出：
+                而 Element Plus 在这种情况下**表头不会跟着表体滚** ——
+                实测（1280 窗口、右栏展开）：表体被压到 929 而表头仍是 988，
+                结果「向量」列的表头被切掉一半（只剩「向」），表头与表体也错位。
+                最紧的一档是 **1280 + 右栏展开**（1016 内容区 → 表体 929），
+                比 1120（右栏自动收起，内容区反而 1052）更紧 —— 容易误判成「窗口越小越紧」。
+             ★ 本表当前：186+176+120+176+100+80+88 = **926 ≤ 929** ✓（改列宽前重算这一条）。 -->
+        <el-table-column prop="kpId" label="kp_id" width="186" show-overflow-tooltip>
           <template #default="{ row }">
             <code class="mono">{{ row.kpId }}</code>
           </template>
         </el-table-column>
-        <!-- min-width 按**最长知识点名**定：新库里最长的一条是
-             「教学短板（难自动分层适配）」，实测需要 ~222px（含 .cell 内边距）。
-             原来 150px 会让它被裁成「教学短板（难自动分层适…」——
-             知识点名是这一列的全部意义，裁掉就等于没显示。 -->
-        <el-table-column prop="name" label="知识点" min-width="180" />
+        <!-- ★ 知识点列：**总宽预算的约束**比「放得下最长那条」更硬。
+             最长的一条是「教学短板（难自动分层适配）」（需要 ~222px），
+             但七列之和必须 ≤ 929（见顶部说明），给不起 222。
+             取舍：**截断 + 悬停看全文**（`show-overflow-tooltip`）——
+             截断至少是「明说被截了」，而表格横向溢出会让**表头被切掉一半**（更坏）。 -->
+        <el-table-column prop="name" label="知识点" min-width="176" show-overflow-tooltip />
         <!-- ★ 宽度按**内容**定，不是按「大概够」定（实测踩到过）：
              学段标签最长「小学高年级」（标签本身 75px）+ `.cell` 左右内边距 8×2 +
              标签的 border/padding，实际需要 **111px**；原来写 96px，
@@ -353,7 +359,7 @@ onMounted(() => {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="chapterTitle" label="章节" min-width="230">
+        <el-table-column prop="chapterTitle" label="章节" min-width="176" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.chapterTitle || '—' }}
           </template>

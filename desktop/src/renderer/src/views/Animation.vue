@@ -863,9 +863,14 @@ const paramNote = computed(() => {
 .tpl__grades {
   display: flex;
   gap: 4px;
-  flex-wrap: nowrap;
+  /* ★★ `wrap` 是必须的（实测缺陷）：新库有**四个学段全适配**的模板
+   * （如「机器学本事：数据 → 训练 → 预测」），四个学段标签一行放不下。
+   * 原来是 `nowrap` + `overflow: hidden` —— 第 4 个标签被**从中间裁断**
+   * （「初中」只剩上半截，看着像「初十」），而且**没有省略号、也没法滚**，
+   * 学生完全不知道自己漏看了一档学段。
+   * `nowrap` 在这里没有收益（卡片高度本来就随内容撑），换行是唯一正确的表达。 */
+  flex-wrap: wrap;
   margin-top: auto;
-  overflow: hidden;
 }
 .tpl__grade {
   flex: none;

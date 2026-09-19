@@ -255,12 +255,37 @@ test('★★ 依赖图谱的检查器不得盖住节点卡片', () => {
   assert.match(inspRule, /width:\s*var\(--insp-w\)/, '检查器自身宽度也必须读那个变量')
 })
 
-test('★ 知识库表格的列宽要按**内容**定（实测两列被裁出省略号）', () => {
+test('★★ 知识库表格：列宽总和必须 ≤ 最紧档的可用宽度（否则表头被切一半）', () => {
   const kb = read('src', 'renderer', 'src', 'views', 'Knowledge.vue')
-  // 缺陷：学段列 width=96 而内容需要 111px → 被裁成「小学低年级 …」；
-  // 知识点列 min-width=150 而最长的「教学短板（难自动分层适配）」需要 ~222px。
-  assert.match(kb, /prop="gradeLevel"[\s\S]{0,80}?width="120"/, '学段列要放得下「小学高年级」标签')
-  assert.match(kb, /prop="name"[\s\S]{0,80}?min-width="180"/, '知识点列要放得下最长的那条知识点名')
+
+  // 缺陷有两层，都是实测出来的：
+  //  ① 单列太窄：学段列 96px 而「小学高年级」标签要 111px → 被裁成「小学低年级 …」；
+  //  ② **总宽超预算**（更隐蔽）：Element Plus 在横向溢出时**表头不跟着表体收** ——
+  //     实测 1280 窗口下，表体被压到 929 而表头仍是 988，
+  //     结果「向量」列的表头被切掉一半（只剩一个「向」字），且表头与表体错位。
+  //     ⚠️ 最紧的一档是 **1280 + 右栏展开**（内容区 1016 → 表体 929），
+  //        比 1120 更紧（1120 下右栏自动收起，内容区反而 1052）——
+  //        「窗口越小越紧」是错的直觉。
+  const widths = [...kb.matchAll(/<el-table-column[^>]*?(?:width|min-width)="(\d+)"/g)].map((m) => Number(m[1]))
+  assert.ok(widths.length >= 6, `应当能解析出各列宽度（实测 ${widths.length} 列）`)
+  const total = widths.reduce((a, b) => a + b, 0)
+  const BUDGET = 929 // 1280 窗口 + 右栏展开时的表体可用宽度（实测值）
+  assert.ok(
+    total <= BUDGET,
+    `列宽总和 ${total} 超过最紧档的预算 ${BUDGET} —— 表头会被切掉一半且与表体错位` +
+      `（当前各列：${widths.join('+')}）`
+  )
+
+  // 会被截断的长文本必须**明说被截断**（悬停可看全文），而不是无声裁掉
+  for (const col of ['name', 'chapterTitle']) {
+    // ⚠️ 用 String.raw 写这个正则：`[\s\S]` 里的反斜杠经 shell heredoc 会掉一层，
+    //    变成 `[sS]`（只匹配 s/S 两个字母），断言就静默失效了 —— 实测踩到。
+    assert.match(
+      kb,
+      new RegExp(String.raw`prop="${col}"[\s\S]{0,120}?show-overflow-tooltip`),
+      `${col} 列要开 show-overflow-tooltip（截断至少是明说的）`
+    )
+  }
 })
 
 /* ================================================================== *
@@ -312,4 +337,33 @@ test('★ 可关闭浮层只允许有一份实现（Esc 与点外部不能各写
   // 面板内与触发器上的点击必须放过
   assert.match(dismiss, /panel\.value\?\.contains\(target\)/, '面板内的点击要放过（选完由面板自己关）')
   assert.match(dismiss, /triggerRef\.value\?\.contains\(target\)/, '触发器上的点击要放过（交给它 toggle）')
+})
+
+test('★★ 动画模板卡的学段标签必须换行（实测第 4 档被从中间裁断）', () => {
+  const anim = read('src', 'renderer', 'src', 'views', 'Animation.vue')
+
+  // 缺陷：新库有**四个学段全适配**的模板（如「机器学本事：数据 → 训练 → 预测」），
+  // 四个学段标签一行放不下；而 `.tpl__grades` 原来是 `nowrap` + `overflow: hidden` ——
+  // 第 4 个标签被**从中间裁断**（「初中」只剩上半截，看着像「初十」），
+  // 而且**没有省略号、也没法滚**，学生完全不知道自己漏看了一档学段。
+  // ⚠️ 取规则体不能用 `anim.indexOf('.tpl__grade {')` 当终点 ——
+  //    它在文件里比 `.tpl__grades {` **更早**出现（`.tpl--on .tpl__grade {`），
+  //    切出来是空串，断言于是永远失败（实测踩到）。
+  //    改成「从规则起点取到下一个顶层 `}`」，与文件里的先后顺序无关。
+  const gradeStart = anim.indexOf('\n.tpl__grades {')
+  assert.ok(gradeStart > 0, '找不到 .tpl__grades 规则')
+  const gradeEnd = anim.indexOf('\n}', gradeStart)
+  assert.ok(gradeEnd > gradeStart, '.tpl__grades 规则没有正常闭合')
+  const gradeRule = anim.slice(gradeStart, gradeEnd)
+  // ⚠️ 先剥掉注释再断言：这段规则的注释里**故意**引用了坏写法
+  //    （「原来是 `nowrap` + `overflow: hidden`」），不剥的话 doesNotMatch
+  //    会被注释里的字面量绊倒，断言永远失败（实测踩到）。
+  const gradeCode = gradeRule.replace(/\/\*[\s\S]*?\*\//g, '')
+  assert.match(gradeCode, /flex-wrap:\s*wrap/, '学段标签必须允许换行（四档放不下）')
+  assert.doesNotMatch(
+    gradeCode,
+    /overflow:\s*hidden/,
+    '不得用 overflow:hidden 吞掉放不下的标签（那会从中间裁断且无法察觉）'
+  )
+  assert.doesNotMatch(gradeCode, /flex-wrap:\s*nowrap/, '不得改回 nowrap')
 })
