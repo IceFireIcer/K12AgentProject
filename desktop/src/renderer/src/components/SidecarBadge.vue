@@ -36,33 +36,50 @@ const sidecar = useSidecarStore()
   max-width: 420px;
 }
 
+/* 状态胶囊：全局不再提供 .chip（见 base.css 的材质层），本组件自带一份。 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  line-height: var(--k12-lh-ui);
+}
+
 .chip--idle,
 .chip--stopped {
-  background: var(--surface-muted);
-  border-color: var(--border-strong);
-  color: var(--text-muted);
+  background: var(--k12-surface-2);
+  border-color: var(--k12-border-strong);
+  color: var(--k12-muted);
 }
 
 .chip--starting {
-  background: var(--warn-soft);
-  border-color: rgba(154, 100, 0, 0.24);
-  color: var(--warn);
+  background: var(--k12-warn-soft);
+  border-color: var(--k12-warn-border);
+  color: var(--k12-warn);
 }
 
+/* 启动中的呼吸点：表达「正在进行」（与 EmptyState 的加载环同一口径），
+ * 不是装饰性动效，且 prefers-reduced-motion 下关闭。 */
 .chip--starting .dot {
   animation: pulse 1.1s ease-in-out infinite;
 }
 
 .chip--ready {
-  background: var(--ok-soft);
-  border-color: rgba(26, 127, 75, 0.24);
-  color: var(--ok);
+  background: var(--k12-good-soft);
+  border-color: var(--k12-good-border);
+  color: var(--k12-good);
 }
 
 .chip--failed {
-  background: var(--danger-soft);
-  border-color: rgba(179, 38, 30, 0.24);
-  color: var(--danger);
+  background: var(--k12-bad-soft);
+  border-color: var(--k12-bad-border);
+  color: var(--k12-bad);
 }
 
 .dot {
@@ -70,6 +87,7 @@ const sidecar = useSidecarStore()
   height: 8px;
   border-radius: 50%;
   background: currentColor;
+  flex: none;
 }
 
 @keyframes pulse {
@@ -83,17 +101,23 @@ const sidecar = useSidecarStore()
 }
 
 .hint {
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
   text-align: right;
-  line-height: 1.5;
+  line-height: var(--k12-lh-ui);
 }
 
 .error {
-  font-size: 12px;
-  color: var(--danger);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-bad);
   text-align: right;
-  line-height: 1.5;
+  line-height: var(--k12-lh-ui);
   word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip--starting .dot {
+    animation: none;
+  }
 }
 </style>

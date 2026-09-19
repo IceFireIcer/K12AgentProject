@@ -151,12 +151,14 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
 </template>
 
 <style scoped>
+/* E2 卡片：白面 + 可见边框 + 浅投影（与 base.css 的 .k12-card 同一配方）。
+ * ⚠️ 不在这里写 color-mix 造第五种表面 —— 层次只有 page / surface / surface-2 / float 四层。 */
 .levels {
   padding: 14px 16px;
-  border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  box-shadow: var(--shadow-sm);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  box-shadow: var(--k12-shadow-card);
 }
 
 .levels--unknown {
@@ -172,8 +174,30 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
 }
 
 .title {
-  font-size: 14px;
+  font-size: var(--k12-fs-lg);
   font-weight: 650;
+  color: var(--k12-fg);
+}
+
+/* 状态胶囊：全局不再提供 .chip（见 base.css 的材质层），本组件自带一份。 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  line-height: var(--k12-lh-ui);
+}
+
+.chip--warn {
+  background: var(--k12-warn-soft);
+  border-color: var(--k12-warn-border);
+  color: var(--k12-warn);
 }
 
 .levels__list {
@@ -184,16 +208,19 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
   gap: 8px;
 }
 
+/* 每一关 = 卡片内的嵌入块（E3）：surface-2 底 + 一档圆角 */
 .level {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  font-size: 13px;
-  transition: border-color 200ms ease-out, background 200ms ease-out;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
+  border: 1px solid var(--k12-border);
+  font-size: var(--k12-fs-sm);
+  transition:
+    border-color var(--k12-dur-state) var(--k12-ease-state),
+    background var(--k12-dur-state) var(--k12-ease-state);
 }
 
 .level__dot {
@@ -201,64 +228,66 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
   height: 9px;
   flex: none;
   border-radius: 50%;
-  background: var(--border-strong);
+  background: var(--k12-border-strong);
 }
 
-/* 四档配色：未解锁灰、学习中蓝、已通过绿、已掌握金 */
+/* 四档配色：未解锁灰、学习中主色、已通过绿、已掌握金（都是主题色，不写死色值） */
 .stage--locked {
   opacity: 0.62;
 }
 
 .stage--learning {
-  border-color: rgba(47, 111, 208, 0.5);
+  border-color: color-mix(in srgb, var(--k12-accent) 50%, transparent);
 }
 
 .stage--learning .level__dot {
-  background: var(--accent);
+  background: var(--k12-accent);
 }
 
 .stage--quizzed {
-  border-color: rgba(46, 160, 92, 0.5);
-  background: color-mix(in srgb, #2ea05c 8%, var(--surface-muted));
+  border-color: color-mix(in srgb, var(--k12-good) 50%, transparent);
+  background: color-mix(in srgb, var(--k12-good) 8%, var(--k12-surface-2));
 }
 
 .stage--quizzed .level__dot {
-  background: #2ea05c;
+  background: var(--k12-good);
 }
 
 .stage--mastered {
-  border-color: rgba(217, 160, 36, 0.55);
-  background: color-mix(in srgb, #d9a024 10%, var(--surface-muted));
+  border-color: color-mix(in srgb, var(--k12-warn) 55%, transparent);
+  background: color-mix(in srgb, var(--k12-warn) 10%, var(--k12-surface-2));
 }
 
 .stage--mastered .level__dot {
-  background: #d9a024;
+  background: var(--k12-warn);
 }
 
 .level__name {
   flex: 1;
-  font-family: var(--font-mono);
-  font-size: 12px;
+  min-width: 0;
+  font-family: var(--k12-font-mono);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-fg-2);
   word-break: break-all;
 }
 
 .level__stage {
   flex: none;
   font-weight: 650;
-  color: var(--text-muted);
+  color: var(--k12-muted);
 }
 
 .level__mastery {
   flex: none;
   font-variant-numeric: tabular-nums;
-  color: var(--text-faint);
-  font-size: 12px;
+  color: var(--k12-muted-2);
+  font-size: var(--k12-fs-xs);
 }
 
 .levels__foot {
   margin-top: 12px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted-2);
 }
 </style>

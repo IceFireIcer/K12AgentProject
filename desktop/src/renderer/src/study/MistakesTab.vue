@@ -137,13 +137,14 @@ function goPractice(kpId: string, kpName: string): void {
 }
 
 .toolbar__hint {
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
 }
 
 .summary {
   margin-bottom: 10px;
-  font-size: 13px;
+  font-size: var(--k12-fs-sm);
+  color: var(--k12-fg-2);
 }
 
 .list {
@@ -152,11 +153,13 @@ function goPractice(kpId: string, kpName: string): void {
   gap: 8px;
 }
 
+/* E2 卡片：白面 + 可见边框 + 浅投影 */
 .item {
   padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-card);
 }
 
 .item__head {
@@ -167,71 +170,99 @@ function goPractice(kpId: string, kpName: string): void {
 }
 
 .item__name {
-  font-size: 13px;
+  font-size: var(--k12-fs-sm);
   font-weight: 600;
+  color: var(--k12-fg);
 }
 
 .item__chapter {
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .item__count {
   padding: 1px 8px;
-  border-radius: 999px;
-  background: var(--warn-soft, rgba(214, 158, 46, 0.14));
-  color: var(--warn);
-  font-size: 11px;
+  border-radius: var(--k12-r-flat);
+  background: var(--k12-warn-soft);
+  border: 1px solid var(--k12-warn-border);
+  color: var(--k12-warn);
+  /* 错次角标（「错 3 次」）：选择器名含 count，走角标档 */
+  font-size: var(--k12-fs-micro);
   font-weight: 600;
+}
+
+/* 页面级操作按钮（导出）：控件层统一 --k12-r-control。
+ * ⚠️ 全局 .btn 已随旧 base.css 移除，本页自带一份。 */
+.btn {
+  padding: 5px 12px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover:not(:disabled) {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
+  }
 }
 
 .btn--mini {
   margin-left: auto;
   padding: 3px 10px;
-  font-size: 12px;
 }
 
+/* 题干引用：左侧一条竖线（引用行用极小圆角） */
 .item__stem {
   margin-top: 6px;
   padding-left: 8px;
-  border-left: 2px solid var(--border);
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--text);
+  border-left: 2px solid var(--k12-border-strong);
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg-2);
 }
 
 .item__stem--none {
-  color: var(--text-faint);
+  color: var(--k12-muted-2);
   font-style: italic;
 }
 
 .item__meta {
   margin-top: 4px;
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .footnote {
   margin-top: 12px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted-2);
 }
 
 .state {
   padding: 10px 0;
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .state--error {
-  color: var(--warn);
-  line-height: 1.7;
+  color: var(--k12-warn);
+  line-height: var(--k12-lh-body);
 }
 
 .notice {
   margin-bottom: 10px;
-  font-size: 12px;
-  color: var(--ok);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-good);
 }
 </style>

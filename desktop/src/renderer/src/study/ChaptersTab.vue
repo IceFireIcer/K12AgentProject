@@ -85,12 +85,13 @@ function ratio(mastered: number, total: number): number {
 
 .summary {
   margin-bottom: 12px;
-  font-size: 13px;
+  font-size: var(--k12-fs-sm);
+  color: var(--k12-fg-2);
 }
 
 .summary__note {
-  color: var(--text-faint);
-  font-size: 12px;
+  color: var(--k12-muted-2);
+  font-size: var(--k12-fs-xs);
 }
 
 .list {
@@ -99,11 +100,13 @@ function ratio(mastered: number, total: number): number {
   gap: 12px;
 }
 
+/* E2 卡片：白面 + 可见边框 + 浅投影 */
 .chapter {
   padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-card);
 }
 
 .chapter__head {
@@ -114,29 +117,30 @@ function ratio(mastered: number, total: number): number {
 }
 
 .chapter__title {
-  font-size: 13px;
+  font-size: var(--k12-fs-sm);
   font-weight: 600;
+  color: var(--k12-fg);
 }
 
 .chapter__count {
-  font-size: 12px;
+  font-size: var(--k12-fs-xs);
   font-variant-numeric: tabular-nums;
-  color: var(--accent-strong);
+  color: var(--k12-accent-ink);
   font-weight: 600;
 }
 
 .bar {
   margin-top: 7px;
   height: 6px;
-  border-radius: 999px;
-  background: var(--border);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-border);
   overflow: hidden;
 }
 
 .bar__fill {
   display: block;
   height: 100%;
-  background: var(--accent);
+  background: var(--k12-accent);
 }
 
 .chapter__kps {
@@ -146,23 +150,24 @@ function ratio(mastered: number, total: number): number {
   margin-top: 8px;
 }
 
+/* 知识点 chip：极小元素 → 圆角 flat 档 */
 .kp {
   padding: 1px 7px;
-  border-radius: 6px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  font-size: 11px;
-  color: var(--text-faint);
+  border-radius: var(--k12-r-flat);
+  background: var(--k12-surface-2);
+  border: 1px solid var(--k12-border);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .state {
   padding: 10px 0;
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .state--error {
-  color: var(--warn);
-  line-height: 1.7;
+  color: var(--k12-warn);
+  line-height: var(--k12-lh-body);
 }
 </style>

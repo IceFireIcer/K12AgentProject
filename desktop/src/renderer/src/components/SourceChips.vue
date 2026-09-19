@@ -33,37 +33,49 @@ defineProps<{ citations: Citation[] }>()
   gap: 6px;
 }
 
+/* 来源胶囊：一条来源 = 一个 chip（章节 · 小节 · 学段）。 */
 .sources .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   max-width: 100%;
+  padding: 2px 10px;
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  font-size: var(--k12-fs-xs);
   font-weight: 500;
-  color: var(--text-muted);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
 }
 
 .chapter {
-  color: var(--text);
+  color: var(--k12-fg);
   font-weight: 600;
 }
 
 .sep {
-  color: var(--text-faint);
+  color: var(--k12-muted-2);
 }
 
 .section {
-  color: var(--text-muted);
+  color: var(--k12-muted);
 }
 
 .grade {
   padding-left: 8px;
-  border-left: 1px solid var(--border);
-  color: var(--text-faint);
-  font-size: 11px;
+  border-left: 1px solid var(--k12-border);
+  color: var(--k12-muted-2);
 }
 
 .compat {
   padding: 0 6px;
-  border-radius: 999px;
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: 11px;
+  border-radius: var(--k12-r-flat);
+  background: var(--k12-warn-soft);
+  border: 1px solid var(--k12-warn-border);
+  color: var(--k12-warn);
+  /* k12-mark：「向上兼容」是 4 字角标（§6.4 要求显式标注跨学段取用），
+   * 不是正文 —— 升到 12px 会与相邻的章节/小节同权，角标语义消失。 */
+  font-size: var(--k12-fs-micro);
 }
 </style>

@@ -84,25 +84,26 @@ const rects = computed(() =>
 
 .edge {
   fill: none;
-  stroke: var(--border);
+  /* 边用 border-strong（不是 border）：白卡上的极浅细线在这个尺寸下几乎看不见 */
+  stroke: var(--k12-border-strong);
   stroke-width: 1.4;
 }
 
 .node {
-  fill: var(--surface);
-  stroke: var(--border);
+  fill: var(--k12-surface);
+  stroke: var(--k12-border-strong);
   stroke-width: 1.2;
 }
 
 .node--mastered {
-  fill: var(--accent-soft);
-  stroke: var(--accent);
+  fill: var(--k12-accent-soft);
+  stroke: var(--k12-accent);
   stroke-width: 1.6;
 }
 
 .node__text {
-  font-size: 12px;
-  fill: var(--text);
+  font-size: var(--k12-fs-xs);
+  fill: var(--k12-fg);
   pointer-events: none;
 }
 </style>

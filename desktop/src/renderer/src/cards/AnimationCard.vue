@@ -256,15 +256,16 @@ watch(iframeEl, (element) => {
 <style scoped>
 .anim {
   padding: 14px 16px;
-  border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  box-shadow: var(--shadow-sm);
+  /* 卡片本体 → 卡片圆角 + paper 白面（与 base.css 的 .k12-card 同配方） */
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border-strong);
+  box-shadow: var(--k12-shadow-card);
 }
 
 .anim--degraded {
   border-style: dashed;
-  background: var(--surface-muted);
+  background: var(--k12-surface-2);
 }
 
 .anim--expanded {
@@ -272,7 +273,49 @@ watch(iframeEl, (element) => {
   inset: 24px;
   z-index: 50;
   overflow: auto;
-  box-shadow: var(--shadow-lg, 0 18px 48px rgba(0, 0, 0, 0.22));
+  /* 全屏是**浮层**（压在所有东西之上）→ float 档投影，而不是卡片那一档 */
+  box-shadow: var(--k12-shadow-float);
+}
+
+/* ── 状态胶囊（角标语义）─────────────────────────────────────────────
+ * ⚠️ 全局 `.chip` / `.chip--*` 已随新设计系统移除（`base.css` 只剩材质层与
+ *   排版层）。模板里的类名照旧写着，于是这些胶囊一直无样式渲染 ——
+ *   自带一份，配方与同目录的 `ProgressCard.vue` 一致（同一叠卡片必须同族）。
+ * `.chip` 必须在 `.tool` **之前**：`.tool` 用同权重选择器覆盖字重与字号。 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  line-height: var(--k12-lh-ui);
+}
+
+/* 动画已就绪 */
+.chip--ok {
+  background: var(--k12-good-soft);
+  border-color: var(--k12-good-border);
+  color: var(--k12-good);
+}
+
+/* 已切换为文字讲解（沙箱超时 / 自报错误）：这是**降级** → warn 语义色
+ * （「能用，但不理想」），而不是 bad —— 文字讲解仍然把知识讲到了，
+ * 涂成红色会让学生以为「坏了、学不成了」。 */
+.chip--warn {
+  background: var(--k12-warn-soft);
+  border-color: var(--k12-warn-border);
+  color: var(--k12-warn);
+}
+
+.chip--accent {
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  color: var(--k12-accent-ink);
 }
 
 .anim__head {
@@ -283,14 +326,65 @@ watch(iframeEl, (element) => {
 }
 
 .title {
-  font-size: 14px;
+  /* 卡片标题 → 区块标题档（与 ProgressCard / QuizCard 的 `.title` 同一落点） */
+  font-size: var(--k12-fs-lg);
   font-weight: 650;
 }
 
 .tool {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--k12-font-mono);
+  /* 时长读数这类等宽小字：meta 档（不是 ≤4 字角标，角标另走 .chip） */
+  font-size: var(--k12-fs-xs);
   font-weight: 500;
+}
+
+/* ── 按钮 ────────────────────────────────────────────────────────────
+ * ⚠️ 全局 `.btn` / `.btn--ghost` 已随旧样式表移除，模板里的类名一直无样式
+ *   （「全屏」此前就是个没有形状的纯文字）。自带一份；全屏是描边式次要动作，
+ *   配方取 `views/Animation.vue` 的 `.anim__ghost`（同族页面）。
+ * 高度由 padding + line-height 决定，不钉像素。 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover:not(:disabled) {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
+  }
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 播放是这一块的主要动作 → 填充用 accent-ink（文字色那一支），白字压上去才够对比度；
+ * accent 是画得好看的浅色，配白字读不清。 */
+.btn--primary {
+  border-color: var(--k12-accent-ink);
+  background: var(--k12-accent-ink);
+  color: var(--k12-surface);
+}
+
+/* 「全屏」是卡片头右上角的**次要**动作：与 `.btn` 同一支描边样式（无色底填充）。
+ * 单独立一条是因为模板里确实写着这个修饰类 —— 留一个没有对应规则的类名，
+ * 下一个读代码的人会以为它被漏掉了（本文件已经因为这类「类名在、规则没了」
+ * 的旧账白屏过一轮）。 */
+.btn--ghost {
+  background: var(--k12-surface);
+  border-color: var(--k12-border);
+  color: var(--k12-fg-2);
 }
 
 .spacer {
@@ -306,9 +400,11 @@ watch(iframeEl, (element) => {
   display: block;
   width: 100%;
   height: 300px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: #ffffff;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-inset);
+  /* iframe 里的动画 HTML 按白底绘制 → 必须给**不透明**的 paper 白。
+   * `--k12-surface` 在全部 18 组主题里都是 #FFFFFF，是白底的唯一来源。 */
+  background: var(--k12-surface);
 }
 
 .anim--expanded .anim__frame {
@@ -322,10 +418,12 @@ watch(iframeEl, (element) => {
   align-items: center;
   justify-content: center;
   margin: 0;
-  font-size: 13px;
-  color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.86);
-  border-radius: var(--radius-sm);
+  /* 加载说明是一整句给学生看的话 → 次级正文档（与 views/Animation.vue 的 `.anim__veil` 同一落点） */
+  font-size: var(--k12-fs-sm);
+  color: var(--k12-muted);
+  /* 半透明遮罩：压在 iframe 之上（与 views/Animation.vue 的 `.anim__veil` 同一手法） */
+  background: color-mix(in srgb, var(--k12-surface) 86%, transparent);
+  border-radius: var(--k12-r-inset);
   pointer-events: none;
 }
 
@@ -338,20 +436,32 @@ watch(iframeEl, (element) => {
 }
 
 .anim__progress {
-  font-size: 12.5px;
-  color: var(--text-muted);
+  /* 旧值不在 8 档之内：进度读数是 meta → meta 档（与 views/Animation.vue 的 `.anim__time` 同一落点） */
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
+}
+
+/* 进度里的百分比：同一句里「进度」是标签、数字才是值 —— 把值提出来，
+ * 且数字定宽（否则 9%→10% 跳动时整行会左右抖）。 */
+.metric {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  font-weight: 650;
+  color: var(--k12-fg-2);
 }
 
 .anim__fallback {
   margin-top: 12px;
   padding: 12px 14px;
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  border: 1px solid var(--border);
+  /* 文字讲解 = 沙箱位置的替代（卡内嵌入块）→ inset 圆角 + paper 底 */
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
 }
 
 .anim__fallback-text {
-  font-size: 14px;
+  /* 降级后的文字讲解 = 沙箱位置的替代正文 → 正文档 */
+  font-size: var(--k12-fs-md);
   line-height: 1.85;
   white-space: pre-wrap;
   word-break: break-word;
@@ -363,14 +473,15 @@ watch(iframeEl, (element) => {
   max-width: 480px;
   height: auto;
   margin-top: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-inset);
 }
 
 .anim__reason {
   margin-top: 10px;
-  font-size: 12px;
+  /* 降级气泡下的脚注 → meta 档（与 views/Animation.vue 的 `.anim__reason` 同一落点） */
+  font-size: var(--k12-fs-xs);
   line-height: 1.6;
-  color: var(--text-faint);
+  color: var(--k12-muted-2);
 }
 </style>

@@ -153,14 +153,47 @@ function close(): void {
   margin-bottom: 12px;
 }
 
+/* 无障碍标签用的是**全局** `.sr-only`（定义在 `assets/base.css`）——
+ * 这里不再自带一份：两份定义迟早分叉，而 CSS 分叉是静默的。 */
+
 .search {
   flex: 1;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  font-size: 13px;
+  padding: 6px 12px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface);
+  color: var(--k12-fg);
+  font-family: inherit;
+  font-size: var(--k12-fs-sm);
+}
+
+.search::placeholder {
+  color: var(--k12-muted-2);
+}
+
+/* 页面级操作按钮（刷新）：控件层统一 --k12-r-control。
+ * ⚠️ 全局 .btn 已随旧 base.css 移除，本页自带一份。 */
+.btn {
+  padding: 5px 12px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  flex: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
+  }
+}
+
+.btn--mini {
+  padding: 3px 10px;
 }
 
 .list {
@@ -169,11 +202,13 @@ function close(): void {
   gap: 8px;
 }
 
+/* E2 卡片：白面 + 可见边框 + 浅投影 */
 .item {
   padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-card);
 }
 
 .item__head {
@@ -190,32 +225,37 @@ function close(): void {
 }
 
 .item__title {
-  font-size: 13px;
+  font-size: var(--k12-fs-sm);
   font-weight: 600;
+  color: var(--k12-fg);
 }
 
 .item__meta {
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .item__snippet {
   margin-top: 5px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
 }
 
+/* 回看内容 = 卡片内的嵌入块（E3）：surface-2 底 + 一档圆角。
+ * ⚠️ 原来的「虚线分隔 + 白底」在白卡里读不出层次，card 套 card 是同一类病。 */
 .detail {
   margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border);
+  padding: 10px 12px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
 }
 
 .detail__note {
   margin-bottom: 8px;
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted-2);
 }
 
 .messages {
@@ -230,38 +270,33 @@ function close(): void {
 .message {
   display: flex;
   gap: 8px;
-  font-size: 12px;
-  line-height: 1.7;
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
 }
 
 .message__role {
   flex-shrink: 0;
   width: 32px;
   font-weight: 600;
-  color: var(--text-faint);
+  color: var(--k12-muted-2);
 }
 
 .message--user .message__text {
-  color: var(--text);
+  color: var(--k12-fg);
 }
 
 .message--assistant .message__text {
-  color: var(--text);
-}
-
-.btn--mini {
-  padding: 3px 10px;
-  font-size: 12px;
+  color: var(--k12-fg-2);
 }
 
 .state {
   padding: 10px 0;
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .state--error {
-  color: var(--warn);
-  line-height: 1.7;
+  color: var(--k12-warn);
+  line-height: var(--k12-lh-body);
 }
 </style>

@@ -56,9 +56,7 @@ const label = computed(() => {
     :aria-label="label"
   >
     <div class="progress__track">
-      <div class="progress__fill" :style="{ width: `${percent}%` }">
-        <span class="progress__shine" aria-hidden="true"></span>
-      </div>
+      <div class="progress__fill" :style="{ width: `${percent}%` }"></div>
     </div>
     <span class="progress__label" data-testid="progress-label">{{ label }}</span>
   </div>
@@ -79,9 +77,9 @@ const label = computed(() => {
   position: relative;
   flex: 1;
   height: 10px;
-  border-radius: 999px;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface-2);
+  border: 1px solid var(--k12-border);
   overflow: hidden;
 }
 
@@ -92,40 +90,18 @@ const label = computed(() => {
 .progress__fill {
   position: relative;
   height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--accent) 0%, #58b0e6 100%);
-  /* ★ 进度变化时只做一次 240ms 的过渡（CSS，不引动画库）；prefers-reduced-motion 下关掉 */
-  transition: width 240ms ease-out;
-}
-
-/* 高光扫过：用一个绝对定位的半透明条 + keyframes，纯 CSS */
-.progress__shine {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    100deg,
-    rgba(255, 255, 255, 0) 20%,
-    rgba(255, 255, 255, 0.45) 50%,
-    rgba(255, 255, 255, 0) 80%
-  );
-  transform: translateX(-100%);
-  animation: progress-shine 1.8s ease-in-out infinite;
-}
-
-@keyframes progress-shine {
-  0% {
-    transform: translateX(-100%);
-  }
-  60%,
-  100% {
-    transform: translateX(100%);
-  }
+  border-radius: var(--k12-r-pill);
+  /* accent → accent-2：同一组主题色的两端，不写死色值 */
+  background: linear-gradient(90deg, var(--k12-accent) 0%, var(--k12-accent-2) 100%);
+  /* ★ 进度变化时只做一次状态过渡（CSS，不引动画库）；prefers-reduced-motion 下关掉。
+   * 时长与曲线用全站唯一的两个 token（版式契约 §6）。 */
+  transition: width var(--k12-dur-state) var(--k12-ease-state);
 }
 
 .progress__label {
   flex: none;
-  font-size: 12px;
-  color: var(--text-muted);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -133,10 +109,6 @@ const label = computed(() => {
 @media (prefers-reduced-motion: reduce) {
   .progress__fill {
     transition: none;
-  }
-
-  .progress__shine {
-    animation: none;
   }
 }
 </style>

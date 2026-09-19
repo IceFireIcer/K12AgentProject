@@ -22,8 +22,19 @@ const props = defineProps<{
 
 /** 五档（与 `routes/quiz.py` 的 `BADGE_LEVELS` 一一对应，**顺序也是契约**）。 */
 const BADGE_TIERS = ['起步', '初通', '熟练', '精通', '大师'] as const
-/** 每档的配色（按档位递进：灰蓝 → 金）。 */
-const TIER_COLORS = ['#8aa0b8', '#5b9bd5', '#2f6fd0', '#7a5cd6', '#d9a024'] as const
+/**
+ * 每档的配色（按档位递进：灰 → 学段色 → 学段压深色 → 青 → 金）。
+ *
+ * ★ 只给 **token 名**，不写色值：色板随学段变（`tokens.generated.css`），
+ *   写死 hex 会让徽章在四学段里各错一次，也会绕过对比度校验。
+ */
+const TIER_COLORS = [
+  'var(--k12-muted-2)',
+  'var(--k12-accent)',
+  'var(--k12-accent-ink)',
+  'var(--k12-cyan)',
+  'var(--k12-warn)'
+] as const
 
 /** 拆出档位名与计数（认不出就整体当档位名，**不抛异常**）。 */
 const parts = computed(() => {
@@ -90,26 +101,29 @@ const title = computed(() => {
   align-items: center;
   gap: 5px;
   padding: 3px 9px 3px 6px;
-  border-radius: 999px;
-  font-size: 12px;
+  border-radius: var(--k12-r-pill);
+  font-size: var(--k12-fs-xs);
   font-weight: 650;
-  line-height: 1.5;
-  color: var(--text);
-  background: color-mix(in srgb, var(--badge-color, var(--accent)) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--badge-color, var(--accent)) 42%, transparent);
-  /* 授予徽章时弹一下：250ms 的 CSS 关键帧，不引动画库 */
+  line-height: var(--k12-lh-snug);
+  color: var(--k12-fg);
+  background: color-mix(in srgb, var(--badge-color, var(--k12-accent)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--badge-color, var(--k12-accent)) 42%, transparent);
+  /* 授予徽章时弹一下：250ms 的 CSS 关键帧，不引动画库。
+   * 这是「刚刚拿到了」的一次性状态反馈（非装饰性循环动效），
+   * 与 EmptyState 的加载环同一口径：prefers-reduced-motion 下关闭。 */
   animation: badge-pop 250ms ease-out;
 }
 
 .badge--compact {
   padding: 2px 7px 2px 5px;
-  font-size: 11px;
+  /* k12-mark：紧凑徽章（列表里的小记号），角标档 11px —— 与 .badge 的 12px 拉开一档 */
+  font-size: var(--k12-fs-micro);
 }
 
 .badge--locked {
-  color: var(--text-faint);
+  color: var(--k12-muted-2);
   background: transparent;
-  border-color: var(--border-strong);
+  border-color: var(--k12-border-strong);
   border-style: dashed;
   animation: none;
 }
@@ -127,7 +141,7 @@ const title = computed(() => {
 
 .badge__count {
   font-variant-numeric: tabular-nums;
-  color: var(--text-muted);
+  color: var(--k12-muted);
   font-weight: 500;
 }
 

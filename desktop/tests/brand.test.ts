@@ -176,3 +176,43 @@ test('G19-3d 原始 logos/ 不随包分发（只发缩小后的 brand/）', () =
     `brand/ 合计 ${(total / 1024 / 1024).toFixed(1)}MB，超过 2MB —— 很可能把原图放进来了`
   )
 })
+
+test('★★ G19-3e 代码里的 logo URL 必须真的指向存在的素材（改名不同步就裂图）', () => {
+  /*
+   * 为什么单独立一条：上面三条查的是**素材文件**在不在，这一条查的是
+   * **代码里的 URL 能不能解析到它们** —— 两件事会各自跑偏，而第二种**完全静默**：
+   *   把 `primary_low.png` 改名（或把 `brand-logo.ts` 的路径写错），
+   *   typecheck、单测、构建**全都照过**，只在界面上留一个裂图。
+   */
+  const source = readFileSync(join(desktopRoot, 'src', 'renderer', 'src', 'brand-logo.ts'), 'utf8')
+
+  // 抓出源码里所有 './brand/xxx.png' 字面量
+  const urls = [...source.matchAll(/'\.\/brand\/([A-Za-z0-9_.-]+\.png)'/g)].map((m) => m[1])
+  assert.ok(urls.length >= 5, `brand-logo.ts 里只找到 ${urls.length} 个 logo 路径，至少应有 5 个`)
+
+  const brandDir = join(desktopRoot, 'resources', 'brand')
+  for (const file of urls) {
+    assert.doesNotThrow(
+      () => readFileSync(join(brandDir, file)),
+      `brand-logo.ts 引用了 ./brand/${file}，但 resources/brand/ 里没有它 —— 界面上会裂图`
+    )
+  }
+
+  // ★ 反向：素材目录里每一张图都该被引用到（新增素材却没人用 = 白打进安装包）
+  const onDisk = readdirSync(brandDir).filter((f) => f.endsWith('.png'))
+  const unused = onDisk.filter((f) => !urls.includes(f))
+  assert.deepEqual(
+    unused,
+    [],
+    `resources/brand/ 里有没被 brand-logo.ts 引用的图：${unused.join('、')}（要么接上，要么别打包）`
+  )
+
+  // ★ URL 必须**相对页面**（不能以 / 开头）：打包态页面是 file://，/brand/x.png
+  //   会解析到文件系统根。这条 grep 一次就能钉住，不必等实跑。
+  const absolute = [...source.matchAll(/['"]\/brand\/[^'"]+['"]/g)].map((m) => m[0])
+  assert.deepEqual(
+    absolute,
+    [],
+    `brand-logo.ts 里出现以 / 开头的 logo 路径：${absolute.join('、')} —— 打包态（file://）会裂图`
+  )
+})

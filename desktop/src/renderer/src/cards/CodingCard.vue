@@ -461,14 +461,70 @@ const interruptNotice = computed(() => {
 <style scoped>
 .coding {
   padding: 14px 16px;
-  border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  box-shadow: var(--shadow-sm);
+  /* 卡片本体 → 卡片圆角；白面（paper）+ 可见边框 + 近距离投影，与 base.css 的 .k12-card 同配方 */
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border-strong);
+  box-shadow: var(--k12-shadow-card);
 }
 
 .coding--unknown {
   border-style: dashed;
+}
+
+/* ── 状态胶囊（角标语义）─────────────────────────────────────────────
+ * ⚠️ 旧样式表留下过全局 `.chip` / `.chip--*`，它们**已随新设计系统整体移除**
+ *   （`base.css` 只保留材质层与排版层）—— 模板里的类名照旧写着，于是这些胶囊
+ *   一直是无样式渲染（无底色、无圆角、字号继承）。这里自带一份，配方与
+ *   `ProgressCard` 的 `.chip` 一致（同一目录的兄弟卡片，视觉上必须同族）。
+ * `.chip` 必须在 `.tool` **之前**：`.tool` 用同权重选择器覆盖字重与字号。 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  line-height: var(--k12-lh-ui);
+}
+
+/* 运行成功 / Python 就绪：用「好」的语义色（浅底 + 深字，保证可读） */
+.chip--ok {
+  background: var(--k12-good-soft);
+  border-color: var(--k12-good-border);
+  color: var(--k12-good);
+}
+
+/* 正在准备（进行中，不是故障）：走主色，与下面的 --warn 明显分开 ——
+ * 两者都撮成黄色的话，学生分不清「在加载」和「加载失败」。 */
+.chip--busy {
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  color: var(--k12-accent-ink);
+}
+
+/* 运行失败 / Python 环境不可用：这是**问题** → 用 bad 语义色 */
+.chip--warn {
+  background: var(--k12-bad-soft);
+  border-color: var(--k12-bad-border);
+  color: var(--k12-bad);
+}
+
+/* 待加载：中性态，不抢注意力 */
+.chip--idle {
+  background: var(--k12-surface-2);
+  border-color: var(--k12-border-strong);
+  color: var(--k12-muted);
+}
+
+.chip--accent {
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  color: var(--k12-accent-ink);
 }
 
 .coding__head {
@@ -479,35 +535,41 @@ const interruptNotice = computed(() => {
 }
 
 .title {
-  font-size: 14px;
+  /* 卡片标题：按语义走区块标题档（14px 的原值是正文档，对「标题」太轻） */
+  font-size: var(--k12-fs-lg);
   font-weight: 650;
 }
 
 .tool {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--k12-font-mono);
+  /* 知识点 id：是 id 不是角标（长度也远超 4 字）→ meta 档，micro 档不适用 */
+  font-size: var(--k12-fs-xs);
   font-weight: 500;
 }
 
 .coding__goal {
   margin-top: 8px;
-  font-size: 13px;
+  /* 学习目标：可读的说明文字（学生要照着做）→ 次级正文档 */
+  font-size: var(--k12-fs-sm);
   line-height: 1.8;
-  color: var(--text-muted);
+  color: var(--k12-muted);
   word-break: break-word;
 }
 
 .coding__goal-label {
   font-weight: 650;
-  color: var(--text);
+  color: var(--k12-fg);
 }
 
 .coding__editor-wrap {
   margin-top: 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--k12-border-strong);
+  /* 卡内嵌入块（编辑器外框）→ inset 档 */
+  border-radius: var(--k12-r-inset);
   overflow: hidden;
-  background: var(--surface);
+  /* 白面：Monaco 的 vs 主题本身就是白底，这里必须同为 paper，否则外框与
+   * 编辑器之间会露出一条色差缝 */
+  background: var(--k12-surface);
 }
 
 .coding__editor {
@@ -520,20 +582,22 @@ const interruptNotice = computed(() => {
   margin: 0;
   padding: 12px;
   min-height: 120px;
-  font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-family: var(--k12-font-mono);
+  /* 旧值不在 8 档之内：等宽脚手架回显 → meta 档（与下面的代码块同一个落点） */
+  font-size: var(--k12-fs-xs);
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--text-muted);
+  color: var(--k12-muted);
 }
 
 .coding__editor-failure {
   margin: 0;
   padding: 12px;
-  font-size: 13px;
+  /* 编辑器没起来时给学生看的说明 → 次级正文档（可读的失败说明，不是脚注） */
+  font-size: var(--k12-fs-sm);
   line-height: 1.7;
-  color: var(--danger);
+  color: var(--k12-bad);
 }
 
 .coding__actions {
@@ -544,12 +608,51 @@ const interruptNotice = computed(() => {
   flex-wrap: wrap;
 }
 
+/* ── 按钮 ────────────────────────────────────────────────────────────
+ * ⚠️ 同上：全局 `.btn` / `.btn--primary` 已随旧样式表移除，模板里的类名
+ *   一直是无样式渲染。这里自带一份（配方取自 `study/MistakesTab.vue` 的 `.btn`
+ *   与 `ConfirmDialog` 的 `.cd__btn--primary`：填充色用 accent-ink —— 它是
+ *   base.css 里指定的「按钮填充」那一支，accent 是画得好看的浅色，配白字读不清）。
+ * 高度由 padding + line-height 决定，不钉像素 —— 字号抬升不会把它挤变形。 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover:not(:disabled) {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
+  }
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  border-color: var(--k12-accent-ink);
+  background: var(--k12-accent-ink);
+  color: var(--k12-surface);
+}
+
 .out {
   margin-top: 12px;
   padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
+  /* 卡内嵌入块（结果面板）→ surface-2 底 + inset 圆角 */
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
+  border: 1px solid var(--k12-border);
 }
 
 .out__head {
@@ -561,7 +664,8 @@ const interruptNotice = computed(() => {
 
 .out__feedback {
   margin-top: 8px;
-  font-size: 13px;
+  /* 后端翻译好的中文反馈：这张卡片上的主角 → 次级正文档 */
+  font-size: var(--k12-fs-sm);
   line-height: 1.8;
   white-space: pre-wrap;
   word-break: break-word;
@@ -569,9 +673,10 @@ const interruptNotice = computed(() => {
 
 .out__failure {
   margin-top: 8px;
-  font-size: 13px;
+  /* 运行器故障说明：整句可读文案 → 次级正文档 */
+  font-size: var(--k12-fs-sm);
   line-height: 1.7;
-  color: var(--danger);
+  color: var(--k12-bad);
 }
 
 .block {
@@ -580,20 +685,23 @@ const interruptNotice = computed(() => {
 
 .block__label {
   display: block;
-  font-size: 12px;
+  /* 块内小标签（「程序输出」）→ meta 档 */
+  font-size: var(--k12-fs-xs);
   font-weight: 650;
-  color: var(--text-muted);
+  color: var(--k12-muted);
   margin-bottom: 4px;
 }
 
 .block__code {
   margin: 0;
   padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  font-family: var(--font-mono);
-  font-size: 12.5px;
+  /* 代码块是在 surface-2 面板上的白纸 → 圆角回 inset 档；底色回到 paper */
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  font-family: var(--k12-font-mono);
+  /* 旧值不在 8 档之内：程序输出 / 原始报错是等宽读数 → meta 档 */
+  font-size: var(--k12-fs-xs);
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
@@ -607,12 +715,13 @@ const interruptNotice = computed(() => {
 
 .raw summary {
   cursor: pointer;
-  font-size: 12px;
-  color: var(--text-faint);
+  /* 折叠条的说明文字 → meta 档（与 views/Coding.vue 的 `.raw summary` 同一落点） */
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .raw summary:hover {
-  color: var(--text-muted);
+  color: var(--k12-muted);
 }
 
 .hints {
@@ -632,14 +741,16 @@ const interruptNotice = computed(() => {
   align-items: flex-start;
   gap: 8px;
   padding: 9px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
+  /* 提示条 = 卡内嵌入块（与 views/Coding.vue 的 `.hint` 同一配方） */
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
+  border: 1px solid var(--k12-border);
 }
 
 .hint__text {
   flex: 1;
-  font-size: 13px;
+  /* 分级提示正文：学生要照着改代码 → 次级正文档 */
+  font-size: var(--k12-fs-sm);
   line-height: 1.8;
   word-break: break-word;
 }
@@ -647,30 +758,36 @@ const interruptNotice = computed(() => {
 .coding__intervene {
   margin-top: 10px;
   padding: 9px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--accent-soft);
-  border: 1px solid var(--accent);
-  font-size: 13px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-accent-soft);
+  /* 边框是「画」的那一层 → accent（不是 accent-ink：那是给文字用的） */
+  border: 1px solid var(--k12-accent);
+  /* 老师要介入的提示：一句写给学生的完整话 → 次级正文档 */
+  font-size: var(--k12-fs-sm);
   line-height: 1.7;
 }
 
 .coding__warn {
   margin-top: 8px;
-  font-size: 12px;
+  /* 能力自检的说明（「不支持中断死循环」）→ meta 档 */
+  font-size: var(--k12-fs-xs);
   line-height: 1.7;
-  color: var(--danger);
+  color: var(--k12-bad);
 }
 
 .coding__hint {
   margin-top: 8px;
-  font-size: 13px;
-  color: var(--accent);
+  /* 本卡片的即时提示（「先写一点代码」）→ meta 档。
+   * 这一条**是要读的文字** → accent-ink（accent 配在这个字号上对比度不够）。 */
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-accent-ink);
 }
 
 .coding__foot {
   margin-top: 12px;
-  font-size: 12px;
+  /* 卡片脚注（沙箱说明）→ meta 档 */
+  font-size: var(--k12-fs-xs);
   line-height: 1.6;
-  color: var(--text-faint);
+  color: var(--k12-muted-2);
 }
 </style>

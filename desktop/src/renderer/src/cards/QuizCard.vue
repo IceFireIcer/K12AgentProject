@@ -256,18 +256,64 @@ function submit(question: QuizQuestionView): void {
 <style scoped>
 .quiz {
   padding: 14px 16px;
-  border-radius: var(--radius);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
-  box-shadow: var(--shadow-sm);
+  /* 卡片本体 → 卡片圆角 + paper 白面（与 base.css 的 .k12-card 同配方） */
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border-strong);
+  box-shadow: var(--k12-shadow-card);
 }
 
+/* 批改结果卡片：仍然是**纸**，只是不再叠在题目卡片的嵌入块上 ——
+ * 用 surface-2 把「结论卡」和「出题卡」在白面上区分开。 */
 .quiz--result {
-  background: var(--surface-muted);
+  background: var(--k12-surface-2);
 }
 
 .quiz--unknown {
   border-style: dashed;
+}
+
+/* ── 状态胶囊（角标语义）─────────────────────────────────────────────
+ * ⚠️ 全局 `.chip` / `.chip--*` 已随新设计系统移除（`base.css` 只剩材质层与
+ *   排版层）。模板里的类名照旧写着，于是这些胶囊一直无样式渲染 ——
+ *   自带一份，配方与同目录的 `ProgressCard.vue` 一致（同一叠卡片要同族）。
+ * `.chip` 必须在 `.tool` **之前**：`.tool` 用同权重选择器覆盖字重与字号。 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  line-height: var(--k12-lh-ui);
+}
+
+/* 答对了 / 已批改 */
+.chip--ok {
+  background: var(--k12-good-soft);
+  border-color: var(--k12-good-border);
+  color: var(--k12-good);
+}
+
+/* 再想一想 / 未知载荷：走 **warn**（琥珀）而不是 bad。
+ * 两条依据：① 同一个动作在 `views/Quiz.vue` 里也是琥珀（`.fb__verdict` / `.hw__score`
+ * 答错都用 `--k12-warn`）—— 卡片与它所在的页面不能两种颜色；
+ * ② 文案本身是「再想一想」这种鼓励口径，涂成报错红与它自相矛盾。
+ * `BlockedNotice` / `DegradedNotice` / `ProgressCard` 的 `.chip--warn` 同为琥珀。 */
+.chip--warn {
+  background: var(--k12-warn-soft);
+  border-color: var(--k12-warn-border);
+  color: var(--k12-warn);
+}
+
+.chip--accent {
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  color: var(--k12-accent-ink);
 }
 
 .quiz__head {
@@ -278,13 +324,15 @@ function submit(question: QuizQuestionView): void {
 }
 
 .title {
-  font-size: 14px;
+  /* 卡片标题 → 区块标题档（与 ProgressCard 的 `.title` 同一落点） */
+  font-size: var(--k12-fs-lg);
   font-weight: 650;
 }
 
 .tool {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--k12-font-mono);
+  /* 知识点 id / qid / 判分方：是 id 与标签，不是 ≤4 字角标 → meta 档 */
+  font-size: var(--k12-fs-xs);
   font-weight: 500;
 }
 
@@ -298,9 +346,10 @@ function submit(question: QuizQuestionView): void {
 
 .item {
   padding: 12px 14px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
+  /* 题目 = 卡片内的嵌入块 → surface-2 底 + inset 圆角 */
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
+  border: 1px solid var(--k12-border);
 }
 
 .item__head {
@@ -311,14 +360,16 @@ function submit(question: QuizQuestionView): void {
 }
 
 .item__no {
-  font-size: 12px;
+  /* 「第 1 题」是题号 meta（与 Quiz.vue 的 .qitem__no 同一落点） */
+  font-size: var(--k12-fs-xs);
   font-weight: 650;
-  color: var(--text-muted);
+  color: var(--k12-muted);
 }
 
 .item__stem {
   margin-top: 8px;
-  font-size: 14px;
+  /* 题干 = 这一块的主对象 → 正文档 */
+  font-size: var(--k12-fs-md);
   line-height: 1.8;
   white-space: pre-wrap;
   word-break: break-word;
@@ -343,31 +394,35 @@ function submit(question: QuizQuestionView): void {
   align-items: flex-start;
   gap: 10px;
   padding: 9px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: var(--surface);
+  /* 选项是在题块（surface-2）上的可点白片 → inset 圆角 + paper 底 */
+  border-radius: var(--k12-r-inset);
+  border: 1px solid var(--k12-border-strong);
+  background: var(--k12-surface);
   cursor: pointer;
-  font-size: 14px;
+  /* 选项 = 学生要读且要选的对象 → 正文档（与 Quiz.vue 的 .opt 同一落点） */
+  font-size: var(--k12-fs-md);
   line-height: 1.7;
 }
 
 .option:hover {
-  border-color: var(--accent);
+  /* 状态描边是「画」的一层 → accent */
+  border-color: var(--k12-accent);
 }
 
 .option.is-picked {
-  border-color: var(--accent);
-  background: var(--accent-soft);
+  border-color: var(--k12-accent);
+  background: var(--k12-accent-soft);
 }
 
 .option input {
   margin-top: 5px;
-  accent-color: var(--accent);
+  /* radio 的原生染色：浏览器拿它直接画控件，必须给可用的实色 → accent */
+  accent-color: var(--k12-accent);
 }
 
 .option__letter {
   font-weight: 650;
-  color: var(--text-muted);
+  color: var(--k12-muted);
 }
 
 .option__text {
@@ -375,32 +430,72 @@ function submit(question: QuizQuestionView): void {
   word-break: break-word;
 }
 
+/* ── 按钮 ────────────────────────────────────────────────────────────
+ * ⚠️ 全局 `.btn` / `.btn--primary` 已随旧样式表移除，模板里的类名一直无样式。
+ *   自带一份（配方取自 `ConfirmDialog` 的 `.cd__btn` / `.cd__btn--primary`）。
+ * 高度由 padding + line-height 决定，不钉像素。 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover:not(:disabled) {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
+  }
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 提交键是这一块的主要动作 → 填充用 accent-ink（文字色那一支），
+ * 白字压在 accent-ink 上才够对比度；accent 是画得好看的浅色，配白字读不清。 */
+.btn--primary {
+  border-color: var(--k12-accent-ink);
+  background: var(--k12-accent-ink);
+  color: var(--k12-surface);
+}
+
 .ans {
   margin-top: 10px;
   width: 100%;
   padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: var(--surface);
+  border-radius: var(--k12-r-control);
+  border: 1px solid var(--k12-border-strong);
+  background: var(--k12-surface);
   font: inherit;
-  color: var(--text);
+  color: var(--k12-fg);
 }
 
 .ans--code {
-  font-family: var(--font-mono);
+  font-family: var(--k12-font-mono);
 }
 
 .ans:focus {
-  outline: 2px solid rgba(47, 111, 208, 0.35);
+  /* 焦点环用派生 token（`--k12-accent-ring`），不在组件里自己 color-mix */
+  outline: 2px solid var(--k12-accent-ring);
   outline-offset: 1px;
 }
 
 .feedback {
   margin-top: 12px;
   padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  border: 1px solid var(--border);
+  /* 逐题反馈是题块上的白片（结论区）→ inset 圆角 + paper 底 */
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -410,23 +505,27 @@ function submit(question: QuizQuestionView): void {
 .feedback__text {
   flex: 1 1 100%;
   margin-top: 4px;
-  font-size: 13px;
+  /* 逐题反馈：后端判分写给学生的话 → 次级正文档（与 Quiz.vue 的 .fb__text 同一落点） */
+  font-size: var(--k12-fs-sm);
   line-height: 1.7;
-  color: var(--text-muted);
+  color: var(--k12-muted);
   word-break: break-word;
 }
 
 .quiz__foot {
   margin-top: 12px;
-  font-size: 12px;
+  /* 卡片脚注（判分口径说明）→ meta 档 */
+  font-size: var(--k12-fs-xs);
   line-height: 1.6;
-  color: var(--text-faint);
+  color: var(--k12-muted-2);
 }
 
 .quiz__hint {
   margin-top: 8px;
-  font-size: 13px;
-  color: var(--danger);
+  /* 本卡片的即时提示（「先写下你的答案」）：是句劝告不是报错 → 与
+   * `views/Quiz.vue` 的 `.qlist__hint` 同为琥珀（那一页里 bad 只留给真正的故障）。 */
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-warn);
 }
 
 /* 闯关进度块：与题目列表拉开一点距离，避免看起来像第 N+1 道题 */

@@ -1,42 +1,163 @@
-/**
- * 全局样式与设计变量（对话优先布局的基础）。
+/* ==========================================================================
+ * 基础层：层次系统、排版、形状、Element Plus 主题覆盖
  *
- * 只放「所有视图共用的东西」：字体栈、颜色变量、基础排版、通用按钮/徽章。
- * 组件自己的样式一律写在组件的 `<style scoped>` 里。
- */
+ * ── 层次系统（本文件最重要的一节）──────────────────────────────────────
+ * 界面"分不清组件边界"的根因不是线太细，而是**页面底色和卡片都是白的** ——
+ * 白卡片压在白页面上，只能靠细线分隔，等于没有分隔。
+ *
+ * 画布原本的设计是：**每个学段有一个带色的页面底色**，白卡片压在上面。
+ * 恢复它之后，边界不靠加粗描边就有了。四层：
+ *
+ *   page     页面底色（画布原 bg：初中 #ECEDFE、小学低 #FFF2E4…）带学段色
+ *   surface  白卡片（#FFFFFF）+ 1px 边框 + 浅投影        ← 浮在 page 上
+ *   inset    卡片内的嵌入块（画布原 surface-2，带学段色） ← 沉在 surface 里
+ *   float    浮层（白 + 更强投影 + 深边框）              ← 浮在所有东西上
+ *
+ * **规则**：任何"一块内容"都必须是这四层之一，不许出现第 5 种自定义表面。
+ * 这条规则是上一版 16 处手写卡片、10 种表面配方混在一起的解药。
+ *
+ * ── 两支学段色 ──────────────────────────────────────────────────────────
+ *   accent      画布原值 → 边框、浅底、大片装饰（"被看"的东西）
+ *   accent-ink  压深版   → 文字、按钮填充、进度、节点（"被读"的东西）
+ * 都是画布的色相，只差明度：明快感在 accent，可读性在 ink。
+ * 对比度由 `node scripts/check-contrast.mjs --strict` 机器校验（234 项全过）。
+ * ========================================================================== */
+
+/* ── 字体：本地自托管，禁 CDN（断网演示硬约束）──────────────────────────── */
+@import '@fontsource-variable/inter/index.css';
+@import '@fontsource-variable/noto-sans-sc/index.css';
+@import '@fontsource-variable/jetbrains-mono/index.css';
+@import './tokens.generated.css';
 
 :root {
+  --k12-font-ui: 'Inter Variable', 'Noto Sans SC Variable', -apple-system,
+    'Segoe UI', 'Microsoft YaHei', sans-serif;
+  --k12-font-mono: 'JetBrains Mono Variable', 'Cascadia Code', Consolas, monospace;
+
+  /* ── 字号阶梯：8 档，**正文基准 16px** ──────────────────────────────────
+   * ★ 档位与用途**一一对应**（越界就会「标签比内容重」）。改之前先读这张表：
+   *   2xl   32px  仅首屏问候（全站唯一）
+   *   xl    24px  **页面身份行**（每个内容页一条，说这页在讲什么）/ hero 数字
+   *   title 17px  顶栏页面名 —— 它是 chrome，必须**小于**内容区的身份行
+   *   lg    18px  卡片 / 区块标题
+   *   md    16px  正文
+   *   sm    14px  次级正文、列表项
+   *   xs    13px  meta、单位、脚注、主路径提示
+   *   micro 12px  **仅角标（≤4 字）** —— 它不是「小一点的正文」
+   *
+   * ★★ 为什么整条阶梯从 14px 基准抬到 16px（2026-09-18）：
+   *   使用者是 **K12 学生**，会长时间盯着看。14px 的中文在 1440 宽的窗口上
+   *   确实偏小 —— 阅读费劲、眼睛容易累，这是**用眼健康**问题，不是审美偏好。
+   *   所以每一档都跟着抬（不是只抬正文）：只抬正文会让它顶到次级正文那一档，
+   *   层级差被吃掉，「标题比正文还小」就会重新出现。
+   * ★ 三条关系**仍然必须成立**（抬字号时最容易破的就是它们）：
+   *   ① 顶栏页面名（title）**严格小于**内容区身份行（xl）；
+   *   ② 正文（md）大于任何 meta（xs / micro）；
+   *   ③ micro 只给 ≤4 字的角标，其余一律 xs 起步。
+   *
+   * 历史教训（保留，因为同样的错会再犯）：11px 曾是全站最高频字号
+   * （依赖图谱页拿它写 id / 标签 / 关系 / 层级徽标），结果 meta 与角标同权、
+   * 层级整个塌掉；而顶栏 18px 的页面名比内容区 16px 还重。                              */
+  --k12-fs-micro: 12px;
+  --k12-fs-xs: 13px;
+  --k12-fs-sm: 14px;
+  --k12-fs-md: 16px;
+  --k12-fs-lg: 18px;
+  --k12-fs-title: 17px;
+  --k12-fs-xl: 24px;
+  --k12-fs-2xl: 32px;
+
+  /* ── 行高：与字号反比 ──────────────────────────────────────────────────
+   * ⚠️ `body` 从 1.7 抬到 1.75：字号变大后**行长字数变少**、行间距的绝对像素
+   *    也跟着变大，1.75 让「连续读三行」的负担更轻（长时间阅读的主要疲劳来源
+   *    就是行间跳转，而不是单字大小）。 */
+  --k12-lh-tight: 1.25;
+  --k12-lh-snug: 1.4;
+  --k12-lh-ui: 1.6;
+  --k12-lh-body: 1.75;
+
+  /* ── 形状：四档 ────────────────────────────────────────────────────────
+   * inset 6 < card 10 < control 12（控件最圆：它是"拿起来的物件"）。
+   * 圆角跨度够大，形状本身就成为层次的线索。                                  */
+  --k12-r-inset: 6px;
+  --k12-r-card: 10px;
+  --k12-r-control: 12px;
+  --k12-r-pill: 999px;
+  /* 极小元素（角标 / chip / 代码片 / 引用行）。
+   * ⚠️ 此前被 33 处引用却**从未定义** —— var() 取不到值会退化成 0，
+   * 那些元素一直是直角，只是没人注意。缺陷，不是设计。 */
+  --k12-r-flat: 4px;
+
+  /* ── 间距：4 的倍数 ──────────────────────────────────────────────────── */
+  --k12-sp-1: 4px;
+  --k12-sp-2: 8px;
+  --k12-sp-3: 12px;
+  --k12-sp-4: 16px;
+  --k12-sp-5: 20px;
+  --k12-sp-6: 24px;
+  --k12-sp-7: 32px;
+
+  /* 卡片之间的统一间距。**全站一个值** —— 上一版 12/14/16/20 四种并存。 */
+  --k12-gap: 16px;
+
+  /* ── 阅读节奏：三档，按「内容离得多远」而不是「看起来够不够」──────────
+   * 段落之间的停顿由 line-height 1.7 自身承担，**不用 token**。
+   * 这里只定「层级切换」的三档：
+   *   block 块之间   20px  正文 → 步骤 → 要点 → 引用 → 卡片；切换要比段落停顿更明显
+   *   msg   消息之间 36px  一轮对话是一个单元，必须一眼分得开
+   *   gap   卡片之间 16px  并列卡片的统一间距（上面那个）
+   *
+   * 依据：眼睛靠**间距差**而不是字号差分辨层级。重排前对话页实测 ——
+   * 段落视觉间距 35.8px，消息之间却只有 20px（更小），块间与段落则同为 12px；
+   * 四个层级里三个挤在同一个值上，所以读不出结构。这是**节奏**问题，不是字号问题。 */
+  --k12-gap-block: 20px;
+  --k12-gap-msg: 36px;
+
+  /* ── 外壳尺寸 ──────────────────────────────────────────────────────────
+   * ★ 这三个尺寸都**由内容决定**，不是拍脑袋来的：字号从 14 抬到 16 之后，
+   *   它们跟着长——否则会出现「字挤在栏里」「按钮贴着文字边缘」这类
+   *   放大字号才暴露的拥挤（不是字号本身的错，是容器没跟着长）。
+   *   - 侧栏 248→264：导航项文字 14→16px，品牌名 16→18px；
+   *   - 顶栏 64→72：页面名 15→17px + 副标题 13px，加上窗口按钮要够点；
+   *   - 阅读栏 820→880：16px 中文每行约 55 字（原 14px 时约 58 字）——
+   *     行宽跟着字号涨一点，才维持「一行读得完一句话」的节奏。 */
+  --k12-w-sidebar: 264px;
+  --k12-w-sidebar-narrow: 68px;
+  --k12-w-rail: 300px;
+  --k12-h-topbar: 72px;
+  --k12-w-reading: 880px;
+
+  /* ── 投影：两档 ────────────────────────────────────────────────────────
+   * 投影是"边界"的第二个信号（第一个是底色差）。卡片用近距离的，
+   * 浮层用范围更大的。两者都带一点扩散，让边缘有柔和的过渡而不是硬切。      */
+  --k12-shadow-card:
+    0 1px 2px color-mix(in srgb, var(--k12-fg) 6%, transparent),
+    0 1px 8px -2px color-mix(in srgb, var(--k12-fg) 8%, transparent);
+  --k12-shadow-float:
+    0 4px 12px -2px color-mix(in srgb, var(--k12-fg) 14%, transparent),
+    0 12px 32px -8px color-mix(in srgb, var(--k12-fg) 20%, transparent);
+  /* 抬升一档：用于「聚焦」这类瞬时状态（输入条 focus-within）。
+   * ⚠️ 此前被 MessageComposer 引用却从未定义 —— 那处 box-shadow 整条声明
+   * 因含无效 var() 而失效，聚焦时其实没有任何阴影反馈。 */
+  --k12-shadow-raise:
+    0 2px 4px color-mix(in srgb, var(--k12-fg) 8%, transparent),
+    0 6px 16px -4px color-mix(in srgb, var(--k12-fg) 16%, transparent);
+
+  /* ── 状态过渡：**唯一**的时长与曲线 ────────────────────────────────────
+   * 全站不做装饰性动效（见下方「动效：本版无」）；只允许状态本身有过渡，
+   * 且必须用这两个 token，不在组件里各写一套时长。
+   * ⚠️ ease-state 此前被 2 处引用却从未定义，那两条 transition 其实一直无效。 */
+  --k12-dur-state: 120ms;
+  --k12-ease-state: ease;
+
+  /* 深色面（代码区 / 动画舞台）上的文字与语法色。
+   * 这两个面与页面相反，是"屏"，所以文字色单独定。 */
+  --k12-screen-fg: color-mix(in srgb, #FFFFFF 88%, var(--k12-fg));
+  --k12-screen-dim: color-mix(in srgb, #FFFFFF 42%, var(--k12-fg));
+  --k12-screen-key: color-mix(in srgb, #FFFFFF 58%, var(--k12-accent));
+  --k12-screen-num: color-mix(in srgb, #FFFFFF 45%, var(--k12-warn));
+
   color-scheme: light;
-
-  --bg: #f3f6fb;
-  --surface: #ffffff;
-  --surface-muted: #f7f9fd;
-  --border: rgba(24, 33, 51, 0.1);
-  --border-strong: rgba(24, 33, 51, 0.18);
-
-  --text: #1b2431;
-  --text-muted: #5d6a80;
-  --text-faint: #8892a4;
-
-  --accent: #2f6fd0;
-  --accent-strong: #24589f;
-  --accent-soft: #eaf2fe;
-
-  --ok: #1a7f4b;
-  --ok-soft: #e6f6ed;
-  --warn: #9a6400;
-  --warn-soft: #fff5df;
-  --danger: #b3261e;
-  --danger-soft: #fdeceb;
-
-  --radius-lg: 16px;
-  --radius: 12px;
-  --radius-sm: 8px;
-  --shadow: 0 12px 32px rgba(24, 33, 51, 0.07);
-  --shadow-sm: 0 2px 8px rgba(24, 33, 51, 0.06);
-
-  --font-sans: "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
-  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
 }
 
 * {
@@ -47,124 +168,178 @@ html,
 body,
 #app {
   height: 100%;
+  margin: 0;
+}
+
+#app {
+  min-width: 1120px;
 }
 
 body {
-  margin: 0;
-  font-family: var(--font-sans);
-  font-size: 15px;
-  line-height: 1.7;
-  color: var(--text);
-  background: var(--bg);
+  font-family: var(--k12-font-ui);
+  font-size: var(--k12-fs-md);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg);
+  background: var(--k12-page);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-variant-numeric: tabular-nums;
 }
 
-h1,
-h2,
-h3,
-p,
-dl,
-dd {
+h1, h2, h3, h4, h5, h6, p, figure {
   margin: 0;
 }
-
-code {
-  font-family: var(--font-mono);
-  font-size: 0.92em;
-  padding: 0 0.28em;
-  border-radius: 4px;
-  background: rgba(24, 33, 51, 0.06);
+h1, h2, h3 {
+  letter-spacing: -0.01em;
+  line-height: var(--k12-lh-tight);
 }
-
 button {
-  font: inherit;
-  cursor: pointer;
+  font-family: inherit;
+}
+a {
+  color: var(--k12-accent-ink);
+  text-decoration: none;
 }
 
-/* 通用：按钮 */
-.btn {
-  display: inline-flex;
+:focus-visible {
+  outline: 2px solid var(--k12-accent-ink);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--k12-muted-2) 45%, transparent);
+  border-radius: var(--k12-r-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--k12-muted-2) 70%, transparent);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── 四层材质：组件只允许用这四个类 ────────────────────────────────────── */
+
+/* E2 卡片：白面 + 可见边框 + 浅投影。**这是绝大多数"一块内容"的形态。** */
+.k12-card {
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-card);
+  box-shadow: var(--k12-shadow-card);
+  /* 卡片常落在 flex 行里，少了这行不会收缩、会把父容器撑破 */
+  min-width: 0;
+}
+/* E3 嵌入块：卡片内部的次级块。带学段色的浅底，压在白面上自然分得开。 */
+.k12-inset {
+  background: var(--k12-surface-2);
+  border-radius: var(--k12-r-inset);
+}
+/* E4 浮层：对话框 / 菜单 / 悬浮窗。 */
+.k12-float {
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-card);
+  box-shadow: var(--k12-shadow-float);
+}
+
+/* 卡片头：**统一的分隔** —— 底色带一档 + 下边框。
+ * 上一版很多卡片只有一个标题文字、与内容连成一片，这是边界糊掉的第二个原因。 */
+.k12-card-head {
+  display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 16px;
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
-  transition:
-    background 0.15s ease,
-    border-color 0.15s ease,
-    transform 0.1s ease;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  border-radius: var(--k12-r-card) var(--k12-r-card) 0 0;
+}
+.k12-card-body {
+  padding: 16px;
+}
+.k12-card-foot {
+  padding: 12px 16px;
+  border-top: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  border-radius: 0 0 var(--k12-r-card) var(--k12-r-card);
 }
 
-.btn:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent-strong);
+/* 状态点 */
+.k12-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
 }
 
-.btn:active:not(:disabled) {
-  transform: translateY(1px);
+/* ── 页面身份行（22px）───────────────────────────────────────────────────
+ * 每个内容页**顶部一条**，说的是「这页在讲什么」，不是重复页面名 ——
+ * 页面名已经由顶栏（15px，chrome）给出。这条才是内容区的最大字号，
+ * 于是「内容比外壳重」在视觉上重新成立。
+ *
+ * 为什么单独成类而不是各页自己写：它是**全站一致的排版接口**，
+ * 一旦各页自己写 font-size，18/20/22 会立刻散开（这正是本轮返工要修的病）。
+ * 用 .k12-identity 包住即可；右侧可放一个 .k12-identity__meta。 */
+.k12-identity {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.k12-identity__main {
+  font-size: var(--k12-fs-xl);
+  font-weight: 650;
+  line-height: var(--k12-lh-snug);
+  letter-spacing: -0.01em;
+  color: var(--k12-fg);
+}
+.k12-identity__meta {
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
 }
 
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+/* ── 主路径提示（12px）───────────────────────────────────────────────────
+ * 每页一行，说清「先做什么、再做什么」。学生不该靠试错找出这一页的用法。
+ * 刻意用 muted：它是路标，不是内容。 */
+.k12-path {
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
 }
 
-.btn--primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #ffffff;
+/* ── 页面操作栏吸顶时的分隔线 ──────────────────────────────────────────────
+ * `PageActions` 是 scoped 组件，而这条规则要同时命中**父级**（`.shell__content`）
+ * 与它自己（`.pa`）—— 在 scoped 里写成 `:global(...) .pa` 会被 SFC 编译器
+ * 产出成 `.shell__content.is-scrolled{...}`（`.pa` 被丢掉，规则失效）。
+ * 所以它必须住在全局样式里。
+ * `.is-scrolled` 由 AppShell 挂在滚动容器上（纯 CSS 判断不了 sticky 是否已吸住）。 */
+.shell__content.is-scrolled .pa {
+  border-bottom-color: var(--k12-border);
 }
 
-.btn--primary:hover:not(:disabled) {
-  background: var(--accent-strong);
-  border-color: var(--accent-strong);
-  color: #ffffff;
+/* ── 排版细节 ────────────────────────────────────────────────────────────
+ * 小标签字距 + 数字定宽：成本极低，但一个不对齐的数字列会让整页显得潦草。
+ * ⚠️ 这两者都是 **meta**（小标签 / 读数），按字号契约是 12px ——
+ *    11px 只留给"≤4 字的角标"。改造前它们是 11px，等于把 meta 降成角标，
+ *    于是角标不再突出、meta 又读不清。 */
+.k12-label {
+  font-size: var(--k12-fs-xs);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  color: var(--k12-muted);
 }
 
-/* 通用：小徽章 */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.9;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-}
-
-.chip--accent {
-  background: var(--accent-soft);
-  border-color: rgba(47, 111, 208, 0.24);
-  color: var(--accent-strong);
-}
-
-.chip--ok {
-  background: var(--ok-soft);
-  border-color: rgba(26, 127, 75, 0.24);
-  color: var(--ok);
-}
-
-.chip--warn {
-  background: var(--warn-soft);
-  border-color: rgba(154, 100, 0, 0.24);
-  color: var(--warn);
-}
-
-.chip--danger {
-  background: var(--danger-soft);
-  border-color: rgba(179, 38, 30, 0.24);
-  color: var(--danger);
-}
-
-/* 无障碍：屏幕阅读器可读、视觉上隐藏 */
+/* 无障碍：屏幕阅读器可读、视觉上隐藏。
+ * ★ 这是**全局工具类**（`<label class="sr-only">` / 给读屏软件的一句说明），
+ *   在 App.vue、MessageComposer.vue、SessionsTab.vue 三处用到。
+ * ⚠️ 它必须在这里定义**一次** —— 旧样式表被整体替换时它一度消失，而使用者照旧写着
+ *   `class="sr-only"`：类名不存在时**不会报错**，只是那行文字**直接显示出来**
+ *   （实测：顶栏多出一条「智团团 —— 陪你学 AI 的通识课小老师」，
+ *   输入框上方多出一条「输入你的问题」）。CSS 拼错永远静默，这类工具类尤其要留意。
+ * ⚠️ 用 `clip-path` + `1px` 而不是 `display:none` / `visibility:hidden`：
+ *   后两者会让辅助技术**也**读不到，那就失去了这个类存在的全部意义。 */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -172,7 +347,203 @@ button {
   padding: 0;
   margin: -1px;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
+}
+
+.k12-num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+.k12-readout {
+  font-family: var(--k12-font-mono);
+  font-size: var(--k12-fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--k12-muted);
+}
+/* 数值 + 单位：单位用小字弱化，避免"78%"与"78 %"两种读法 */
+.k12-unit {
+  font-size: 0.85em;
+  color: var(--k12-muted);
+  margin-left: 2px;
+}
+
+/* ── 动效：本版无 ────────────────────────────────────────────────────────
+ * 没有 transition / animation / @keyframes。
+ * 目的是让设计只能靠材质、留白、字体层级与颜色自己站住 —— 动效会掩护静态缺陷。
+ * 保留的只有状态本身（:hover / :focus-visible 的颜色与描边变化）。          */
+
+/* ── Element Plus 主题覆盖 ────────────────────────────────────────────── */
+/* ⚠️ EP 的 hover / active 用的是色阶变量（primary-light-3 / dark-2），
+ *    只映射 --el-color-primary 是不够的 —— 那样 hover 主按钮会掉回 EP 蓝。 */
+:root {
+  --el-color-primary: var(--k12-accent-ink);
+  --el-color-primary-light-3: color-mix(in srgb, var(--k12-accent-ink) 70%, var(--k12-surface));
+  --el-color-primary-light-5: color-mix(in srgb, var(--k12-accent-ink) 50%, var(--k12-surface));
+  --el-color-primary-light-7: color-mix(in srgb, var(--k12-accent-ink) 30%, var(--k12-surface));
+  --el-color-primary-light-8: color-mix(in srgb, var(--k12-accent-ink) 20%, var(--k12-surface));
+  --el-color-primary-light-9: color-mix(in srgb, var(--k12-accent-ink) 10%, var(--k12-surface));
+  --el-color-primary-dark-2: color-mix(in srgb, var(--k12-accent-ink) 80%, var(--k12-fg));
+
+  --el-color-success: var(--k12-good);
+  --el-color-success-light-3: color-mix(in srgb, var(--k12-good) 70%, var(--k12-surface));
+  --el-color-success-light-5: color-mix(in srgb, var(--k12-good) 50%, var(--k12-surface));
+  --el-color-success-light-7: color-mix(in srgb, var(--k12-good) 30%, var(--k12-surface));
+  --el-color-success-light-8: color-mix(in srgb, var(--k12-good) 20%, var(--k12-surface));
+  --el-color-success-light-9: color-mix(in srgb, var(--k12-good) 10%, var(--k12-surface));
+  --el-color-success-dark-2: color-mix(in srgb, var(--k12-good) 80%, var(--k12-fg));
+
+  --el-color-warning: var(--k12-warn);
+  --el-color-warning-light-3: color-mix(in srgb, var(--k12-warn) 70%, var(--k12-surface));
+  --el-color-warning-light-5: color-mix(in srgb, var(--k12-warn) 50%, var(--k12-surface));
+  --el-color-warning-light-7: color-mix(in srgb, var(--k12-warn) 30%, var(--k12-surface));
+  --el-color-warning-light-8: color-mix(in srgb, var(--k12-warn) 20%, var(--k12-surface));
+  --el-color-warning-light-9: color-mix(in srgb, var(--k12-warn) 10%, var(--k12-surface));
+  --el-color-warning-dark-2: color-mix(in srgb, var(--k12-warn) 80%, var(--k12-fg));
+
+  --el-color-danger: var(--k12-bad);
+  --el-color-danger-light-3: color-mix(in srgb, var(--k12-bad) 70%, var(--k12-surface));
+  --el-color-danger-light-5: color-mix(in srgb, var(--k12-bad) 50%, var(--k12-surface));
+  --el-color-danger-light-7: color-mix(in srgb, var(--k12-bad) 30%, var(--k12-surface));
+  --el-color-danger-light-8: color-mix(in srgb, var(--k12-bad) 20%, var(--k12-surface));
+  --el-color-danger-light-9: color-mix(in srgb, var(--k12-bad) 10%, var(--k12-surface));
+  --el-color-danger-dark-2: color-mix(in srgb, var(--k12-bad) 80%, var(--k12-fg));
+
+  --el-color-info: var(--k12-muted);
+  --el-color-info-light-9: color-mix(in srgb, var(--k12-muted) 10%, var(--k12-surface));
+  --el-color-info-dark-2: color-mix(in srgb, var(--k12-muted) 80%, var(--k12-fg));
+
+  --el-text-color-primary: var(--k12-fg);
+  --el-text-color-regular: var(--k12-fg-2);
+  --el-text-color-secondary: var(--k12-muted);
+  --el-text-color-placeholder: var(--k12-muted);
+  --el-text-color-disabled: var(--k12-muted-2);
+
+  --el-border-color: var(--k12-border);
+  --el-border-color-light: color-mix(in srgb, var(--k12-border) 80%, transparent);
+  --el-border-color-lighter: color-mix(in srgb, var(--k12-border) 60%, transparent);
+  --el-border-color-extra-light: color-mix(in srgb, var(--k12-border) 40%, transparent);
+
+  --el-bg-color: var(--k12-surface);
+  --el-bg-color-overlay: var(--k12-surface);
+  --el-fill-color: var(--k12-surface-2);
+  --el-fill-color-blank: var(--k12-surface);
+  --el-fill-color-light: var(--k12-surface-2);
+
+  --el-font-family: var(--k12-font-ui);
+  --el-font-size-base: var(--k12-fs-md);
+  --el-border-radius-base: var(--k12-r-control);
+  --el-border-radius-small: var(--k12-r-inset);
+  --el-border-radius-round: var(--k12-r-pill);
+
+  --el-box-shadow-light: var(--k12-shadow-card);
+  --el-box-shadow: var(--k12-shadow-float);
+  --el-transition-duration: 0s;
+}
+
+.el-button {
+  border-radius: var(--k12-r-control);
+  font-weight: 600;
+}
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface);
+  box-shadow: 0 0 0 1px var(--k12-border) inset;
+}
+.el-input__wrapper:hover,
+.el-select__wrapper:hover {
+  box-shadow: 0 0 0 1px var(--k12-accent-border) inset;
+}
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--k12-accent-ink) inset;
+}
+.el-card {
+  border-radius: var(--k12-r-card);
+  border-color: var(--k12-border);
+}
+.el-dialog {
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-float);
+}
+.el-tag {
+  border-radius: var(--k12-r-pill);
+  font-weight: 600;
+}
+.el-tabs__item {
+  font-size: var(--k12-fs-sm);
+  font-weight: 600;
+}
+.el-segmented {
+  --el-segmented-bg-color: var(--k12-surface-2);
+  --el-segmented-item-selected-bg-color: var(--k12-surface);
+  --el-segmented-item-selected-color: var(--k12-accent-ink);
+  border-radius: var(--k12-r-control);
+  padding: 3px;
+}
+.el-segmented__item {
+  font-size: var(--k12-fs-xs);
+  font-weight: 550;
+  border-radius: calc(var(--k12-r-control) - 3px);
+}
+.el-segmented__item-selected {
+  box-shadow: 0 0 0 1px var(--k12-border);
+}
+.el-progress-bar__outer {
+  background-color: var(--k12-surface-2);
+}
+.el-progress__text {
+  font-size: var(--k12-fs-xs) !important;
+  font-weight: 650;
+  color: var(--k12-muted);
+}
+.el-table {
+  --el-table-border-color: var(--k12-border);
+  --el-table-header-bg-color: var(--k12-surface-2);
+  --el-table-header-text-color: var(--k12-muted);
+  --el-table-row-hover-bg-color: var(--k12-surface-2);
+  --el-table-text-color: var(--k12-fg-2);
+  font-size: var(--k12-fs-sm);
+}
+.el-table th.el-table__cell {
+  font-weight: 650;
+  font-size: var(--k12-fs-xs);
+}
+.el-timeline {
+  padding-left: 2px;
+}
+.el-timeline-item__node {
+  background: var(--k12-accent-ink);
+}
+.el-descriptions {
+  --el-descriptions-item-bordered-label-background: var(--k12-surface-2);
+}
+.el-descriptions__label {
+  color: var(--k12-muted) !important;
+  font-weight: 600 !important;
+}
+.el-descriptions__content {
+  color: var(--k12-fg-2) !important;
+}
+.el-collapse,
+.el-collapse-item__header,
+.el-collapse-item__wrap {
+  border-color: var(--k12-border);
+  background: transparent;
+}
+.el-collapse-item__header {
+  font-size: var(--k12-fs-sm);
+  font-weight: 650;
+  color: var(--k12-fg);
+}
+.el-step__title {
+  font-size: var(--k12-fs-sm);
+  font-weight: 600;
+}
+.el-alert {
+  border-radius: var(--k12-r-inset);
 }

@@ -130,15 +130,18 @@ function chapterNumber(title: string): number {
 
 .summary {
   margin-bottom: 12px;
-  font-size: 13px;
+  font-size: var(--k12-fs-sm);
+  color: var(--k12-fg-2);
 }
 
+/* 图谱画布 = 一张卡片（E2）：自绘 SVG 压在白面上，边界靠底色差与细线 */
 .canvas {
   overflow: auto;
   padding: 4px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-card);
 }
 
 .legend {
@@ -146,8 +149,8 @@ function chapterNumber(title: string): number {
   gap: 16px;
   flex-wrap: wrap;
   margin-top: 8px;
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
 }
 
 .legend__item {
@@ -159,20 +162,21 @@ function chapterNumber(title: string): number {
 .dot {
   width: 10px;
   height: 10px;
-  border-radius: 3px;
-  border: 1px solid var(--border);
-  background: var(--surface);
+  border-radius: var(--k12-r-flat);
+  border: 1px solid var(--k12-border-strong);
+  background: var(--k12-surface);
 }
 
 .dot--mastered {
-  background: var(--accent-soft);
-  border-color: var(--accent);
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent);
 }
 
 .section {
   margin: 18px 0 8px;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--k12-fs-lg);
+  font-weight: 650;
+  color: var(--k12-fg);
 }
 
 .chapters {
@@ -182,9 +186,10 @@ function chapterNumber(title: string): number {
 }
 
 .chapter__title {
-  font-size: 12px;
+  font-size: var(--k12-fs-sm);
   font-weight: 600;
   margin-bottom: 5px;
+  color: var(--k12-fg);
 }
 
 .chapter__kps {
@@ -195,28 +200,28 @@ function chapterNumber(title: string): number {
 
 .kp {
   padding: 2px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  font-size: 11px;
-  color: var(--text-faint);
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
 }
 
 .kp--mastered {
-  background: var(--accent-soft);
-  border-color: rgba(47, 111, 208, 0.28);
-  color: var(--accent-strong);
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  color: var(--k12-accent-ink);
   font-weight: 600;
 }
 
 .state {
   padding: 10px 0;
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .state--error {
-  color: var(--warn);
-  line-height: 1.7;
+  color: var(--k12-warn);
+  line-height: var(--k12-lh-body);
 }
 </style>
