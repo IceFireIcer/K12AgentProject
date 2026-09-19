@@ -4,8 +4,8 @@
   "title": "梯度下降：沿着下坡方向一步步调参数",
   "concept": "梯度下降",
   "kp_ids": [
-    "sr-loss-gradient",
-    "sr-linear-regression"
+    "machine-learning-sr",
+    "supervised-learning-sr"
   ],
   "grade_levels": [
     "senior"

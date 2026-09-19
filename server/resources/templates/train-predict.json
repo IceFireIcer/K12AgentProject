@@ -4,9 +4,10 @@
   "title": "机器学本事：数据 → 训练 → 预测",
   "concept": "数据·训练·预测",
   "kp_ids": [
-    "ph-data-train-predict",
-    "pl-ai-around-me",
-    "sr-ml-pipeline"
+    "training-inference-pl",
+    "training-inference-ph",
+    "training-inference-jr",
+    "training-inference-sr"
   ],
   "grade_levels": [
     "primary_low",

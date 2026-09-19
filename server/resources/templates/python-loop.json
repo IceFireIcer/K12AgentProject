@@ -4,8 +4,8 @@
   "title": "循环：同一段代码重复执行",
   "concept": "循环",
   "kp_ids": [
-    "jr-py-loop",
-    "jr-py-variable"
+    "prog-loop-jr",
+    "prog-loop-sr"
   ],
   "grade_levels": [
     "junior",

@@ -4,7 +4,9 @@
   "title": "决策树：一串「是 / 否」往下问",
   "concept": "决策树",
   "kp_ids": [
-    "jr-decision-tree"
+    "supervised-learning-ph",
+    "supervised-learning-jr",
+    "supervised-learning-sr"
   ],
   "grade_levels": [
     "primary_high",

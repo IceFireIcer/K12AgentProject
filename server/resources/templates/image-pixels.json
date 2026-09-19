@@ -4,8 +4,9 @@
   "title": "图像分类：机器把照片看成数字",
   "concept": "图像分类",
   "kp_ids": [
-    "ph-image-classification",
-    "pl-machine-sees"
+    "computer-vision-pl",
+    "computer-vision-ph",
+    "computer-vision-jr"
   ],
   "grade_levels": [
     "primary_low",

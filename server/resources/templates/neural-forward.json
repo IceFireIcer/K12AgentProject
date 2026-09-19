@@ -4,8 +4,10 @@
   "title": "神经网络：一层层算过去",
   "concept": "神经网络",
   "kp_ids": [
-    "jr-neural-basics",
-    "sr-ml-pipeline"
+    "artificial-neuron-jr",
+    "artificial-neuron-sr",
+    "neural-network-jr",
+    "neural-network-sr"
   ],
   "grade_levels": [
     "junior",

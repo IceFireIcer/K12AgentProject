@@ -4,8 +4,9 @@
   "title": "排序：把一排数字从小到大摆好",
   "concept": "排序",
   "kp_ids": [
-    "jr-py-loop",
-    "jr-data-features"
+    "prog-list-ph",
+    "prog-list-jr",
+    "prog-list-sr"
   ],
   "grade_levels": [
     "primary_high",

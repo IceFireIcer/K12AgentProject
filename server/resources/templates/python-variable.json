@@ -4,8 +4,8 @@
   "title": "变量：给数据起一个名字",
   "concept": "变量",
   "kp_ids": [
-    "jr-py-variable",
-    "jr-py-loop"
+    "prog-variable-jr",
+    "prog-variable-sr"
   ],
   "grade_levels": [
     "junior",
