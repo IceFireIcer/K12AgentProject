@@ -63,14 +63,58 @@ let sidecar: SidecarManager | null = null
 /** 退出流程已开始（防止 `before-quit` 递归触发）。 */
 let quitting = false
 
+/**
+ * 窗口尺寸与外观。
+ *
+ * ★ **1440×900 是设计基准**（`docs/ui/版式契约.md` 与 `assets/base.css` 的断点都按它写）：
+ *   - `<1280` 会让侧栏收成 64px 图标条、对话右栏改浮层（响应式是**有意的**，
+ *     但演示与验收要在一屏里看全，所以默认开 1440）；
+ *   - `#app` 有 `min-width: 1120px`（正文阅读栏 + 侧栏 + 右栏的下限），
+ *     窗口比它窄就会出横向滚动条 —— 所以 **minWidth 也取 1120**，
+ *     让「窗口能缩到多小」与「界面能排到多小」是同一个数，
+ *     不会出现「拖到 900 宽就横向滚动」这种看起来像错位的状态。
+ *
+ * ★★ **无边框窗口（`frame: false`）+ 页面内自绘的窗口按钮**：
+ *   Windows 原生标题栏是系统灰、带应用图标与菜单，与本设计（浅色纸面 + 学段配色）
+ *   完全不是一套视觉；且它会在顶栏之上再压一行，把「对话优先」的纵向空间吃掉一截。
+ *   代价与配套（少任何一条都会让窗口变得不好用）：
+ *     ① **拖拽**：顶栏那一行必须是拖拽区（`AppShell.vue` 的 `.shell__head`），
+ *        且里面的**可交互元素**要显式 `no-drag`（否则点不动）；
+ *     ② **窗口按钮**：最小化 / 最大化 / 关闭做在页面里（`WindowControls.vue`），
+ *        经 IPC 走 `window:*` 那四条通道 —— 渲染进程没有 Node 能力，只能这样要；
+ *     ③ **最大化状态要推回渲染进程**：按钮图标得知道现在是「最大化」还是「还原」，
+ *        而拖拽/双击/贴边吸附（Win+方向键）都会改变它，渲染进程自己看不到。
+ *   `titleBarStyle: 'hidden'` 是 macOS 的路子（Windows 上配合 `titleBarOverlay`
+ *   会得到**系统画的**按钮，与本设计仍然不是一套）—— 所以用 `frame: false`。
+ */
+const WINDOW_WIDTH = 1440
+const WINDOW_HEIGHT = 900
+/** 与 `assets/base.css` 的 `#app { min-width }` 对齐（见上面第 ①② 条的理由）。 */
+const WINDOW_MIN_WIDTH = 1120
+const WINDOW_MIN_HEIGHT = 700
+
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
-    width: 1080,
-    height: 760,
-    minWidth: 900,
-    minHeight: 640,
+    width: WINDOW_WIDTH,
+    height: WINDOW_HEIGHT,
+    minWidth: WINDOW_MIN_WIDTH,
+    minHeight: WINDOW_MIN_HEIGHT,
     show: false,
     title: BRAND_NAME,
+    // ★ 窗口 / 任务栏图标：不设的话 Windows 上显示的是 **Electron 的原子图标** ——
+    //   那是别人的牌子，而它是学生每天在任务栏上看到的第一眼。
+    // ★ 路径必须是**两个模式下都存在**的那一份。`build/icon.png` 看着最自然，但
+    //   electron-builder 把 `build/` 当**构建资源**（只拿它生成 exe 图标），
+    //   **不会**打进 app.asar —— 打包态会指向一个不存在的文件（实测确认）。
+    //   而 `resources/brand/` 两种模式都在：开发态是 `desktop/resources/brand/`，
+    //   打包态在 `app.asar.unpacked/resources/brand/`（`asarUnpack` 收录了 `resources/**`）。
+    // ⚠️ 用打包态**实际存在**的那份（同一张 `logos/mainlogo.png` 的 256px 版，
+    //   与任务栏图标同源），而不是为了「看着整齐」去 copy 一份到别处。
+    icon: join(import.meta.dirname, '../../resources/brand/main.png'),
+    // 无边框：标题栏由页面自己画（见上面那段说明）
+    frame: false,
+    // 屏上居中：默认位置在 Windows 上是「系统决定」，多显示器下可能开在副屏
+    center: true,
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(import.meta.dirname, '../preload/index.js'),
@@ -86,6 +130,12 @@ function createWindow(): BrowserWindow {
   window.on('ready-to-show', () => {
     window.show()
   })
+
+  // ★ 最大化状态变了就推给渲染进程（按钮图标要跟着换）。
+  //   这两个事件覆盖「双击拖拽区」「系统菜单」「Win+↑/↓」「拖到屏幕上边缘」全部路径 ——
+  //   渲染进程自己无法观察到这些。
+  window.on('maximize', () => pushWindowState(window))
+  window.on('unmaximize', () => pushWindowState(window))
 
   // 关窗后别再留着已销毁窗口的引用（`mainWindow` 只用于取渲染进程/推状态）
   window.on('closed', () => {
@@ -105,6 +155,17 @@ function createWindow(): BrowserWindow {
   }
 
   return window
+}
+
+/**
+ * 把当前最大化状态推给该窗口的渲染进程。
+ *
+ * ★ 只推给**这一个**窗口（不是 `getAllWindows()`）：这是窗口自身的属性。
+ * ★ 已销毁的窗口不发（对销毁后的 `webContents` 调用会抛）。
+ */
+function pushWindowState(window: BrowserWindow): void {
+  if (window.isDestroyed()) return
+  window.webContents.send(IPC.windowMaximizedChanged, window.isMaximized())
 }
 
 function pushSidecarState(): void {

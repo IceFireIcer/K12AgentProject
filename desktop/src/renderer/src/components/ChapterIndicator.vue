@@ -14,6 +14,13 @@
  * ★ 章节**清单**复用既有的取数路径（`stores/study.ts` 的 `loadChapters`，
  *   同一份数据也供「学习档案 → 章节进度」分页使用）—— 不新增第二条取数路径。
  *
+ * ── 它住在哪里（与学段指示器的分工）──────────────────────────────────────
+ * 学段是**全局环境**（在哪一页都成立），所以那一枚在顶栏；章节是**这段对话在学什么**，
+ * 所以它挂在对话页的消息区上方（`views/Chat.vue` 的 `.chat__indicators` 行），
+ * 且顶栏**不再**渲染学段以外的那一枚（同一件事出现两次就是「界面错位」本身）。
+ * ★ 分隔线由**外面那一行**（`.chat__indicators`）画：两个组件各自再画一条就会叠成双线。
+ *   所以本组件自己不画下边框（页面用法需要时由所在容器决定）。
+ *
  * 显示的三种状态：
  *   - 还没判定出学段（`chat.currentGrade === null`）：给一句可读提示，**不列空列表**
  *     （章节按学段分，学段未知列不出任何东西）；
@@ -152,50 +159,61 @@ async function choose(title: string): Promise<void> {
 </template>
 
 <style scoped>
+/* ★ 不画底色、不画下边框：这一行是**桌面层**（与下面的会话工具条同层），
+ *   分隔线属于外面那一行（`Chat.vue` 的 `.chat__indicators`）。
+ *   这里再铺一层白 / 再画一条线，就会与外层叠成「白条 + 双线」——
+ *   那正是「元素错位」看起来的样子。
+ * 单行布局（badge + 触发器）在窄窗口下**不换行**：让章节名截断，而不是把行撑成两行。 */
 .chapter {
-  padding: 6px 24px 8px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+  padding: 7px 24px 8px;
 }
 
 .chapter__line {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
+/* ⚠️ 用 `inline-block` 而不是 `inline-flex`：里面是一整句可截断的章标题，
+ *   而 `text-overflow` 只对**块容器里的行内内容**生效 —— 换成 flex，
+ *   文字会被包成一个匿名 flex 项，截断只会硬切、不出省略号。 */
 .chapter__badge {
-  display: inline-flex;
-  align-items: center;
+  display: inline-block;
+  min-width: 0;
   padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  border: 1px solid rgba(47, 111, 208, 0.24);
-  color: var(--accent-strong);
-  font-size: 12px;
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-accent-soft);
+  border: 1px solid var(--k12-accent-border);
+  color: var(--k12-accent-ink);
+  font-size: var(--k12-fs-xs);
   font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chapter__set {
+  flex: none;
   padding: 2px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
-  background: var(--surface);
-  color: var(--text-muted);
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-border-strong);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--k12-fs-xs);
   cursor: pointer;
 }
 
 .chapter__set:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--k12-accent-ink);
+  color: var(--k12-accent-ink);
 }
 
 .chapter__set:disabled {
   cursor: not-allowed;
-  color: var(--text-faint);
+  color: var(--k12-muted-2);
 }
 
 .chapter__picker {
@@ -213,23 +231,23 @@ async function choose(title: string): Promise<void> {
 
 .chapter__option {
   padding: 3px 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
-  background: var(--surface);
-  color: var(--text-muted);
+  border-radius: var(--k12-r-pill);
+  border: 1px solid var(--k12-border-strong);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--k12-fs-xs);
   cursor: pointer;
 }
 
 .chapter__option:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--k12-accent-ink);
+  color: var(--k12-accent-ink);
 }
 
 .chapter__option:disabled {
   cursor: not-allowed;
-  color: var(--text-faint);
+  color: var(--k12-muted-2);
 }
 
 /* 「不限章节」跟章按钮分开一点：它不是一章，是「不限定」 */
@@ -239,27 +257,27 @@ async function choose(title: string): Promise<void> {
 
 /* 当前生效的那一章：与 `.chapter__badge` 同一视觉语言（选中 = 强调色） */
 .chapter__option--active {
-  border-color: rgba(47, 111, 208, 0.45);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  border-color: var(--k12-accent-border);
+  background: var(--k12-accent-soft);
+  color: var(--k12-accent-ink);
   font-weight: 600;
 }
 
 .chapter__note {
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
 }
 
 .chapter__notice {
   margin-top: 5px;
-  font-size: 12px;
-  color: var(--ok);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-good);
 }
 
 .chapter__warn {
   margin-top: 5px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--warn);
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-warn);
 }
 </style>

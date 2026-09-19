@@ -1,5 +1,5 @@
 /**
- * 学习报告 / 错题本的 **Markdown 拼装**（纯函数，可单测）。
+ * 学习报告的 **Markdown 拼装 + 报告文案**（纯函数，可单测）。
  *
  * ---------------------------------------------------------------------------
  * 为什么拼装放在渲染进程（而不是 Python）
@@ -20,6 +20,14 @@
  *    所以这里**不需要**做任何过滤 —— 但也不许「顺手」去补一列「参考答案」。
  * 3. ★ **导出物是给学生/家长看的**：中文、分节、可用 Markdown 阅读器打开；
  *    连续天数/掌握度这类数字要写清口径（「近 7 天」而不是一个光秃秃的「7」）。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么这里还有两个**文案映射**（`STAGE_LABELS` / `SIGNAL_TYPE_LABELS`）
+ * ---------------------------------------------------------------------------
+ * 因为它们是「屏幕上」与「导出物里」**共用的同一份字**：概览页（`ReportTab.vue`）
+ * 与这里各写一份的话，改一处忘另一处就会出现「页面写『已测验』、导出写『已闯关』」。
+ * 契约本身只给英文枚举（`locked|learning|quizzed|mastered`、
+ * `vocab|depth|quiz_perf|meta_cognition`），中文说法必须有唯一出处。
  */
 
 import type { MistakesView, ReportView } from '../stores/study'
@@ -37,6 +45,71 @@ export function masteryLabel(score: number): string {
   if (score >= 0.8) return '已掌握'
   if (score >= 0.5) return '正在学'
   return '需要练'
+}
+
+/**
+ * 闯关四个阶段的中文名（键 = `progress.stage` 的取值，也是报告里 `stageCounts` 的键）。
+ *
+ * ★ 唯一出处：概览页的「逐关进度」与这里的「四、闯关进度」都读它。
+ */
+export const STAGE_LABELS: Record<string, string> = {
+  locked: '未解锁',
+  learning: '学习中',
+  quizzed: '已测验',
+  mastered: '已掌握'
+}
+
+/** 四类学段判定信号的中文名（键 = 契约 `GradeSignalType` 的四个字面量）。 */
+export const SIGNAL_TYPE_LABELS: Record<string, string> = {
+  vocab: '术语使用',
+  depth: '提问深度',
+  quiz_perf: '答题表现',
+  meta_cognition: '元认知表达'
+}
+
+/**
+ * 「概览」页比 `LearningReport` **多出来的那几块数据**（可选参数，不传就是老行为）。
+ *
+ * 结构与 `stores/insight.ts` 的派生值**逐字段对得上**，但不 import 那边：
+ * 这是纯函数，参数一律是**结构类型** —— 免得一个格式化函数被绑死在某个 store 上。
+ * ⚠️ 三个字段**都不参与判定**：掌握度平均与分档是服务端算好的展示口径、
+ * 信号与推荐是服务端给的结论，这里只把它们排成可读文本。
+ */
+export interface ReportOverview {
+  /** 掌握度概览（`insight.masterySummary`；`total` 为 0 时整行不出现）。 */
+  masterySummary?: {
+    average: number
+    mastered: number
+    needWork: number
+    total: number
+  } | null
+  /** 学段判定信号（`insight.gradeSignals`）。 */
+  gradeSignals?: {
+    confidence: number
+    signals?: readonly { signalType: string; value: number; raw?: string | null }[] | null
+  } | null
+  /**
+   * 推荐下一步（`insight.recommended` 那一条）。
+   *
+   * ★ 形状是**平铺**的（不是 `{ item }`）：调用方手里拿到的就是那一条，
+   *   包一层只会让每个调用点都写一次 `{ item: recommended }`。
+   */
+  recommended?: {
+    kpId: string
+    name: string
+    reason: string
+  } | null
+}
+
+/** 0..1 之外的数不进导出物（脏数据不该在报告里变成 137%）——**只夹紧，不判断对错**。 */
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(1, value))
+}
+
+/** 0..1 → 百分比整数（导出物里不写 62.0000001%）。 */
+function percentOf(value: number): number {
+  return Math.round(clamp01(value) * 100)
 }
 
 /** 毫秒时间戳 → `YYYY-MM-DD HH:mm`（本地时间；导出物上没有时区换算的需求）。 */
@@ -68,11 +141,20 @@ export function summaryLine(report: ReportView, days: number): string {
  * 分节与页面上一致（概况 / 掌握度 / 章节进度 / 闯关 / 学段轨迹 / 下一步），
  * 这样「屏幕上看到的」与「导出的文件」不会各说各话。
  *
- * 「下一步学什么」**不由本函数算**：`report` 里没有推荐（推荐有唯一出口
- * `/api/profile/{id}/recommendation`）。所以这里只写一句指向对话的提示，
- * 绝不自己猜一个推荐 —— 猜出来的推荐与页面上的会不一致。
+ * `overview` 是**可选**的第三参：传了就把概览页独有的那两块数据
+ * （掌握度平均与分档、学段判定信号）与推荐一起写进文件；
+ * **不传时输出与从前逐字节相同**（既有单测就是按两参调用的，不许改它们的期望）。
+ * 三块新增内容都是**追加**，不动任何既有分节的标题与顺序 —— 报告的六个分区是
+ * 被单测钉住的对外结构。
+ *
+ * 「下一步学什么」**不由本函数算**：推荐有唯一出口（`/api/profile/{id}/recommendation`），
+ * 这里只在 `overview.recommendation` 传进来时把它写出来（算推荐是 Python 的事）。
  */
-export function composeReportMarkdown(report: ReportView, days: number): string {
+export function composeReportMarkdown(
+  report: ReportView,
+  days: number,
+  overview?: ReportOverview
+): string {
   const lines: string[] = []
   lines.push(`# 学习报告（近 ${days} 天）`)
   lines.push('')
@@ -84,6 +166,17 @@ export function composeReportMarkdown(report: ReportView, days: number): string 
   lines.push('## 一、学习概况')
   lines.push('')
   lines.push(summaryLine(report, days))
+  // 掌握度概览（概览页 hero 上的那几个数）——口径写在括号里，
+  // 免得家长把 0.6 这条界面分档线当成判分规则（判分规则在后端，另有阈值）。
+  const masterySummary = overview?.masterySummary
+  if (masterySummary && masterySummary.total > 0) {
+    lines.push('')
+    lines.push(
+      `- 平均掌握度：**${percentOf(masterySummary.average)}%**` +
+        `（共 ${masterySummary.total} 个知识点：已掌握（≥0.6）${masterySummary.mastered} 个 · ` +
+        `待加强（<0.6）${masterySummary.needWork} 个）`
+    )
+  }
   if (report.daily.length > 0) {
     lines.push('')
     lines.push('| 日期 | 活动数 | 练习题数 | 答对 |')
@@ -135,14 +228,8 @@ export function composeReportMarkdown(report: ReportView, days: number): string 
   if (stageKeys.length === 0) {
     lines.push('还没有开始闯关。')
   } else {
-    const stageNames: Record<string, string> = {
-      locked: '未解锁',
-      learning: '学习中',
-      quizzed: '已测验',
-      mastered: '已掌握'
-    }
     for (const key of stageKeys) {
-      lines.push(`- ${stageNames[key] ?? key}：${report.stageCounts[key]} 个知识点`)
+      lines.push(`- ${STAGE_LABELS[key] ?? key}：${report.stageCounts[key]} 个知识点`)
     }
   }
   if (report.badges.length > 0) {
@@ -153,6 +240,20 @@ export function composeReportMarkdown(report: ReportView, days: number): string 
 
   lines.push('## 五、学段变化轨迹')
   lines.push('')
+  // 判定信号（概览页「学段依据」里的那四格）插在轨迹**之前**：
+  // 「按什么判的」是因、「变成了什么」是果，读起来是一条线。
+  const gradeSignals = overview?.gradeSignals
+  const signals = gradeSignals?.signals ?? []
+  if (gradeSignals && signals.length > 0) {
+    lines.push(`判定信号（当前置信度 ${percentOf(gradeSignals.confidence)}%）：`)
+    lines.push('')
+    for (const signal of signals) {
+      const signalLabel = SIGNAL_TYPE_LABELS[signal.signalType] ?? signal.signalType
+      const raw = signal.raw && signal.raw.trim().length > 0 ? `（${signal.raw.trim()}）` : ''
+      lines.push(`- ${signalLabel}：${percentOf(signal.value)}%${raw}`)
+    }
+    lines.push('')
+  }
   if (report.gradeHistory.length === 0) {
     lines.push('还没有学段变化记录。')
   } else {
@@ -168,6 +269,16 @@ export function composeReportMarkdown(report: ReportView, days: number): string 
 
   lines.push('## 六、下一步')
   lines.push('')
+  // 推荐是**服务端给的**：传进来就写出来，不传就只留那句指引（绝不本地猜一个）。
+  const recommended = overview?.recommended
+  if (recommended) {
+    const name =
+      recommended.name && recommended.name !== recommended.kpId
+        ? recommended.name
+        : `${recommended.kpId}（知识点编号）`
+    lines.push(`- 建议接着练：**${name}** —— ${recommended.reason}`)
+    lines.push('')
+  }
   lines.push('回到对话里问一句「我接下来该学什么」，助手会按依赖图与掌握度给出建议。')
   lines.push('')
 
@@ -235,3 +346,4 @@ export function composeMistakesMarkdown(mistakes: MistakesView): string {
 
   return lines.join('\n')
 }
+

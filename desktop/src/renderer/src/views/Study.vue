@@ -104,19 +104,26 @@ watch(
 
 .study__head {
   padding: 14px 24px 10px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  border-bottom: 1px solid var(--k12-border);
+  /* 这一条是**纸**（本页的头部横条，带一条细线收口），不是身后的桌面 ——
+   * 桌面底色已经由 `.shell__content` 铺好（`--k12-page`） */
+  background: var(--k12-surface);
 }
 
 .study__title {
-  font-size: 16px;
+  /* 这一层的区块标题（分页外壳的头）→ 区块标题档。
+   * 它**不是**页面身份行：身份行走 PageIdentity（24px），本页内容区的最大字号
+   * 由各分页自己的 hero 承担（ReportTab 的 `.hero__num`），所以这里不能取 xl ——
+   * 取了就会与内容抢焦点、且与顶栏 17px 的页面名重复两遍。 */
+  font-size: var(--k12-fs-lg);
   font-weight: 700;
 }
 
 .study__sub {
   margin-top: 3px;
-  font-size: 12px;
-  color: var(--text-faint);
+  /* 当前分页的一句话说明 → meta 档 */
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted-2);
 }
 
 .study__tabs {
@@ -126,35 +133,42 @@ watch(
   flex-wrap: wrap;
 }
 
+/* 分页胶囊：与 `study/ReportTab.vue` 的时间范围胶囊同一配方（同一组导航，
+ * 学生在这两处做的都是「换一个视图」这件事，长相必须一致）。 */
 .tab {
   padding: 5px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-pill);
   background: transparent;
-  color: var(--text-faint);
-  font-size: 13px;
+  color: var(--k12-muted-2);
+  /* 分页按钮 = 学生要点的一串列表项 → 次级正文档。
+   * 高度由 padding + line-height 撑着，不钉像素高度 —— 字号抬升不会把它挤变形。 */
+  font-size: var(--k12-fs-sm);
   cursor: pointer;
 }
 
 .tab:hover {
-  color: var(--text);
-  border-color: var(--accent);
+  /* 这一行是**要读的文字** → fg；描边是画出来的一层 → accent */
+  color: var(--k12-fg);
+  border-color: var(--k12-accent);
 }
 
 .tab--on {
-  background: var(--accent-soft);
-  border-color: rgba(47, 111, 208, 0.28);
-  color: var(--accent-strong);
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  /* 选中态的颜色是要读的 → accent-ink（accent 本身在这个字号上对比度不够） */
+  color: var(--k12-accent-ink);
   font-weight: 600;
 }
 
 .study__error {
   margin: 10px 24px 0;
   padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--warn-soft, rgba(214, 158, 46, 0.12));
-  color: var(--warn);
-  font-size: 12px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-warn-soft);
+  color: var(--k12-warn);
+  /* 桥接失败说明 → meta 档 */
+  font-size: var(--k12-fs-xs);
   line-height: 1.6;
 }
 
