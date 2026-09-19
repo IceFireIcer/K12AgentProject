@@ -236,7 +236,7 @@ export const GenerateQuizParams = Type.Object({
   kpId: Type.String({
     minLength: 1,
     maxLength: 64,
-    description: '要出题的知识点 id（例如 jr-py-loop）；从画像或 rag_search 的结果里取'
+    description: '要出题的知识点 id（例如 prog-loop-jr）；从画像或 rag_search 的结果里取'
   }),
   gradeLevel: Type.Optional(
     Type.Union(
@@ -1449,7 +1449,7 @@ export function createQuizExtension(
         noteStudentBoundary(session?.studentId)
         const kpId = readNonEmptyString(params?.kpId)
         if (kpId === null) {
-          return failed('出题需要知识点 id（例如 jr-py-loop）。请先确认要练哪个知识点。')
+          return failed('出题需要知识点 id（例如 prog-loop-jr）。请先确认要练哪个知识点。')
         }
         const gradeLevel = resolveGradeLevel(params?.gradeLevel, session?.gradeLevel)
         const count =

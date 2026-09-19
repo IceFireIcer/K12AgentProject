@@ -66,7 +66,7 @@ const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 test('G8-1 ★ 参数摘要不含密钥、不含学生个人信息、不含对话原文', () => {
   const summary = summarizeArgs({
-    kp_id: 'jr-py-loop',
+    kp_id: 'prog-loop-jr',
     grade_level: 'junior',
     count: 2,
     query: '老师，我的名字是小明，请把这段代码改成计算平均分',
@@ -79,7 +79,7 @@ test('G8-1 ★ 参数摘要不含密钥、不含学生个人信息、不含对�
   })
 
   // 白名单内的短标识与标量可以出现（轨迹要能看出「调了哪个知识点」）
-  assert.match(summary, /kp_id=jr-py-loop/)
+  assert.match(summary, /kp_id=prog-loop-jr/)
   assert.match(summary, /grade_level=junior/)
   assert.match(summary, /count=2/)
   assert.match(summary, /options=«数组 3 项»/)
@@ -348,19 +348,19 @@ test('G9-7 学习记录提取：qa / animation / coding / quiz 全覆盖，无�
     activity: 'qa',
     detail: '对话答疑（检索教材片段）'
   })
-  assert.deepEqual(extractLearningFromTool('generate_animation', { kp_id: 'jr-py-loop', concept: '循环' }, {}), {
+  assert.deepEqual(extractLearningFromTool('generate_animation', { kp_id: 'prog-loop-jr', concept: '循环' }, {}), {
     activity: 'animation',
     detail: '观看动画讲解',
-    kpId: 'jr-py-loop'
+    kpId: 'prog-loop-jr'
   })
-  assert.deepEqual(extractLearningFromTool('evaluate_code', { kp_id: 'jr-py-loop', code: 'print(1)' }, { details: { ok: true } }), {
+  assert.deepEqual(extractLearningFromTool('evaluate_code', { kp_id: 'prog-loop-jr', code: 'print(1)' }, { details: { ok: true } }), {
     activity: 'coding',
     detail: '代码运行与评估',
-    kpId: 'jr-py-loop'
+    kpId: 'prog-loop-jr'
   })
   assert.deepEqual(
-    extractLearningFromTool('submit_quiz', { qid: 'q1' }, { details: { kpId: 'jr-py-loop', correct: false } }),
-    { activity: 'quiz', detail: '提交作答', kpId: 'jr-py-loop', isCorrect: false }
+    extractLearningFromTool('submit_quiz', { qid: 'q1' }, { details: { kpId: 'prog-loop-jr', correct: false } }),
+    { activity: 'quiz', detail: '提交作答', kpId: 'prog-loop-jr', isCorrect: false }
   )
 
   // 与学习数据无关的 Tool → `null`（不猜、不写库）
@@ -369,15 +369,15 @@ test('G9-7 学习记录提取：qa / animation / coding / quiz 全覆盖，无�
   }
 
   // ★ 提取结果里**不存在**任何承载对话正文的字段
-  const extracted = extractLearningFromTool('generate_quiz', { kp_id: 'jr-py-loop', stem: '以下哪个是循环' }, {})
+  const extracted = extractLearningFromTool('generate_quiz', { kp_id: 'prog-loop-jr', stem: '以下哪个是循环' }, {})
   assert.deepEqual(Object.keys(extracted ?? {}).sort(), ['activity', 'detail', 'kpId'])
   assert.ok(!JSON.stringify(extracted).includes('以下哪个是循环'))
 
   // kp_id 形状校验：中文/路径/超长一律丢弃（避免把正文写进 kp_id 列）
-  assert.equal(extractKpId({ kp_id: 'jr-py-loop' }, {}), 'jr-py-loop')
+  assert.equal(extractKpId({ kp_id: 'prog-loop-jr' }, {}), 'prog-loop-jr')
   assert.equal(extractKpId({ kp_id: '循环' }, {}), undefined)
   assert.equal(extractKpId({ kp_id: '../../etc/passwd' }, {}), undefined)
-  assert.equal(extractKpId({}, { details: { kpId: 'sr-ml-gd' } }), 'sr-ml-gd')
+  assert.equal(extractKpId({}, { details: { kpId: 'machine-learning-sr' } }), 'machine-learning-sr')
 
   // 对错只认显式字段：`ok` 在不同扩展里含义不同，拿它当对错会污染掌握度
   assert.equal(extractCorrectness({ details: { correct: true } }), true)
@@ -411,7 +411,7 @@ test('G9-8 learning-log：绑定学生后按事件写库（tool_execution_end + 
   handlers.get('tool_execution_end')?.({
     toolCallId: 'c1',
     toolName: 'generate_animation',
-    args: { kp_id: 'jr-py-loop' },
+    args: { kp_id: 'prog-loop-jr' },
     isError: false,
     result: { details: { ok: true } }
   })
@@ -476,7 +476,7 @@ test('G9-8 learning-log：绑定学生后按事件写库（tool_execution_end + 
   const unboundHandlers = new Map<string, (event: unknown) => unknown>()
   unbound({ on: (event, handler) => unboundHandlers.set(event, handler), registerTool: () => undefined })
   bindAgentSession(null)
-  unboundHandlers.get('tool_execution_end')?.({ toolName: 'generate_animation', args: { kp_id: 'jr-py-loop' }, result: {} })
+  unboundHandlers.get('tool_execution_end')?.({ toolName: 'generate_animation', args: { kp_id: 'prog-loop-jr' }, result: {} })
   assert.equal(unbound.stats().written, 0)
   assert.ok(warnings.some((line) => line.includes('未绑定当前学生')))
 })
@@ -491,7 +491,7 @@ test('G9-8b ★ 回写路径的 HTTP 形状：`POST /api/profile/{id}/events` + 
   const payloads: LearningEventPayload[] = [
     {
       activity: 'quiz',
-      kpId: 'jr-py-loop',
+      kpId: 'prog-loop-jr',
       sessionId: 'sess-42',
       isCorrect: true,
       detail: '提交作答',
@@ -551,7 +551,7 @@ test('★ G9-8c 真 HTTP 往返：learning-log 经 bridge/client.ts 发出带 X-
     // ★ 送的是契约里**有**的字段（`extra="forbid"` 会直接 422）
     const payload: LearningEventPayload = {
       activity: 'coding',
-      kpId: 'jr-py-loop',
+      kpId: 'prog-loop-jr',
       sessionId: 'sess-99',
       isCorrect: false,
       detail: '运行学生代码',

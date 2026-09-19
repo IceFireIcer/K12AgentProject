@@ -15,8 +15,8 @@ const theme = useThemeStore()
 /** 只保留四个真实学段（default / brand 是设计系统档，不对应真实学段） */
 const realGrades = GRADES.filter((g) => g.key !== 'default' && g.key !== 'brand')
 
-/** 示例知识点名（`kb.sqlite` 的真实 kp：`jr-data-features`）。 */
-const SAMPLE_KP_NAME = '数据与特征'
+/** 示例知识点名（`kb.sqlite` 的真实 kp：`computer-vision-jr`）。 */
+const SAMPLE_KP_NAME = '计算机视觉（CV）'
 
 /**
  * 预览某学段配色。再点一次已选中的那一档 = 结束预览（回到学生实际配色）——

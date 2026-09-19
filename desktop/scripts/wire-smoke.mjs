@@ -157,7 +157,7 @@ await check('GET /api/quiz/progress/{id} 回 levels（阶段 + 分数）', async
 
 await check('★★ GET /api/quiz/bank/{kp} 的题目**不含 answer**（答案防泄漏）', async () => {
   const { status, json } = await api(
-    `/api/quiz/bank/jr-data-features?gradeLevel=junior&count=3`
+    `/api/quiz/bank/prog-loop-jr?gradeLevel=junior&count=3`
   )
   assert.equal(status, 200)
   assert.ok(Array.isArray(json.questions) && json.questions.length > 0, '至少要有一道题')
@@ -170,7 +170,7 @@ await check('★★ GET /api/quiz/bank/{kp} 的题目**不含 answer**（答案�
 })
 
 await check('判分：真提交一题拿到 correct / feedback / masteryDelta', async () => {
-  const bank = await api(`/api/quiz/bank/jr-data-features?gradeLevel=junior&count=1`)
+  const bank = await api(`/api/quiz/bank/prog-loop-jr?gradeLevel=junior&count=1`)
   const qid = bank.json.questions[0].qid
   const { status, json } = await api('/api/quiz/grade', {
     method: 'POST',
@@ -184,14 +184,14 @@ await check('判分：真提交一题拿到 correct / feedback / masteryDelta', 
 
 /* ── 编程（★ 结构上不存在参考答案；后端不执行代码）────────────────────── */
 await check('GET /api/code/templates/{kp} 的模板**没有 solution**', async () => {
-  const { status, json } = await api(`/api/code/templates/jr-data-features?gradeLevel=junior`)
+  const { status, json } = await api(`/api/code/templates/prog-loop-jr?gradeLevel=junior`)
   assert.equal(status, 200)
   assert.ok(typeof json.scaffold === 'string' && json.scaffold.length > 0, '要有脚手架')
   assert.ok(!('solution' in json), '★ 模板里出现了 solution —— 答案泄漏')
 })
 
 await check('GET /api/code/hint/{kp}?level=1 回一级提示（逐级要）', async () => {
-  const { status, json } = await api(`/api/code/hint/jr-data-features?level=1`)
+  const { status, json } = await api(`/api/code/hint/prog-loop-jr?level=1`)
   assert.equal(status, 200)
   assert.equal(json.level, 1)
   assert.ok(typeof json.hint === 'string' && json.hint.length > 0)
@@ -202,7 +202,7 @@ await check('POST /api/code/run-hint 只做报错归一，不执行代码', asyn
     method: 'POST',
     body: JSON.stringify({
       studentId: STUDENT,
-      kpId: 'jr-data-features',
+      kpId: 'prog-loop-jr',
       code: 'print(totle)',
       language: 'python',
       stdout: '',
@@ -238,12 +238,13 @@ await check('POST /api/animation/render 产出**自包含** HTML（断网可跑�
 })
 
 await check('POST /api/animation/host/{sid}/{kp} 回一次性 nonce 地址', async () => {
-  const list = await api('/api/animation/templates')
+  // 渲染按**知识点**命中模板（`training-inference-jr` → `train-predict`），
+  // 托管用同一个 kp —— 与真实调用方的做法一致（渲染什么就托管什么）。
   const rendered = await api('/api/animation/render', {
     method: 'POST',
-    body: JSON.stringify({ templateId: list.json.available[0], gradeLevel: 'junior' })
+    body: JSON.stringify({ kpId: 'training-inference-jr', gradeLevel: 'junior' })
   })
-  const { status, json } = await api(`/api/animation/host/${STUDENT}/jr-data-features`, {
+  const { status, json } = await api(`/api/animation/host/${STUDENT}/training-inference-jr`, {
     method: 'POST',
     body: JSON.stringify({ html: rendered.json.html, payloadId: 'smoke-payload-1' })
   })

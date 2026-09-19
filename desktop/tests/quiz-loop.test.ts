@@ -64,7 +64,7 @@ test('★ 变式题准备：含答案的那一份给后端，投影后的一份�
         }
       ]
     },
-    { kpId: 'jr-py-variable', gradeLevel: 'junior', seed: 'seed1' }
+    { kpId: 'prog-variable-jr', gradeLevel: 'junior', seed: 'seed1' }
   )
   assert.equal(result.ok, true)
   if (!result.ok) return
@@ -101,7 +101,7 @@ test('★ 主观题的评分细则同样不出后端（只进 rubricCache 与登
         }
       ]
     },
-    { kpId: 'jr-py-variable', gradeLevel: 'junior', seed: 'seed2' }
+    { kpId: 'prog-variable-jr', gradeLevel: 'junior', seed: 'seed2' }
   )
   assert.equal(result.ok, true)
   if (!result.ok) return
@@ -116,17 +116,17 @@ test('★ 主观题的评分细则同样不出后端（只进 rubricCache 与登
 test('★ qid 由本侧统一生成（带随机段），模型给的 qid 不进载荷', () => {
   const result = prepareVariants(
     { questions: [{ qid: 'q1', type: 'blank', stem: 'x', answer: '2' }] },
-    { kpId: 'jr-py-loop', gradeLevel: 'junior', seed: 'abc123' }
+    { kpId: 'prog-loop-jr', gradeLevel: 'junior', seed: 'abc123' }
   )
   assert.equal(result.ok, true)
   if (!result.ok) return
   const qid = String(result.questions[0].qid)
-  assert.ok(qid.startsWith('gen-jr-py-loop-abc123-'), `qid 形状不对：${qid}`)
+  assert.ok(qid.startsWith('gen-prog-loop-jr-abc123-'), `qid 形状不对：${qid}`)
   assert.ok(!qid.includes('q1'), '模型给的 qid 不该原样进载荷（会互相撞）')
 })
 
 test('变式题 qid 形状稳定且可读', () => {
-  assert.equal(variantQid('jr-py-variable', 0, 'ab'), 'gen-jr-py-variable-ab-1')
+  assert.equal(variantQid('prog-variable-jr', 0, 'ab'), 'gen-prog-variable-jr-ab-1')
   // 非法字符被清掉（qid 要能当 URL 段与 JSON 键用）
   assert.equal(variantQid('a/b c', 1, 'ab'), 'gen-abc-ab-2')
 })
@@ -157,7 +157,7 @@ test('变式题校验：没有题 / 没有答案 / 题型认不出都拒', () =>
 test('变式题校验：kpId 与请求不一致时拒（否则答案会登记到错的关卡上）', () => {
   const result = prepareVariants(
     { questions: [{ qid: 'a', type: 'blank', stem: 'x', answer: '2', kpId: '别的知识点' }] },
-    { kpId: 'jr-py-loop', gradeLevel: 'junior' }
+    { kpId: 'prog-loop-jr', gradeLevel: 'junior' }
   )
   assert.equal(result.ok, false)
 })
@@ -217,8 +217,8 @@ test('★ 判分 Prompt 不注入对话历史（判一道题不需要上一轮�
 })
 
 test('变式题生成 Prompt 写明学段，并限定题型与开放题规则', () => {
-  const prompt = buildVariantPrompt({ kpId: 'jr-py-variable', gradeLevel: 'junior', count: 3 })
-  assert.ok(prompt.includes('jr-py-variable'))
+  const prompt = buildVariantPrompt({ kpId: 'prog-variable-jr', gradeLevel: 'junior', count: 3 })
+  assert.ok(prompt.includes('prog-variable-jr'))
   assert.ok(prompt.includes('初中'))
   assert.ok(prompt.includes('3 道'))
   for (const kind of ['choice', 'blank', 'code_blank']) {
@@ -402,8 +402,8 @@ test('★ 进度投影：只认四个字段，认不出的关卡整关丢掉', (
     studentId: 'student_001',
     seeded: 3,
     levels: [
-      { kpId: 'jr-py-variable', stage: 'mastered', badge: '精通-4', mastery: 0.6, extra: '丢掉' },
-      { kpId: 'jr-py-loop', stage: 'learning', badge: null, mastery: 0 },
+      { kpId: 'prog-variable-jr', stage: 'mastered', badge: '精通-4', mastery: 0.6, extra: '丢掉' },
+      { kpId: 'prog-loop-jr', stage: 'learning', badge: null, mastery: 0 },
       { stage: 'locked' }, // 没有 kpId → 丢掉
       { kpId: 'no-stage', mastery: 0.1 }, // 没有 stage → 丢掉
       'garbage'

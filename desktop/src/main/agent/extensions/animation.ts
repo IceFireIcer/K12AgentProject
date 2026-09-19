@@ -182,7 +182,7 @@ export const GenerateAnimationParams = Type.Object({
   kpId: Type.Optional(
     Type.String({
       maxLength: 64,
-      description: '知识点 id（例如 jr-py-loop）；从 rag_search 结果或画像里取，不确定就不要填'
+      description: '知识点 id（例如 training-inference-jr）；从 rag_search 结果或画像里取，不确定就不要填'
     })
   ),
   templateId: Type.Optional(

@@ -50,7 +50,7 @@ console.log('真实 sidecar（重启后的新进程）进度：', JSON.stringify
 }, null, 1))
 
 const payload = {
-  kpId: 'pl-ai-around-me',
+  kpId: 'ai-definition-pl',
   source: 'generated',
   tool: 'submit_quiz',
   kind: 'quiz',
@@ -91,7 +91,7 @@ console.log(
     barValue: c.querySelector('[data-testid="progress-bar"]')?.getAttribute('data-value'),
     advanced: lv.filter(l => l.getAttribute('data-stage') !== 'locked').map(l => l.getAttribute('data-kp-id') + '=' + l.getAttribute('data-stage')),
     badges: lv.map(l => l.getAttribute('data-badge')).filter(Boolean),
-    masteryOfFirst: lv.filter(l => l.getAttribute('data-kp-id') === 'pl-ai-around-me').map(l => l.querySelector('[data-testid="progress-mastery"]')?.textContent?.trim())
+    masteryOfFirst: lv.filter(l => l.getAttribute('data-kp-id') === 'ai-definition-pl').map(l => l.querySelector('[data-testid="progress-mastery"]')?.textContent?.trim())
   }
 })()`),
     null,

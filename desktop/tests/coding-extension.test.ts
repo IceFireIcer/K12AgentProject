@@ -196,7 +196,7 @@ function fakeServer(options: FakeServerOptions = {}) {
     if (path.startsWith('/api/code/templates/')) {
       return Response.json(
         options.template ?? {
-          kpId: 'jr-py-loop',
+          kpId: 'prog-loop-jr',
           language: 'python',
           scaffold: '# TODO 1：把循环次数补上\nfor i in range(____):',
           expectedBehavior: '打印 60 75 88'
@@ -639,11 +639,11 @@ test('coding-3: 每个 Tool 都有 promptSnippet 与中文 description（模型�
 test('coding-4: get_code_template / evaluate_code 的结果都带 kind: coding 供前端分派', async () => {
   bindStudent()
   const { tools } = setup({ outcomes: [OK_OUTCOME] })
-  const template = await callTool(tools, 'get_code_template', { kpId: 'jr-py-loop' })
+  const template = await callTool(tools, 'get_code_template', { kpId: 'prog-loop-jr' })
   assert.equal(template.details.kind, CODING_PAYLOAD_KIND)
   assert.equal(CODING_PAYLOAD_KIND, 'coding', 'kind 必须与 §9.3 的映射表一致')
 
-  const evaluation = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' })
+  const evaluation = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' })
   assert.equal(evaluation.details.kind, CODING_PAYLOAD_KIND)
 })
 
@@ -654,9 +654,9 @@ test('coding-4: get_code_template / evaluate_code 的结果都带 kind: coding �
 test('template-1: 取模板：返回脚手架 + 预期行为，并带上会话学段', async () => {
   bindStudent('student_001', 'junior')
   const { tools, seen } = setup({ outcomes: [OK_OUTCOME] })
-  const result = await callTool(tools, 'get_code_template', { kpId: 'jr-py-loop' })
+  const result = await callTool(tools, 'get_code_template', { kpId: 'prog-loop-jr' })
 
-  assert.equal(result.details.kpId, 'jr-py-loop')
+  assert.equal(result.details.kpId, 'prog-loop-jr')
   assert.ok(String(result.details.scaffold).includes('TODO'), '脚手架必须带 TODO 标记')
   assert.ok(String(result.details.expectedBehavior).length > 0)
   // 学段来自**会话**（前端说了不算），用查询串传给服务端
@@ -666,7 +666,7 @@ test('template-1: 取模板：返回脚手架 + 预期行为，并带上会话�
 test('template-2: 给模型的话不许把脚手架念一遍（会被刷屏）', async () => {
   bindStudent()
   const { tools } = setup({ outcomes: [OK_OUTCOME] })
-  const result = await callTool(tools, 'get_code_template', { kpId: 'jr-py-loop' })
+  const result = await callTool(tools, 'get_code_template', { kpId: 'prog-loop-jr' })
   assert.ok(result.text.includes('编程卡片'), '要告诉模型"内容在卡片上"')
   assert.ok(result.text.includes('不要'), '要明确要求模型别复述代码')
   assert.ok(!result.text.includes('for i in range'), '不许把脚手架原文塞进给模型的文本')
@@ -701,7 +701,7 @@ test('template-5: 断网（请求抛异常）→ 走 failed，不抛到调用方
   })
   const { tools, pi } = collectTools()
   factory(pi)
-  const result = await callTool(tools, 'get_code_template', { kpId: 'jr-py-loop' })
+  const result = await callTool(tools, 'get_code_template', { kpId: 'prog-loop-jr' })
   assert.equal(result.details.ok, false)
   assert.equal(result.details.degraded, true)
 })
@@ -710,9 +710,9 @@ test('template-6: 回执不符合契约（缺 scaffold）→ 明确报错而不�
   bindStudent()
   const { tools } = setup({
     outcomes: [OK_OUTCOME],
-    server: { template: { kpId: 'jr-py-loop' } }
+    server: { template: { kpId: 'prog-loop-jr' } }
   })
-  const result = await callTool(tools, 'get_code_template', { kpId: 'jr-py-loop' })
+  const result = await callTool(tools, 'get_code_template', { kpId: 'prog-loop-jr' })
   assert.equal(result.details.ok, false)
   assert.match(String(result.details.errorMessage), /契约/)
 })
@@ -724,7 +724,7 @@ test('template-6: 回执不符合契约（缺 scaffold）→ 明确报错而不�
 test('G18-2a: ★ evaluate_code 把代码交给运行器（而不是自己执行）', async () => {
   bindStudent()
   const { tools, calls } = setup({ outcomes: [OK_OUTCOME] })
-  await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print("hi")' })
+  await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print("hi")' })
 
   assert.equal(calls.length, 1, '应当恰好请求渲染进程执行一次')
   assert.equal(calls[0].request.code, 'print("hi")', '代码原样交给运行器')
@@ -737,7 +737,7 @@ test('G18-2a: ★ evaluate_code 把代码交给运行器（而不是自己执行
 test('G18-2b: ★ 成功路径：stdout 原样回传，无 error、无提示', async () => {
   bindStudent()
   const { tools } = setup({ outcomes: [OK_OUTCOME] })
-  const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' })
+  const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' })
   assert.equal(result.details.ok, true)
   assert.equal(result.details.stdout, '60 75 88\n')
   assert.equal(result.details.error, null)
@@ -763,7 +763,7 @@ test('G18-2c: ★ 失败路径：中文反馈 + 结构化 error + 第 1 级提�
       })
     }
   })
-  const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'if True:\nprint(1)' })
+  const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'if True:\nprint(1)' })
 
   assert.equal(result.details.ok, false)
   const error = result.details.error as Record<string, unknown>
@@ -799,7 +799,7 @@ test('G18-2d: ★★ 死循环被中断：interrupted 标志 + 「停不下来�
 
   // ★ 关键：Tool **正常返回**（而不是抛异常）—— Pi 与 UI 同进程，抛出去会一起挂
   const result = await callTool(tools, 'evaluate_code', {
-    kpId: 'jr-py-loop',
+    kpId: 'prog-loop-jr',
     code: 'while True:\n    pass'
   })
 
@@ -818,7 +818,7 @@ test('G18-2e: 运行器故障（Worker 未接线 / 超时）与「学生报错�
     { stdout: '', stderr: '', interrupted: false, elapsedMs: 0, failure: RUNNER_UNWIRED_TEXT }
   ]
   const { tools, seen } = setup({ outcomes })
-  const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' })
+  const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' })
 
   assert.equal(result.details.ok, false)
   assert.equal(result.details.degraded, true, '运行器故障是"能力受限"，不是崩溃')
@@ -829,7 +829,7 @@ test('G18-2e: 运行器故障（Worker 未接线 / 超时）与「学生报错�
 test('G18-2f: evaluate_code 不吞掉空代码与缺 kpId（入参校验在本地做完）', async () => {
   bindStudent()
   const { tools, calls } = setup({ outcomes: [OK_OUTCOME] })
-  const empty = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: '   ' })
+  const empty = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: '   ' })
   assert.equal(empty.details.ok, false)
   const noKp = await callTool(tools, 'evaluate_code', { code: 'print(1)' })
   assert.equal(noKp.details.ok, false)
@@ -839,7 +839,7 @@ test('G18-2f: evaluate_code 不吞掉空代码与缺 kpId（入参校验在本�
 test('G18-2g: 没有绑定学生时拒绝执行（学习记录必须落到具体学生名下）', async () => {
   bindAgentSession(null)
   const { tools, calls } = setup({ outcomes: [OK_OUTCOME] })
-  const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' })
+  const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' })
   assert.equal(result.details.ok, false)
   assert.equal(calls.length, 0)
   bindStudent() // 收尾：别把未绑定状态漏给下一个测试
@@ -869,10 +869,10 @@ test('G19-hint-1: 提示级别逐级加深，同一 kp 内绝不跳级', async (
   const { tools, pi } = collectTools()
   factory(pi)
 
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, 'tc-1')
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, 'tc-2')
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, 'tc-3')
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, 'tc-4') // 到顶后应停在 3
+  await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, 'tc-1')
+  await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, 'tc-2')
+  await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, 'tc-3')
+  await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, 'tc-4') // 到顶后应停在 3
 
   assert.deepEqual(seen, [1, 2, 3, 3], '必须 1→2→3 逐级，到顶停住（不跳级、不越界）')
 })
@@ -896,7 +896,7 @@ test('G19-hint-2: 提示文本逐级不同，且 level 1 不含可直接照抄�
   const { tools, pi } = collectTools()
   factory(pi)
   for (let i = 0; i < 3; i += 1) {
-    const result = await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, `tc-${i}`)
+    const result = await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, `tc-${i}`)
     captured.push(String(result.details.hint))
   }
   assert.equal(new Set(captured).size, 3, '三级提示必须文本不同（否则"递进"是空话）')
@@ -924,10 +924,10 @@ test('G19-hint-3: 提示按 kp 隔离 —— 换知识点后从 level 1 重新�
   const { tools, pi } = collectTools()
   factory(pi)
 
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, 'tc-1')
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, 'tc-2') // → 2
+  await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, 'tc-1')
+  await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, 'tc-2') // → 2
   // 换一个知识点：必须重新从 1 开始（不带上一轮的级别）
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-decision-tree' }, 'tc-3')
+  await callTool(tools, 'get_coding_hint', { kpId: 'supervised-learning-jr' }, 'tc-3')
 
   assert.deepEqual(
     seen.map((entry) => entry.level),
@@ -954,11 +954,11 @@ test('G19-hint-4: 答对后清零 —— 再求助从 level 1 重新开始', asy
   const { tools, pi } = collectTools()
   factory(pi)
 
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, 'tc-1') // 1
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, 'tc-2') // 2
+  await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, 'tc-1') // 1
+  await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, 'tc-2') // 2
   // 学生做对了 → 清零
-  await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' }, 'tc-3')
-  await callTool(tools, 'get_coding_hint', { kpId: 'jr-py-loop' }, 'tc-4')
+  await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' }, 'tc-3')
+  await callTool(tools, 'get_coding_hint', { kpId: 'prog-loop-jr' }, 'tc-4')
 
   assert.deepEqual(levels, [1, 2, 1], '答对后提示级别应回到 1（"你上次做对了"这件事要尊重）')
 })
@@ -1035,7 +1035,7 @@ test('G19-intervene-2: ★ 连续失败 3 次触发主动介入（第 1、2 次�
   const counterValues: number[] = []
   const texts: string[] = []
   for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i += 1) {
-    const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(x)' }, `tc-${i}`)
+    const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(x)' }, `tc-${i}`)
     interveneFlags.push(result.details.shouldIntervene === true)
     counterValues.push(Number(result.details.consecutiveFailures))
     texts.push(result.text)
@@ -1077,7 +1077,7 @@ test('G19-intervene-3: 答对后计数清零，再失败从 1 重新数', async 
 
   const counts: number[] = []
   for (let i = 0; i < 4; i += 1) {
-    const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' }, `tc-${i}`)
+    const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' }, `tc-${i}`)
     counts.push(Number(result.details.consecutiveFailures))
   }
   assert.deepEqual(counts, [1, 2, 0, 1], '成功那一次把计数清零，之后从 1 重新数')
@@ -1098,10 +1098,10 @@ test('G19-intervene-4: 换知识点不带上一轮的失败计数', async () => 
     }
   })
 
-  const a1 = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'x' }, 'tc-1')
-  const a2 = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'x' }, 'tc-2')
+  const a1 = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'x' }, 'tc-1')
+  const a2 = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'x' }, 'tc-2')
   // 换到另一个知识点：必须从 1 开始（不带上一轮的计数）
-  const b1 = await callTool(tools, 'evaluate_code', { kpId: 'jr-decision-tree', code: 'x' }, 'tc-3')
+  const b1 = await callTool(tools, 'evaluate_code', { kpId: 'supervised-learning-jr', code: 'x' }, 'tc-3')
 
   assert.equal(a1.details.consecutiveFailures, 1)
   assert.equal(a2.details.consecutiveFailures, 2)
@@ -1124,11 +1124,11 @@ test('G19-intervene-5: 换学生不带上一轮的失败计数（一人一份）
   })
 
   bindAgentSession({ studentId: 'student_001', sessionId: 's1', gradeLevel: 'junior' })
-  await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'x' }, 'tc-1')
-  await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'x' }, 'tc-2')
+  await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'x' }, 'tc-1')
+  await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'x' }, 'tc-2')
 
   bindAgentSession({ studentId: 'student_002', sessionId: 's2', gradeLevel: 'junior' })
-  const other = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'x' }, 'tc-3')
+  const other = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'x' }, 'tc-3')
 
   assert.equal(other.details.consecutiveFailures, 1, '换学生后计数必须从 1 开始（绝不跨学生复用）')
 })
@@ -1148,8 +1148,8 @@ test('G19-intervene-6: 阈值可注入（压缩到 2 次）—— 证明它真�
       })
     }
   })
-  const first = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'x' }, 'tc-1')
-  const second = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'x' }, 'tc-2')
+  const first = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'x' }, 'tc-1')
+  const second = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'x' }, 'tc-2')
   assert.equal(first.details.shouldIntervene, false)
   assert.equal(second.details.shouldIntervene, true, '阈值改成 2 后第 2 次就该介入')
 })
@@ -1171,7 +1171,7 @@ test('G19-intervene-7: 介入指令复用既有对话输出 —— 不新增第 
       feedback: '失败反馈',
       nextHint: null
     },
-    { kpId: 'jr-py-loop', consecutiveFailures: 3, shouldIntervene: true }
+    { kpId: 'prog-loop-jr', consecutiveFailures: 3, shouldIntervene: true }
   )
   assert.match(text, /主动介入/)
   // 不介入时不该出现那句指令
@@ -1183,7 +1183,7 @@ test('G19-intervene-7: 介入指令复用既有对话输出 —— 不新增第 
       feedback: '失败反馈',
       nextHint: null
     },
-    { kpId: 'jr-py-loop', consecutiveFailures: 1, shouldIntervene: false }
+    { kpId: 'prog-loop-jr', consecutiveFailures: 1, shouldIntervene: false }
   )
   assert.doesNotMatch(quiet, /主动介入/)
 })
@@ -1203,7 +1203,7 @@ test('degrade-1: sidecar 不可用时仍返回可读结果（不是异常、不�
   })
   const { tools, pi } = collectTools()
   factory(pi)
-  const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' })
+  const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' })
   assert.equal(result.details.ok, false)
   assert.equal(result.details.degraded, true, 'degraded=true 表示"本轮对话可继续"')
   assert.ok(/[\u4e00-\u9fff]/.test(String(result.details.errorMessage)))
@@ -1212,7 +1212,7 @@ test('degrade-1: sidecar 不可用时仍返回可读结果（不是异常、不�
 test('degrade-2: sidecar 返回 500 → 可读错误 + degraded', async () => {
   bindStudent()
   const { tools } = setup({ outcomes: [OK_OUTCOME], server: { failStatus: 500 } })
-  const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' })
+  const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' })
   assert.equal(result.details.ok, false)
   assert.match(String(result.details.errorMessage), /HTTP 500/)
   assert.equal(result.details.degraded, true)
@@ -1230,7 +1230,7 @@ test('degrade-3: 运行器抛异常时 execute 也自兜（绝不冒到 Pi 与 U
 
   // ★ Pi 的 Extension 与 Agent 同进程，运行器抛出的异常若冒出去会同时带走 UI
   //   （AGENTS §5.14 的纪律）—— 所以这里断言它**不抛**，而是收敛成可读失败。
-  const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' })
+  const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' })
   assert.equal(result.details.ok, false)
   assert.equal(result.details.degraded, true)
   assert.match(String(result.details.errorMessage), /运行器内部炸了/, '内部原因要保留在可读文案里')
@@ -1242,7 +1242,7 @@ test('degrade-4: 回执缺字段（契约漂移）→ 明确报契约不符，�
     outcomes: [OK_OUTCOME],
     server: { runHint: () => ({ ok: true, stdout: 'x' }) } // 缺 feedback
   })
-  const result = await callTool(tools, 'evaluate_code', { kpId: 'jr-py-loop', code: 'print(1)' })
+  const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' })
   assert.equal(result.details.ok, false)
   assert.match(String(result.details.errorMessage), /契约/)
 })
@@ -1275,7 +1275,7 @@ test('degrade-5: Tool 的失败形状与 quiz/rag 逐字一致（全项目只有
 
 test('card-1: 模板载荷 → template 视图（含 scaffold 与预期行为）', () => {
   const view = readCodingCard({
-    kpId: 'jr-py-loop',
+    kpId: 'prog-loop-jr',
     language: 'python',
     scaffold: '# TODO 1\nfor i in range(____):\n',
     expectedBehavior: '打印 1 到 5',
@@ -1284,14 +1284,14 @@ test('card-1: 模板载荷 → template 视图（含 scaffold 与预期行为）
   })
   assert.equal(view.kind, 'template')
   if (view.kind !== 'template') return
-  assert.equal(view.kpId, 'jr-py-loop')
+  assert.equal(view.kpId, 'prog-loop-jr')
   assert.match(view.scaffold, /TODO/)
   assert.equal(view.expectedBehavior, '打印 1 到 5')
 })
 
 test('card-2: 评估载荷 → result 视图（中文 feedback 与原始 traceback 分开）', () => {
   const view = readCodingCard({
-    kpId: 'jr-py-loop',
+    kpId: 'prog-loop-jr',
     ok: false,
     stdout: '',
     error: {
@@ -1349,11 +1349,11 @@ test('card-4: 提示载荷投影 —— 只认 level 1/2/3 且 hint 非空', () 
 test('card-5: ★ 跨轮收集提示并按 level 升序（1→2→3 都显示出来）', () => {
   const cards = [
     // 提示可能在别的轮次里到达，顺序甚至可能是乱的
-    { payload: { kpId: 'jr-py-loop', level: 3, hint: '第三级' } },
-    { payload: { kpId: 'jr-py-loop', level: 1, hint: '第一级' } },
-    { payload: { kpId: 'jr-py-loop', level: 2, hint: '第二级' } }
+    { payload: { kpId: 'prog-loop-jr', level: 3, hint: '第三级' } },
+    { payload: { kpId: 'prog-loop-jr', level: 1, hint: '第一级' } },
+    { payload: { kpId: 'prog-loop-jr', level: 2, hint: '第二级' } }
   ]
-  const hints = collectHints(cards, 'jr-py-loop')
+  const hints = collectHints(cards, 'prog-loop-jr')
   assert.deepEqual(
     hints.map((hint) => hint.level),
     [1, 2, 3],
@@ -1367,38 +1367,38 @@ test('card-5: ★ 跨轮收集提示并按 level 升序（1→2→3 都显示出
 
 test('card-6: ★ 提示/结果按 kpId 归属（多知识点同屏不串台）', () => {
   const cards = [
-    { payload: { kpId: 'jr-py-loop', level: 1, hint: '循环的第一级' } },
-    { payload: { kpId: 'jr-decision-tree', level: 1, hint: '决策树的第一级' } },
-    { payload: { kpId: 'jr-decision-tree', level: 2, hint: '决策树的第二级' } }
+    { payload: { kpId: 'prog-loop-jr', level: 1, hint: '循环的第一级' } },
+    { payload: { kpId: 'supervised-learning-jr', level: 1, hint: '决策树的第一级' } },
+    { payload: { kpId: 'supervised-learning-jr', level: 2, hint: '决策树的第二级' } }
   ]
-  const loopHints = collectHints(cards, 'jr-py-loop')
+  const loopHints = collectHints(cards, 'prog-loop-jr')
   assert.equal(loopHints.length, 1, '不能把别的知识点的提示挂到这张卡片上')
   assert.equal(loopHints[0].hint, '循环的第一级')
 
-  const treeHints = collectHints(cards, 'jr-decision-tree')
+  const treeHints = collectHints(cards, 'supervised-learning-jr')
   assert.deepEqual(treeHints.map((hint) => hint.hint), ['决策树的第一级', '决策树的第二级'])
 })
 
 test('card-7: 结果收集保留**最新**一次（学生改完再跑要看新结果）', () => {
   const cards = [
-    { payload: { kpId: 'jr-py-loop', ok: false, stdout: '', feedback: '第一次失败', consecutiveFailures: 1 } },
-    { payload: { kpId: 'jr-py-loop', ok: true, stdout: 'ok\n', feedback: '成功', consecutiveFailures: 0 } }
+    { payload: { kpId: 'prog-loop-jr', ok: false, stdout: '', feedback: '第一次失败', consecutiveFailures: 1 } },
+    { payload: { kpId: 'prog-loop-jr', ok: true, stdout: 'ok\n', feedback: '成功', consecutiveFailures: 0 } }
   ]
-  const result = collectResult(cards, 'jr-py-loop')
+  const result = collectResult(cards, 'prog-loop-jr')
   assert.ok(result)
   assert.equal(result?.ok, true, '后到的结果覆盖先前的（否则学生改好了还看着旧的失败结论）')
   assert.equal(result?.feedback, '成功')
 })
 
 test('card-8: 消息文本不让模型代做 / 不改写学生代码', () => {
-  const hintMessage = buildHintRequestMessage('jr-py-loop', 'for i in range(____):')
-  assert.match(hintMessage, /jr-py-loop/)
+  const hintMessage = buildHintRequestMessage('prog-loop-jr', 'for i in range(____):')
+  assert.match(hintMessage, /prog-loop-jr/)
   assert.match(hintMessage, /不要直接给我完整答案/, '求助时必须显式要求不给答案')
   assert.match(hintMessage, /get_coding_hint/, '要指名让模型调哪个 Tool')
   // ★ 前端不许指定级别（级别由主进程的状态表推进）
   assert.doesNotMatch(hintMessage, /level\s*[:=]\s*[123]/, '消息里不许出现"要第几级"')
 
-  const runMessage = buildRunRequestMessage('jr-py-loop', 'print(1)')
+  const runMessage = buildRunRequestMessage('prog-loop-jr', 'print(1)')
   assert.match(runMessage, /evaluate_code/)
   assert.match(runMessage, /python/, '代码块要标语言，模型才看得清')
   assert.match(runMessage, /不要直接给正确代码/)
@@ -1406,7 +1406,7 @@ test('card-8: 消息文本不让模型代做 / 不改写学生代码', () => {
 
 test('card-9: 超长代码在消息里被截断（别把整份文件灌进 prompt）', () => {
   const long = 'x = 1\n'.repeat(500)
-  const message = buildRunRequestMessage('jr-py-loop', long)
+  const message = buildRunRequestMessage('prog-loop-jr', long)
   assert.ok(message.length < long.length, '必须截断')
   assert.ok(message.includes('…'), '截断要有可见标记')
 })

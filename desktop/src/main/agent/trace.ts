@@ -10,7 +10,7 @@
  *
  * 1. **参数只记摘要，绝不落原文**。`get_student_profile` 这类 Tool 的参数里可能带学生输入、
  *    代码片段、昵称；轨迹图是要进汇报 PPT 与报告的文件，落原文等于把数据合规问题写进交付物。
- *    {@link summarizeArgs} 按「键名分类 → 值分类」产出 `kp_id=jr-py-loop, query=«文本 12 字»`
+ *    {@link summarizeArgs} 按「键名分类 → 值分类」产出 `kp_id=prog-loop-jr, query=«文本 12 字»`
  *    这样的摘要，并且**默认丢弃**敏感键（key/token/secret…）与个人信息键（name/student/…）。
  * 2. **不改任何东西**。三个事件全部是**只读通知**：`tool_execution_end` 不能回写结果，
  *    `tool_call` 只用来读「是否被安全阀拦下」（拦下时不会再有执行事件）。
@@ -806,8 +806,8 @@ export function demoRecorder(): ToolTraceRecorder {
   })
   recorder.noteToolEnd({ toolCallId: 'c1', toolName: 'rag_search', isError: false, result: { degraded: 'fts' } })
 
-  recorder.noteToolCall({ toolCallId: 'c2', toolName: 'generate_quiz', input: { kp_id: 'jr-py-loop', count: 2 } })
-  recorder.noteToolStart({ toolCallId: 'c2', toolName: 'generate_quiz', args: { kp_id: 'jr-py-loop', count: 2 } })
+  recorder.noteToolCall({ toolCallId: 'c2', toolName: 'generate_quiz', input: { kp_id: 'prog-loop-jr', count: 2 } })
+  recorder.noteToolStart({ toolCallId: 'c2', toolName: 'generate_quiz', args: { kp_id: 'prog-loop-jr', count: 2 } })
   recorder.noteToolEnd({ toolCallId: 'c2', toolName: 'generate_quiz', isError: false, result: {} })
 
   // 第二条学生消息：Pi 把 `turnIndex` 重置回 0

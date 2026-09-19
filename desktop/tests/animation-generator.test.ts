@@ -152,7 +152,14 @@ test('A1 片段解析：宽松读（剥 ```json 围栏）但严格校验必填�
 })
 
 test('A1 prompt：把四条会白屏的约束都写进去了', () => {
-  const prompt = buildFragmentPrompt({ concept: '梯度下降', kpId: 'jr-ml-gd', gradeLevel: 'junior', attempt: 0 })
+  // 旧 id `jr-ml-gd`（初中·机器学习的梯度下降）在新库 228 个 kp_id 里语义对应 machine-learning-jr
+  // —— 学段后缀与概念族都保持原样，下面两条断言因此一字未改
+  const prompt = buildFragmentPrompt({
+    concept: '梯度下降',
+    kpId: 'machine-learning-jr',
+    gradeLevel: 'junior',
+    attempt: 0
+  })
   assert.match(prompt, /梯度下降/)
   assert.match(prompt, /junior/)
   assert.match(prompt, /禁止任何外部引用/, '断网演示的底线必须写进 prompt')
@@ -185,7 +192,7 @@ test('A1 合流：生成器把片段交回 Python（我们不在 TS 侧拼 HTML�
 
   const payload = (await generate({
     concept: '循环',
-    kpId: 'jr-py-loop',
+    kpId: 'prog-loop-jr',
     gradeLevel: 'junior',
     attempt: 0,
     // ★ `payloadId` 必须原样送到合流端点（Python 把它注入沙箱 HTML，前端按它校验每条
@@ -332,7 +339,8 @@ test('★ A4 模板命中时生成器一次都不被调用（补充路径不许�
   const tool = captureTool(extension as unknown as (pi: unknown) => void)
   const result = (await tool.execute('call-template-1', {
     concept: '排序',
-    kpId: 'jr-data-features',
+    // 排序柱状模板在新库覆盖的就是「列表与字典」这个知识点（sorting-bars → prog-list-{ph,jr,sr}）
+    kpId: 'prog-list-jr',
     gradeLevel: 'junior',
     templateId: 'sorting-bars'
   })) as Record<string, unknown>

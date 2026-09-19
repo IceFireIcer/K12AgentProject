@@ -100,8 +100,8 @@ export const useCodeStore = defineStore('code', () => {
    * 为什么必须在界面这一层做（实测抓到的缺陷）：编程页的默认状态是
    * 「这个知识点还没有预置模板」—— 后端为此回的是**面向排障**的 404 文案：
    * ```
-   * 读取失败（HTTP 404）：知识点 'pl-ai-around-me' 还没有预置代码模板。
-   * 现有模板：jr-data-features、…（模板文件：server/resources/code-templates/）。
+   * 读取失败（HTTP 404）：知识点 'ai-definition-pl' 还没有预置代码模板。
+   * 现有模板：prog-list-jr、prog-loop-jr、prog-variable-jr（模板文件：server/resources/code-templates/）。
    * ```
    * 一个 10 岁的学生打开编程页，看到的是 **HTTP 状态码 + 内部 kp_id + 服务器上的文件路径**。
    * 这既像「软件坏了」（他会关掉页面，而不是「换个知识点」），

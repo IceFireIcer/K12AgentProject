@@ -79,18 +79,18 @@ const FAKE_PROFILE: ProfileResponse = {
     lastActiveAt: 1_757_000_000
   },
   mastery: [
-    { kpId: 'jr-py-loop', score: 0.9, attempts: 3, correct: 3, lastSeenAt: 1_757_000_000 },
-    { kpId: 'jr-py-var', score: 0.35, attempts: 2, correct: 1, lastSeenAt: 1_756_000_000 }
+    { kpId: 'prog-loop-jr', score: 0.9, attempts: 3, correct: 3, lastSeenAt: 1_757_000_000 },
+    { kpId: 'prog-variable-jr', score: 0.35, attempts: 2, correct: 1, lastSeenAt: 1_756_000_000 }
   ],
   preferences: { explain_style: '喜欢用生活中的例子', pace: '想慢一点' },
-  recommendedKpIds: ['jr-py-func']
+  recommendedKpIds: ['prog-list-jr']
 }
 
 /** 推荐详细版（票 20 的 `/recommendation`）：带理由，渲染成「推荐下一步（…）」那一行。 */
 const FAKE_RECOMMENDATION: RecommendationResponse = {
   source: 'graph',
   summary: '前置已经会了，可以直接往下讲循环。',
-  items: [{ kpId: 'jr-py-loop', name: '循环', gradeLevel: 'junior', depth: 1, mastery: 0.9, reason: '前置已掌握' }]
+  items: [{ kpId: 'prog-loop-jr', name: '循环：重复的事交给机器', gradeLevel: 'junior', depth: 1, mastery: 0.9, reason: '前置已掌握' }]
 }
 
 /** 带学段权威段的基座 prompt（真实形态：`buildGradeSystemPrompt` 的产物）。 */
@@ -173,7 +173,7 @@ test('G20-4 内容：掌握度分档 / 学习偏好 / 推荐下一步都在块�
   assert.ok(block.includes('推荐下一步'), '推荐行必须在（个性化闭环的「读」这一端）')
   assert.ok(block.includes('推荐口径') || block.includes('优先顺着这条线引导'), '推荐口径或退路提示必须有一句')
   // 掌握度按分数降序：0.9 那条排在 0.35 前面（prompt 预算先给最重要的）
-  assert.ok(block.indexOf('jr-py-loop') < block.indexOf('jr-py-var'))
+  assert.ok(block.indexOf('prog-loop-jr') < block.indexOf('prog-variable-jr'))
 })
 
 test('G20-5 单一实现：块正文就是 renderProfileText 的输出（防两套渲染漂移）', () => {
@@ -490,14 +490,17 @@ test('G21-3 偏好顺序不影响块：渲染顺序由 PREFERENCE_ORDER 钉死�
 
 test('G21-4 掌握度平局不影响块：同分按 kpId 兜底排序（不靠调用方给的数组顺序）', () => {
   const tie = [
-    { kpId: 'jr-py-b', score: 0.5, attempts: 1, correct: 1, lastSeenAt: 1_700_000_000 },
-    { kpId: 'jr-py-a', score: 0.5, attempts: 1, correct: 1, lastSeenAt: 1_700_000_000 }
+    { kpId: 'prog-variable-jr', score: 0.5, attempts: 1, correct: 1, lastSeenAt: 1_700_000_000 },
+    { kpId: 'prog-list-jr', score: 0.5, attempts: 1, correct: 1, lastSeenAt: 1_700_000_000 }
   ]
   const a = renderStudentContextBlock({ ...FAKE_PROFILE, mastery: tie }, CONTEXT_OPTIONS)
   const b = renderStudentContextBlock({ ...FAKE_PROFILE, mastery: [...tie].reverse() }, CONTEXT_OPTIONS)
 
   assert.equal(a, b, '同分条目换了数组顺序块就变 —— 服务端换个 ORDER BY 就会让前缀缓存无谓失效')
-  assert.ok(a.indexOf('jr-py-a') < a.indexOf('jr-py-b'), `同分必须按 kpId 字典序（a 在 b 前）：\n${a}`)
+  assert.ok(
+    a.indexOf('prog-list-jr') < a.indexOf('prog-variable-jr'),
+    `同分必须按 kpId 字典序（prog-list-jr 在 prog-variable-jr 前）：\n${a}`
+  )
 })
 
 test('G21-5 ★ 反向对照：画像真的变了，块**必须**跟着变（不许把块冻成常量）', () => {
@@ -507,7 +510,7 @@ test('G21-5 ★ 反向对照：画像真的变了，块**必须**跟着变（不
     {
       ...FAKE_PROFILE,
       mastery: FAKE_PROFILE.mastery!.map((item) =>
-        item.kpId === 'jr-py-var' ? { ...item, score: 0.95 } : item
+        item.kpId === 'prog-variable-jr' ? { ...item, score: 0.95 } : item
       )
     },
     CONTEXT_OPTIONS
@@ -560,19 +563,25 @@ test('G22-1 错题摘要进了块：含知识点名与错次，且带「再出�
     mistakes: {
       studentId: 'student_001',
       items: [
-        { kpId: 'jr-py-loop', kpName: '循环', wrongCount: 3 },
-        { kpId: 'jr-py-var', kpName: '变量', wrongCount: 1 }
+        { kpId: 'prog-loop-jr', kpName: '循环：重复的事交给机器', wrongCount: 3 },
+        { kpId: 'prog-variable-jr', kpName: '变量：给数据起名字', wrongCount: 1 }
       ],
       totalWrong: 4,
       withoutStem: 1
     }
   })
 
-  assert.ok(block.includes('循环'), `块里应当有错题的知识点名：\n${block}`)
+  assert.ok(
+    block.includes('循环：重复的事交给机器（错 3 次）'),
+    `块里应当有错题的知识点名与错次：\n${block}`
+  )
   assert.ok(block.includes('错 3 次'), '应当出现错次（模型据此决定先照顾哪个）')
   assert.ok(block.includes('变式题'), '应当明确指示「再出变式题巩固」（对接 senior.ts 的既有要求）')
-  // 错得多的排前面
-  assert.ok(block.indexOf('循环') < block.indexOf('变量'), '错次多的应当排在前面')
+  // 错得多的排前面（锚在错题那一行上：知识点名在「推荐下一步」那行里也会出现）
+  assert.ok(
+    block.indexOf('循环：重复的事交给机器（错 3 次）') < block.indexOf('变量：给数据起名字（错 1 次）'),
+    `错次多的应当排在前面：\n${block}`
+  )
 })
 
 test('★ G22-2 错题那一行不放时间与题干（否则每轮都丢掉前缀缓存）', () => {
@@ -582,8 +591,8 @@ test('★ G22-2 错题那一行不放时间与题干（否则每轮都丢掉前�
       studentId: 'student_001',
       items: [
         {
-          kpId: 'jr-py-loop',
-          kpName: '循环',
+          kpId: 'prog-loop-jr',
+          kpName: '循环：重复的事交给机器',
           wrongCount: 2,
           // 就算服务端把这两个字段一起给过来，也**不许**进块
           stem: '下面哪个循环是无限循环？',
@@ -603,8 +612,8 @@ test('★ G22-2 错题那一行不放时间与题干（否则每轮都丢掉前�
 
 test('★ G22-3 错题平局不影响块：同错次按 kpId 兜底排序', () => {
   const items = [
-    { kpId: 'jr-py-b', kpName: '乙', wrongCount: 2 },
-    { kpId: 'jr-py-a', kpName: '甲', wrongCount: 2 }
+    { kpId: 'machine-learning-jr', kpName: '机器学习（ML）', wrongCount: 2 },
+    { kpId: 'neural-network-jr', kpName: '神经网络', wrongCount: 2 }
   ]
   const first = renderStudentContextBlock(FAKE_PROFILE, {
     ...CONTEXT_OPTIONS,
@@ -616,26 +625,41 @@ test('★ G22-3 错题平局不影响块：同错次按 kpId 兜底排序', () =
   })
 
   assert.equal(first, reversed, '同错次换了数组顺序块就变 —— 服务端换个 ORDER BY 就会白白丢一次缓存')
-  assert.ok(first.indexOf('甲') < first.indexOf('乙'), `同错次必须按 kpId 字典序：\n${first}`)
+  assert.ok(
+    first.indexOf('机器学习（ML）') < first.indexOf('神经网络'),
+    `同错次必须按 kpId 字典序：\n${first}`
+  )
 })
 
 test('★ G22-4 反向对照：错题真的变了，块必须跟着变', () => {
   const base = renderStudentContextBlock(FAKE_PROFILE, {
     ...CONTEXT_OPTIONS,
-    mistakes: { items: [{ kpId: 'jr-py-loop', kpName: '循环', wrongCount: 1 }], totalWrong: 1, withoutStem: 0 }
+    mistakes: {
+      items: [{ kpId: 'prog-loop-jr', kpName: '循环：重复的事交给机器', wrongCount: 1 }],
+      totalWrong: 1,
+      withoutStem: 0
+    }
   })
   const moreWrong = renderStudentContextBlock(FAKE_PROFILE, {
     ...CONTEXT_OPTIONS,
-    mistakes: { items: [{ kpId: 'jr-py-loop', kpName: '循环', wrongCount: 5 }], totalWrong: 5, withoutStem: 0 }
+    mistakes: {
+      items: [{ kpId: 'prog-loop-jr', kpName: '循环：重复的事交给机器', wrongCount: 5 }],
+      totalWrong: 5,
+      withoutStem: 0
+    }
   })
   assert.notEqual(moreWrong, base, '错次变了块却不变 —— 「答错了要照顾」这条闭环断了')
 
   const anotherKp = renderStudentContextBlock(FAKE_PROFILE, {
     ...CONTEXT_OPTIONS,
-    mistakes: { items: [{ kpId: 'jr-py-new', kpName: '分支', wrongCount: 1 }], totalWrong: 1, withoutStem: 0 }
+    mistakes: {
+      items: [{ kpId: 'prog-list-jr', kpName: '列表与字典：把一批数据放在一起', wrongCount: 1 }],
+      totalWrong: 1,
+      withoutStem: 0
+    }
   })
   assert.notEqual(anotherKp, base, '换了一个错题知识点，块必须变')
-  assert.ok(anotherKp.includes('分支'))
+  assert.ok(anotherKp.includes('列表与字典：把一批数据放在一起'))
 })
 
 test('G22-5 没有错题 / 取不到错题 → 不注入那一行（不产出空壳）', () => {
@@ -672,7 +696,11 @@ test('G22-6 错题最多注入三个知识点（块在每轮首位，不能挤�
 test('G22-7 幂等仍成立：带错题的块重复拼装只出现一次', () => {
   const block = renderStudentContextBlock(FAKE_PROFILE, {
     ...CONTEXT_OPTIONS,
-    mistakes: { items: [{ kpId: 'jr-py-loop', kpName: '循环', wrongCount: 2 }], totalWrong: 2, withoutStem: 0 }
+    mistakes: {
+      items: [{ kpId: 'prog-loop-jr', kpName: '循环：重复的事交给机器', wrongCount: 2 }],
+      totalWrong: 2,
+      withoutStem: 0
+    }
   })
   const once = withStudentContext(GRADE_BASE, block)
   const twice = withStudentContext(once, block)
@@ -685,9 +713,9 @@ test('G22-7 幂等仍成立：带错题的块重复拼装只出现一次', () =>
 test('G22-8 拿不到知识点名时退回 kpId（不假装有名，也不留空）', () => {
   const block = renderStudentContextBlock(FAKE_PROFILE, {
     ...CONTEXT_OPTIONS,
-    mistakes: { items: [{ kpId: 'jr-py-loop', wrongCount: 2 }], totalWrong: 2, withoutStem: 0 }
+    mistakes: { items: [{ kpId: 'prog-loop-jr', wrongCount: 2 }], totalWrong: 2, withoutStem: 0 }
   })
-  assert.ok(block.includes('jr-py-loop'), `没有名字时应当退回 kpId：\n${block}`)
+  assert.ok(block.includes('prog-loop-jr'), `没有名字时应当退回 kpId：\n${block}`)
   assert.ok(block.includes('错 2 次'))
 })
 
@@ -707,7 +735,7 @@ test('G22-8 拿不到知识点名时退回 kpId（不假装有名，也不留空
 /** 带章节的画像（在校章 = junior 第4章）。 */
 const CHAPTER_PROFILE: ProfileResponse = {
   ...FAKE_PROFILE,
-  student: { ...FAKE_PROFILE.student, currentChapter: '第4章 用 Python 处理数据' }
+  student: { ...FAKE_PROFILE.student, currentChapter: '第4章 大模型与AI智能体Agent' }
 }
 
 const CHAPTER_LINE_HEAD = '- 当前教材章节：'
@@ -732,7 +760,7 @@ test('G23-1 ★ 章节行的位置固定：在标题行之后、掌握度之前'
   assert.ok(titleLine >= 0, `块里找不到画像标题行：\n${block}`)
   assert.equal(
     lines[titleLine + 1],
-    `${CHAPTER_LINE_HEAD}第4章 用 Python 处理数据（回答与检索优先围绕本章；学生若问其他章节，照常回答）`,
+    `${CHAPTER_LINE_HEAD}第4章 大模型与AI智能体Agent（回答与检索优先围绕本章；学生若问其他章节，照常回答）`,
     `★ 章节行必须是**紧跟标题行的那一行**（它是块的第二行正文），实际下一行是：${lines[titleLine + 1]}`
   )
 })
@@ -744,7 +772,7 @@ test('G23-2 ★ 同画像两次渲染逐字相等（章节行不得引入任何�
 
   // 章节两边的空白不该改变块（`renderProfileText` 内部 trim）
   const padded = renderStudentContextBlock(
-    { ...CHAPTER_PROFILE, student: { ...CHAPTER_PROFILE.student, currentChapter: '  第4章 用 Python 处理数据  ' } },
+    { ...CHAPTER_PROFILE, student: { ...CHAPTER_PROFILE.student, currentChapter: '  第4章 大模型与AI智能体Agent  ' } },
     CONTEXT_OPTIONS
   )
   assert.equal(padded, once, '首尾空白应当被 trim 掉（否则「同一章」会渲染出两种块）')
@@ -753,13 +781,13 @@ test('G23-2 ★ 同画像两次渲染逐字相等（章节行不得引入任何�
 test('★ G23-3 反向对照：章节改了，块**必须**跟着变（不许把章节写死 / 忽略）', () => {
   const base = renderStudentContextBlock(CHAPTER_PROFILE, CONTEXT_OPTIONS)
   const another = renderStudentContextBlock(
-    { ...CHAPTER_PROFILE, student: { ...CHAPTER_PROFILE.student, currentChapter: '第5章 循环与重复' } },
+    { ...CHAPTER_PROFILE, student: { ...CHAPTER_PROFILE.student, currentChapter: '第5章 人工智能主要应用领域' } },
     CONTEXT_OPTIONS
   )
 
   assert.notEqual(another, base, '章节换了块却不变 —— 学生选了章节，模型却还是按旧章讲（软偏好没接上）')
-  assert.ok(another.includes('第5章 循环与重复'), `新章节标题必须真的进块：\n${another}`)
-  assert.ok(!another.includes('第4章 用 Python 处理数据'), '旧章节标题不该还留在块里')
+  assert.ok(another.includes('第5章 人工智能主要应用领域'), `新章节标题必须真的进块：\n${another}`)
+  assert.ok(!another.includes('第4章 大模型与AI智能体Agent'), '旧章节标题不该还留在块里')
 })
 
 test('★ G23-4 无章节时：块与从前**逐字相等**（整行不出现，不是空行）', () => {
@@ -799,7 +827,7 @@ test('★ G23-5 章节行里没有日期 / 时刻 / 长数字串（防有人把�
   const chapterLine = block.split('\n').find((line) => line.startsWith(CHAPTER_LINE_HEAD)) ?? ''
   assert.equal(
     chapterLine,
-    `${CHAPTER_LINE_HEAD}第4章 用 Python 处理数据（回答与检索优先围绕本章；学生若问其他章节，照常回答）`,
+    `${CHAPTER_LINE_HEAD}第4章 大模型与AI智能体Agent（回答与检索优先围绕本章；学生若问其他章节，照常回答）`,
     '章节行的文本模板是冻结的（改它等于换一种口径交给模型）'
   )
   assert.ok(!chapterLine.includes('学段'), '章标题已含学段语境，不要在章节行后面重复学段标签')

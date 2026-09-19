@@ -174,13 +174,16 @@ function defaultResponse(method: string, payload?: Record<string, unknown>): unk
     case 'readGradeHistory':
       return { currentLevel: 'junior', entries: [] }
     case 'readQuizBank':
-      return { kpId: 'jr-data-features', source: 'bank', questions: [] }
+      // 新库 id 形态为 `<概念slug>-<pl|ph|jr|sr>`；这里取「数据处理流程（初中）」
+      return { kpId: 'data-processing-jr', source: 'bank', questions: [] }
     case 'gradeQuiz':
       return { qid: 'q1', correct: true, scoredBy: 'rule', feedback: '答对了', masteryDelta: 0.1 }
     case 'readQuizProgress':
       return { studentId: 'student_001', gradeLevel: 'junior', seeded: true, levels: [] }
     case 'readCodeTemplate':
-      return { kpId: 'jr-data-features', language: 'python', scaffold: '# TODO', expectedBehavior: '输出 165.2' }
+      // 代码模板在新库只剩 3 份、且都是初中（prog-variable / prog-loop / prog-list）；
+      // 这里取 prog-list-jr（配套模板是「列表与字典」）
+      return { kpId: 'prog-list-jr', language: 'python', scaffold: '# TODO', expectedBehavior: '输出 165.2' }
     case 'readCodeHint':
       // 回显请求的级别（真实后端就是这么回的：你问第几级就给第几级）
       return { level: typeof payload?.level === 'number' ? payload.level : 1, hint: `第 ${payload?.level ?? 1} 级提示` }
@@ -197,7 +200,7 @@ function defaultResponse(method: string, payload?: Record<string, unknown>): unk
             label: '神经网络前向传播',
             title: '神经网络前向传播',
             concept: '特征逐层转换',
-            kpIds: ['jr-data-features'],
+            kpIds: ['artificial-neuron-jr'],
             gradeLevels: ['junior'],
             durationMs: 8000,
             params: [],
@@ -221,7 +224,7 @@ function defaultResponse(method: string, payload?: Record<string, unknown>): unk
       }
     case 'readKnowledgeStats':
       return {
-        counts: { kp: 33, chunk: 271 },
+        counts: { kp: 228, chunk: 593, dependencies: 483 },
         gradeLevels: ['junior'],
         kbPath: 'kb.sqlite',
         userRebuilt: false,
@@ -232,9 +235,17 @@ function defaultResponse(method: string, payload?: Record<string, unknown>): unk
     case 'readKnowledgePoints':
       return { points: [] }
     case 'importKnowledge':
-      return { ok: true, kpId: 'jr-x', savedAs: 'knowledge-user/junior/jr-x.md', problems: [], stats: null, message: '已导入' }
+      return {
+        ok: true,
+        kpId: 'ai-definition-jr',
+        savedAs: 'knowledge-user/junior/ai-definition-jr.md',
+        problems: [],
+        stats: null,
+        message: '已导入'
+      }
     case 'rebuildKnowledge':
-      return { ok: true, stats: null, elapsedMs: 1000, documents: 33, dependencies: 47, message: '重建完成' }
+      // 新库现实：228 篇教材（57 概念 × 4 学段）、483 条依赖边
+      return { ok: true, stats: null, elapsedMs: 1000, documents: 228, dependencies: 483, message: '重建完成' }
     default:
       return {}
   }
@@ -345,12 +356,12 @@ test('★ 题库投影后不可能带出答案（答案防泄漏的渲染进程�
   const bridge = installFakeBridge()
   // 故意在响应里塞一个 answer —— 后端不会这么干，但这里要证明前端**也不认它**
   bridge.respond('readQuizBank', {
-    kpId: 'jr-data-features',
+    kpId: 'data-processing-jr',
     source: 'bank',
     questions: [
       {
         qid: 'q1',
-        kpId: 'jr-data-features',
+        kpId: 'data-processing-jr',
         type: 'choice',
         stem: '题目',
         options: ['A', 'B'],
@@ -363,7 +374,7 @@ test('★ 题库投影后不可能带出答案（答案防泄漏的渲染进程�
   setActivePinia(createPinia())
   const quiz = useQuizStore()
 
-  await quiz.selectLevel('jr-data-features')
+  await quiz.selectLevel('data-processing-jr')
 
   assert.equal(bridge.calls.readQuizBank, 1)
   const question = quiz.bank?.questions?.[0]
@@ -418,14 +429,14 @@ test('★ 锁着的关卡当场拒绝，不发无意义的请求', async () => {
     studentId: 'student_001',
     gradeLevel: 'junior',
     seeded: true,
-    levels: [{ kpId: 'jr-locked', stage: 'locked', badge: null, mastery: 0 }]
+    levels: [{ kpId: 'ai-definition-sr', stage: 'locked', badge: null, mastery: 0 }]
   })
   const { useQuizStore } = await import('../src/renderer/src/stores/quiz.ts')
   setActivePinia(createPinia())
   const quiz = useQuizStore()
 
   await quiz.loadProgress()
-  await quiz.selectLevel('jr-locked')
+  await quiz.selectLevel('ai-definition-sr')
 
   assert.equal(bridge.calls.readQuizBank, undefined, '锁着的关卡不该去取题')
   assert.ok((quiz.bankError ?? '').includes('还没解锁'))
@@ -464,7 +475,10 @@ test('导入成功时落盘路径与提示都带出来，并顺手刷新统计�
   setActivePinia(createPinia())
   const knowledge = useKnowledgeStore()
 
-  await knowledge.importMarkdown({ fileName: 'jr-x.md', markdown: '---\nkp_id: jr-x\n---\n## 一\n正文' })
+  await knowledge.importMarkdown({
+    fileName: 'ai-definition-jr.md',
+    markdown: '---\nkp_id: ai-definition-jr\n---\n## 一\n正文'
+  })
 
   assert.equal(knowledge.importPhase, 'accepted')
   assert.equal(knowledge.importMessage, '已导入')
@@ -603,7 +617,7 @@ test('★ 分级提示一次只要一级（一次全给等于把答案摆在旁�
   setActivePinia(createPinia())
   const code = useCodeStore()
 
-  await code.loadTemplate('jr-data-features')
+  await code.loadTemplate('prog-list-jr')
   assert.equal(code.draft, '# TODO', '脚手架就是编辑器的初始内容')
 
   await code.askForHint()
@@ -629,7 +643,7 @@ test('★ 脚手架里没有参考答案（结构上就不存在，不是靠界�
   setActivePinia(createPinia())
   const code = useCodeStore()
 
-  await code.loadTemplate('jr-data-features')
+  await code.loadTemplate('prog-list-jr')
 
   assert.ok(code.template)
   assert.equal('solution' in (code.template as object), false, '模板载荷里不该有参考答案字段')
@@ -641,7 +655,7 @@ test('★ 运行分析只送「跑完的结果」，代码执行不在这条链�
   setActivePinia(createPinia())
   const code = useCodeStore()
 
-  await code.loadTemplate('jr-data-features')
+  await code.loadTemplate('prog-list-jr')
   // 模拟「渲染进程的 Pyodide Worker 已经跑完」，把结果交给后端分析
   await code.analyzeRun({ code: 'print(1)', stdout: '1', stderr: '', attempt: 1 })
 

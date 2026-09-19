@@ -63,7 +63,7 @@ const levels = computed(() => quiz.levels)
 /**
  * kp_id → 中文名。
  *
- * ⚠️ 关卡进度只给 `kpId`（没有名字），而界面上不能只摆 `jr-data-features` 这种标识。
+ * ⚠️ 关卡进度只给 `kpId`（没有名字），而界面上不能只摆 `ai-definition-jr` 这种标识。
  *    中文名的来源是**教材知识点清单**（与依赖图谱同一个 `kb.sqlite`）——
  *    取不到名字时原样显示 kpId，不编一个名字出来。
  */

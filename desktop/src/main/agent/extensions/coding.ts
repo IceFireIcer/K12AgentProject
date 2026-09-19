@@ -184,7 +184,7 @@ export const GetCodeTemplateParams = Type.Object({
   kpId: Type.String({
     minLength: 1,
     maxLength: 64,
-    description: '要取代码模板的知识点 id（例如 jr-py-loop / jr-decision-tree / jr-neural-basics）'
+    description: '要取代码模板的知识点 id（例如 prog-loop-jr / prog-variable-jr / prog-list-jr）。★ 只有「编程实践」章（第八章）配有代码模板，可用 id 就是这三个：prog-variable-jr / prog-loop-jr / prog-list-jr；取别的知识点会拿不到模板。'
   }),
   gradeLevel: Type.Optional(
     Type.Union(
@@ -780,7 +780,7 @@ export function createCodingExtension(
         noteStudentBoundary(session?.studentId)
         const kpId = readNonEmptyString(params?.kpId)
         if (kpId === null) {
-          return failed('取代码模板需要知识点 id（例如 jr-py-loop）。请先确认要练哪个知识点。')
+          return failed('取代码模板需要知识点 id（例如 prog-loop-jr）。请先确认要练哪个知识点。')
         }
 
         const query = new URLSearchParams()

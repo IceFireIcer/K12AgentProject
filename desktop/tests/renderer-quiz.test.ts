@@ -58,8 +58,8 @@ const chatModule = await import('../src/renderer/src/stores/chat.ts')
 
 /** 一道选择题（**对外形态**：没有 `answer`）。 */
 const CHOICE_QUESTION = {
-  qid: 'jr-py-variable-q1',
-  kpId: 'jr-py-variable',
+  qid: 'prog-variable-jr-q1',
+  kpId: 'prog-variable-jr',
   type: 'choice',
   stem: '在 Python 里，下面哪一句能把 3 和 5 的和存进变量 total？',
   options: ['total = 3 + 5', 'total = "3 + 5"', 'total == 3 + 5'],
@@ -69,7 +69,7 @@ const CHOICE_QUESTION = {
 /** 题库出题载荷（`generate_quiz` 的 details）+ 主进程附加的 `tool` / `kind`。 */
 function quizPayload(overrides: Record<string, unknown> = {}): unknown {
   return {
-    kpId: 'jr-py-variable',
+    kpId: 'prog-variable-jr',
     source: 'bank',
     questions: [CHOICE_QUESTION],
     tool: 'generate_quiz',
@@ -81,7 +81,7 @@ function quizPayload(overrides: Record<string, unknown> = {}): unknown {
 /** 批改结果载荷（`submit_quiz` 的 details）。 */
 function resultPayload(overrides: Record<string, unknown> = {}): unknown {
   return {
-    qid: 'jr-py-variable-q1',
+    qid: 'prog-variable-jr-q1',
     correct: true,
     scoredBy: 'rule',
     feedback: '答对了！等号让右边算完再存进左边。',
@@ -114,10 +114,10 @@ test('练习卡片：题库载荷投影成可渲染的题目（选项、题型�
   if (view.kind !== 'questions') return
 
   assert.equal(view.source, 'bank')
-  assert.equal(view.kpId, 'jr-py-variable')
+  assert.equal(view.kpId, 'prog-variable-jr')
   assert.equal(view.questions.length, 1)
   const [question] = view.questions
-  assert.equal(question.qid, 'jr-py-variable-q1')
+  assert.equal(question.qid, 'prog-variable-jr-q1')
   assert.equal(question.type, 'choice')
   assert.equal(question.options.length, 3)
   assert.ok(question.stem.includes('total'))
@@ -128,7 +128,7 @@ test('★ 答案不泄漏：投影结果里不可能出现 answer / explanation�
   const leaked = quizPayload({
     questions: [
       { ...CHOICE_QUESTION, answer: SECRET, answerText: SECRET, solution: SECRET, correctOption: 0 },
-      { ...CHOICE_QUESTION, qid: 'jr-q2', answer: [SECRET], explanation: SECRET }
+      { ...CHOICE_QUESTION, qid: 'prog-variable-jr-q2', answer: [SECRET], explanation: SECRET }
     ]
   })
 
@@ -166,8 +166,8 @@ test('练习卡片：填空题 / 代码填空题也认得（题型来自冻结�
   const view = readQuizCard(
     quizPayload({
       questions: [
-        { qid: 'jr-py-variable-q2', kpId: 'jr-py-variable', type: 'code_blank', stem: 'total = 3 ______ 5', options: null },
-        { qid: 'jr-py-variable-q3', kpId: 'jr-py-variable', type: 'blank', stem: '变量名要能看懂：______' }
+        { qid: 'prog-variable-jr-q2', kpId: 'prog-variable-jr', type: 'code_blank', stem: 'total = 3 ______ 5', options: null },
+        { qid: 'prog-variable-jr-q3', kpId: 'prog-variable-jr', type: 'blank', stem: '变量名要能看懂：______' }
       ]
     })
   )
@@ -184,7 +184,7 @@ test('练习卡片：批改结果按后端给的字段渲染（不重算、不�
   const view = readQuizCard(resultPayload({ correct: false, masteryDelta: -0.1, scoredBy: 'rule' }))
   assert.equal(view.kind, 'result')
   if (view.kind !== 'result') return
-  assert.equal(view.qid, 'jr-py-variable-q1')
+  assert.equal(view.qid, 'prog-variable-jr-q1')
   assert.equal(view.correct, false)
   assert.equal(view.masteryDelta, -0.1)
   assert.equal(view.scoredBy, 'rule')
@@ -203,8 +203,8 @@ test('批改结果跨轮收集：同一题多次作答时保留最新一次', ()
     { payload: resultPayload({ correct: true, masteryDelta: 0.15, feedback: '这次对了' }) }
   ])
   assert.equal(results.size, 1)
-  assert.equal(results.get('jr-py-variable-q1')?.correct, true)
-  assert.equal(results.get('jr-py-variable-q1')?.feedback, '这次对了')
+  assert.equal(results.get('prog-variable-jr-q1')?.correct, true)
+  assert.equal(results.get('prog-variable-jr-q1')?.feedback, '这次对了')
 })
 
 /* ------------------------------------------------------------------ *
@@ -212,8 +212,8 @@ test('批改结果跨轮收集：同一题多次作答时保留最新一次', ()
  * ------------------------------------------------------------------ */
 
 test('提交消息：带上题目编号与学生的作答，并明确要求走后端判分', () => {
-  const message = buildQuizSubmissionMessage({ qid: 'jr-py-variable-q1', stem: CHOICE_QUESTION.stem }, 'total = 3 + 5')
-  assert.ok(message.includes('jr-py-variable-q1'), '提交消息必须带 qid（后端按 qid 判分）')
+  const message = buildQuizSubmissionMessage({ qid: 'prog-variable-jr-q1', stem: CHOICE_QUESTION.stem }, 'total = 3 + 5')
+  assert.ok(message.includes('prog-variable-jr-q1'), '提交消息必须带 qid（后端按 qid 判分）')
   assert.ok(message.includes('total = 3 + 5'), '提交消息必须带学生的作答')
   assert.ok(message.includes('submit_quiz'), '要明确要求模型调用 submit_quiz')
   assert.ok(!message.includes('答对了'), '前端不许出现任何判分结论')
@@ -486,11 +486,11 @@ test('练习卡片提交：走对话把作答交给主 Agent（不带学段）',
   setActivePinia(createPinia())
   const chat = chatModule.useChatStore()
 
-  await chat.submitQuizAnswer({ qid: 'jr-py-variable-q1', stem: '哪一句能求和？' }, 'total = 3 + 5')
+  await chat.submitQuizAnswer({ qid: 'prog-variable-jr-q1', stem: '哪一句能求和？' }, 'total = 3 + 5')
 
   assert.equal(bridge.sent.length, 1)
   assert.deepEqual(Object.keys(bridge.sent[0]).sort(), ['text'])
-  assert.ok(bridge.sent[0].text.includes('jr-py-variable-q1'))
+  assert.ok(bridge.sent[0].text.includes('prog-variable-jr-q1'))
   assert.ok(bridge.sent[0].text.includes('total = 3 + 5'))
 
   const turns = (chat as unknown as { turns: Array<{ userText: string }> }).turns
@@ -513,7 +513,7 @@ test('批改结果进 store 后，题目卡片能按 qid 取到它（跨轮反�
 
   ;(chat as unknown as { conversation: unknown }).conversation = state
 
-  const result = chat.quizResults.get('jr-py-variable-q1')
+  const result = chat.quizResults.get('prog-variable-jr-q1')
   assert.ok(result, '批改结果应能从整段对话里按 qid 找到')
   assert.equal(result?.correct, true)
   assert.equal(result?.masteryDelta, 0.15)

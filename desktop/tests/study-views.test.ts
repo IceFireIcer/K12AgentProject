@@ -182,10 +182,10 @@ test('边的路径是直角折线（起点竖 → 横 → 终点竖），且不�
 })
 
 test('节点标签：超过上限按**字符**截断（不把汉字切半个）', () => {
-  assert.equal(nodeLabel('循环', 'jr-py-loop'), '循环')
+  assert.equal(nodeLabel('神经网络', 'neural-network-jr'), '神经网络')
   // 没有名字时退回 kpId —— **也要截断**：矩形是定宽的，id 同样放不下
-  // （`jr-py-loop` 是 10 个字符 > 上限 7）。截断而不是溢出，是刻意的。
-  assert.equal(nodeLabel('', 'jr-py-loop'), 'jr-py-l…')
+  // （`neural-network-jr` 是 17 个字符 > 上限 7）。截断而不是溢出，是刻意的。
+  assert.equal(nodeLabel('', 'neural-network-jr'), 'neural-…')
   const long = '一二三四五六七八九十'
   const label = nodeLabel(long, 'x')
   assert.equal(Array.from(label).length, NODE_LABEL_MAX_CHARS + 1, '截断后应含省略号')
@@ -222,10 +222,10 @@ function sampleReport(overrides: Partial<ReportView> = {}): ReportView {
     streakDays: 2,
     todayStudied: true,
     mastery: [
-      { kpId: 'jr-py-loop', score: 0.9, attempts: 2, correct: 2 },
-      { kpId: 'jr-py-var', score: 0.3, attempts: 1, correct: 0 }
+      { kpId: 'prog-loop-jr', score: 0.9, attempts: 2, correct: 2 },
+      { kpId: 'prog-variable-jr', score: 0.3, attempts: 1, correct: 0 }
     ],
-    chapters: [{ chapterTitle: '第4章 用 Python 处理数据', kpCount: 3, masteredCount: 1, quizzedCount: 1 }],
+    chapters: [{ chapterTitle: '第8章 编程实践（补充）', kpCount: 3, masteredCount: 1, quizzedCount: 1 }],
     stageCounts: { mastered: 1, learning: 2 },
     badges: ['bronze'],
     gradeHistory: [
@@ -249,13 +249,13 @@ function sampleMistakes(overrides: Partial<MistakesView> = {}): MistakesView {
     gradeLevel: 'junior',
     items: [
       {
-        kpId: 'jr-py-loop',
-        kpName: '循环',
-        chapterTitle: '第4章 用 Python 处理数据',
+        kpId: 'prog-loop-jr',
+        kpName: '循环：重复的事交给机器',
+        chapterTitle: '第8章 编程实践（补充）',
         stem: '下面哪个循环是无限循环？',
         wrongCount: 2,
         lastWrongAt: Date.parse('2026-09-17T10:00:00Z'),
-        lastQid: 'q-1'
+        lastQid: 'prog-loop-jr-q1'
       }
     ],
     totalWrong: 2,
@@ -271,7 +271,7 @@ test('报告 Markdown：含六个分区与关键数字', () => {
   }
   assert.ok(markdown.includes('连续学习：**2** 天'))
   assert.ok(markdown.includes('第 3 轮：小学高年级 → 初中'), '学段轨迹应当是可读叙事')
-  assert.ok(markdown.includes('jr-py-loop'), '掌握度表格含知识点')
+  assert.ok(markdown.includes('prog-loop-jr'), '掌握度表格含知识点')
   // 表头与分隔行成对（Markdown 表格语法）
   const tableRows = markdown.split('\n').filter((line) => line.startsWith('|'))
   assert.ok(tableRows.length >= 4, `表格行数偏少：${tableRows.length}`)
@@ -333,7 +333,7 @@ test('时间格式化：非法值给破折号（不产出 Invalid Date）', () =
 test('错题本 Markdown：列出知识点名、题干与错次；没有题干时如实说明', () => {
   const markdown = composeMistakesMarkdown(sampleMistakes())
   assert.ok(markdown.includes('# 错题本'))
-  assert.ok(markdown.includes('循环'), '应当用人类可读的知识点名')
+  assert.ok(markdown.includes('循环：重复的事交给机器'), '应当用人类可读的知识点名')
   assert.ok(markdown.includes('下面哪个循环是无限循环？'), '应当含题干')
   assert.ok(markdown.includes('错 2 次'))
   assert.ok(markdown.includes('另有 1 次答错没有题目记录'), '没有题干的答错要被显式说明')
@@ -344,8 +344,8 @@ test('错题本 Markdown：拿不到知识点名时退回编号并标注（不�
     sampleMistakes({
       items: [
         {
-          kpId: 'jr-py-loop',
-          kpName: 'jr-py-loop',
+          kpId: 'prog-loop-jr',
+          kpName: 'prog-loop-jr',
           chapterTitle: '',
           stem: '',
           wrongCount: 1,
@@ -355,7 +355,7 @@ test('错题本 Markdown：拿不到知识点名时退回编号并标注（不�
       ]
     })
   )
-  assert.ok(markdown.includes('jr-py-loop（知识点编号）'))
+  assert.ok(markdown.includes('prog-loop-jr（知识点编号）'))
   assert.ok(markdown.includes('这次答错没有对应的题目记录'))
 })
 

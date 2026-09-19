@@ -498,7 +498,7 @@ test('iframe 还没挂上时发指令返回 false（调用方据此走降级，�
  * ================================================================== */
 
 test('模板优先：命中时直接返回 template 载荷，且只调一次 /api/animation/render', async () => {
-  const { result, calls } = await runTool({ concept: '排序', kpId: 'jr-py-loop' })
+  const { result, calls } = await runTool({ concept: '排序', kpId: 'prog-list-jr' })
   const details = detailsOf(result)
   assert.equal(details.source, 'template')
   assert.equal(details.concept, '排序')
@@ -512,7 +512,7 @@ test('模板优先：命中时直接返回 template 载荷，且只调一次 /ap
 
 test('★ 校验不过（422）→ 重试，重试次数**硬上限 3**（首次 + 3 次重试 = 4 次调用）', async () => {
   const { result, calls } = await runTool(
-    { concept: '排序', kpId: 'jr-py-loop' },
+    { concept: '排序', kpId: 'prog-list-jr' },
     { responses: [{ status: 422, body: { detail: '模板脚本里有 throw' } }] }
   )
   // 4 次渲染尝试 + 0 次托管（降级产物不托管）
@@ -525,7 +525,7 @@ test('★ 校验不过（422）→ 重试，重试次数**硬上限 3**（首次
 
 test('★ 3 次仍失败 → **降级为正常 payload（不发 error）**：文字 + 静态图都在', async () => {
   const { result } = await runTool(
-    { concept: '排序', kpId: 'jr-py-loop', caption: '看左边的柱子怎么一点点挪到位置。' },
+    { concept: '排序', kpId: 'prog-list-jr', caption: '看左边的柱子怎么一点点挪到位置。' },
     { responses: [{ status: 422, body: { detail: '模板脚本里有 throw' } }] }
   )
 
@@ -572,7 +572,7 @@ test('sidecar 不可用 → 降级（且不发 error），界面仍然有文字�
   }
   const extension = createAnimationExtension({ request: failing, log: () => {} })
   const tool = captureTool(extension as unknown as (pi: unknown) => void)
-  const result = (await tool.execute('call-x', { concept: '循环', kpId: 'jr-py-loop' })) as Record<string, unknown>
+  const result = (await tool.execute('call-x', { concept: '循环', kpId: 'prog-loop-jr' })) as Record<string, unknown>
   const details = detailsOf(result)
   assert.notEqual(details.error, true)
   assert.equal(details.html, '')
@@ -582,7 +582,7 @@ test('sidecar 不可用 → 降级（且不发 error），界面仍然有文字�
 
 test('★ 重试计数用 Extension 内的 Map，**同一个 toolCallId 累计、不同调用互不影响**', async () => {
   const { result } = await runTool(
-    { concept: '排序', kpId: 'jr-py-loop' },
+    { concept: '排序', kpId: 'prog-list-jr' },
     { responses: [{ status: 422, body: { detail: 'boom' } }], toolCallId: 'call-A' }
   )
   const details = detailsOf(result)
@@ -591,7 +591,7 @@ test('★ 重试计数用 Extension 内的 Map，**同一个 toolCallId 累计�
 
   // 另一次调用（不同 toolCallId）从 0 重新计：不会因为上一张卡片重试过就少试几次
   const second = await runTool(
-    { concept: '循环', kpId: 'jr-py-loop' },
+    { concept: '循环', kpId: 'prog-loop-jr' },
     { responses: [{ status: 422, body: { detail: 'boom' } }], toolCallId: 'call-B' }
   )
   assert.equal(detailsOf(second.result).attempts, 4)
@@ -608,7 +608,7 @@ test('retries=0 时只试一次（旋钮可调，但上限语义不变）', asyn
 test('自由生成是**补充路径**：模板命中时完全不调用它', async () => {
   let generated = 0
   const { result } = await runTool(
-    { concept: '排序', kpId: 'jr-py-loop' },
+    { concept: '排序', kpId: 'prog-list-jr' },
     {
       generate: async () => {
         generated += 1
@@ -684,7 +684,7 @@ test('缺 concept → 可读失败（统一失败形状，事件层据此发 err
 
 test('生成的 HTML 里有外部引用 → 校验不通过 → 重试（CDN 在断网演示里必然白屏）', async () => {
   const { result, calls } = await runTool(
-    { concept: '排序', kpId: 'jr-py-loop' },
+    { concept: '排序', kpId: 'prog-list-jr' },
     { responses: [{ status: 200, body: goodPayload({ html: '<html><script src="https://cdn.jsdelivr.net/anime.js"></script></html>' }) }] }
   )
   assert.ok(
@@ -757,8 +757,8 @@ test('渲染侧投影：认不出的载荷退化成可读文案，绝不抛、�
 
 test('★ resourceUrl 只认本机回环的动画托管地址（防载荷被改成外网地址）', () => {
   assert.equal(
-    readLoopbackUrl('http://127.0.0.1:54321/resources/animation/student_001/jr-py-loop?nonce=abc&payload_id=p1'),
-    'http://127.0.0.1:54321/resources/animation/student_001/jr-py-loop?nonce=abc&payload_id=p1'
+    readLoopbackUrl('http://127.0.0.1:54321/resources/animation/student_001/prog-loop-jr?nonce=abc&payload_id=p1'),
+    'http://127.0.0.1:54321/resources/animation/student_001/prog-loop-jr?nonce=abc&payload_id=p1'
   )
   for (const bad of [
     'https://evil.example/resources/animation/a/b?nonce=x',
