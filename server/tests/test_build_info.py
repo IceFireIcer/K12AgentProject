@@ -248,6 +248,14 @@ class BuildWiringCase(unittest.TestCase):
             [sys.executable, str(BUILD_SERVER), "--verify", "--if-stale"],
             capture_output=True,
             text=True,
+            # ★★ 必须显式指定 `encoding="utf-8"`：被调脚本都装了
+            #    `app.console.install_utf8_stdio()`，**输出就是 UTF-8 字节**；
+            #    不指定时父进程按 `locale.getpreferredencoding()` 解码 ——
+            #    中文 Windows 上是 utf-8（所以本机一直绿），而英文 runner 上是
+            #    cp1252：中文字符的某个字节（实测 0x8d）在 cp1252 里**未定义**，
+            #    于是 reader 线程抛 UnicodeDecodeError、`stderr` 变成 **None**，
+            #    报出来的却是一句莫名其妙的 `TypeError: can only concatenate str`。
+            encoding="utf-8",
             cwd=str(ROOT),
             check=False,
         )
@@ -280,6 +288,14 @@ class BuildWiringCase(unittest.TestCase):
             [sys.executable, str(BUILD_SERVER), "--print-fingerprint"],
             capture_output=True,
             text=True,
+            # ★★ 必须显式指定 `encoding="utf-8"`：被调脚本都装了
+            #    `app.console.install_utf8_stdio()`，**输出就是 UTF-8 字节**；
+            #    不指定时父进程按 `locale.getpreferredencoding()` 解码 ——
+            #    中文 Windows 上是 utf-8（所以本机一直绿），而英文 runner 上是
+            #    cp1252：中文字符的某个字节（实测 0x8d）在 cp1252 里**未定义**，
+            #    于是 reader 线程抛 UnicodeDecodeError、`stderr` 变成 **None**，
+            #    报出来的却是一句莫名其妙的 `TypeError: can only concatenate str`。
+            encoding="utf-8",
             cwd=str(ROOT),
             check=False,
         )
@@ -292,6 +308,14 @@ class BuildWiringCase(unittest.TestCase):
             [sys.executable, str(ROOT / "scripts" / "build_info.py"), "--fingerprint"],
             capture_output=True,
             text=True,
+            # ★★ 必须显式指定 `encoding="utf-8"`：被调脚本都装了
+            #    `app.console.install_utf8_stdio()`，**输出就是 UTF-8 字节**；
+            #    不指定时父进程按 `locale.getpreferredencoding()` 解码 ——
+            #    中文 Windows 上是 utf-8（所以本机一直绿），而英文 runner 上是
+            #    cp1252：中文字符的某个字节（实测 0x8d）在 cp1252 里**未定义**，
+            #    于是 reader 线程抛 UnicodeDecodeError、`stderr` 变成 **None**，
+            #    报出来的却是一句莫名其妙的 `TypeError: can only concatenate str`。
+            encoding="utf-8",
             cwd=str(ROOT),
             check=False,
         )
@@ -303,6 +327,14 @@ class BuildWiringCase(unittest.TestCase):
             [sys.executable, str(ROOT / "scripts" / "build_info.py"), "--json"],
             capture_output=True,
             text=True,
+            # ★★ 必须显式指定 `encoding="utf-8"`：被调脚本都装了
+            #    `app.console.install_utf8_stdio()`，**输出就是 UTF-8 字节**；
+            #    不指定时父进程按 `locale.getpreferredencoding()` 解码 ——
+            #    中文 Windows 上是 utf-8（所以本机一直绿），而英文 runner 上是
+            #    cp1252：中文字符的某个字节（实测 0x8d）在 cp1252 里**未定义**，
+            #    于是 reader 线程抛 UnicodeDecodeError、`stderr` 变成 **None**，
+            #    报出来的却是一句莫名其妙的 `TypeError: can only concatenate str`。
+            encoding="utf-8",
             cwd=str(ROOT),
             check=False,
         )
