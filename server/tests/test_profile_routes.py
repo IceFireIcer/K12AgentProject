@@ -210,9 +210,9 @@ class TestLearningEvents(ProfileCase):
         student_id = self.create_student("四类活动", "junior")["studentId"]
         cases = [
             ("qa", {"sessionId": "sess-1", "detail": "对话轮次结束"}),
-            ("animation", {"kpId": "jr-py-loop", "detail": "观看动画讲解"}),
-            ("coding", {"kpId": "jr-py-loop", "isCorrect": True, "detail": "代码运行与评估"}),
-            ("quiz", {"kpId": "jr-py-loop", "isCorrect": False, "detail": "提交作答"}),
+            ("animation", {"kpId": "prog-loop-jr", "detail": "观看动画讲解"}),
+            ("coding", {"kpId": "prog-loop-jr", "isCorrect": True, "detail": "代码运行与评估"}),
+            ("quiz", {"kpId": "prog-loop-jr", "isCorrect": False, "detail": "提交作答"}),
         ]
         for activity, extra in cases:
             response = self.post_event(student_id, activity=activity, **extra)
@@ -513,14 +513,14 @@ class TestPreferenceWrite(ProfileCase):
 class TestProfileRead(ProfileCase):
     def test_profile_returns_contract_shape(self) -> None:
         student_id = self.create_student("画像", "primary_high")["studentId"]
-        self.post_event(student_id, activity="quiz", kpId="ph-loop", isCorrect=True, detail="提交作答")
-        self.post_event(student_id, activity="quiz", kpId="ph-var", isCorrect=False, detail="提交作答")
+        self.post_event(student_id, activity="quiz", kpId="prog-loop-ph", isCorrect=True, detail="提交作答")
+        self.post_event(student_id, activity="quiz", kpId="prog-variable-ph", isCorrect=False, detail="提交作答")
         # 掌握度由练习轨（票 14/15）写；这里直接改库模拟「已经答过题」
         conn = sqlite3.connect(student_learning_db_path(self.tmp, student_id))
         try:
             conn.execute(
                 "INSERT INTO mastery(kp_id, score, attempts, correct, last_seen_at) VALUES(?,?,?,?,?)",
-                ("ph-loop", 0.8, 3, 3, int(time.time())),
+                ("prog-loop-ph", 0.8, 3, 3, int(time.time())),
             )
             conn.execute("INSERT INTO profile_pref(key, value) VALUES('pace', 'slow')")
             conn.commit()
@@ -533,7 +533,7 @@ class TestProfileRead(ProfileCase):
         self.assertEqual(sorted(body), ["mastery", "preferences", "recommendedKpIds", "student"])
         self.assertEqual(body["student"]["studentId"], student_id)
         self.assertEqual(body["student"]["gradeLevel"], "primary_high")
-        self.assertEqual(body["mastery"][0]["kpId"], "ph-loop")
+        self.assertEqual(body["mastery"][0]["kpId"], "prog-loop-ph")
         self.assertAlmostEqual(body["mastery"][0]["score"], 0.8)
         self.assertGreater(body["mastery"][0]["lastSeenAt"], 1_600_000_000_000, "lastSeenAt 应当是毫秒")
         self.assertEqual(body["preferences"], {"pace": "slow"})

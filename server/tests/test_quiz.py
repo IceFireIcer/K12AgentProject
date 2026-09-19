@@ -61,7 +61,7 @@ SENTINEL_ANSWER = "哨兵答案-ZX91-不得出现在响应里"
 def _question(**overrides) -> QuizQuestion:
     base = dict(
         qid="test-q1",
-        kp_id="jr-py-loop",
+        kp_id="prog-loop-jr",
         type="blank",
         stem="1 到 5 依次打印，用什么函数？",
         options=None,
@@ -162,9 +162,20 @@ class TestBankContent(unittest.TestCase):
     def test_bank_has_no_out_of_scope_terms(self) -> None:
         self.assertEqual(self.report.out_of_scope, [], f"题库超纲：{self.report.out_of_scope}")
 
-    def test_bank_covers_all_three_question_types(self) -> None:
+    def test_bank_question_types_are_within_release_scope_and_complete(self) -> None:
+        """题库题型**恰好**是随包分发的那两种，且都在第一版范围内。
+
+        ⚠️ 形态换代（2026-09-19，随 K12KnowledgeBase 接入）：新题库（``ch01``…``ch08``，
+        684 题）里**没有 ``code_blank``**（旧题库有；新教材第 8 章「编程实践」的题
+        全部是 choice / blank）。路由与契约仍然支持 ``code_blank``（判分分支还在，
+        ``test_code_blank_ignores_spacing`` 也在），只是随包内容不再含这类题。
+
+        判据仍然是「集合相等」而不是「包含于范围」：少一种（有人删掉全部填空题）
+        或多一种（冒出一个没被登记过的题型）都会当场变红。
+        """
         types = {entry.question.type for entry in self.report.entries}
-        self.assertEqual(types, {"choice", "blank", "code_blank"})
+        self.assertEqual(types, {"choice", "blank"}, f"题库题型集合变了：{sorted(types)}")
+        self.assertTrue(types <= {"choice", "blank", "code_blank"}, "出现了第一版范围外的题型")
 
     def test_every_question_points_at_a_real_kp_in_the_same_grade(self) -> None:
         for entry in self.report.entries:
@@ -175,7 +186,7 @@ class TestBankContent(unittest.TestCase):
             self.assertEqual(
                 doc.grade_level,
                 entry.grade_level,
-                f"{entry.question.qid} 所在文件是 {entry.grade_level}，"
+                f"{entry.question.qid} 逐题推导出的学段是 {entry.grade_level}，"
                 f"但知识点属于 {doc.grade_level}（题库与教材学段错位）",
             )
 
@@ -184,16 +195,22 @@ class TestBankContent(unittest.TestCase):
         self.assertEqual(len(qids), len(set(qids)), "题库里有重复 qid")
 
     def test_out_of_scope_helper_flags_primary_low_terms(self) -> None:
-        # 票 14 点名的两个超纲词：小学低年级题干里出现即违规
-        self.assertIn("算法", out_of_scope_terms("用算法帮小明分类", "primary_low"))
+        """★ 超纲自检：小学低年级题干里出现更高的术语即违规（票 14 的口径）。"""
+        # 术语文表换代（K12KnowledgeBase）：这两个词的 min_grade 是 junior，
+        # 小学低年级题干里出现即超纲。逐条断言「判据真的卡在学段上」。
+        self.assertIn("决策树", out_of_scope_terms("用决策树帮小明分类", "primary_low"))
         self.assertIn("特征向量", out_of_scope_terms("特征向量的长度", "primary_low"))
-        self.assertEqual(out_of_scope_terms("用算法帮小明分类", "junior"), [])
+        # 反向对照：同一句话给初中生**不**算超纲（否则「超纲」二字就没了判别力）
+        self.assertEqual(out_of_scope_terms("用决策树帮小明分类", "junior"), [])
+        # 也不许把「本学段就该讲」的词误判成超纲（算法是 primary_low 起）
+        self.assertEqual(out_of_scope_terms("用算法帮小明分类", "primary_low"), [])
 
     def test_d5_bank_load_reads_the_terminology_file_once(self) -> None:
         """★ D5 回归：``load_bank`` 逐题自检时**只读一次**术语表（不是每题一次）。
 
         修复前 ``out_of_scope_terms`` 内部每题都调 ``load_terminology(KNOWLEDGE_DIR)``：
-        一次取题（或一次判分查库）就是「题数」次文件读 —— 实测 82 次。
+        一次取题（或一次判分查库）就是「题数」次文件读 —— 旧题库 81 题时实测 82 次，
+        新题库 684 题只会更贵（而判分路径每答一题都要调一次）。
         这里用**计数替身**盯住调用次数（比断言耗时稳，也不受磁盘缓存影响）。
         """
         calls = {"n": 0}
@@ -215,12 +232,22 @@ class TestBankContent(unittest.TestCase):
         self.assertLessEqual(calls["n"], 1, f"逐题自检却读了 {calls['n']} 次术语表")
 
     def test_d5_out_of_scope_terms_accepts_an_injected_table(self) -> None:
-        """显式传入术语文表时**不读盘**，且判定结果与默认路径一致（向后兼容）。"""
-        table = {"terms": [{"term": "算法", "min_grade": "junior"}], "tone_markers": []}
-        self.assertEqual(out_of_scope_terms("用算法帮小明分类", "primary_low", terminology=table), ["算法"])
-        self.assertEqual(out_of_scope_terms("用算法帮小明分类", "junior", terminology=table), [])
-        # 不传 = 走默认路径，结果一样（旧调用方照常工作）
-        self.assertIn("算法", out_of_scope_terms("用算法帮小明分类", "primary_low"))
+        """显式传入术语文表时**不读盘**，且判定结果与默认路径一致（向后兼容）。
+
+        ⚠️ 夹具用**注入的那张表**造出一条「默认表里没有」的超纲关系：
+        拿随包表里本就 min_grade=primary_low 的词（例如「算法」）当例子，
+        这条断言会退化成「注入不生效也绿」—— 那正是它要防的空转。
+        """
+        table = {"terms": [{"term": "冒泡排序", "min_grade": "junior"}], "tone_markers": []}
+        self.assertEqual(
+            out_of_scope_terms("用冒泡排序帮小明排一下", "primary_low", terminology=table),
+            ["冒泡排序"],
+        )
+        self.assertEqual(
+            out_of_scope_terms("用冒泡排序帮小明排一下", "junior", terminology=table), []
+        )
+        # 不传 = 走默认路径（旧调用方照常工作），且默认表确实认得出它的那一条
+        self.assertIn("决策树", out_of_scope_terms("用决策树帮小明分类", "primary_low"))
 
 
 # --------------------------------------------------------------------------- #
@@ -229,7 +256,7 @@ class TestBankContent(unittest.TestCase):
 class TestGradeIsolation(QuizCase):
     def test_junior_gets_junior_questions(self) -> None:
         response = self.client.get(
-            "/api/quiz/bank/jr-py-loop", params={"gradeLevel": "junior", "count": 5}
+            "/api/quiz/bank/prog-loop-jr", params={"gradeLevel": "junior", "count": 5}
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["questions"])
@@ -237,22 +264,41 @@ class TestGradeIsolation(QuizCase):
     def test_junior_never_gets_senior_questions(self) -> None:
         """初中生问高中知识点 → 取不到题（404），**绝不返回超纲题**。"""
         response = self.client.get(
-            "/api/quiz/bank/sr-linear-regression", params={"gradeLevel": "junior"}
+            "/api/quiz/bank/ai-definition-sr", params={"gradeLevel": "junior"}
         )
         self.assertEqual(response.status_code, 404)
         self.assertIn("没有题目", response.json()["detail"])
 
+    def test_primary_low_never_gets_any_higher_grade(self) -> None:
+        """★ 最强的那对对照：小学低年级取**同一概念**的更高学段，三档全部 404。
+
+        「同一个概念、只差学段」把「按学段隔离」和「这个 kp 根本没题」区分开了：
+        如果哪天隔离被放宽，这三条会立刻变成 200 而当场变红。
+        """
+        for kp_id in ("ai-definition-ph", "ai-definition-jr", "ai-definition-sr"):
+            with self.subTest(kp=kp_id):
+                response = self.client.get(
+                    f"/api/quiz/bank/{kp_id}", params={"gradeLevel": "primary_low"}
+                )
+                self.assertEqual(response.status_code, 404, response.text)
+        # 反向对照：同一个 kp_id 给对应学段就取得到（证明上一条不是「这个 kp 没题」）
+        ok = self.client.get(
+            "/api/quiz/bank/ai-definition-sr", params={"gradeLevel": "senior"}
+        )
+        self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertTrue(ok.json()["questions"])
+
     def test_senior_can_review_lower_grade_questions(self) -> None:
         """向上兼容方向是「高中生回看初中题」，与检索链一致。"""
         response = self.client.get(
-            "/api/quiz/bank/jr-py-loop", params={"gradeLevel": "senior"}
+            "/api/quiz/bank/prog-loop-jr", params={"gradeLevel": "senior"}
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["questions"])
 
     def test_allow_compat_false_restricts_to_exact_grade(self) -> None:
         response = self.client.get(
-            "/api/quiz/bank/jr-py-loop",
+            "/api/quiz/bank/prog-loop-jr",
             params={"gradeLevel": "senior", "allowCompat": "false"},
         )
         self.assertEqual(response.status_code, 404)
@@ -260,7 +306,7 @@ class TestGradeIsolation(QuizCase):
     def test_select_questions_orders_exact_grade_first(self) -> None:
         report = load_bank(BANK_DIR)
         picked = select_questions(
-            report, kp_id="jr-py-loop", grade_level="senior", count=2, allow_compat=True
+            report, kp_id="prog-loop-jr", grade_level="senior", count=2, allow_compat=True
         )
         self.assertTrue(picked)
         self.assertEqual({entry.grade_level for entry in picked}, {"junior"})
@@ -292,7 +338,7 @@ class TestAnswerNeverLeavesBackend(QuizCase):
 
     def test_no_answer_key_in_real_payload(self) -> None:
         response = self.client.get(
-            "/api/quiz/bank/jr-py-loop", params={"gradeLevel": "junior", "count": 5}
+            "/api/quiz/bank/prog-loop-jr", params={"gradeLevel": "junior", "count": 5}
         )
         raw = response.text
         payload = json.loads(raw)
@@ -321,7 +367,7 @@ class TestAnswerNeverLeavesBackend(QuizCase):
                     "questions": [
                         {
                             "qid": "sentinel-q1",
-                            "kp_id": "jr-py-loop",
+                            "kp_id": "prog-loop-jr",
                             "type": "blank",
                             "stem": "哨兵题：请填空（答案不该出现在这里）",
                             "answer": SENTINEL_ANSWER,
@@ -329,7 +375,7 @@ class TestAnswerNeverLeavesBackend(QuizCase):
                         },
                         {
                             "qid": "sentinel-q2",
-                            "kp_id": "jr-py-loop",
+                            "kp_id": "prog-loop-jr",
                             "type": "choice",
                             "stem": "哨兵选择题",
                             "options": ["选项甲", "选项乙"],
@@ -354,7 +400,7 @@ class TestAnswerNeverLeavesBackend(QuizCase):
         self._write_sentinel_bank()
 
         response = self.client.get(
-            "/api/quiz/bank/jr-py-loop", params={"gradeLevel": "junior", "count": 5}
+            "/api/quiz/bank/prog-loop-jr", params={"gradeLevel": "junior", "count": 5}
         )
         self.assertEqual(response.status_code, 200)
         raw = response.text
@@ -389,7 +435,7 @@ class TestAnswerNeverLeavesBackend(QuizCase):
         """反向对照：内部模型**有** answer —— 上面的「没有」不是因为字段压根不存在。"""
         self.assertIn("answer", QuizQuestion.model_fields)
         self.assertNotIn("answer", json.dumps(self.client.get(
-            "/api/quiz/bank/jr-py-loop", params={"gradeLevel": "junior"}
+            "/api/quiz/bank/prog-loop-jr", params={"gradeLevel": "junior"}
         ).json()))
 
 
@@ -411,7 +457,7 @@ class TestMasteryAndHistory(QuizCase):
             conn.close()
 
     def test_single_correct_answer_moves_mastery_by_at_most_0_2(self) -> None:
-        body = {"studentId": "student_001", "qid": "jr-py-loop-q2", "answer": "+="}
+        body = {"studentId": "student_001", "qid": "prog-loop-jr-q1", "answer": "循环变量"}
         first = self.grade(**body).json()
         self.assertTrue(first["correct"])
         self.assertEqual(first["scoredBy"], "rule")
@@ -419,7 +465,7 @@ class TestMasteryAndHistory(QuizCase):
         self.assertAlmostEqual(first["masteryDelta"], MASTERY_GAIN_CORRECT, places=6)
         self.assertLess(first["masteryDelta"], 1.0, "一次答题不能把掌握度从 0 顶到 1")
 
-        row = self._mastery_row("student_001", "jr-py-loop")
+        row = self._mastery_row("student_001", "prog-loop-jr")
         self.assertIsNotNone(row)
         self.assertAlmostEqual(row["score"], MASTERY_GAIN_CORRECT, places=6)
         self.assertEqual(row["attempts"], 1)
@@ -429,36 +475,36 @@ class TestMasteryAndHistory(QuizCase):
     def test_wrong_answer_delta_is_clamped_and_never_goes_below_zero(self) -> None:
         # 先答对一次，把掌握度抬到 0.15，再答错 —— 否则 0 减去任何值都会被截到 0，
         # 测出来是「0 变化」而不是「负变化」，等于没测到限幅。
-        self.grade(studentId="student_002", qid="jr-py-loop-q2", answer="+=")
+        self.grade(studentId="student_002", qid="prog-loop-jr-q1", answer="循环变量")
         result = self.grade(
-            studentId="student_002", qid="jr-py-loop-q2", answer="-="
+            studentId="student_002", qid="prog-loop-jr-q1", answer="循环次数"
         ).json()
         self.assertFalse(result["correct"])
         self.assertAlmostEqual(result["masteryDelta"], -MASTERY_LOSS_WRONG, places=6)
         self.assertGreaterEqual(result["masteryDelta"], -MASTERY_DELTA_LIMIT)
 
-        row = self._mastery_row("student_002", "jr-py-loop")
+        row = self._mastery_row("student_002", "prog-loop-jr")
         self.assertEqual(row["attempts"], 2)
         self.assertEqual(row["correct"], 1)
         self.assertAlmostEqual(row["score"], MASTERY_GAIN_CORRECT - MASTERY_LOSS_WRONG, places=6)
 
         # 全新学生答错：掌握度停在 0（不能为负），回报的增量也就是 0
         fresh = self.grade(
-            studentId="student_012", qid="jr-py-loop-q2", answer="-="
+            studentId="student_012", qid="prog-loop-jr-q1", answer="循环次数"
         ).json()
         self.assertFalse(fresh["correct"])
         self.assertEqual(fresh["masteryDelta"], 0.0)
-        self.assertEqual(self._mastery_row("student_012", "jr-py-loop")["score"], 0.0)
+        self.assertEqual(self._mastery_row("student_012", "prog-loop-jr")["score"], 0.0)
 
     def test_repeated_answers_converge_and_delta_stops_at_the_ceiling(self) -> None:
-        body = {"studentId": "student_003", "qid": "jr-py-loop-q2", "answer": "+="}
+        body = {"studentId": "student_003", "qid": "prog-loop-jr-q1", "answer": "循环变量"}
         deltas = []
         for _ in range(10):
             payload = self.grade(**body).json()
             deltas.append(payload["masteryDelta"])
             self.assertLessEqual(abs(payload["masteryDelta"]), MASTERY_DELTA_LIMIT)
 
-        row = self._mastery_row("student_003", "jr-py-loop")
+        row = self._mastery_row("student_003", "prog-loop-jr")
         self.assertAlmostEqual(row["score"], 1.0, places=6)
         self.assertEqual(row["attempts"], 10)
         self.assertEqual(row["correct"], 10)
@@ -467,8 +513,8 @@ class TestMasteryAndHistory(QuizCase):
     def test_attempt_is_written_to_learning_history(self) -> None:
         self.grade(
             studentId="student_004",
-            qid="jr-py-loop-q1",
-            answer="for i in range(1, 6):\n    print(i)",
+            qid="prog-loop-jr-q1",
+            answer="循环变量",
             sessionId="turn_abc",
         )
         conn = sqlite3.connect(student_db_path(self.tmp, "student_004"))
@@ -480,15 +526,15 @@ class TestMasteryAndHistory(QuizCase):
             conn.close()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][0], "quiz")
-        self.assertEqual(rows[0][1], "jr-py-loop")
+        self.assertEqual(rows[0][1], "prog-loop-jr")
         self.assertEqual(rows[0][2], 1)
         self.assertEqual(rows[0][3], "turn_abc")
 
     def test_students_do_not_share_a_database(self) -> None:
-        self.grade(studentId="student_010", qid="jr-py-loop-q2", answer="+=")
-        self.grade(studentId="student_011", qid="jr-py-loop-q2", answer="-=")
-        a = self._mastery_row("student_010", "jr-py-loop")["score"]
-        b = self._mastery_row("student_011", "jr-py-loop")["score"]
+        self.grade(studentId="student_010", qid="prog-loop-jr-q1", answer="循环变量")
+        self.grade(studentId="student_011", qid="prog-loop-jr-q1", answer="循环次数")
+        a = self._mastery_row("student_010", "prog-loop-jr")["score"]
+        b = self._mastery_row("student_011", "prog-loop-jr")["score"]
         self.assertNotEqual(a, b, "两个学生的掌握度串了（一人一库被破坏）")
         self.assertNotEqual(
             student_db_path(self.tmp, "student_010"),
@@ -502,7 +548,7 @@ class TestMasteryAndHistory(QuizCase):
 class TestHttpBoundary(QuizCase):
     def test_bank_payload_shape(self) -> None:
         payload = self.client.get(
-            "/api/quiz/bank/jr-py-variable", params={"gradeLevel": "junior"}
+            "/api/quiz/bank/prog-variable-jr", params={"gradeLevel": "junior"}
         ).json()
         self.assertEqual(set(payload), {"kpId", "questions", "source"})
         self.assertEqual(payload["source"], "bank")
@@ -510,16 +556,16 @@ class TestHttpBoundary(QuizCase):
 
     def test_snake_case_query_params_also_accepted(self) -> None:
         response = self.client.get(
-            "/api/quiz/bank/jr-py-variable", params={"grade_level": "junior"}
+            "/api/quiz/bank/prog-variable-jr", params={"grade_level": "junior"}
         )
         self.assertEqual(response.status_code, 200)
 
     def test_missing_grade_is_422(self) -> None:
-        self.assertEqual(self.client.get("/api/quiz/bank/jr-py-variable").status_code, 422)
+        self.assertEqual(self.client.get("/api/quiz/bank/prog-variable-jr").status_code, 422)
 
     def test_bad_grade_is_422(self) -> None:
         response = self.client.get(
-            "/api/quiz/bank/jr-py-variable", params={"gradeLevel": "college"}
+            "/api/quiz/bank/prog-variable-jr", params={"gradeLevel": "college"}
         )
         self.assertEqual(response.status_code, 422)
 
@@ -536,7 +582,7 @@ class TestHttpBoundary(QuizCase):
 
     def test_grade_rejects_path_traversal_student_id(self) -> None:
         """studentId 会被拼进路径：必须挡在 HTTP 边界上。"""
-        response = self.grade(studentId="../../evil", qid="jr-py-loop-q2", answer="+=")
+        response = self.grade(studentId="../../evil", qid="prog-loop-jr-q1", answer="循环变量")
         self.assertEqual(response.status_code, 422)
         self.assertFalse((self.tmp.parent / "evil").exists())
 
@@ -544,13 +590,13 @@ class TestHttpBoundary(QuizCase):
         """契约 forbid 额外字段（临时加松散字段必须 422）。"""
         response = self.client.post(
             "/api/quiz/grade",
-            json={"studentId": "student_001", "qid": "jr-py-loop-q2", "answer": "+=", "oops": 1},
+            json={"studentId": "student_001", "qid": "prog-loop-jr-q1", "answer": "循环变量", "oops": 1},
         )
         self.assertEqual(response.status_code, 422)
 
     def test_grade_result_shape(self) -> None:
         payload = self.grade(
-            studentId="student_001", qid="jr-py-loop-q2", answer="+="
+            studentId="student_001", qid="prog-loop-jr-q1", answer="循环变量"
         ).json()
         self.assertEqual(
             set(payload), {"qid", "correct", "scoredBy", "feedback", "masteryDelta"}
@@ -560,7 +606,7 @@ class TestHttpBoundary(QuizCase):
 
     def test_feedback_of_wrong_answer_is_chinese_and_readable(self) -> None:
         payload = self.grade(
-            studentId="student_005", qid="jr-py-loop-q2", answer="完全不对"
+            studentId="student_005", qid="prog-loop-jr-q1", answer="完全不对"
         ).json()
         self.assertFalse(payload["correct"])
         self.assertIn("再", payload["feedback"])
@@ -586,7 +632,7 @@ class TestQuizRoutesRequireExplicitDataDir(unittest.TestCase):
     def test_grade_returns_503_instead_of_writing_to_the_shared_dir(self) -> None:
         response = self.client.post(
             "/api/quiz/grade",
-            json={"studentId": "student_999", "qid": "jr-py-loop-q2", "answer": "+="},
+            json={"studentId": "student_999", "qid": "prog-loop-jr-q1", "answer": "循环变量"},
         )
         self.assertEqual(response.status_code, 503, response.text)
         self.assertIn("data-dir", response.json()["detail"])
@@ -605,7 +651,7 @@ class TestQuizRoutesRequireExplicitDataDir(unittest.TestCase):
                 "questions": [
                     {
                         "qid": "v-1",
-                        "kpId": "jr-py-loop",
+                        "kpId": "prog-loop-jr",
                         "type": "blank",
                         "stem": "1 到 5 用什么函数？",
                         "referenceAnswer": "range",

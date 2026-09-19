@@ -592,13 +592,17 @@ class TestTemplateMatching(unittest.TestCase):
         self.templates = R.load_templates(TEMPLATES_DIR)
 
     def test_知识点精确命中(self) -> None:
-        template, reason = R.pick_template(self.templates, kp_id="jr-py-loop", grade_level="junior")
+        template, reason = R.pick_template(self.templates, kp_id="prog-loop-jr", grade_level="junior")
         self.assertEqual(reason, "kp")
-        self.assertIn("jr-py-loop", template.kp_ids if template else [])
+        self.assertIn("prog-loop-jr", template.kp_ids if template else [])
 
     def test_神经网络在初中命中自己而不是被退到小学模板(self) -> None:
-        """★ 回归用例（实测踩到）：跨学段模板（junior+senior）必须能被初中生选中。"""
-        template, reason = R.pick_template(self.templates, kp_id="jr-neural-basics", grade_level="junior")
+        """★ 回归用例（实测踩到）：跨学段模板（junior+senior）必须能被初中生选中。
+
+        `neural-network-jr` 只被 `neural-forward`（junior+senior）覆盖；
+        若学段判据写反，初中生会被退到小学那份 `image-pixels`（它含 `computer-vision-jr`）。
+        """
+        template, reason = R.pick_template(self.templates, kp_id="neural-network-jr", grade_level="junior")
         self.assertEqual(reason, "kp")
         self.assertEqual(template.id if template else None, "neural-forward")
 
@@ -617,6 +621,15 @@ class TestTemplateMatching(unittest.TestCase):
                 R.template_usable_for(template, "primary_low"),
                 f"{template.id} 不该对小学低年级可用（超纲）",
             )
+
+        # ★ 学段方向在**模板选择**这条路径上同样不放宽：
+        # `machine-learning-sr` 由 `gradient-descent`（仅 senior）覆盖，
+        # 小学低年级来问时不能靠「知识点命中」把它拿到手。
+        template, reason = R.pick_template(
+            self.templates, kp_id="machine-learning-sr", grade_level="primary_low"
+        )
+        self.assertNotEqual(reason, "kp", "小学低年级不该按知识点命中只给高中的梯度下降模板")
+        self.assertNotEqual(template.id if template else None, "gradient-descent")
 
     def test_每个学段都至少有一个可用模板(self) -> None:
         """★ 反向检查：**每个学段**都得有模板可用，否则那个学段的动画只能降级。
@@ -712,17 +725,17 @@ class TestInternalRoutes(unittest.TestCase):
         self.assertEqual(len(body["matched"]), body["total"], "不过滤时应返回全部模板")
 
         filtered = self.client.get(
-            "/api/animation/templates", params={"kpId": "jr-py-loop", "gradeLevel": "junior"}
+            "/api/animation/templates", params={"kpId": "prog-loop-jr", "gradeLevel": "junior"}
         )
         self.assertEqual(filtered.status_code, 200)
         matched = filtered.json()["matched"]
-        self.assertTrue(matched, "jr-py-loop 应当有模板")
-        self.assertTrue(all("jr-py-loop" in item["kpIds"] for item in matched))
+        self.assertTrue(matched, "prog-loop-jr 应当有模板")
+        self.assertTrue(all("prog-loop-jr" in item["kpIds"] for item in matched))
 
     def test_渲染命中模板_返回完整载荷(self) -> None:
         response = self.client.post(
             "/api/animation/render",
-            json={"kpId": "jr-py-loop", "gradeLevel": "junior", "payloadId": "unit-pid"},
+            json={"kpId": "prog-loop-jr", "gradeLevel": "junior", "payloadId": "unit-pid"},
         )
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()

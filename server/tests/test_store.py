@@ -741,7 +741,14 @@ class TestChunker(unittest.TestCase):
         """同一个 Markdown 反复分块，chunk_id 必须完全一致（幂等建库的前提）。"""
         from app.knowledge.library import load_document
 
-        doc = load_document(ROOT / "knowledge" / "junior" / "jr-py-loop.md")
+        # 取一篇**会被拆成多块**的正文（>600 token）—— 单块文档测不出「拆分顺序是否稳定」。
+        # 新教材里高中篇幅最长，用它；找不到就退到任意一篇，别让这条测试因为内容变化而硬失败。
+        candidates = [ROOT / "knowledge" / "senior" / "prompt-sr.md"]
+        candidates += sorted((ROOT / "knowledge" / "senior").glob("*.md"))[:1]
+        path = next((p for p in candidates if p.exists()), None)
+        self.assertIsNotNone(path, "knowledge/senior/ 下找不到任何教材，无法测分块幂等")
+
+        doc = load_document(path)
         first = [d.chunk_id for d in chunker.chunk_document(doc, chunker.heuristic_token_count)]
         second = [d.chunk_id for d in chunker.chunk_document(doc, chunker.heuristic_token_count)]
         self.assertEqual(first, second)
@@ -762,16 +769,52 @@ class TestRealCorpusChunking(unittest.TestCase):
 
         self.docs = load_library(ROOT / "knowledge")
 
-    def test_parent_blocks_are_within_300_600_tokens(self) -> None:
-        sizes: list[int] = []
+    def test_parent_blocks_respect_the_size_contract(self) -> None:
+        """节级父块的尺寸口径。
+
+        ★★ 这条断言在 2026-09-19 接入 K12KnowledgeBase 时**改过口径**，理由要说清楚：
+
+        原文断言「每个父块都落在 300–600」。那对新教材是**不可能满足**的 ——
+        新库的一篇正文 = 一个知识点的一个学段 = **一个 ``##`` 节**，
+        而小学低年级那一节本身就只有 100–190 token（这是《写作规范》定的字数区间：
+        小学低 80–150 字）。一节天生就短，硬凑到 300 只能靠灌水或跨知识点拼接，
+        两者都会让检索质量变差。
+
+        ★ 而且「允许短块」**本来就是 chunker 写明的契约**，不是为迁移开的口子：
+        ``plan_parent_blocks`` 的 docstring 原话是
+        「超过 600 token 的小节在句子边界拆成多个父块，切点尽量落在 300–600 之间
+        （**拆出来的块不会小于 300，除非整节本来就这么短**）」。
+
+        所以真正该钉住的是这两条：
+          1. **上限是硬的**：任何父块都不许超过 600（超了说明拆分逻辑坏了）；
+          2. **下限只对「被拆出来的块」生效**：一篇文档拆成 ≥2 块时，
+             每一块都必须 ≥300 —— 这才是有判别力的那一半
+             （单块文档落到 <300 是内容天然短，不是 bug）。
+        """
+        per_doc: list[list[int]] = []
         for doc in self.docs:
-            for _title, text, _idx in chunker.plan_parent_blocks(doc, self.counter):
-                sizes.append(self.counter(text))
-        self.assertTrue(sizes)
-        over = [s for s in sizes if s > chunker.PARENT_MAX_TOKENS]
+            sizes = [self.counter(text) for _title, text, _idx in chunker.plan_parent_blocks(doc, self.counter)]
+            if sizes:
+                per_doc.append(sizes)
+
+        self.assertTrue(per_doc, "没有任何父块，说明教材没被读到")
+
+        over = [s for sizes in per_doc for s in sizes if s > chunker.PARENT_MAX_TOKENS]
         self.assertEqual(over, [], f"超上限的父块：{over}")
-        below = [s for s in sizes if s < chunker.PARENT_MIN_TOKENS]
-        self.assertEqual(below, [], f"低于下限的父块：{below}")
+
+        # 只有「被拆过」的文档才谈得上下限：拆出来的每一块都必须够大
+        too_small_after_split = [
+            (sizes, s)
+            for sizes in per_doc
+            if len(sizes) > 1
+            for s in sizes
+            if s < chunker.PARENT_MIN_TOKENS
+        ]
+        self.assertEqual(
+            too_small_after_split,
+            [],
+            f"拆分后仍有低于下限的父块（拆分逻辑坏了）：{too_small_after_split}",
+        )
 
     def test_grade_term_audit_passes(self) -> None:
         """学段错位自检必须零问题（教材内容与术语文表对齐）。"""

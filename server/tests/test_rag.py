@@ -30,15 +30,28 @@ if str(ROOT) not in sys.path:
 import numpy as np  # noqa: E402
 
 from app.config import KNOWLEDGE_DIR  # noqa: E402
+from app.knowledge import deps  # noqa: E402
 from app.knowledge.deps import EXPANSION_LIMIT  # noqa: E402
 from app.rag import retriever  # noqa: E402
 from app.rag.contracts_bridge import contract_parity_report, field_diff  # noqa: E402
 from tests.test_store import FakeEmbedder, build_fixture_kb  # noqa: E402
 
+#: 检索锚点（★ 2026-09-19 随 K12KnowledgeBase 更新：旧 33 个 kp 的命名整体作废，
+#: 新 kp_id 形如 ``<概念slug>-<pl|ph|jr|sr>``）。每个概念在四个学段各有一篇正文，
+#: ``prog-loop`` 是「循环」这一概念。
+LOOP_JUNIOR = "prog-loop-jr"
+LOOP_PRIMARY_LOW = "prog-loop-pl"
+LOOP_PRIMARY_HIGH = "prog-loop-ph"
+LOOP_SENIOR = "prog-loop-sr"
+VARIABLE_JUNIOR = "prog-variable-jr"
+
 # 高中学段专有词（初中学段发问时**绝不能**命中它的内容）
 SENIOR_ONLY_QUERY = "梯度下降"
 # 双字词查询：trigram 匹配不到，靠 LIKE 兜底（FTS 降级路径的关键用例）
 SHORT_QUERY = "循环"
+# ★ 学生整句提问（逐字取自新教材初中「循环」正文）：中文没有分词器，
+#   整句若不拆 n-gram 就匹配不到任何行 —— FTS 降级路径的关键用例。
+SENTENCE_QUERY = "循环里忘了让条件变化会怎样"
 # 教材里不存在的词（连 n-gram 都匹配不到）：用来把链路一路逼到 outline
 ABSENT_QUERY = "量子纠缠退相干"
 
@@ -103,7 +116,7 @@ class TestVectorPathAndGradeIsolation(RagCase):
         result = self.service().search(query=SHORT_QUERY, grade_level="junior", top_k=5)
         self.assertEqual(result.degraded, "vector")
         self.assertTrue(result.hits, "初中学段问「循环」必须能命中（主路径）")
-        self.assertIn("jr-py-loop", {h.kp_id for h in result.hits})
+        self.assertIn(LOOP_JUNIOR, {h.kp_id for h in result.hits})
 
     def test_junior_query_never_returns_senior_content(self) -> None:
         """★ 关卡 C：初中提问不得返回高中学段的内容（不论问的是哪个词）。"""
@@ -224,15 +237,76 @@ class TestTopKIsCountedAfterParentDedupe(RagCase):
 # 用途二：依赖图扩展（关卡 C 之外，但同属检索链）
 # --------------------------------------------------------------------------- #
 class TestDependencyExpansion(RagCase):
-    def test_loop_query_pulls_in_variable_context(self) -> None:
-        """★ 票 12 用途二：问「循环」时，返回的 Citation 里能看到「变量」。"""
+    """★ 票 12 用途二：检索命中之后，依赖图把**前置知识点**补进上下文。
+
+    ★★ 2026-09-19 随 K12KnowledgeBase 更新：新库的边是「概念内四学段成链
+    （全是 prerequisite）+ 概念间同学段 related」，所以旧断言「问循环补进变量」
+    （那是旧库的一条 ``related`` 边，而且 ``related`` 本来就不参与扩展）必然红。
+
+    改动后的断言不再钉某一个具体 id，而是钉**行为**：补进来的每一条都必须是
+    「某个直接命中的知识点的、不超过 ``EXPANSION_MAX_DEPTH`` 跳的**前置**」，
+    且落在允许的学段内 —— 这条不变量比旧写法更强（旧写法只查了一条边）。
+    """
+
+    def _get(self):
+        conn = self.service()._ensure_conn()
+        return conn
+
+    def _prerequisite_closure(self, direct_ids: list[str], allowed: set[str]) -> set[str]:
+        """直接命中集合的「前置闭包」（只看 prerequisite 边，深度同实现口径）。"""
+        conn = self.service()._ensure_conn()
+        closure: set[str] = set()
+        for kp_id in direct_ids:
+            for row in deps.prerequisites(
+                conn, kp_id, max_depth=deps.EXPANSION_MAX_DEPTH, relation="prerequisite"
+            ):
+                if row.grade_level in allowed:
+                    closure.add(row.kp_id)
+        return closure
+
+    def test_loop_query_pulls_in_prerequisite_context(self) -> None:
+        """★ 问「循环」时返回的 Citation 里要能看到依赖图补进来的前置内容。
+
+        ⚠️ 学生是初中学段：允许的学段是 junior + 更低（向上兼容），
+        **高中学段的循环（``prog-loop-sr``）绝不能出现** —— 扩展同样受学段隔离约束。
+        """
         result = self.service().search(query=SHORT_QUERY, grade_level="junior", top_k=5)
-        kp_ids = [h.kp_id for h in result.hits]
-        self.assertIn("jr-py-loop", kp_ids)
-        self.assertIn("jr-py-variable", kp_ids, "依赖图扩展没有把前置知识点「变量」补进来")
-        expanded = [h for h in result.hits if h.expanded]
-        self.assertTrue(expanded)
-        self.assertIn("jr-py-variable", {h.kp_id for h in expanded})
+        hits = result.hits
+        direct = [h.kp_id for h in hits if not h.expanded]
+        expanded = [h.kp_id for h in hits if h.expanded]
+
+        self.assertIn(LOOP_JUNIOR, direct, "直接命中里应有初中「循环」")
+        self.assertTrue(expanded, "依赖图没有把任何前置知识点补进来")
+        closure = self._prerequisite_closure(direct, {"junior", "primary_high", "primary_low"})
+        self.assertTrue(
+            set(expanded) <= closure,
+            f"补进来的内容不是任何直接命中的前置（方向或 relation 过滤写错了）："
+            f"expanded={expanded}, 允许的前置闭包={sorted(closure)}",
+        )
+        self.assertNotIn(
+            LOOP_SENIOR,
+            {h.kp_id for h in hits},
+            "初中学段问「循环」不该命中高中版（学段泄漏）",
+        )
+
+    def test_same_concept_lower_grades_are_the_expansion(self) -> None:
+        """★ 具体到「同一概念的低学段正文」：高中生问循环，扩展必须带出初中/小学的循环。
+
+        这是新库最典型的扩展动作（学段链就是 prerequisite 边），
+        也是「跨学段衔接真实存在」在检索侧的证据。
+        """
+        conn = self.service()._ensure_conn()
+        picked = deps.expansion_kp_ids(
+            conn,
+            [LOOP_SENIOR],
+            grade_levels=["senior", "junior", "primary_high", "primary_low"],
+            limit=EXPANSION_LIMIT,
+        )
+        self.assertEqual(
+            picked,
+            [LOOP_JUNIOR, LOOP_PRIMARY_HIGH],
+            f"高中「循环」的前置应当是同概念的更低学段（越近越前），实际：{picked}",
+        )
 
     def test_expansion_is_capped(self) -> None:
         """扩展必须有上限，不能把 top-k 挤满。"""
@@ -447,7 +521,7 @@ class TestDegradationChain(RagCase):
         result = service.search(query=SHORT_QUERY, grade_level="junior", top_k=5)
         self.assertEqual(result.degraded, "vector")
         self.assertTrue(result.hits)
-        self.assertIn("jr-py-loop", {h.kp_id for h in result.hits})
+        self.assertIn(LOOP_JUNIOR, {h.kp_id for h in result.hits})
         notes = " ".join(a.detail for a in result.attempts if a.ok)
         self.assertIn("numpy", notes)
 
@@ -527,9 +601,9 @@ class TestDegradationChain(RagCase):
         self.assertEqual(result.degraded, "outline")
 
     def test_sentence_query_still_hits_on_fts_level(self) -> None:
-        """★ 学生整句提问（「循环里怎么累加总分」）在 FTS 级也必须能找到东西。
+        """★ 学生整句提问（逐字取自教材初中「循环」正文）在 FTS 级也必须能找到东西。
 
-        中文没有分词器：整句若不拆 n-gram，会被当成一个 14 字词条，
+        中文没有分词器：整句若不拆 n-gram，会被当成一个十数字的词条，
         trigram 的 MATCH 与 LIKE 都匹配不到任何行 —— 「FTS 永不失败」就成了空话。
         """
         empty = Path(tempfile.mkdtemp())
@@ -539,9 +613,9 @@ class TestDegradationChain(RagCase):
             embedding_config={"mode": "none"},
         )
         self.addCleanup(service.close)
-        result = service.search(query="循环里怎么累加总分", grade_level="junior", top_k=3)
+        result = service.search(query=SENTENCE_QUERY, grade_level="junior", top_k=3)
         self.assertEqual(result.degraded, "fts")
-        self.assertIn("jr-py-loop", {h.kp_id for h in result.hits})
+        self.assertIn(LOOP_JUNIOR, {h.kp_id for h in result.hits})
 
     def test_fts_rejects_weak_partial_matches(self) -> None:
         """只蒙中一个二字片段的块不算命中（否则会把不相干片段当教材喂给模型）。"""
@@ -655,33 +729,64 @@ class TestHttpRoute(RagCase):
         self.assertEqual(response.status_code, 422)
 
     def test_graph_deps_route(self) -> None:
-        response = self.client.get("/api/graph/deps/jr-py-variable")
+        """后继方向（推荐路径的数据来源）。
+
+        ★ 2026-09-19 随 K12KnowledgeBase 更新：新库的**同学段**后继走 ``related``
+        （「变量 → 循环」），**同概念下一学段**走 ``prerequisite``（「变量（初中）→ 变量（高中）」）
+        —— 两种关系各有一条，断言同时钉住两者（只钉一条会让另一条的方向错漏过去）。
+        """
+        response = self.client.get(
+            f"/api/graph/deps/{VARIABLE_JUNIOR}", params={"max_depth": 1}
+        )
         self.assertEqual(response.status_code, 200)
         nodes = response.json()
-        self.assertTrue(nodes)
-        self.assertEqual(nodes[0]["direction"], "successor")
-        self.assertEqual(nodes[0]["kpId"], "jr-py-loop")
+        by_id = {node["kpId"]: node for node in nodes}
+        self.assertEqual(
+            sorted(by_id),
+            ["prog-loop-jr", "prog-variable-sr"],
+            f"初中「变量」的 1 跳后继应当是同段的循环与同概念的高中篇，实际：{sorted(by_id)}",
+        )
+        self.assertTrue(all(node["direction"] == "successor" for node in nodes))
+        self.assertEqual(by_id["prog-variable-sr"]["relation"], "prerequisite")
+        self.assertEqual(by_id["prog-loop-jr"]["relation"], "related")
 
     def test_graph_deps_route_prerequisite_direction(self) -> None:
-        """前置方向（检索扩展的数据来源）。深度 1 = 直接前置；默认深度会一直往上走。"""
+        """前置方向（检索扩展的数据来源）。深度 1 = 直接前置；默认深度会一直往上走。
+
+        ★ 新库的「循环（初中）」直接前置是「循环（小学高）」（学段链，prerequisite）
+        与「变量（初中）」（同学段 related）。
+        """
         response = self.client.get(
-            "/api/graph/deps/jr-py-loop",
+            f"/api/graph/deps/{LOOP_JUNIOR}",
             params={"direction": "prerequisite", "max_depth": 1},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual([n["kpId"] for n in response.json()], ["jr-py-variable"])
+        by_id = {node["kpId"]: node for node in response.json()}
+        self.assertEqual(
+            sorted(by_id),
+            [LOOP_PRIMARY_HIGH, "prog-variable-jr"],
+            f"初中「循环」的 1 跳前置应当是同概念的上一学段与同段「变量」，实际：{sorted(by_id)}",
+        )
+        self.assertEqual(by_id[LOOP_PRIMARY_HIGH]["relation"], "prerequisite")
+        self.assertEqual(by_id[LOOP_PRIMARY_HIGH]["gradeLevel"], "primary_high")
 
         transitive = self.client.get(
-            "/api/graph/deps/jr-py-loop", params={"direction": "prerequisite"}
+            f"/api/graph/deps/{LOOP_JUNIOR}", params={"direction": "prerequisite"}
         ).json()
-        self.assertIn("jr-data-features", {n["kpId"] for n in transitive})
+        self.assertIn(
+            LOOP_PRIMARY_LOW,
+            {node["kpId"] for node in transitive},
+            "默认深度应当一路走到小学低年级的那一篇（学段链是连通的）",
+        )
 
     def test_graph_deps_unknown_kp_is_404(self) -> None:
         self.assertEqual(self.client.get("/api/graph/deps/nope").status_code, 404)
 
     def test_graph_deps_depth_is_capped(self) -> None:
         self.assertEqual(
-            self.client.get("/api/graph/deps/jr-py-variable", params={"max_depth": 99}).status_code,
+            self.client.get(
+                f"/api/graph/deps/{VARIABLE_JUNIOR}", params={"max_depth": 99}
+            ).status_code,
             422,
         )
 

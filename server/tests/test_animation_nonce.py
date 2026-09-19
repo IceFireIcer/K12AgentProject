@@ -44,7 +44,7 @@ LOOPBACK_BASE = "http://127.0.0.1:8756"
 #: 两个学生_「跨学生不可互取」这条断言需要两个身份。
 STUDENT_A = "student_001"
 STUDENT_B = "student_002"
-KP_ID = "jr-py-loop"
+KP_ID = "prog-loop-jr"
 
 
 def _build_client(data_dir: Path) -> TestClient:
@@ -277,7 +277,7 @@ class TestAnimationResourceRoute(unittest.TestCase):
 
     def test_非法的学生id或知识点id_返回422(self) -> None:
         for path in (
-            f"/resources/animation/{'..%2F..%2Fetc'}/jr-py-loop",
+            f"/resources/animation/{'..%2F..%2Fetc'}/prog-loop-jr",
             f"/resources/animation/{STUDENT_A}/{'..%2F..%2Fpasswd'}",
         ):
             with self.subTest(path=path):

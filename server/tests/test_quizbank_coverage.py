@@ -1,22 +1,30 @@
 # -*- coding: utf-8 -*-
 """题库覆盖率守卫：**闯关路径上的每个知识点都必须有题**（关卡 E 的缺口修复）。
 
-这道缺口的真实形态（修之前的实测）：
+这道缺口的真实形态（历史实测）：
 
-- 知识主线扩到 **33 个知识点**（四学段 8/9/8/8），而 ``server/resources/quizbank/*.json``
-  只覆盖了 **15 个**；
-- 关卡路径按**依赖图拓扑序**走**全部 33 关**（``level_order_from_graph``），
-  于是 **33 关里有 26 关取不到题（404）**，解锁链在第 11 关断掉；
+- 知识主线早已从 33 个知识点扩到 **228 个**（新库 K12KnowledgeBase：57 个概念 × 四学段），
+  而 ``server/resources/quizbank/*.json`` 只覆盖了其中一部分；
+- 关卡路径按**依赖图拓扑序**走一遍，于是路径上有多少关就有多少关可能取不到题（404），
+  解锁链在某一关断掉；
 - 没有 API Key 时编排层没有 LLM 兜底 → 学生撞上死胡同
   （25% 多模态 + 15% 体验分的闭环断了）。
 
-★ 后续修复（同一缺口的第二层）：题库补齐到 33/33 之后，**关卡路径仍走全图 33 关**，
-  而取题按学段隔离 —— 于是 ``primary_high`` 学生的路径里有 **16 关是初中/高中内容**，
+★ 后续修复（同一缺口的第二层）：题库补齐之后，**关卡路径仍可能走全图**，
+  而取题按学段隔离 —— 于是 ``primary_high`` 学生的路径里会混进初中/高中内容，
   取题全部 404（普通游玩即可走到）。修法是**把路径与解锁也按学生学段过滤**
   （与 :func:`select_questions` 同一个 ``compatible_grades`` 判据），
   见 ``test_quiz_loop.py::TestPathIsScopedToTheStudentsGrade`` 的真实走查。
   本文件补上**跨学段那一半**的守卫：该学生兼容范围内的 kp 必须**取得出来**，
   范围外必须**取不到**（隔离不许被放宽）。
+
+★★ **题库分片形态换了一代（2026-09-19，随 K12KnowledgeBase 接入）**：
+  旧形态是「一学段一文件」（``primary_low.json`` … ``senior.json``，现已删除），
+  新形态是「**一章节一文件**」（``ch01.json`` … ``ch08.json``，共 684 题）——
+  章分片**一个文件横跨四学段**，结构上给不出文件级 ``grade_level``，
+  于是每题的学段由它自己的 ``kp_id`` 后缀决定（``<slug>-<pl|ph|jr|sr>``）。
+  下面第 0 组把**两种形态都能读**这件事单独立成断言：漏掉新形态的后果实测过 ——
+  五份章分片全被整文件跳过，覆盖率静默掉到 0/228。
 
 题库加载器（``load_bank``）对坏题**只跳过、不抛异常**——这是为现场演示做的取舍，
 但它带来一个副作用：**一条写错的题会静默消失**，覆盖率悄悄掉一格而没人发现。
@@ -52,7 +60,12 @@ if str(ROOT) not in sys.path:
 from app.config import KNOWLEDGE_DIR  # noqa: E402
 from app.contracts import QuizPayload, QuizQuestion, QuizQuestionOut  # noqa: E402
 from app.knowledge.library import GRADE_LEVELS, compatible_grades, load_library  # noqa: E402
-from app.routes.quiz import default_bank_dir, load_bank, select_questions  # noqa: E402
+from app.routes.quiz import (  # noqa: E402
+    default_bank_dir,
+    grade_from_kp_id,
+    load_bank,
+    select_questions,
+)
 
 BANK_DIR = default_bank_dir()
 
@@ -123,6 +136,159 @@ def raw_questions(bank_dir: Path | str) -> list[tuple[str, dict]]:
         for item in raw.get("questions") or []:
             out.append((path.name, item))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# 0. ★ 两种分片形态都能读（章分片 / 一学段一文件）
+# --------------------------------------------------------------------------- #
+class TestBankReadsBothShardForms(unittest.TestCase):
+    """★ ``load_bank`` 必须同时认两种分片形态，且**都不许静默丢题**。
+
+    形态 ①（旧）：**一学段一文件** —— 文件级 ``grade_level``，文件里所有题同属一个学段；
+    形态 ②（新，2026-09-19 起随包分发）：**一章节一文件** —— 文件级 ``chapter``，
+    文件横跨四学段，每题的学段由 ``kp_id`` 后缀推导（``<slug>-<pl|ph|jr|sr>``）。
+
+    为什么两种都要留着测：① 是**已发布过的格式**（学生自己导入的题库、
+    旧的手写题库文件都长这样），loader 回退到只认一种就会把另一边整文件丢掉；
+    ② 是**当前随包格式**。丢任何一种的表现都是「取题 404」，而 ``skipped`` 里只有一行字。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    @staticmethod
+    def _question(qid: str, kp_id: str, *, qtype: str = "blank") -> dict:
+        body: dict = {
+            "qid": qid,
+            "kp_id": kp_id,
+            "type": qtype,
+            "stem": f"{qid} 的题干",
+            "answer": "答案",
+            "explanation": "讲解。",
+        }
+        if qtype == "choice":
+            body["options"] = ["选项甲", "选项乙"]
+        return body
+
+    def _write(self, name: str, payload: dict) -> Path:
+        path = self.tmp / name
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_legacy_grade_level_file_still_loads(self) -> None:
+        """① 一学段一文件：文件级 ``grade_level`` 决定整文件的学段。"""
+        self._write(
+            "junior.json",
+            {
+                "version": 1,
+                "grade_level": "junior",
+                "questions": [
+                    self._question("legacy-jr-q1", "prog-loop-jr", qtype="choice"),
+                    self._question("legacy-jr-q2", "ai-definition-jr"),
+                ],
+            },
+        )
+        report = load_bank(self.tmp)
+        self.assertEqual(report.skipped, [], "一学段一文件的形态被整文件跳过了")
+        self.assertEqual(len(report.entries), 2)
+        self.assertEqual({entry.grade_level for entry in report.entries}, {"junior"})
+
+    def test_chapter_shard_loads_and_derives_grade_from_kp_id(self) -> None:
+        """② 章分片：文件级没有 ``grade_level``，每题学段由 ``kp_id`` 后缀推导。"""
+        self._write(
+            "ch99.json",
+            {
+                "version": 1,
+                "chapter": "第99章 测试用章",
+                "notes": "夹具",
+                "questions": [
+                    self._question("shard-pl-q1", "ai-definition-pl"),
+                    self._question("shard-sr-q1", "ai-definition-sr"),
+                ],
+            },
+        )
+        report = load_bank(self.tmp)
+        self.assertEqual(report.skipped, [], "章分片被整文件跳过了（每题的学段推不出来？）")
+        grades = {entry.question.qid: entry.grade_level for entry in report.entries}
+        self.assertEqual(
+            grades,
+            {"shard-pl-q1": "primary_low", "shard-sr-q1": "senior"},
+            "章分片的学段必须逐题按 kp_id 后缀推导（不是整文件一个学段）",
+        )
+
+    def test_both_forms_load_in_one_directory(self) -> None:
+        """两种形态**共存**也要全部读到（切格式期间两份文件会同时在目录里）。"""
+        self._write(
+            "junior.json",
+            {
+                "version": 1,
+                "grade_level": "junior",
+                "questions": [self._question("mixed-legacy-q1", "prog-loop-jr")],
+            },
+        )
+        self._write(
+            "ch99.json",
+            {
+                "version": 1,
+                "chapter": "第99章 测试用章",
+                "questions": [self._question("mixed-shard-q1", "prog-loop-ph")],
+            },
+        )
+        report = load_bank(self.tmp)
+        self.assertEqual(report.skipped, [])
+        self.assertEqual(len(report.entries), 2)
+        self.assertEqual(
+            {entry.question.qid for entry in report.entries},
+            {"mixed-legacy-q1", "mixed-shard-q1"},
+        )
+
+    def test_chapter_shard_with_unrecognisable_kp_suffix_is_skipped_and_reported(self) -> None:
+        """★ 章分片里 ``kp_id`` 推不出学段 → **必须跳过并报出来**，不许默认成某个学段。
+
+        默认学段是「学段隔离开天窗」的形态：小学低年级的题可能被当成高中的题取出去。
+        所以这张网要一直张着（``skipped`` 里必须能看到它），而不是静默收下。
+        """
+        self._write(
+            "ch98.json",
+            {
+                "version": 1,
+                "chapter": "第98章 测试用章",
+                "questions": [self._question("bad-suffix-q1", "no-grade-suffix")],
+            },
+        )
+        report = load_bank(self.tmp)
+        self.assertEqual(report.entries, [], "推不出学段的题不该被收下")
+        self.assertEqual(len(report.skipped), 1, f"跳过要报出来：{report.skipped}")
+        self.assertIn("bad-suffix-q1", report.skipped[0])
+
+    def test_shipped_bank_is_chapter_sharded_and_every_grade_matches_the_library(self) -> None:
+        """★ 随包题库是**章分片**，且逐题推出来的学段与教材 front matter 一致。
+
+        这条把「后缀约定」与「教材真实学段」钉在一起：后缀写错（``ai-definition-pl``
+        写成 ``ai-definition-jr``）会让「按学段取题」取到超纲或取不到，图上看不出来。
+        """
+        report = load_bank(BANK_DIR)
+        self.assertTrue(report.entries, "随包题库空，这条断言会空转")
+        self.assertEqual(report.files, sorted(report.files), "文件清单应按文件名稳定排序")
+        doc_grade = {doc.kp_id: doc.grade_level for doc in load_library(KNOWLEDGE_DIR)}
+        for entry in report.entries:
+            with self.subTest(qid=entry.question.qid):
+                derived = grade_from_kp_id(entry.question.kp_id)
+                self.assertIsNotNone(
+                    derived, f"{entry.question.qid}: kp_id {entry.question.kp_id!r} 没有学段后缀"
+                )
+                self.assertEqual(
+                    entry.grade_level,
+                    derived,
+                    f"{entry.question.qid}: 文件的学段与 kp_id 后缀推导出来的不一致",
+                )
+                self.assertEqual(
+                    derived,
+                    doc_grade.get(entry.question.kp_id),
+                    f"{entry.question.qid}: kp_id 后缀推出来的学段与教材里的不一致",
+                )
 
 
 # --------------------------------------------------------------------------- #
@@ -219,7 +385,7 @@ class TestBankCoverage(unittest.TestCase):
         self.assertGreater(len(self.kps), 0, f"教材里一个知识点都没读到：{KNOWLEDGE_DIR}")
 
     def test_every_knowledge_point_has_enough_questions(self) -> None:
-        """★ 本文件的头号断言：33 个知识点一个都不能少。"""
+        """★ 本文件的头号断言：教材里 228 个知识点一个都不能少。"""
         missing = uncovered_kp_ids(BANK_DIR)
         detail = "\n".join(
             f"  - {kp_id}（{self.kps.get(kp_id, '?')}）：现有 {self.counts.get(kp_id, 0)} 题"
@@ -240,14 +406,22 @@ class TestBankCoverage(unittest.TestCase):
         )
 
     def test_every_kp_question_lives_in_its_own_grade_file(self) -> None:
-        """题库文件学段必须与知识点学段一致，否则「按学段取题」会取不到。"""
+        """逐题学段必须与知识点学段一致，否则「按学段取题」会取不到或越级。
+
+        ★ 判据换了一代：旧题库是「一学段一文件」，所以断言的是
+          「``entry.grade_level`` 等于该题 kp 在教材里的学段」；新题库是**章分片**
+          （一个文件横跨四学段），``entry.grade_level`` 是 loader 从 ``kp_id`` 后缀
+          逐题推出来的 —— 于是这条断言的实际含义变成：
+          **推导出来的学段 == 教材里那个知识点的学段**（教材是那个权威）。
+          后缀写错、教材改了学段而题库没跟上，都会在这里当场变红。
+        """
         docs = {kp_id: grade for kp_id, grade in self.kps.items()}
         for entry in load_bank(BANK_DIR).entries:
             with self.subTest(qid=entry.question.qid):
                 self.assertEqual(
                     entry.grade_level,
                     docs.get(entry.question.kp_id),
-                    f"{entry.question.qid}: 所在文件是 {entry.grade_level}，"
+                    f"{entry.question.qid}: 推导出的学段是 {entry.grade_level}，"
                     f"知识点却属于 {docs.get(entry.question.kp_id)}",
                 )
 
@@ -321,25 +495,54 @@ class TestGradeReachabilityMatchesIsolation(unittest.TestCase):
                 )
 
     def test_a_real_cross_grade_pair_is_blocked(self) -> None:
-        """★ 具名复现：`primary_high` 取初中 kp 必须是空的。
+        """★ 具名复现：`primary_low` 取高中 kp 必须是空的（最强对照：小学低年级 ↔ 高中）。
 
-        上一条是遍历式的；这一条把工单点名的那个跨学段对子写死，
+        上一条是遍历式的；这一条把**真实存在的跨学段对子**写死，
         让「隔离真的卡在这条边上」这件事**不依赖遍历逻辑写对**也能被看见。
         """
-        self.assertEqual(self.kps.get("ph-image-classification"), "primary_high")
-        self.assertEqual(self.kps.get("jr-data-features"), "junior")
+        # 最强的那个对照：同一个概念的两端（小学低年级 ↔ 高中）
+        self.assertEqual(self.kps.get("ai-definition-pl"), "primary_low")
+        self.assertEqual(self.kps.get("ai-definition-sr"), "senior")
 
         blocked = select_questions(
-            self.report, kp_id="jr-data-features", grade_level="primary_high", count=3
+            self.report, kp_id="ai-definition-sr", grade_level="primary_low", count=3
         )
         self.assertEqual(
-            blocked, [], "★ 小学高年级学生不该取到初中的题（初中提问不得返回高中内容同理）"
+            blocked, [], "★ 小学低年级学生不该取到高中的题（初中提问不得返回高中内容同理）"
         )
         ok = select_questions(
-            self.report, kp_id="jr-data-features", grade_level="junior", count=3
+            self.report, kp_id="ai-definition-sr", grade_level="senior", count=3
         )
         self.assertGreaterEqual(
-            len(ok), MIN_QUESTIONS_PER_KP, "前提：初中学生本来取得到这个 kp（否则上一条是空转）"
+            len(ok), MIN_QUESTIONS_PER_KP, "前提：高中学生本来取得到这个 kp（否则上一条是空转）"
+        )
+
+        # 相邻学段那一对（小学高年级 → 初中）同样要卡住：这是「死胡同」里最常见的一跳
+        self.assertEqual(self.kps.get("ai-definition-ph"), "primary_high")
+        self.assertEqual(self.kps.get("ai-definition-jr"), "junior")
+        self.assertEqual(
+            select_questions(
+                self.report, kp_id="ai-definition-jr", grade_level="primary_high", count=3
+            ),
+            [],
+            "★ 小学高年级学生不该取到初中的题",
+        )
+        self.assertGreaterEqual(
+            len(
+                select_questions(
+                    self.report, kp_id="ai-definition-jr", grade_level="junior", count=3
+                )
+            ),
+            MIN_QUESTIONS_PER_KP,
+            "前提：初中学生本来取得到这个 kp",
+        )
+
+        # 向上兼容方向仍然有效（高中生回看小学低年级的内容 = 复习，不是越级）
+        review = select_questions(
+            self.report, kp_id="ai-definition-pl", grade_level="senior", count=3
+        )
+        self.assertGreaterEqual(
+            len(review), MIN_QUESTIONS_PER_KP, "★ 隔离不该把「回看更低学段」也一起卡掉"
         )
 
 
@@ -350,7 +553,7 @@ class TestOutwardPayloadNeverLeaksTheAnswer(unittest.TestCase):
     """把**每一条**题库记录投影成对外载荷，递归查嵌套键里有没有 ``answer``。
 
     ``test_quiz.py`` 已经有一条哨兵断言，但那条走的是**一条真题 + 一份临时题库**；
-    这里补齐「**全部 81 条**新老题目逐条过一遍」，
+    这里补齐「**全部 684 条**题目逐条过一遍」，
     这样新加的内容若不小心改了投影路径（例如给 ``QuizQuestionOut`` 加了字段），
     当场就会被抓住。
     """
@@ -386,7 +589,7 @@ class TestOutwardPayloadNeverLeaksTheAnswer(unittest.TestCase):
         self.assertIn("answer", QuizQuestion.model_fields)
 
     def test_no_answer_key_anywhere_in_any_projected_payload(self) -> None:
-        """★ 逐条投影 + 递归遍历键名：81 条里任何一条都不许出现 ``answer`` 类键。
+        """★ 逐条投影 + 递归遍历键名：684 条里任何一条都不许出现 ``answer`` 类键。
 
         ⚠️ 这里查的是**键名**，不是答案文本。原因：``explanation``（解析）按契约
         **本来就要发给学生**（``QuizQuestionOut`` 的字段之一，答题后当反馈用），
@@ -422,7 +625,7 @@ class TestOutwardPayloadNeverLeaksTheAnswer(unittest.TestCase):
         否则上面那条「全部没有」可能只是遍历器写错了。
         """
         leaky = {
-            "kpId": "jr-py-loop",
+            "kpId": "prog-loop-jr",
             "source": "bank",
             "questions": [
                 {
@@ -503,7 +706,7 @@ class TestCoverageCheckIsNotVacuous(unittest.TestCase):
         """★ 极端变异：题库全空 → **每一个** kp 都必须被判为未覆盖。
 
         这条挡的是「覆盖率函数把 kp 集合读成空集」那类假绿：
-        真出了那种 bug，这里的期望值（33 个 kp）与实测值（0 个）会对不上。
+        真出了那种 bug，这里的期望值（228 个 kp）与实测值（0 个）会对不上。
         """
         empty = self.tmp / "bank-empty"
         empty.mkdir()

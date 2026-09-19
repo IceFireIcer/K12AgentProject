@@ -322,7 +322,7 @@ def build_recommendation(
         # ★ 去重集合：同一个知识点只能出现一次。**必须跨两段共享** ——
         #   一个知识点完全可能既是「待重练」（掌握度不够）又是别人的「后继」
         #   （前置已掌握），两段各推一次就会出现**重复条目**（实测踩到过：
-        #   推荐列表里 `ph-data-train-predict` 冒了两次，学生看到「先回头把 X、X 再练熟」）。
+        #   推荐列表里 `training-inference-jr` 冒了两次，学生看到「先回头把 X、X 再练熟」）。
         picked: set[str] = set()
         names: dict[str, str] = {}
         if conn is not None and review_candidates:

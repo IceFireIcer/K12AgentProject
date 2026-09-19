@@ -51,7 +51,7 @@ def good_body(**overrides: object) -> dict:
     """一份**合格**的片段（模型产出形态：不含库、运行时、payload_id）。"""
     payload = {
         "concept": "循环",
-        "kpId": "jr-py-loop",
+        "kpId": "prog-loop-jr",
         "gradeLevel": "junior",
         "payloadId": "evidence123",
         "title": "循环：重复做同一件事",

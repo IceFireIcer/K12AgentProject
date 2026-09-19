@@ -6,9 +6,9 @@
 文件形态（一人一份文件 + 文件头元数据）::
 
     ---
-    kp_id: jr-py-loop
+    kp_id: prog-loop-jr
     grade_level: junior
-    chapter_title: 第4章 用 Python 处理数据
+    chapter_title: 第8章 编程实践（补充）
     knowledge_point: 循环
     content_type: concept
     summary: 一句话摘要（供大纲兜底与画像展示）

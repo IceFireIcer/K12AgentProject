@@ -3,8 +3,9 @@
 
 这一组断言盯住五条「闭环只写不读」类的静默故障：
 
-1. ★ **推荐由依赖图驱动**：掌握「变量」→ 推荐它的后继「循环」
-   （`from` 是前置、`to` 是后继，方向搞反是静默错）；
+1. ★ **推荐由依赖图驱动**：掌握「人工智能的定义（小学低年级）」（`ai-definition-pl`）
+   → 推荐它的后继「人工智能的定义（小学高年级）」（`ai-definition-ph`）——
+   同一概念跨学段的链，`from` 是前置、`to` 是后继，方向搞反是静默错；
 2. ★ **推荐随掌握度变化**（票 20 的「可演示数据流」）：同一份代码，连续答错某知识点后
    推荐的第一位换成它；
 3. ★ **冷启动**：全新学生 id 直接问推荐 → 有图里的入口知识点，不空、不 500；
@@ -189,43 +190,76 @@ class TestColdStart(PersonalizationCase):
 # --------------------------------------------------------------------------- #
 @unittest.skipUnless(REAL_KB.exists(), f"缺少真实知识库 {REAL_KB}（先跑 scripts/build_kb.py）")
 class TestGraphDrivenRecommendation(PersonalizationCase):
-    """掌握「变量」（`jr-py-variable`）→ 推荐它的后继「循环」（`jr-py-loop`）。"""
+    """掌握「人工智能的定义（小学低年级）」→ 推荐它的后继「人工智能的定义（小学高年级）」。
 
-    VARIABLE = "jr-py-variable"
-    LOOP = "jr-py-loop"
+    这一对来自新教材（K12KnowledgeBase）里**同一概念跨学段的链**：
+    ``ai-definition-pl → ai-definition-ph → ai-definition-jr → ai-definition-sr``
+    —— 概念内四学段成链、链上相邻两级是 ``prerequisite`` 边，正是「沿链推荐」的样本。
+    """
 
-    def test_mastering_variable_recommends_loop(self) -> None:
+    #: 链上的前置（也是整张依赖图的唯一根）
+    PREREQUISITE = "ai-definition-pl"
+    #: 它的直接后继（同一概念的下一个学段）
+    SUCCESSOR = "ai-definition-ph"
+
+    def test_mastering_prerequisite_recommends_its_successor(self) -> None:
         """★ 执行文档 §8.6 用途一的直接断言（也是汇报要念的那一条）。"""
-        self.set_student("student_graph_loop")
-        self.master(self.VARIABLE, prefix="var")
+        self.set_student("student_graph_chain")
+        self.master(self.PREREQUISITE, prefix="chain")
 
         body = self.recommend(gradeLevel="junior").json()
         self.assertEqual(body["source"], "graph", "掌握后应走依赖图后继这条路径")
         ids = [item["kpId"] for item in body["items"]]
         self.assertIn(
-            self.LOOP,
+            self.SUCCESSOR,
             ids,
-            f"★ 掌握「变量」后应推荐依赖图里的后继「循环」，实际推荐：{ids}",
+            f"★ 掌握「人工智能的定义（小学低年级）」后应推荐依赖图里的后继"
+            f"「人工智能的定义（小学高年级）」，实际推荐：{ids}",
         )
-        loop = next(item for item in body["items"] if item["kpId"] == self.LOOP)
-        self.assertTrue(loop["name"], "推荐条目应带上人类可读的名字（图里查得到）")
-        self.assertGreaterEqual(loop["depth"], 1, "后继的跳数至少是 1")
+        successor = next(item for item in body["items"] if item["kpId"] == self.SUCCESSOR)
+        self.assertTrue(successor["name"], "推荐条目应带上人类可读的名字（图里查得到）")
+        self.assertGreaterEqual(successor["depth"], 1, "后继的跳数至少是 1")
 
     def test_recommendation_is_not_alphabetical_or_random(self) -> None:
-        """★ 推荐来自依赖图，**不是**按 id 字典序取下一个。
+        """★ 推荐来自依赖图，**不是**按 id 字典序取下一个、也不是随机取。
 
-        `jr-py-loop` 与 `jr-py-variable` 连字典序都排在 variable 后面，
-        所以「取字典序下一个」也会碰到它 —— 这条用例的判别力在于：**没掌握时不该出现它**
-        （如果实现是「无脑取列表下一个」，没掌握时也会出现）。
+        两个方向合起来才有判别力（单看任一条会放过某些错误实现）：
+          - 还没掌握前置时，后继 `ai-definition-ph` **不该出现** —— 依赖图是有方向的
+            （冷启动给的是图里的入口，不会因为 ph 在字典序上紧挨着 pl 就把它带上）；
+          - 掌握前置之后，它**必须出现** —— 说明真的沿 `prerequisite` 边走了一步。
+        换成「把 kp 表按 id 排序取下一个未掌握项」第一条就会红；换成随机取第二条会红。
         """
         self.set_student("student_not_alpha")
         before = [item["kpId"] for item in self.recommend(gradeLevel="junior").json()["items"]]
         self.assertNotIn(
-            self.LOOP, before, "还没掌握前置时，后继不该被推荐出来（依赖图是有方向的）"
+            self.SUCCESSOR, before, "还没掌握前置时，后继不该被推荐出来（依赖图是有方向的）"
         )
-        self.master(self.VARIABLE, prefix="alpha")
+        self.master(self.PREREQUISITE, prefix="alpha")
         after = [item["kpId"] for item in self.recommend(gradeLevel="junior").json()["items"]]
-        self.assertIn(self.LOOP, after, "掌握前置后，后继应当出现在推荐里")
+        self.assertIn(self.SUCCESSOR, after, "掌握前置后，后继应当出现在推荐里")
+
+    def test_mastering_two_links_walks_further_along_the_chain(self) -> None:
+        """★ 沿链继续往深走：掌握链上前两级后，推荐推进到第三级，且不回推已掌握的两级。
+
+        概念内四学段成链 ``ai-definition-pl → -ph → -jr → -sr``：
+          - 掌握 ``-pl`` → 推 ``-ph``（见上一条用例）；
+          - 再掌握 ``-ph`` → 推 ``-jr``：**链在往前走**，不是原地打转；
+          - 两个已掌握的 kp **一个都不许出现在推荐里** —— ``recommend_next`` 必须过滤已掌握项，
+            否则学生会被反复推回刚学会的内容（掌握前置 → 它的后继正是刚掌握的那个）。
+        """
+        self.set_student("student_graph_walk")
+        self.master(self.PREREQUISITE, prefix="walk-1")
+        middle = self.SUCCESSOR  # ai-definition-ph
+        self.master(middle, prefix="walk-2")
+
+        body = self.recommend(gradeLevel="junior").json()
+        self.assertEqual(body["source"], "graph")
+        ids = [item["kpId"] for item in body["items"]]
+        self.assertIn(
+            "ai-definition-jr", ids, f"掌握链上前两级后应推进到第三级，实际推荐：{ids}"
+        )
+        self.assertNotIn(self.PREREQUISITE, ids, "已掌握的第一级不该被推回来")
+        self.assertNotIn(middle, ids, "已掌握的第二级不该被推回来（它是第一级的后继）")
 
     def test_recommendation_never_exceeds_the_limit(self) -> None:
         self.set_student("student_limit")
@@ -254,14 +288,14 @@ class TestRecommendationTracksMastery(PersonalizationCase):
         first = self.recommend(gradeLevel="junior").json()
         self.assertEqual(first["source"], "cold_start")
 
-        # ② 掌握「变量」→ 推荐后继
-        self.master("jr-py-variable", prefix="demo-var")
+        # ② 掌握「人工智能的定义（小学低年级）」→ 推荐后继（同一概念的下一个学段）
+        self.master("ai-definition-pl", prefix="demo-var")
         second = self.recommend(gradeLevel="junior").json()
         self.assertEqual(second["source"], "graph")
-        self.assertIn("jr-py-loop", [item["kpId"] for item in second["items"]])
+        self.assertIn("ai-definition-ph", [item["kpId"] for item in second["items"]])
 
-        # ③ 在「循环」上连续答错 → 推荐第一位变成它（重练）
-        bad = self.register([_variant("demo-loop-1", "jr-py-loop")])
+        # ③ 在后继上连续答错 → 推荐第一位变成它（重练）
+        bad = self.register([_variant("demo-loop-1", "ai-definition-ph")])
         for _ in range(3):
             self.answer(bad[0], "", correct=False)
 
@@ -271,7 +305,7 @@ class TestRecommendationTracksMastery(PersonalizationCase):
         )
         self.assertEqual(
             third["items"][0]["kpId"],
-            "jr-py-loop",
+            "ai-definition-ph",
             "★ 连续答错的知识点必须排在推荐第一位",
         )
         self.assertLess(
@@ -284,7 +318,7 @@ class TestRecommendationTracksMastery(PersonalizationCase):
     def test_profile_endpoint_uses_the_same_recommender(self) -> None:
         """★ 两条端点**同一套推荐**（不许各算一份，否则会给出两个「下一步」）。"""
         self.set_student("student_same_source")
-        self.master("jr-py-variable", prefix="same")
+        self.master("ai-definition-pl", prefix="same")
         detail = [item["kpId"] for item in self.recommend(gradeLevel="junior").json()["items"]]
         profile_ids = self.profile().json()["recommendedKpIds"]
         self.assertEqual(
@@ -296,14 +330,17 @@ class TestRecommendationTracksMastery(PersonalizationCase):
     def test_recommendation_items_are_unique(self) -> None:
         """★ 推荐条目**不能重复**（同一知识点既是「待重练」又是别人的「后继」时）。
 
-        实测踩到过：`ph-data-train-predict` 同时命中第①段（掌握度不够）与第②段
+        实测踩到过：同一个知识点同时命中第①段（掌握度不够）与第②段
         （前置已掌握），于是推荐列表里出现两次，总述读成
-        「先回头把数据·训练·预测、数据·训练·预测再练熟一点」—— 一眼假。
+        「先回头把某个知识点、同一个知识点再练熟一点」—— 一眼假。
+
+        ★ 换到新教材后这条场景照旧成立：掌握 `ai-definition-pl`（它成为后继的来源），
+          再在它的后继 `ai-definition-ph` 上答错（它成为待重练）—— 同一个 kp 同时命中两段。
         """
         self.set_student("student_dedup")
-        # 掌握「变量」（它成为后继的来源），再在「循环」上答错（它成为待重练）
-        self.master("jr-py-variable", prefix="dedup-var")
-        bad = self.register([_variant("dedup-loop-1", "jr-py-loop")])
+        # 掌握链路前一级（它成为后继的来源），再在后一级上答错（它成为待重练）
+        self.master("ai-definition-pl", prefix="dedup-var")
+        bad = self.register([_variant("dedup-loop-1", "ai-definition-ph")])
         self.answer(bad[0], "", correct=False)
 
         body = self.recommend(gradeLevel="junior").json()
@@ -326,19 +363,32 @@ class TestRecommendationTracksMastery(PersonalizationCase):
             )
 
     def test_cold_start_skips_already_mastered_topics(self) -> None:
-        """全部掌握后不该再把入口知识点当「起点」重复推（冷启动的补位也有排除）。"""
+        """已掌握的知识点不该被推荐回来（既不做「待重练」，也不当「起点」重复推）。
+
+        ★ 这条断言的可达性在新教材下要说清楚（**不要**以为它覆盖了
+          ``_entry_kp_ids(exclude=…)`` 那个分支）：掌握一个知识点后它必然有后继
+          （新图里六个入口在本学段内各有 6–14 个后继），于是 ``source`` 走到 ``graph``，
+          而 ``exclude`` 只在``source`` 落到 ``cold_start`` 时才生效 —— 当前图里
+          **没有**「既是入口、又在本学段内没有后继」的 kp，那个分支今天是不可达的。
+          真正被这条钉住的是：已掌握项（mastery ≥ 阈值）不会以任何身份出现在推荐里。
+        """
         self.set_student("student_skip_mastered")
-        self.master("jr-py-variable", prefix="skip")
+        self.master("ai-definition-pl", prefix="skip")
         body = self.recommend(gradeLevel="junior").json()
+        ids = [item["kpId"] for item in body["items"]]
         for item in body["items"]:
             self.assertIsNotNone(item["kpId"])
+        # 已掌握的不该被推荐回来（无论走哪一段）
+        self.assertNotIn(
+            "ai-definition-pl", ids, "已掌握的知识点被推荐回来了（它既不该重练也不该当起点）"
+        )
         # 已掌握的不该作为「待重练」出现（它是 mastery ≥ 阈值）
         review_ids = [
             item["kpId"]
             for item in body["items"]
-            if item["mastery"] < REVIEW_MASTERY_CEILING and item["kpId"] == "jr-py-variable"
+            if item["mastery"] < REVIEW_MASTERY_CEILING and item["kpId"] == "ai-definition-pl"
         ]
-        self.assertEqual(review_ids, [], "已掌握的「变量」不该被当成待重练")
+        self.assertEqual(review_ids, [], "已掌握的「人工智能的定义（小学低年级）」不该被当成待重练")
 
 
 # --------------------------------------------------------------------------- #
@@ -363,7 +413,7 @@ class TestCrossSessionMemory(PersonalizationCase):
 
     def test_mastery_progress_badge_survive_restart(self) -> None:
         qids = self.register(
-            [_variant(f"persist-{i}", "jr-py-variable") for i in range(1, 5)]
+            [_variant(f"persist-{i}", "ai-definition-pl") for i in range(1, 5)]
         )
         for qid in qids:
             self.answer(qid, "2")
@@ -394,7 +444,7 @@ class TestCrossSessionMemory(PersonalizationCase):
 
     def test_history_survives_restart_with_session_ids(self) -> None:
         """★ 学习记录带 `session_id` 落库、重启后仍在（关联 Pi 会话的唯一方式）。"""
-        qids = self.register([_variant("hist-1", "jr-py-variable")])
+        qids = self.register([_variant("hist-1", "ai-definition-pl")])
         self.client.post(
             "/api/quiz/grade",
             json={
@@ -415,7 +465,7 @@ class TestCrossSessionMemory(PersonalizationCase):
         """推荐也跨重启稳定（它读的是同一份 `learning.db`）。"""
         self.master  # noqa: B018 - 文档用途，避免 linter 误判未使用
         qids = self.register(
-            [_variant(f"rec-{i}", "jr-py-variable") for i in range(1, 5)]
+            [_variant(f"rec-{i}", "ai-definition-pl") for i in range(1, 5)]
         )
         for qid in qids:
             self.answer(qid, "2")
@@ -431,7 +481,7 @@ class TestCrossSessionMemory(PersonalizationCase):
     def test_students_remain_isolated_after_restart(self) -> None:
         """★ 一人一库：重启后两个学生的数据仍然互不可见。"""
         other = "student_other_20"
-        self.register([_variant("iso-1", "jr-py-variable")])
+        self.register([_variant("iso-1", "ai-definition-pl")])
         self.answer("iso-1", "2")
         self._restart()
         # 另一个学生：自己的库里没有这道生成题（判分 404），推荐也不受第一个学生影响
@@ -465,7 +515,7 @@ class TestProfileBehaviour(PersonalizationCase):
             self.profile().status_code, 404, "没有任何记录时画像应是 404（不是空画像）"
         )
 
-        qids = self.register([_variant("nc-1", "jr-py-variable")])
+        qids = self.register([_variant("nc-1", "ai-definition-pl")])
         self.assertEqual(self.profile().json()["mastery"], [], "刚建行时还没有掌握度")
         self.answer(qids[0], "2")
 
@@ -474,7 +524,7 @@ class TestProfileBehaviour(PersonalizationCase):
         self.assertAlmostEqual(mastery[0]["score"], MASTERY_GAIN_CORRECT, places=6)
 
         # 再答一道：第二次读必须反映新值（缓存了就会停在 0.15）
-        qids2 = self.register([_variant("nc-2", "jr-py-variable")])
+        qids2 = self.register([_variant("nc-2", "ai-definition-pl")])
         self.answer(qids2[0], "2")
         mastery = self.profile().json()["mastery"]
         self.assertAlmostEqual(mastery[0]["score"], MASTERY_GAIN_CORRECT * 2, places=6)
@@ -542,7 +592,7 @@ class TestProfileBehaviour(PersonalizationCase):
         「这一列是不是真的必要、有没有生物特征或无关个人信息」。
         """
         self.set_student("student_compliance")
-        self.register([_variant("cmp-1", "jr-py-variable")])
+        self.register([_variant("cmp-1", "ai-definition-pl")])
         self.answer("cmp-1", "2")
 
         expected = {

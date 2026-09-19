@@ -232,12 +232,47 @@ class TestRecommendation(GraphCase):
 
 
 class TestRecommendationOnRealCorpus(RealCorpusCase):
-    def test_recommend_after_mastering_variable_is_loop(self) -> None:
-        """★ 真教材口径：掌握「变量」后推荐的后继必须是依赖图里的「循环」。"""
-        rows = recommend_next(self.conn, ["jr-py-variable"], grade_level="junior")
-        self.assertEqual([r.kp_id for r in rows][:1], ["jr-py-loop"])
-        self.assertEqual(rows[0].direction, "successor")
-        self.assertEqual(rows[0].name, "循环")
+    def test_recommend_after_mastering_loop_is_list(self) -> None:
+        """★ 真教材口径：掌握「循环（小学高）」后，后继必须是「循环（初中）」与「列表与字典（小学高）」。
+
+        ★★ 2026-09-19 随 K12KnowledgeBase 更新：旧断言写的是「变量 → 循环」，
+        但旧 33 个 kp 的命名与连法整体作废。新库的边是
+        「**概念内四学段成链**（pl→ph→jr→sr，全是 prerequisite）+
+        **概念间同学段 related**」，所以「变量（初中）」的后继里，
+        同概念的高中篇（``prog-variable-sr``）才是 prerequisite，
+        「循环」是 related 边 —— 旧断言在新图上必然红。
+        这里改用 ``prog-loop-ph`` 做锚点：它的 1 跳后继**恰好**是
+        ``prog-loop-jr``（同概念升级，prerequisite）与 ``prog-list-ph``（同学段相关，related），
+        两种关系都被覆盖到。
+        """
+        rows = recommend_next(self.conn, ["prog-loop-ph"], grade_level="junior", max_depth=1)
+        by_id = {row.kp_id: row for row in rows}
+        self.assertEqual(
+            sorted(by_id),
+            ["prog-list-ph", "prog-loop-jr"],
+            f"掌握「循环（小学高）」后应当推荐「循环（初中）」与「列表与字典（小学高）」，实际：{sorted(by_id)}",
+        )
+        # 同概念的下一学段是**正式的前置关系**（学段链），不是「相关」
+        self.assertEqual(by_id["prog-loop-jr"].relation, "prerequisite")
+        self.assertEqual(by_id["prog-loop-jr"].direction, "successor")
+        self.assertEqual(by_id["prog-loop-jr"].grade_level, "junior")
+        self.assertEqual(by_id["prog-list-ph"].relation, "related")
+
+    def test_grade_filter_prevents_recommending_upward(self) -> None:
+        """★ 同一锚点不做学段过滤时，2 跳就会摸到高中学段的那条 —— 正是过滤该拦住的。"""
+        anchor = ["prog-loop-pl"]
+        filtered = recommend_next(self.conn, anchor, grade_level="primary_low", max_depth=2, limit=10)
+        self.assertNotIn(
+            "primary_high",
+            {row.grade_level for row in filtered},
+            "小学低年级的推荐里不该出现更高学段内容（超纲）",
+        )
+        unfiltered = recommend_next(self.conn, anchor, max_depth=2, limit=10)
+        self.assertIn(
+            "junior",
+            {row.grade_level for row in unfiltered},
+            "不过滤时应能看到跨到更高学段的后继（否则这条对照没有判别力）",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -407,30 +442,57 @@ class TestExpansionDepth(GraphCase):
 
 
 class TestExpansionOnRealCorpus(RealCorpusCase):
-    def test_prerequisites_of_loop_include_variable(self) -> None:
-        """★ 检索扩展：问「循环」要补进「变量」的内容（真教材）。"""
+    def test_prerequisites_of_upper_grade_loop_include_lower_grades(self) -> None:
+        """★ 检索扩展：高中生问「循环」要补进更低学段的「循环」正文（真教材）。
+
+        ★★ 2026-09-19 随 K12KnowledgeBase 更新：旧断言用的那批旧 kp_id（旧 33 个 kp
+        的命名）整体作废。
+        新库的四学段是**同概念成链**，所以「循环」高中篇的前置链是初中 → 小学高 → 小学低，
+        扩展取的是 ``prerequisite`` 边（``related`` 只表示「相关」，不参与扩展）。
+        """
         kp_ids = expansion_kp_ids(
             self.conn,
-            ["jr-py-loop"],
-            grade_levels=["junior", "primary_high", "primary_low"],
+            ["prog-loop-sr"],
+            grade_levels=["senior", "junior", "primary_high", "primary_low"],
             limit=2,
         )
-        self.assertIn("jr-py-variable", kp_ids)
+        self.assertEqual(
+            kp_ids,
+            ["prog-loop-jr", "prog-loop-ph"],
+            "扩展应补进同概念更低学段的前置（越近的排越前）",
+        )
+        deeper = expansion_kp_ids(
+            self.conn,
+            ["prog-loop-sr"],
+            grade_levels=["senior", "junior", "primary_high", "primary_low"],
+            max_depth=3,
+            limit=3,
+        )
+        self.assertIn("prog-loop-pl", deeper, "2 跳的小学低年级前置也该够得到")
 
     def test_expansion_respects_limit(self) -> None:
         kp_ids = expansion_kp_ids(
             self.conn,
-            ["jr-py-loop"],
-            grade_levels=["junior", "primary_high", "primary_low"],
+            ["prog-loop-sr"],
+            grade_levels=["senior", "junior", "primary_high", "primary_low"],
             limit=1,
         )
         self.assertEqual(len(kp_ids), 1)
 
     def test_expansion_filtered_by_grade(self) -> None:
-        """★ 扩展只允许不高于学生学段的内容：初中生的前置不该出现高中学段。"""
-        kp_ids = expansion_kp_ids(self.conn, ["jr-py-loop"], grade_levels=["junior"], limit=5)
-        self.assertIn("jr-py-variable", kp_ids)
-        self.assertNotIn("ph-image-classification", kp_ids)
+        """★ 扩展只允许不高于学生学段的内容：初中生的前置不该出现高中学段。
+
+        新库的链条天然往上走（``prog-loop-sr`` 的前置是 ``prog-loop-jr``），
+        所以「把它过滤掉」这件事是**可观测**的：加上 senior 才回得来，
+        限定 junior 及以下必须把高中段的前置全部挡掉。
+        """
+        junior_only = expansion_kp_ids(self.conn, ["prog-loop-sr"], grade_levels=["junior"], limit=5)
+        self.assertEqual(junior_only, ["prog-loop-jr"], "限定初中学段时只剩同概念的初中篇")
+        with_senior = expansion_kp_ids(
+            self.conn, ["prog-loop-sr"], grade_levels=["senior", "junior"], limit=5
+        )
+        self.assertIn("prog-loop-jr", with_senior)
+        self.assertNotIn("prog-loop-sr", with_senior, "种子自身不该被当成自己的前置")
 
 
 # --------------------------------------------------------------------------- #

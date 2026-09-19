@@ -3,8 +3,9 @@
 
 这一组盯住五条「错了就静默出事」的红线：
 
-1. ★ **章节顺序是教材顺序**（``kb`` 的 rowid），不是字典序 ——
-   字典序会让「第 10 章」排在「第 2 章」前面，学生看到的目录顺序就是错的；
+1. ★ **章节顺序是教材顺序**（按 `第N章` 解析章号，不是 rowid、不是字典序）——
+   字典序会让「第 10 章」排在「第 2 章」前面、入库序会按文件名字典序乱排，
+   学生看到的目录顺序就是错的；
 2. ★ **错题只算 ``is_correct = 0``**：``is_correct IS NULL``（没有对错概念的活动：
    qa / 动画 / 生成题）不能算错题，否则错题本里会冒出一堆学生没做错的题；
 3. ★★ **答案不外流**：错题本**不 join 带标准答案的 ``generated_question``，
@@ -47,10 +48,14 @@ TOKEN = "test-token-study"
 #:   ——「随包库」只在打包产物里有，测试要能用就得指向开发态那一份。
 REAL_KB = ROOT / "_data" / "shared" / "kb.sqlite"
 
-#: 四学段的章节数（实测：与 `architecture/pending/02-教材章节选择.md` 的清单一致）。
+#: 四学段的章节数（实测：新教材 K12KnowledgeBase 每学段都是 8 章）。
 #: ★ 写死在这里是**有意的**：教材章节数变了就要有人显式改这个数并说明原因，
 #:   而不是让测试自动跟着变（那样「教材少了一章」永远不会被发现）。
-EXPECTED_CHAPTERS = {"primary_low": 6, "primary_high": 7, "junior": 5, "senior": 6}
+EXPECTED_CHAPTERS = {"primary_low": 8, "primary_high": 8, "junior": 8, "senior": 8}
+
+#: 新教材每学段的**最后一章**（章号最大的一章，用来说明排序不是字典序/入库序）。
+#: ⚠️ 「（补充）」是全角括号，和库里的字面量一字不差。
+LAST_CHAPTER_TITLE = "第8章 编程实践（补充）"
 
 
 class StudyCase(unittest.TestCase):
@@ -165,6 +170,12 @@ class TestChapters(StudyCase):
                 list(range(1, len(numbers) + 1)),
                 f"{grade} 的章号不连续（教材章节变了？）：{numbers}",
             )
+            # ★ 反例锚点：最新的一章（第 8 章）必须排在最后 —— 按字典序/入库序都会把它排错。
+            self.assertEqual(
+                titles[-1],
+                LAST_CHAPTER_TITLE,
+                f"{grade} 的最后一章应当是「{LAST_CHAPTER_TITLE}」，实际：{titles[-1]}",
+            )
 
     def test_kp_ids_are_real_and_counts_agree(self) -> None:
         body = self.client.get("/api/knowledge/chapters/junior").json()
@@ -173,7 +184,7 @@ class TestChapters(StudyCase):
             self.assertEqual(item["kpCount"], len(item["kpIds"]))
             self.assertGreater(item["kpCount"], 0)
             total += item["kpCount"]
-        # 初中学段的知识点数（实测 8）；与 kp 表一致即可，不写死具体数字
+        # 初中学段的知识点数（新教材实测 57 = 57 概念 × 1）；与 kp 表一致即可，不写死具体数字
         listed = self.client.get("/api/knowledge/chapters/junior").json()
         self.assertEqual(total, sum(item["kpCount"] for item in listed["chapters"]))
 
@@ -248,26 +259,46 @@ class TestMistakes(StudyCase):
     def test_only_wrong_answers_are_mistakes(self) -> None:
         """★ 只算 ``is_correct = 0``；``NULL``（没对错概念）与 ``1`` 都不算。"""
         student = self.create_student("错题", "junior")
-        self.write_history(student, kp_id="jr-py-loop", activity="quiz", question="循环题", is_correct=False)
-        self.write_history(student, kp_id="jr-py-loop", activity="quiz", question="循环题", is_correct=True)
-        self.write_history(student, kp_id="jr-py-var", activity="qa", is_correct=None)  # NULL
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="循环题", is_correct=False)
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="循环题", is_correct=True)
+        self.write_history(student, kp_id="prog-variable-jr", activity="qa", is_correct=None)  # NULL
 
         body = self.client.get(f"/api/quiz/mistakes/{student}").json()
-        self.assertEqual([item["kpId"] for item in body["items"]], ["jr-py-loop"])
+        self.assertEqual([item["kpId"] for item in body["items"]], ["prog-loop-jr"])
         self.assertEqual(body["items"][0]["wrongCount"], 1)
         self.assertEqual(body["totalWrong"], 1)
+
+    def test_same_concept_in_two_grades_aggregates_separately(self) -> None:
+        """★ 归并按 **kp_id**，不是按「概念」：同一概念在四学段各有独立 kp。
+
+        ★ 新教材里 ``X-pl / X-ph / X-jr / X-sr`` 是**四个不同的知识点**
+          （例如 ``prog-loop-pl`` 与 ``prog-loop-jr``）—— 错题本要分别归并，
+          不能把「循环」这一个概念合并成一条（那样学生分不清自己卡在哪个学段的讲法上）。
+        """
+        student = self.create_student("跨学段", "junior")
+        self.write_history(student, kp_id="prog-loop-pl", activity="quiz", question="小学的循环题", is_correct=False)
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="初中的循环题", is_correct=False)
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="初中的循环题", is_correct=False)
+
+        body = self.client.get(f"/api/quiz/mistakes/{student}").json()
+        self.assertEqual(
+            [(item["kpId"], item["wrongCount"]) for item in body["items"]],
+            [("prog-loop-jr", 2), ("prog-loop-pl", 1)],
+            "同一概念的两个学段必须是两条独立记录（错得多的在前）",
+        )
+        self.assertEqual(body["totalWrong"], 3)
 
     def test_blank_stem_is_counted_not_silently_dropped(self) -> None:
         """★ 答错但没有题干（QA / 编程轨）要被**显式统计**，不能静默少几条。"""
         student = self.create_student("无题干", "junior")
-        self.write_history(student, kp_id="jr-py-loop", activity="quiz", question="有题干", is_correct=False)
-        self.write_history(student, kp_id="jr-py-loop", activity="coding", question="", is_correct=False)
-        self.write_history(student, kp_id="jr-py-var", activity="coding", question="", is_correct=False)
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="有题干", is_correct=False)
+        self.write_history(student, kp_id="prog-loop-jr", activity="coding", question="", is_correct=False)
+        self.write_history(student, kp_id="prog-variable-jr", activity="coding", question="", is_correct=False)
 
         body = self.client.get(f"/api/quiz/mistakes/{student}").json()
         self.assertEqual(body["totalWrong"], 3, "总错次应当含没有题干的那些")
         self.assertEqual(body["withoutStem"], 2, "两次没有题干的答错要被显式报出来")
-        loop = next(item for item in body["items"] if item["kpId"] == "jr-py-loop")
+        loop = next(item for item in body["items"] if item["kpId"] == "prog-loop-jr")
         self.assertEqual(loop["wrongCount"], 2, "同一知识点的错次要累加")
         self.assertEqual(loop["stem"], "有题干", "题干取最近一次**有题干**的那条")
 
@@ -275,24 +306,33 @@ class TestMistakes(StudyCase):
         """没有知识点归属的行（qa 轨未识别出 kp）按知识点聚合时无处可放 —— 跳过而不是崩。"""
         student = self.create_student("无归属", "junior")
         self.write_history(student, kp_id="", activity="qa", is_correct=False)
-        self.write_history(student, kp_id="jr-py-loop", activity="quiz", question="题", is_correct=False)
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="题", is_correct=False)
 
         body = self.client.get(f"/api/quiz/mistakes/{student}").json()
-        self.assertEqual([item["kpId"] for item in body["items"]], ["jr-py-loop"])
+        self.assertEqual([item["kpId"] for item in body["items"]], ["prog-loop-jr"])
 
     def test_sorted_by_wrong_count_then_kp_id(self) -> None:
-        """★ 排序显式钉死：错得多的在前，平局按 kpId —— 不依赖 SQL 行序（否则列表会莫名跳动）。"""
+        """★ 排序显式钉死：错得多的在前，平局按 kpId —— 不依赖 SQL 行序（否则列表会莫名跳动）。
+
+        用三个**真实**的初中 kp：第 4 章「大模型与AI智能体Agent」里的三个知识点
+        （``agent-perception-jr`` / ``agent-planning-jr`` / ``agent-action-jr``），
+        字典序与错次都不相同，正好能分辨「按错次排」与「按 id 排」。
+        """
         student = self.create_student("排序", "junior")
-        for kp, times in (("jr-b", 1), ("jr-a", 1), ("jr-c", 3)):
+        for kp, times in (("agent-planning-jr", 1), ("agent-action-jr", 1), ("agent-perception-jr", 3)):
             for _ in range(times):
                 self.write_history(student, kp_id=kp, activity="quiz", question="题", is_correct=False)
 
         body = self.client.get(f"/api/quiz/mistakes/{student}").json()
-        self.assertEqual([item["kpId"] for item in body["items"]], ["jr-c", "jr-a", "jr-b"])
+        self.assertEqual(
+            [item["kpId"] for item in body["items"]],
+            ["agent-perception-jr", "agent-action-jr", "agent-planning-jr"],
+            "错得多的在前；同为 1 次的按 kpId 升序（action < planning）",
+        )
 
     def test_kp_name_and_chapter_come_from_kb(self) -> None:
         student = self.create_student("补名", "junior")
-        self.write_history(student, kp_id="jr-py-loop", activity="quiz", question="题", is_correct=False)
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="题", is_correct=False)
         body = self.client.get(f"/api/quiz/mistakes/{student}").json()
         item = body["items"][0]
         self.assertTrue(item["kpName"], "知识点名应当从 kb 补上")
@@ -302,7 +342,7 @@ class TestMistakes(StudyCase):
         student = self.create_student("题号", "junior")
         self.write_history(
             student,
-            kp_id="jr-py-loop",
+            kp_id="prog-loop-jr",
             activity="quiz",
             question="题",
             is_correct=False,
@@ -315,7 +355,7 @@ class TestMistakes(StudyCase):
         """``detail`` 格式坏了不该让错题本整体 500（它只是辅助信息）。"""
         student = self.create_student("坏detail", "junior")
         self.write_history(
-            student, kp_id="jr-py-loop", activity="quiz", question="题", is_correct=False, detail="{不是JSON"
+            student, kp_id="prog-loop-jr", activity="quiz", question="题", is_correct=False, detail="{不是JSON"
         )
         body = self.client.get(f"/api/quiz/mistakes/{student}").json()
         self.assertEqual(body["items"][0]["lastQid"], "")
@@ -325,7 +365,7 @@ class TestMistakes(StudyCase):
         student = self.create_student("防泄漏", "junior")
         self.write_history(
             student,
-            kp_id="jr-py-loop",
+            kp_id="prog-loop-jr",
             activity="quiz",
             question="下列哪个是正确的循环？",
             is_correct=False,
@@ -365,13 +405,13 @@ class TestMistakes(StudyCase):
         """★ 跨学生隔离：A 的错题不出现在 B 的错题本里。"""
         a = self.create_student("甲", "junior")
         b = self.create_student("乙", "junior")
-        self.write_history(a, kp_id="jr-py-loop", activity="quiz", question="A 的题", is_correct=False)
-        self.write_history(b, kp_id="jr-py-var", activity="quiz", question="B 的题", is_correct=False)
+        self.write_history(a, kp_id="prog-loop-jr", activity="quiz", question="A 的题", is_correct=False)
+        self.write_history(b, kp_id="prog-variable-jr", activity="quiz", question="B 的题", is_correct=False)
 
         body_a = self.client.get(f"/api/quiz/mistakes/{a}").json()
         body_b = self.client.get(f"/api/quiz/mistakes/{b}").json()
-        self.assertEqual([item["kpId"] for item in body_a["items"]], ["jr-py-loop"])
-        self.assertEqual([item["kpId"] for item in body_b["items"]], ["jr-py-var"])
+        self.assertEqual([item["kpId"] for item in body_a["items"]], ["prog-loop-jr"])
+        self.assertEqual([item["kpId"] for item in body_b["items"]], ["prog-variable-jr"])
         self.assertNotIn("B 的题", json.dumps(body_a, ensure_ascii=False))
 
 
@@ -381,9 +421,9 @@ class TestMistakes(StudyCase):
 class TestLearningReport(StudyCase):
     def test_counts_and_quiz_accuracy(self) -> None:
         student = self.create_student("周报", "junior")
-        self.write_history(student, kp_id="jr-py-loop", activity="quiz", question="题", is_correct=True)
-        self.write_history(student, kp_id="jr-py-loop", activity="quiz", question="题", is_correct=False)
-        self.write_history(student, kp_id="jr-py-loop", activity="qa")
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="题", is_correct=True)
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="题", is_correct=False)
+        self.write_history(student, kp_id="prog-loop-jr", activity="qa")
 
         body = self.client.get(f"/api/profile/{student}/report").json()
         self.assertEqual(body["days"], 7)
@@ -401,7 +441,7 @@ class TestLearningReport(StudyCase):
         # 今天 / 昨天 / 前天：连续 3 天
         for offset in (0, 1, 2):
             self.write_history(
-                student, kp_id="jr-py-loop", activity="qa", ts=now - offset * 86_400
+                student, kp_id="prog-loop-jr", activity="qa", ts=now - offset * 86_400
             )
 
         body = self.client.get(f"/api/profile/{student}/report").json()
@@ -413,7 +453,7 @@ class TestLearningReport(StudyCase):
         now = int(time.time())
         for offset in (1, 2):
             self.write_history(
-                student, kp_id="jr-py-loop", activity="qa", ts=now - offset * 86_400
+                student, kp_id="prog-loop-jr", activity="qa", ts=now - offset * 86_400
             )
 
         body = self.client.get(f"/api/profile/{student}/report").json()
@@ -424,15 +464,15 @@ class TestLearningReport(StudyCase):
         student = self.create_student("断档", "junior")
         now = int(time.time())
         # 今天、然后跳到 5 天前：中间断了 → 连续 1 天
-        self.write_history(student, kp_id="jr-py-loop", activity="qa", ts=now)
-        self.write_history(student, kp_id="jr-py-loop", activity="qa", ts=now - 5 * 86_400)
+        self.write_history(student, kp_id="prog-loop-jr", activity="qa", ts=now)
+        self.write_history(student, kp_id="prog-loop-jr", activity="qa", ts=now - 5 * 86_400)
 
         body = self.client.get(f"/api/profile/{student}/report").json()
         self.assertEqual(body["streakDays"], 1)
 
     def test_streak_zero_without_recent_activity(self) -> None:
         student = self.create_student("久远", "junior")
-        self.write_history(student, kp_id="jr-py-loop", activity="qa", ts=int(time.time()) - 30 * 86_400)
+        self.write_history(student, kp_id="prog-loop-jr", activity="qa", ts=int(time.time()) - 30 * 86_400)
         body = self.client.get(f"/api/profile/{student}/report").json()
         self.assertEqual(body["streakDays"], 0)
         self.assertEqual(body["totalActivities"], 0, "时间窗外的活动不计入周窗口")
@@ -460,9 +500,9 @@ class TestLearningReport(StudyCase):
 
     def test_report_includes_mastery_and_chapters(self) -> None:
         student = self.create_student("初中生", "junior")
-        self.write_history(student, kp_id="jr-py-loop", activity="quiz", question="题", is_correct=True)
+        self.write_history(student, kp_id="prog-loop-jr", activity="quiz", question="题", is_correct=True)
         body = self.client.get(f"/api/profile/{student}/report").json()
-        # 章节来自 kb（初中 5 章），且顺序为教材顺序
+        # 章节来自 kb（初中 8 章），且顺序为教材顺序
         self.assertEqual(len(body["chapters"]), EXPECTED_CHAPTERS["junior"])
         self.assertEqual(body["gradeLevel"], "junior")
         self.assertIsInstance(body["mastery"], list)
@@ -513,15 +553,15 @@ class TestLearningReport(StudyCase):
         student = self.create_student("闯关", "junior")
         store = LearningStore(student_learning_db_path(self.tmp, student))
         try:
-            store.upsert_progress("jr-py-loop", stage="mastered", badge="bronze")
-            store.upsert_progress("jr-py-var", stage="learning")
+            store.upsert_progress("prog-loop-jr", stage="mastered", badge="bronze")
+            store.upsert_progress("prog-variable-jr", stage="learning")
         finally:
             store.close()
 
         body = self.client.get(f"/api/profile/{student}/report").json()
         self.assertEqual(body["stageCounts"], {"learning": 1, "mastered": 1})
         self.assertEqual(body["badges"], ["bronze"])
-        # jr-py-loop 在「用 Python 处理数据」那一章里：该章的已掌握数应当是 1
+        # prog-loop-jr 在最后一章「第8章 编程实践（补充）」里：该章的已掌握数应当是 1
         chapter = next(c for c in body["chapters"] if c["masteredCount"] == 1)
         self.assertGreaterEqual(chapter["kpCount"], 1)
         self.assertEqual(
@@ -538,7 +578,7 @@ class TestLearningReport(StudyCase):
     def test_cross_student_isolation(self) -> None:
         a = self.create_student("甲", "primary_low")
         b = self.create_student("乙", "senior")
-        self.write_history(a, kp_id="pl-ai-around-me", activity="quiz", question="A", is_correct=True)
+        self.write_history(a, kp_id="ai-definition-pl", activity="quiz", question="A", is_correct=True)
         body_b = self.client.get(f"/api/profile/{b}/report").json()
         self.assertEqual(body_b["totalActivities"], 0)
         self.assertEqual(body_b["gradeLevel"], "senior")

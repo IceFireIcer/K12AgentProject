@@ -95,19 +95,22 @@ COLD_START_GRADE = DEFAULT_COLD_START_GRADE
 #: 没有它的话，「新学生 + 空图」会得到一条空路径 —— 而冷启动必须能开始，
 #: 这是票 15/20 明确列出的验收项（「不报空指针、有默认路径」）。
 #:
-#: ★ 它是**按学段**给的（不是一条固定两关的列表）：`jr-py-variable` 是初中知识点，
-#:   给小学高年级学生会得到一条取题必然 404 的死关 —— 与关卡路径同一个学段口径
-#:   （见 :func:`_allowed_grades`）。`pl-ai-around-me` 是唯一入口根（``primary_low``），
+#: ★ 它是**按学段**给的（不是一条固定两关的列表）：给小学高年级学生一个初中知识点
+#:   会得到一条取题必然 404 的死关 —— 与关卡路径同一个学段口径（见 :func:`_allowed_grades`）。
+#:
+#: ⚠️ 2026-09-19 随 K12KnowledgeBase 接入更新：新库的入口根是
+#:   ``ai-definition-pl``（「人工智能的定义」，小学低年级），它同时是整张依赖图的根，
 #:   对四个学段都在兼容范围内，因此是所有分支共同的兜底。
+#:   每个学段再各给一个**本学段**的起点，让路径不必都从小学低年级那一条线开始走。
 COLD_START_LEVEL_SEEDS: dict[str, tuple[str, ...]] = {
-    "primary_low": ("pl-ai-around-me",),
-    "primary_high": ("pl-ai-around-me",),
-    "junior": ("pl-ai-around-me", "jr-py-variable"),
-    "senior": ("pl-ai-around-me", "jr-py-variable"),
+    "primary_low": ("ai-definition-pl",),
+    "primary_high": ("ai-definition-ph",),
+    "junior": ("ai-definition-jr",),
+    "senior": ("ai-definition-sr",),
 }
 
-#: 种子兜底**退无可退**时的起点：``primary_low`` 的唯一根，任何学段都兼容。
-COLD_START_LEVEL_SEED_FALLBACK: tuple[str, ...] = ("pl-ai-around-me",)
+#: 种子兜底**退无可退**时的起点：全图的唯一根（``primary_low``），任何学段都兼容。
+COLD_START_LEVEL_SEED_FALLBACK: tuple[str, ...] = ("ai-definition-pl",)
 
 #: 一次答对/答错的掌握度变化。**绝对值必须 < MASTERY_DELTA_LIMIT**，
 #: 并且 :meth:`app.store.learning.LearningStore.apply_mastery` 还会再限幅一次
@@ -265,7 +268,7 @@ def level_order_from_graph(
 
     ★ ``max_depth`` 默认取 :data:`app.knowledge.deps.MAX_DEPTH_LIMIT`（不是 ``DEFAULT_DEPTH``）：
       关卡路径要覆盖**整条链**，而 ``DEFAULT_DEPTH=3`` 恰好会在第四跳把
-      「变量」（``pl→ph→jr-data-features→jr-py-variable``）截掉 ——
+      「循环」（``ai-definition-jr→…→prog-loop-jr``）截掉 ——
       实测踩到过：进度里根本没有学生真正要练的那个知识点，
       表现为「依赖图明明有这条线，关卡列表里却没有」。防环仍然成立
       （``MAX_DEPTH_LIMIT`` 本身就是硬上限，且 CTE 用 UNIQUE 去重）。
@@ -277,8 +280,8 @@ def level_order_from_graph(
       注定让其中 16 关取题 **404**，学生的进度条上会出现一排点不开的死关。
 
     ★ 顺序是**真拓扑序**（Kahn + (跳数, kp_id) 为稳定优先级），不是「按跳数分层再按 id 排」：
-      分层排序在**同层有依赖边**时会破坏前置先于后继（实测：``pl-ai-talk → pl-ai-manners``
-      两条边都是 1 跳，按 id 排会把后继 ``manners`` 排到前置 ``talk`` 前面）。
+      分层排序在**同层有依赖边**时会破坏前置先于后继（实测：``ai-definition-pl → ai-hierarchy-pl``
+      与 ``ai-definition-pl → data-pl`` 都是 1 跳，按 id 排会把后继 ``data`` 排到前置 ``ai-hierarchy`` 前面）。
       同层内的顺序仍需确定，所以用最小堆而不是普通队列 —— 同一份图两次调用结果一致。
     """
     from app.knowledge.deps import MAX_DEPTH_LIMIT, successors
@@ -672,6 +675,31 @@ def bank_dir_for(request: Request) -> Path:
     return Path(injected) if injected else default_bank_dir()
 
 
+#: kp_id **后缀** → 学段。章分片里每题的学段就靠它推导（见 ``load_bank`` 的说明）。
+#:
+#: ★ 为什么按后缀推，而不是查 ``kb.sqlite`` 或 ``knowledge/``：
+#:   题库要能在**没有 kb 的环境**下加载（``K12_QUIZ_BANK_DIR`` 指向别处时是常态），
+#:   查库会把「加载题库」变成「必须先有知识库」。
+#:   后缀是 ``scripts/import_knowledge.py`` 生成的**约定**（``<slug>-<suffix>``），
+#:   而「约定是否被遵守」由 ``tests/test_quizbank_coverage.py`` 对着真教材交叉核对 ——
+#:   推导错会被那条测试抓住，不需要在这里再查一次盘。
+KP_ID_GRADE_SUFFIX: dict[str, str] = {
+    "pl": "primary_low",
+    "ph": "primary_high",
+    "jr": "junior",
+    "sr": "senior",
+}
+
+
+def grade_from_kp_id(kp_id: str) -> str | None:
+    """从 ``kp_id`` 后缀推学段（``ai-definition-pl`` → ``primary_low``）。
+
+    推不出来返回 ``None``（调用方必须跳过该题并报告，**不要默认成某个学段**）。
+    """
+    _, _, suffix = str(kp_id or "").rpartition("-")
+    return KP_ID_GRADE_SUFFIX.get(suffix)
+
+
 def load_bank(bank_dir: str | Path) -> BankReport:
     """读整个题库目录并逐题校验。
 
@@ -702,7 +730,20 @@ def load_bank(bank_dir: str | Path) -> BankReport:
             continue
 
         declared_grade = str(raw.get("grade_level") or "")
-        if declared_grade not in GRADE_LEVELS:
+        # ★★ 两种分片形态（2026-09-19 接入 K12KnowledgeBase 后新增第二种）：
+        #
+        #   ① **一学段一文件**（``primary_low.json`` 那一代）：文件级 ``grade_level``，
+        #      文件里所有题同属一个学段；
+        #   ② **一章节一文件**（``ch01.json`` 这一代）：教材扩到 57 个概念之后，
+        #      再按学段切会让同一个知识点的题被摊进四个文件，作者根本管不过来。
+        #      章分片**一个文件横跨四学段** —— 结构上给不出文件级 ``grade_level``，
+        #      于是每题的学段由它自己的 ``kp_id`` 决定。
+        #
+        # ⚠️ 漏掉第二种的后果实测过：五份章分片**全被整文件跳过**，
+        #   题库覆盖率静默掉到 0/228，而 ``load_bank`` 只往 ``skipped`` 里塞一行字 ——
+        #   没人看就没人知道。所以判据改成「文件级学段**或**章节分片」二选一。
+        is_chapter_shard = declared_grade not in GRADE_LEVELS and bool(raw.get("chapter"))
+        if declared_grade not in GRADE_LEVELS and not is_chapter_shard:
             report.skipped.append(f"{path.name}: grade_level 非法（{declared_grade!r}）")
             logger.warning("题库文件学段非法，整文件跳过：%s（%r）", path, declared_grade)
             continue
@@ -724,7 +765,21 @@ def load_bank(bank_dir: str | Path) -> BankReport:
                 report.skipped.append(f"{path.name}/{question.qid}: 选择题没有 options")
                 logger.warning("选择题缺少选项，已跳过：%s", question.qid)
                 continue
-            report.entries.append(BankEntry(question=question, grade_level=declared_grade))
+
+            entry_grade = declared_grade
+            if is_chapter_shard:
+                derived = grade_from_kp_id(question.kp_id)
+                if derived is None:
+                    # kp_id 没有可识别的学段后缀 → 判不出这题属于哪个学段。
+                    # **必须跳过并说出来**：硬塞一个默认学段会让学段隔离开天窗
+                    # （小学低年级的题可能被当成高中的）。
+                    report.skipped.append(
+                        f"{path.name}/{question.qid}: 章分片里 kp_id 无法推导学段（{question.kp_id!r}）"
+                    )
+                    logger.warning("章分片的 kp_id 无学段后缀，已跳过：%s", question.qid)
+                    continue
+                entry_grade = derived
+            report.entries.append(BankEntry(question=question, grade_level=entry_grade))
 
     for entry in report.entries:
         # 题干 + 选项 + 解析都算「学生看得到的文本」，一起过超纲自检
@@ -792,7 +847,7 @@ def successor_ids_for(conn, kp_id: str, *, grade_level: str | None = None) -> li
     ★ ``grade_level`` 给了就**只返回该学段兼容范围内（本学段 + 更低学段）的直接后继**
       —— 判据就是 :func:`_allowed_grades`，与 :func:`_default_level_order`、
       :func:`select_questions` 同源。这不是装饰：解锁是**关卡路径**的写路径，
-      放出一个更高学段的后继（``ph-image-classification`` → 初中 ``jr-data-features``）
+      放出一个更高学段的后继（``ai-definition-ph`` → 初中 ``ai-definition-jr``）
       会让前端把该关渲染成可做，而 ``select_questions`` 的学段隔离注定让它取题 **404**
       —— 一条普通游玩就能走到的死胡同。
     """
@@ -1470,12 +1525,25 @@ def _seed_default_path(
 
 
 def _default_level_order(request: Request, *, grade_level: str) -> list[str]:
-    """依赖图拓扑序下的关卡路径，**只看学生兼容学段**（读不到图/图为空返回空列表）。
+    """依赖图拓扑序下的关卡路径，**只看学生自己的学段**（读不到图/图为空返回空列表）。
 
-    ★★ 学段范围 = :func:`_allowed_grades`（本学段 + 更低学段），**与取题判分同源**。
-      修之前这里走**全图 33 关**，于是 `primary_high` 学生的路径里有 16 关是初中/高中内容 ——
-      前端会把它渲染成关卡，而取题按学段隔离必然 **404**（普通游玩即可走到）。
-      修完之后：路径里的每一关都在「取得到题」的范围内，且顺序仍是拓扑序。
+    ★★ 两条范围，别混（2026-09-19 接入 K12KnowledgeBase 时明确区分）：
+
+      - **关卡路径 = 本学段**（本函数）。路径回答的是「我现在该按什么顺序练」；
+      - **取题 / 检索 = 兼容学段**（:func:`_allowed_grades`）。学生随时可以回头取更低学段的题。
+
+    ★ 为什么路径不能也用兼容学段（迁移后实测出来的）：
+      新库的依赖图是「概念内 ``X-pl → X-ph → X-jr → X-sr`` 逐级加深 + 概念间同学段相关」。
+      若路径按兼容范围取，**初中生的路径里只有 4/57 关是自己学段的内容**，其余全是小学；
+      高中更极端 —— **0/57**，整条路径都是别人年级的课。
+      学生会觉得「我上初中了，怎么还在学小学的课」。
+
+      旧教材没有这个问题：它本来就是**一学段一本教材**，各学段的图互不相通。
+      新库把概念串成跨学段链之后，「兼容可取」与「该练什么」必须分成两件事。
+
+    ⚠️ **前置只在本学段内算数**：同一概念的低学段版本（初中那篇的前置是小学高年级那篇）
+      对初中生而言是已经学过的基础，不该挡住他 —— 这正是「每个学段各自成图」的含义。
+      取题侧的兼容隔离一个字没改，学生想回头复习随时取得到。
     """
     from app.rag.retriever import default_kb_path
     from app.store.connections import connect
@@ -1490,23 +1558,23 @@ def _default_level_order(request: Request, *, grade_level: str) -> list[str]:
         logger.warning("打开知识库失败，跳过默认关卡路径初始化：%s", exc)
         return []
 
-    allowed = _allowed_grades(grade_level)
+    own = {grade_level}
     try:
         rows = conn.execute("SELECT kp_id, grade_level FROM kp ORDER BY kp_id").fetchall()
         known = {str(r["kp_id"]) for r in rows}
-        in_scope = [str(r["kp_id"]) for r in rows if str(r["grade_level"]) in allowed]
-        # 根 = 兼容学段内**没有前置**的知识点。判据落在学段内（不是「全图无前置」）：
+        in_scope = [str(r["kp_id"]) for r in rows if str(r["grade_level"]) in own]
+        # 根 = 本学段内**没有前置**的知识点。判据落在本学段内（不是「全图无前置」）：
         # 若某个 kp 的前置只存在于更高学段（数据将来变动时可能出现），把它当起点
         # 才能让它进入路径；否则它既不是根、又走不到，会**整关消失**。
-        roots = [kp_id for kp_id in in_scope if not _has_prerequisite(conn, kp_id, allowed)]
+        roots = [kp_id for kp_id in in_scope if not _has_prerequisite(conn, kp_id, own)]
         if not roots:
-            # 兼容学段内全都有前置：拿该范围全部知识点当起点，顺序仍由拓扑排序决定，
+            # 本学段内全都有前置：拿该范围全部知识点当起点，顺序仍由拓扑排序决定，
             # 至少保证「有内容可做」。
             roots = in_scope
         return [
             kp_id
             for kp_id in level_order_from_graph(
-                conn, start_kp_ids=roots, allowed_grades=allowed
+                conn, start_kp_ids=roots, allowed_grades=own
             )
             if kp_id in known
         ]

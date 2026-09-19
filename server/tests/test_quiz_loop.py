@@ -226,10 +226,10 @@ class TestAnswerNeverLeavesBackend(LoopCase):
         """登记变式题：**入参带答案**，出参里哨兵必须零命中。"""
         response = self.register(
             [
-                _variant("leak-q1", "jr-py-variable", answer=SENTINEL_ANSWER),
+                _variant("leak-q1", "prog-variable-jr", answer=SENTINEL_ANSWER),
                 _variant(
                     "leak-q2",
-                    "jr-py-variable",
+                    "prog-variable-jr",
                     stem="说说什么是变量",
                     answer="给数据起名字",
                     rubric=SENTINEL_RUBRIC,
@@ -255,7 +255,7 @@ class TestAnswerNeverLeavesBackend(LoopCase):
 
     def test_sentinel_absent_from_grading_response(self) -> None:
         """判分回执里也不许回显标准答案（回显 = 送答案）。"""
-        self.register([_variant("leak-q3", "jr-py-variable", answer=SENTINEL_ANSWER)])
+        self.register([_variant("leak-q3", "prog-variable-jr", answer=SENTINEL_ANSWER)])
         hit = self.grade("leak-q3", SENTINEL_ANSWER)
         self.assertEqual(hit.status_code, 200)
         self.assertTrue(hit.json()["correct"])
@@ -268,7 +268,7 @@ class TestAnswerNeverLeavesBackend(LoopCase):
     def test_sentinel_absent_from_wrong_answer_feedback_round_trip(self) -> None:
         """连判多次（含答错）后，**整段会话的响应**里都不出现哨兵。"""
         self.register(
-            [_variant("leak-q4", "jr-py-variable", answer=SENTINEL_ANSWER, rubric=SENTINEL_RUBRIC)]
+            [_variant("leak-q4", "prog-variable-jr", answer=SENTINEL_ANSWER, rubric=SENTINEL_RUBRIC)]
         )
         self.grade("leak-q4", "先随便答一次")
         self.grade_subjective("leak-q4", 0.8)
@@ -286,7 +286,7 @@ class TestAnswerNeverLeavesBackend(LoopCase):
         self.assertNotIn("rubric", QuizQuestionOut.model_fields)
         # 出参契约里也没有它
         self.assertNotIn("rubric", json.dumps(self.client.get(
-            "/api/quiz/bank/jr-py-variable", params={"gradeLevel": "junior"}
+            "/api/quiz/bank/prog-variable-jr", params={"gradeLevel": "junior"}
         ).json()))
 
 
@@ -464,7 +464,7 @@ class TestSubjectiveGrading(LoopCase):
         self.register(
             [
                 _variant(
-                    "sub-q1", "jr-py-variable",
+                    "sub-q1", "prog-variable-jr",
                     stem="说说什么是变量",
                     answer="给数据起名字",
                     rubric="要点：变量是给数据起的名字（能提到「存数据」即可给满分）",
@@ -485,7 +485,7 @@ class TestSubjectiveGrading(LoopCase):
     def test_pass_threshold_is_enforced_server_side(self) -> None:
         """★「多少分算过」由服务端定：送进来的只有 score，没有对错。"""
         self.register(
-            [_variant("sub-q2", "jr-py-variable", stem="开放题", answer="参考", rubric="要点")]
+            [_variant("sub-q2", "prog-variable-jr", stem="开放题", answer="参考", rubric="要点")]
         )
         low = self.grade_subjective("sub-q2", SUBJECTIVE_PASS_RATIO - 0.01)
         self.assertFalse(low.json()["correct"], "低于阈值应判错（即便模型说「还不错」）")
@@ -498,7 +498,7 @@ class TestSubjectiveGrading(LoopCase):
 
     def test_objective_question_cannot_use_the_subjective_path(self) -> None:
         """★ 客观题走主观端点 = 试图绕开规则判分 → 409。"""
-        self.register([_variant("obj-1", "jr-py-variable", answer="2")])
+        self.register([_variant("obj-1", "prog-variable-jr", answer="2")])
         response = self.grade_subjective("obj-1", 1.0)
         self.assertEqual(response.status_code, 409, response.text)
         self.assertIn("客观题", response.json()["detail"])
@@ -506,7 +506,7 @@ class TestSubjectiveGrading(LoopCase):
     def test_subjective_question_cannot_use_the_rule_path(self) -> None:
         """★ 主观题走规则端点 = 会把好答案判错 → 409。"""
         self.register(
-            [_variant("sub-q3", "jr-py-variable", stem="开放", answer="参考", rubric="要点")]
+            [_variant("sub-q3", "prog-variable-jr", stem="开放", answer="参考", rubric="要点")]
         )
         response = self.grade("sub-q3", "参考")
         self.assertEqual(response.status_code, 409, response.text)
@@ -519,7 +519,7 @@ class TestSubjectiveGrading(LoopCase):
     def test_score_out_of_range_is_422(self) -> None:
         """`score` 必须落在 0..1（契约层挡下，不允许「没判就落库」）。"""
         self.register(
-            [_variant("sub-q4", "jr-py-variable", stem="开放", answer="参考", rubric="要点")]
+            [_variant("sub-q4", "prog-variable-jr", stem="开放", answer="参考", rubric="要点")]
         )
         for bad in (-0.1, 1.5):
             response = self.client.post(
@@ -545,7 +545,7 @@ class TestVariantRegistration(LoopCase):
         self.set_student("student_variants")
 
     def test_generated_source_and_shape(self) -> None:
-        response = self.register([_variant("v-1", "jr-py-variable")])
+        response = self.register([_variant("v-1", "prog-variable-jr")])
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["source"], "generated", "变式题的 source 必须是 generated")
@@ -553,25 +553,25 @@ class TestVariantRegistration(LoopCase):
 
     def test_rejects_choice_without_options(self) -> None:
         response = self.register(
-            [_variant("v-2", "jr-py-variable", qtype="choice", options=["只有一个"])]
+            [_variant("v-2", "prog-variable-jr", qtype="choice", options=["只有一个"])]
         )
         self.assertEqual(response.status_code, 422)
         self.assertIn("选项", response.json()["detail"])
 
     def test_rejects_empty_answer(self) -> None:
-        response = self.register([_variant("v-3", "jr-py-variable", answer="   ")])
+        response = self.register([_variant("v-3", "prog-variable-jr", answer="   ")])
         self.assertEqual(response.status_code, 422)
         self.assertIn("标准答案", response.json()["detail"])
 
     def test_rejects_out_of_scope_term_for_grade(self) -> None:
         """★ 校验层复查学段（prompt 里写了学段不够，模型可能无视）。"""
-        # 「神经网络」在小学低年级属超纲（terminology.json 的 min_grade）
+        # 「决策树」在小学低年级属超纲（terminology.json 里 min_grade=junior）
         response = self.register(
             [
                 _variant(
                     "v-4",
-                    "pl-ai-around-me",
-                    stem="请解释神经网络是怎么工作的",
+                    "ai-definition-pl",
+                    stem="请解释决策树是怎么工作的",
                     answer="随便",
                 )
             ],
@@ -582,15 +582,15 @@ class TestVariantRegistration(LoopCase):
 
     def test_all_rejected_never_returns_empty_payload(self) -> None:
         """全部不合格时**不返回空题**（空载荷会让前端渲染一张空卡片）。"""
-        response = self.register([_variant("v-5", "jr-py-variable", answer="")])
+        response = self.register([_variant("v-5", "prog-variable-jr", answer="")])
         self.assertEqual(response.status_code, 422)
         self.assertIn("没有一道生成题通过校验", response.json()["detail"])
 
     def test_duplicate_qids_in_one_batch_are_rejected(self) -> None:
         response = self.register(
             [
-                _variant("dup-1", "jr-py-variable"),
-                _variant("dup-1", "jr-py-variable"),
+                _variant("dup-1", "prog-variable-jr"),
+                _variant("dup-1", "prog-variable-jr"),
             ]
         )
         self.assertEqual(response.status_code, 422)
@@ -598,18 +598,18 @@ class TestVariantRegistration(LoopCase):
 
     def test_generated_question_is_persisted_in_the_student_database(self) -> None:
         """生成题落**该学生自己的库**（一人一库，不写进随包题库文件）。"""
-        self.register([_variant("v-6", "jr-py-variable", answer="2")])
+        self.register([_variant("v-6", "prog-variable-jr", answer="2")])
         rows = self.query(
             "SELECT qid, kp_id, reference_answer FROM generated_question WHERE qid = ?",
             ("v-6",),
         )
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["kp_id"], "jr-py-variable")
+        self.assertEqual(rows[0]["kp_id"], "prog-variable-jr")
         self.assertEqual(json.loads(rows[0]["reference_answer"]), "2")
 
     def test_students_do_not_see_each_others_generated_questions(self) -> None:
         """一人一库：另一个学生的生成题在本题学生这里查不到（判分 404）。"""
-        self.register([_variant("shared-q", "jr-py-variable", answer="2")])
+        self.register([_variant("shared-q", "prog-variable-jr", answer="2")])
         other = "student_other_variants"
         response = self.client.post(
             "/api/quiz/grade",
@@ -618,7 +618,7 @@ class TestVariantRegistration(LoopCase):
         self.assertEqual(response.status_code, 404, "跨学生的生成题不该可见")
 
     def test_batch_size_is_capped(self) -> None:
-        many = [_variant(f"cap-{i}", "jr-py-variable") for i in range(20)]
+        many = [_variant(f"cap-{i}", "prog-variable-jr") for i in range(20)]
         response = self.register(many)
         self.assertEqual(response.status_code, 422, "超过上限（10 道）应被契约挡下")
 
@@ -630,24 +630,22 @@ class TestVariantRegistration(LoopCase):
 class TestGateD(LoopCase):
     """★ 关卡 D 的硬线：答题 → 判分 → mastery 写入 → 下一关解锁 → 进度前进 → 徽章更新。
 
-    用真实依赖图里的 `jr-py-variable → jr-py-loop`（「变量」是「循环」的前置）——
-    这正是执行文档 §8.6 与票 15/20 用的那条演示线。
+    用真实依赖图里的一对**同学段**前置/后继：`ai-hierarchy-jr → deep-learning-jr`
+    （「AI 技术的包含层级关系」→「深度学习」，都是初中）。
 
-    ★ 注意：`jr-py-variable` 在整条链的第 5 跳，冷启动时它是 `locked` 的。
-      所以这里的做法是**先把链上的前置逐关打过去，再在目标关做关卡 D 的观测** ——
-      这既是真实的闯关流程，也让「答对 A → 下一关是 A 的后继」这条被完整走一遍。
+    ★ 为什么不再用跨学段的那一对（``ai-definition-ph → ai-definition-jr``）：
+      关卡路径现在**只看学生自己的学段**（见 ``_default_level_order`` 的说明 ——
+      新库把概念串成 ``pl→ph→jr→sr`` 的跨学段链，若路径按兼容范围取，
+      初中生 40 关里只有 4 关是自己的课，高中生更是 0 关）。
+      所以 `ai-definition-ph` 已不在 junior 的路径里，拿它当夹具会「关卡不存在」。
 
-    ★★ **夹具的学段被显式钉在 ``junior``（这是本类唯一一处前提修正，见下面 ``setUp``）**：
-      `jr-py-variable` / `jr-py-loop` 是**初中**知识点，而本类的断言全部关于
-      「逐关打通 → 后继被放出来」这个**机制**，与学段无关。以前夹具依赖
-      「冷启动默认学段（`primary_high`）也能看到初中关卡」，而那个前提正是本文件要修掉的
-      死胡同（`primary_high` 学生看得到、但取不到 `jr-*` 的题）。所以改成
-      「把学生的学段显式设成 `junior`，在这条本来就是为初中设计的演示线上走一遍」——
-      机制断言逐条保留，只是不再跨学段取材。
+    ★ 注意：`ai-hierarchy-jr` 在 junior 路径里排第 6 位（index 6），冷启动时是 `locked`。
+      所以做法是**先把路径上排在它前面的关卡逐关打过去，再在目标关做关卡 D 的观测** ——
+      这既是真实的闯关流程，也让「答对 A → 下一关是 A 的后继」被完整走一遍。
     """
 
-    CURRENT = "jr-py-variable"
-    NEXT = "jr-py-loop"
+    CURRENT = "ai-hierarchy-jr"
+    NEXT = "deep-learning-jr"
     #: 本类学生显式学段：让 ``CURRENT`` / ``NEXT`` 落在兼容范围内（见类文档）。
     GRADE = "junior"
 
@@ -678,7 +676,7 @@ class TestGateD(LoopCase):
 
     def _register_n(self, count: int, *, qid_prefix: str = "gate") -> list[str]:
         questions = [
-            _variant(f"{qid_prefix}-{i}", self.CURRENT, stem=f"变量练习 {i}", answer="2")
+            _variant(f"{qid_prefix}-{i}", self.CURRENT, stem=f"定义练习 {i}", answer="2")
             for i in range(1, count + 1)
         ]
         response = self.register(questions, grade=self.GRADE)
@@ -709,12 +707,12 @@ class TestGateD(LoopCase):
             "learning",
             "★ 前置通关后，目标关必须从 locked 解锁为 learning",
         )
-        # 再打通目标关 → 它的后继（循环）被放出来
+        # 再打通目标关 → 它的后继（下一学段的同一个概念）被放出来
         self._unlock(self.CURRENT)
         self.assertEqual(
             self.level(self.NEXT)["stage"],
             "learning",
-            "★ 答对「变量」→ 下一关是它的后继「循环」",
+            "★ 答对「人工智能的定义（小学高年级）」→ 下一关是它的后继「人工智能的定义（初中）」",
         )
 
     def test_full_chain_answer_grade_mastery_unlock_badge(self) -> None:
@@ -929,13 +927,15 @@ class TestGateD(LoopCase):
 class TestPathIsScopedToTheStudentsGrade(LoopCase):
     """★★ 「路径里的每一关都取得到题」—— 这是本次修复的**唯一目的**。
 
-    缺陷形态（修之前实测）：:func:`_default_level_order` 走**全图 33 关**，
-    而 :func:`select_questions` 按学段隔离 —— 冷启动的 ``primary_high`` 学生拿到 33 关，
-    其中 **16 关是初中/高中**，取题全部 **404**。普通游玩就能走到：
-    小学高年级掌握 ``ph-image-classification`` → 解锁初中后继 ``jr-data-features``
+    缺陷形态（修之前实测）：:func:`_default_level_order` 走**全图**（旧库 33 关，
+    新库 228 个知识点），而 :func:`select_questions` 按学段隔离 —— 冷启动的 ``primary_high``
+    学生拿到含初中/高中的关卡，取题全部 **404**。普通游玩就能走到：
+    小学高年级掌握 ``ai-definition-ph`` → 解锁初中后继 ``ai-definition-jr``
     → 该关在前端是可点的，取题却 404，闭环在**计分功能**里断掉。
 
-    本类对**四个学段各走一遍完整路径**（真发 HTTP 逐关取题），断言：
+    新库（K12KnowledgeBase）里每个概念都有 pl→ph→jr→sr 四个学段，跨学段的边（``related``
+    连接同一概念的不同学段）比旧库更多，所以这条守卫只会更要紧。本类对**四个学段各走一遍
+    完整路径**（真发 HTTP 逐关取题），断言：
 
     1. ★ 每一关都取得到题（``404 count = 0``）—— 真走一遍，不做结构推导；
     2. ★ 路径里**不得出现高于该学生学段**的关卡（初中生看不到高中内容）；
@@ -1077,25 +1077,31 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
         )
 
     def test_the_reported_dead_end_pair_is_gone_for_primary_high(self) -> None:
-        """★ 复现工单里点名的那个死胡同：`primary_high` 学生走不到 `jr-data-features`。
+        """★ 复现工单里点名的那个死胡同：`primary_high` 学生走不到 `ai-definition-jr`。
 
-        缺陷场景：小学高年级学生掌握 ``ph-image-classification``，解锁后继
-        ``jr-data-features``（初中）→ 取题 404。修复后：该后继**根本不进路径**
+        缺陷场景：小学高年级学生掌握 ``ai-definition-ph``，解锁后继
+        ``ai-definition-jr``（初中）→ 取题 404。修复后：该后继**根本不进路径**
         （解锁时就被学段过滤掉），而直接请求它仍然 404（隔离不变）。
+
+        ⚠️ 旧知识库（33 个 kp 的那一代）里点名的对子是一条「图片分类（小学高年级）→
+        数据特征（初中）」的边；新库（K12KnowledgeBase）里那两个 kp 都不存在，
+        所以改成**同一个概念相邻的两个学段**（``ai-definition-ph → ai-definition-jr``）——
+        跨学段边在新库里比比皆是（每个概念都有一条 pl→ph→jr→sr 的链），
+        这条用例的判别力没有变化。
         """
         path, rows = self._walk("primary_high")
-        self.assertNotIn("jr-data-features", path, "★ 初中知识点不该出现在小学高年级的路径里")
+        self.assertNotIn("ai-definition-jr", path, "★ 初中知识点不该出现在小学高年级的路径里")
         self.assertIn(
-            "ph-image-classification",
+            "ai-definition-ph",
             path,
-            "前提：`ph-image-classification` 本身是该学生兼容范围内的关卡",
+            "前提：`ai-definition-ph` 本身是该学生兼容范围内的关卡",
         )
-        self.assertIn("jr-data-features", self._successors("ph-image-classification"),
-                      "前提：`jr-data-features` 确实是它的后继（否则这条用例没在测那条边）")
+        self.assertIn("ai-definition-jr", self._successors("ai-definition-ph"),
+                      "前提：`ai-definition-jr` 确实是它的后继（否则这条用例没在测那条边）")
 
         # 真走一遍「掌握前置」：解锁的后继里不许出现跨学段的那一个
         questions = [
-            _variant(f"deadend-{i}", "ph-image-classification", stem=f"练习 {i}", answer="2")
+            _variant(f"deadend-{i}", "ai-definition-ph", stem=f"练习 {i}", answer="2")
             for i in range(1, 5)
         ]
         response = self.register(questions, grade="primary_high")
@@ -1104,12 +1110,12 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
             self.grade(item["qid"], "2")
         after = {item["kpId"]: item["stage"] for item in self.progress().json()["levels"]}
         self.assertEqual(
-            after.get("jr-data-features"),
+            after.get("ai-definition-jr"),
             None,
             "★ 前置通关后也不该把初中的后继解锁出来（解锁同样要按学段过滤）",
         )
         direct = self.client.get(
-            "/api/quiz/bank/jr-data-features", params={"gradeLevel": "primary_high"}
+            "/api/quiz/bank/ai-definition-jr", params={"gradeLevel": "primary_high"}
         )
         self.assertEqual(direct.status_code, 404, "★ 直接请求更高学段的内容仍应 404（隔离未被削弱）")
 
@@ -1159,15 +1165,15 @@ class TestColdStart(LoopCase):
     def test_cold_start_does_not_overwrite_existing_progress(self) -> None:
         """★ 冷启动**只插不覆盖**：学生真做过的关卡不能被默认路径重置。"""
         self.set_student("student_keep")
-        self.register([_variant("keep-1", "jr-py-variable", answer="2")])
+        self.register([_variant("keep-1", "prog-variable-jr", answer="2")])
         self.grade("keep-1", "2")
-        before = self.level("jr-py-variable")
+        before = self.level("prog-variable-jr")
         self.assertEqual(before["stage"], "quizzed")
         self.assertIsNotNone(before["badge"])
 
         # 再来一次冷启动（模拟另一次调用）
         self.progress()
-        after = self.level("jr-py-variable")
+        after = self.level("prog-variable-jr")
         self.assertEqual(after["stage"], before["stage"])
         self.assertEqual(after["badge"], before["badge"], "徽章不该被重置")
 
@@ -1186,8 +1192,8 @@ class TestLearningHistory(LoopCase):
         self.set_student("student_history")
         self.register(
             [
-                _variant("h-obj", "jr-py-variable", answer="2"),
-                _variant("h-sub", "jr-py-variable", stem="开放题", answer="参考", rubric="要点"),
+                _variant("h-obj", "prog-variable-jr", answer="2"),
+                _variant("h-sub", "prog-variable-jr", stem="开放题", answer="参考", rubric="要点"),
             ]
         )
         self.grade("h-obj", "2")
@@ -1208,7 +1214,7 @@ class TestLearningHistory(LoopCase):
     def test_sqlite_never_stores_conversation_body(self) -> None:
         """★ 合规红线：`learning_history.question` 只放题干前 120 字，不含学生原话。"""
         self.set_student("student_body")
-        self.register([_variant("body-1", "jr-py-variable", answer="2")])
+        self.register([_variant("body-1", "prog-variable-jr", answer="2")])
         student_words = "学生原话不该进数据库这句话"
         self.client.post(
             "/api/quiz/grade",
@@ -1247,39 +1253,56 @@ class TestLearningHistory(LoopCase):
     def test_deep_chain_level_is_present_in_the_default_path(self) -> None:
         """★ 关卡路径必须覆盖**整条链**（不能被递归深度截断）。
 
-        `jr-py-variable` 在依赖图里离入口 4 跳
-        （pl-ai-around-me → ph-data-train-predict → ph-image-classification
-        → jr-data-features → **jr-py-variable**）。早期实现沿用
-        `deps.DEFAULT_DEPTH=3`，结果它**根本没进关卡列表** ——
+        `token-pl`（「Token」，小学低年级）在依赖图里离入口 **5 跳**：
+
+            ai-definition-pl --related--> ai-hierarchy-pl --related--> deep-learning-pl
+            --related--> neural-network-pl --related--> transformer-pl --related--> token-pl
+
+        早期实现沿用 `deps.DEFAULT_DEPTH=3`，结果深处的关卡**根本没进关卡列表** ——
         表现为「依赖图明明有这条线，学生的进度里却没有这一关」。
 
         ★ **前提修正（与 `TestGateD` 同一处，理由一样）**：这条断言测的是
-          「递归深度别把深处的关卡截掉」这个**机制**，与学段无关；而深链的终点是
-          **初中**知识点，冷启动默认学段（`primary_high`）下它本就该被学段过滤掉
-          （那正是本次修复的另一半）。所以把学生显式设成 `junior`，
-          让「深链覆盖」这件事在一个**该学段真的能看到这条链**的学生上被验证。
-          修复后仍要证明的是：在兼容范围内，4 跳的关卡**一关不少**。
+          「递归深度别把深处的关卡截掉」这个**机制**，与学段无关；而这条深链整个落在
+          **小学低年级**的兼容范围内（链上五个知识点都是 `-pl`），所以把学生显式设成
+          `primary_low`，让「深链覆盖」在一个该学段真的能看到这条链的学生上被验证。
+          冷启动默认学段 `primary_high` 虽然也兼容这些关卡，但它的 40 关里排不下这条深链。
+          修复后仍要证明的是：在兼容范围内，5 跳的关卡**一关不少**。
         """
         self.set_student("student_deep")
-        self.set_grade("junior")
+        self.set_grade("primary_low")
         body = self.progress().json()
         ids = {item["kpId"] for item in body["levels"]}
-        for expected in ("jr-py-variable", "jr-py-loop"):
+        deep_chain = (
+            "ai-definition-pl",
+            "ai-hierarchy-pl",
+            "deep-learning-pl",
+            "neural-network-pl",
+            "transformer-pl",
+            "token-pl",
+        )
+        for expected in deep_chain:
             self.assertIn(expected, ids, f"★ 深链上的 {expected} 必须出现在默认关卡路径里")
-        # 拓扑序：前置必须排在后继之前
+        # 拓扑序：前置必须排在后继之前（整条 5 跳链逐段验）
         ordered = [item["kpId"] for item in body["levels"]]
         self.assertEqual(
             sorted(ids), sorted(ordered), "关卡列表应稳定有序（同一份图两次调用顺序一致）"
         )
+        for earlier, later in zip(deep_chain, deep_chain[1:]):
+            self.assertLess(
+                ordered.index(earlier),
+                ordered.index(later),
+                f"★ 深链上 {earlier} 必须排在 {later} 之前",
+            )
+
+        # ★ 同一份拓扑序在**别的学段**同样成立（换一个学生走一遍 junior 的路径）：
+        #   路径只看学生自己的学段，所以这里比的是 junior 内部的一对真实前置/后继。
+        self.set_student("student_deep_junior")
+        self.set_grade("junior")
+        junior = [item["kpId"] for item in self.progress().json()["levels"]]
         self.assertLess(
-            ordered.index("jr-py-variable"),
-            ordered.index("jr-py-loop"),
-            "★ 前置（变量）必须排在后继（循环）之前",
-        )
-        self.assertLess(
-            ordered.index("ph-image-classification"),
-            ordered.index("jr-data-features"),
-            "★ 跨学段那条边（图片分类 → 数据特征）也要保持前置先于后继",
+            junior.index("ai-definition-jr"),
+            junior.index("ai-hierarchy-jr"),
+            "★ junior 路径内部也要保持前置先于后继（ai-definition-jr → ai-hierarchy-jr）",
         )
 
 

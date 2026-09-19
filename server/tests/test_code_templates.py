@@ -13,7 +13,7 @@
 4. **分级提示不跳级**：``level`` 1→2→3 递进，且 ``resolve_hint_level`` 永远不超过
    ``当前级 + 1``（学生反复点求助也不能一步看到骨架）；
 5. **模板离线可用且与教材对齐**：``kp_id`` 必须真实存在于 ``server/knowledge/``，
-   三组必做模板（排序 / 决策树 / 神经网络）逐个实测「填完 TODO 即可通过」；
+   三份随包模板（变量 / 循环 / 列表，全部初中）逐个实测「填完 TODO 即可通过」；
 6. **坏模板不抛异常**：坏 JSON / 缺字段只跳过，取模板链路不整条挂掉。
 
 夹具用真的 ``server/resources/code-templates/`` 与真的 ``server/knowledge/``
@@ -65,12 +65,18 @@ CODE_ROUTE_FILE = ROOT / "app" / "routes" / "code.py"
 #: ★ 哨兵：只可能来自模板里的参照实现。它一旦出现在响应里，就说明参照实现泄漏了。
 SENTINEL_SOLUTION = "哨兵参照实现-SOL91-不得出现在响应里"
 
-#: ★ 「三组必做模板」——票 19 点名要落地的三个方向（排序 / 决策树 / 神经网络）。
+#: ★ **随包分发的全部模板**（2026-09-19 起只剩这三份，全部初中）：
+#: 变量（平均分）/ 循环（冒泡排序）/ 列表（BMI 特征）。
 #: 用的是教材里真实存在的 kp_id（``server/knowledge/junior/``），不是现编的名字。
+#:
+#: ⚠️ 旧知识库那一代还有两份非编程概念的模板（决策树 / 神经网络），
+#: 已随旧知识库一起删除 —— 新库（K12KnowledgeBase）里没有对应的编程正文，
+#: 硬留着会变成「有模板、没正文」的悬空资产
+#: （``test_every_template_kp_id_exists_in_knowledge_library`` 会当场变红）。
 REQUIRED_TEMPLATES = {
-    "jr-py-loop": "排序",
-    "jr-decision-tree": "决策树",
-    "jr-neural-basics": "神经网络",
+    "prog-variable-jr": "变量",
+    "prog-loop-jr": "循环",
+    "prog-list-jr": "列表",
 }
 
 
@@ -104,8 +110,18 @@ class CodeTemplateAssetTests(unittest.TestCase):
         self.assertEqual(TEMPLATES_DIR.name, "code-templates")
 
     def test_required_templates_present(self) -> None:
-        """三组必做模板都在：排序 / 决策树 / 神经网络（票 19 点名）。"""
-        found = {record.kp_id for record in self.report.records}
+        """随包模板**恰好**是清单里那三份：变量 / 循环 / 列表（少一份即红）。
+
+        判据是**集合相等**而不是「清单里的都在」：后者在「清单被打空」时恒成立
+        （一个把模板目录整个删掉的 bug 也能全绿）。所以两头都卡：
+        清单里的每一份都要在，且目录里**不许有清单外的第四份**（新加的模板必须登记）。
+        """
+        found = sorted({record.kp_id for record in self.report.records})
+        self.assertEqual(
+            found,
+            sorted(REQUIRED_TEMPLATES),
+            f"随包模板集合与预期不符（实际 {found}，预期 {sorted(REQUIRED_TEMPLATES)}）",
+        )
         for kp_id, label in REQUIRED_TEMPLATES.items():
             with self.subTest(kp=label):
                 self.assertIn(kp_id, found, f"缺少「{label}」模板（{kp_id}）")
@@ -209,7 +225,7 @@ class SolutionRunnabilityTests(unittest.TestCase):
                 )
 
     def test_three_required_basics_run(self) -> None:
-        """三组必做模板（排序 / 决策树 / 神经网络）逐个跑通 —— 报告里引用这一条。"""
+        """三份随包模板（变量 / 循环 / 列表）逐个跑通 —— 报告里引用这一条。"""
         report = load_templates(TEMPLATES_DIR)
         for kp_id, label in REQUIRED_TEMPLATES.items():
             with self.subTest(kp=label):
@@ -505,12 +521,12 @@ class CodeRouteTests(CodeCase):
 
     # ---------------------------------------------------- GET templates --
     def test_get_template_returns_contract_shape(self) -> None:
-        response = self.client.get("/api/code/templates/jr-py-loop")
+        response = self.client.get("/api/code/templates/prog-loop-jr")
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         # 契约字段（camelCase 出参）
         self.assertEqual(set(body.keys()), {"kpId", "language", "scaffold", "expectedBehavior"})
-        self.assertEqual(body["kpId"], "jr-py-loop")
+        self.assertEqual(body["kpId"], "prog-loop-jr")
         self.assertEqual(body["language"], "python")
         self.assertIn("TODO", body["scaffold"])
         self.assertTrue(body["expectedBehavior"])
@@ -518,13 +534,13 @@ class CodeRouteTests(CodeCase):
     def test_solution_never_appears_in_response(self) -> None:
         """★★ 参照实现不出后端：把哨兵写进 solution，端到端确认响应里零命中。"""
         with tempfile.TemporaryDirectory() as tmp:
-            record = json.loads((TEMPLATES_DIR / "jr-py-loop.json").read_text(encoding="utf-8"))
+            record = json.loads((TEMPLATES_DIR / "prog-loop-jr.json").read_text(encoding="utf-8"))
             record["solution"] = SENTINEL_SOLUTION
-            (Path(tmp) / "jr-py-loop.json").write_text(
+            (Path(tmp) / "prog-loop-jr.json").write_text(
                 json.dumps(record, ensure_ascii=False), encoding="utf-8"
             )
             self._use_templates_dir(Path(tmp))
-            response = self.client.get("/api/code/templates/jr-py-loop")
+            response = self.client.get("/api/code/templates/prog-loop-jr")
             self.assertEqual(response.status_code, 200, response.text)
             self.assertNotIn(SENTINEL_SOLUTION, response.text, "参照实现泄漏到了响应里")
 
@@ -547,18 +563,18 @@ class CodeRouteTests(CodeCase):
     def test_grade_level_filter_is_opt_in(self) -> None:
         """★ 学段过滤是**显式开关**：传了就按兼容链卡，不传就不过滤（有意取舍，见路由注释）。"""
         # 不传学段 → 取得到
-        self.assertEqual(self.client.get("/api/code/templates/jr-decision-tree").status_code, 200)
+        self.assertEqual(self.client.get("/api/code/templates/prog-variable-jr").status_code, 200)
         # 传了更低学段 → 卡住（小学高年级取不到初中的决策树模板）
-        blocked = self.client.get("/api/code/templates/jr-decision-tree?gradeLevel=primary_high")
+        blocked = self.client.get("/api/code/templates/prog-variable-jr?gradeLevel=primary_high")
         self.assertEqual(blocked.status_code, 404)
         self.assertIn("高于当前学段", blocked.json()["detail"])
         # 传了本学段 → 取得到
         self.assertEqual(
-            self.client.get("/api/code/templates/jr-decision-tree?gradeLevel=junior").status_code, 200
+            self.client.get("/api/code/templates/prog-variable-jr?gradeLevel=junior").status_code, 200
         )
         # 非法学段 → 422
         self.assertEqual(
-            self.client.get("/api/code/templates/jr-py-loop?gradeLevel=college").status_code, 422
+            self.client.get("/api/code/templates/prog-loop-jr?gradeLevel=college").status_code, 422
         )
 
     def test_broken_template_is_skipped_not_fatal(self) -> None:
@@ -567,14 +583,14 @@ class CodeRouteTests(CodeCase):
             root = Path(tmp)
             (root / "broken.json").write_text("{不是合法 JSON", encoding="utf-8")
             (root / "nofields.json").write_text('{"kp_id": "x"}', encoding="utf-8")
-            (root / "jr-py-loop.json").write_text(
-                (TEMPLATES_DIR / "jr-py-loop.json").read_text(encoding="utf-8"), encoding="utf-8"
+            (root / "prog-loop-jr.json").write_text(
+                (TEMPLATES_DIR / "prog-loop-jr.json").read_text(encoding="utf-8"), encoding="utf-8"
             )
             self._use_templates_dir(root)
             report = load_templates(root)
             self.assertEqual(len(report.records), 1)
             self.assertEqual(len(report.skipped), 2)
-            self.assertEqual(self.client.get("/api/code/templates/jr-py-loop").status_code, 200)
+            self.assertEqual(self.client.get("/api/code/templates/prog-loop-jr").status_code, 200)
 
     def test_all_templates_reachable_over_http(self) -> None:
         """每个落地的模板都能经 HTTP 取到（离线可用的证据：纯本地文件读取）。"""
@@ -591,7 +607,7 @@ class CodeRouteTests(CodeCase):
             "/api/code/run-hint",
             json={
                 "studentId": "student_001",
-                "kpId": "jr-py-loop",
+                "kpId": "prog-loop-jr",
                 "code": "print('60 75 88')",
                 "language": "python",
                 "stdout": "60 75 88\n",
@@ -614,7 +630,7 @@ class CodeRouteTests(CodeCase):
             "/api/code/run-hint",
             json={
                 "studentId": "student_001",
-                "kpId": "jr-py-loop",
+                "kpId": "prog-loop-jr",
                 "code": "if True:\nprint(1)",
                 "stdout": "",
                 "stderr": raw,
@@ -639,7 +655,7 @@ class CodeRouteTests(CodeCase):
                 "/api/code/run-hint",
                 json={
                     "studentId": "student_001",
-                    "kpId": "jr-py-loop",
+                    "kpId": "prog-loop-jr",
                     "code": "print(x)",
                     "stdout": "",
                     "stderr": stderr,
@@ -662,7 +678,7 @@ class CodeRouteTests(CodeCase):
             "/api/code/run-hint",
             json={
                 "studentId": "student_001",
-                "kpId": "jr-py-loop",
+                "kpId": "prog-loop-jr",
                 "code": f"open({str(marker)!r}, 'w').write('x')\nwhile True: pass",
                 "stdout": "",
                 "stderr": "",
@@ -679,7 +695,7 @@ class CodeRouteTests(CodeCase):
             "/api/code/run-hint",
             json={
                 "studentId": "student_001",
-                "kpId": "jr-py-loop",
+                "kpId": "prog-loop-jr",
                 "code": "while True:\n    pass",
                 "stdout": "",
                 "stderr": stderr,
@@ -698,7 +714,7 @@ class CodeRouteTests(CodeCase):
             "/api/code/run-hint",
             json={
                 "studentId": "student_001",
-                "kpId": "jr-py-loop",
+                "kpId": "prog-loop-jr",
                 "code": "print('x' * 100000)",
                 "stdout": "x" * 100_000,
                 "stderr": "",
@@ -715,7 +731,7 @@ class CodeRouteTests(CodeCase):
             "/api/code/run-hint",
             json={
                 "studentId": "student_001",
-                "kpId": "jr-py-loop",
+                "kpId": "prog-loop-jr",
                 "code": "x = 1\n" * 20_000,
                 "stdout": "",
                 "stderr": "",
@@ -750,7 +766,7 @@ class CodeRouteTests(CodeCase):
             "/api/code/run-hint",
             json={
                 "studentId": "student_001",
-                "kpId": "jr-py-loop",
+                "kpId": "prog-loop-jr",
                 "code": "print(1)",
                 "stdout": "",
                 "stderr": "",

@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import sqlite3
 import sys
@@ -59,6 +60,19 @@ TOKEN = "test-token-chapter"
 REAL_KB = ROOT / "_data" / "shared" / "kb.sqlite"
 
 GRADES = ("primary_low", "primary_high", "junior", "senior")
+
+
+def _chapter_number(title: str) -> int:
+    """从章标题里取章号（``第3章 核心技术分支`` → ``3``）。
+
+    ⚠️ 只认阿拉伯数字：``app/store/kb.py`` 的 ``_CHAPTER_NUMBER_RE`` 就是这个口径，
+    而导入脚本 ``scripts/import_knowledge.py`` 已经把源库的中文序号（``第三章.…``）
+    统一转成了 ``第3章 …``。两者必须一致，否则章节会排到列表末尾（实测踩过）。
+    """
+    match = re.match(r"^第\s*(\d+)\s*章", title)
+    if not match:
+        raise AssertionError(f"章标题里没有阿拉伯章号：{title!r}")
+    return int(match.group(1))
 
 #: 三句童言 → 连续 3 轮同向（向下）的**够格证据**：实测能在第 3 轮把学段从
 #: ``primary_high`` 调到 ``primary_low``（见 ``tests/test_grade.py``）。这里复用同一组句子：
@@ -303,13 +317,65 @@ class TestChapterRoutes(ChapterCase):
         self.assertIn("第9章 不存在的章", detail)
         self.assertEqual(self.raw_current_chapter(student_id), None, "校验失败不许落库")
 
-    def test_chapter_of_another_grade_is_rejected(self) -> None:
-        """★ 学段隔离：初中的学生不能选小学低年级的章（清单按学段取，不是全局取）。"""
+    def test_chapter_list_is_the_same_subject_syllabus_for_every_grade(self) -> None:
+        """★★ 「章」在新教材里是**学科大纲**，不是某一学段的课本 —— 四学段看同一份章清单。
+
+        ★ 这条断言在 2026-09-19 接入 K12KnowledgeBase 时**翻转**过，原委要写清楚：
+
+        旧教材是「一学段一本教材」，章标题各学段不同（小学低有「身边的 AI」、
+        初中有「用 Python 处理数据」），所以旧版断言的是
+        「初中的学生不能选小学低年级的章」（跨学段章标题必须不相交）。
+
+        新库把 57 个概念编成 **8 个学科章节**（人工智能的基础概念 / 核心技术分支 /
+        大模型与 Agent …），**每个概念在四个学段各有一篇正文** ——
+        于是同一章标题在四个学段都存在，只是章内正文的深浅不同。
+        换言之「选第 3 章」现在表达的是「我想围绕这个**主题**学」，
+        内容的深浅由学生学段决定 —— 这比旧语义更贴近真实教材。
+
+        ★ 因此真正需要守住的不变量变成两条：
+          ① 四学段的章清单**一致**（某学段缺章会导致「这章选不上」，
+             而学生看到的是别的学段能选、自己不能）；
+          ② 清单**非空且章号连续**（空清单 = kb 没建好，那是 503 而不是 422）。
+        「选一个根本不存在的章必须 422」由
+        :meth:`test_unknown_chapter_is_422_with_readable_message` 覆盖。
+        """
+        lists = {grade: self.chapter_titles(grade) for grade in GRADES}
+
+        for grade, titles in lists.items():
+            self.assertTrue(titles, f"{grade} 的章清单为空 —— kb 没建好或该学段没有内容")
+            numbers = sorted(_chapter_number(t) for t in titles)
+            self.assertEqual(
+                numbers, list(range(1, len(numbers) + 1)), f"{grade} 的章号不连续：{numbers}"
+            )
+
+        baseline = lists[GRADES[0]]
+        for grade in GRADES[1:]:
+            self.assertEqual(
+                lists[grade],
+                baseline,
+                f"{grade} 的章清单与 {GRADES[0]} 不一致 —— 四学段应当共用同一份学科大纲",
+            )
+
+    def test_chapter_of_another_grade_is_accepted_now_that_chapters_are_subject_level(self) -> None:
+        """学段之间的章**可以互相选**（承接上一条的新语义）。
+
+        ★ 这条与旧版 `test_chapter_of_another_grade_is_rejected` 是**同一条断言的翻转**：
+          旧版要求 422，新版要求 200。理由见上一条 ——
+          章已经是学科大纲，「初中生选第 1 章」不该被拒（他自己那本也有第 1 章）。
+          ⚠️ 但要守住「**学生的学段不被这次写入改掉**」，且「清单里没有的章仍然 422」
+             —— 后者是反向对照，证明成员判断还在、没被顺手删掉。
+        """
         student_id = self.create_student("初中生", "junior")
-        other = self.chapter_titles("primary_low")[0]
-        self.assertNotIn(other, self.chapter_titles("junior"))
-        response = self.put_chapter(student_id, other)
-        self.assertEqual(response.status_code, 422, response.text)
+        from_other_grade = self.chapter_titles("primary_low")[0]
+
+        response = self.put_chapter(student_id, from_other_grade)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["gradeLevel"], "junior", "学段不该被这次写入改掉")
+        self.assertEqual(self.raw_current_chapter(student_id), from_other_grade)
+
+        # 反向对照：清单里**没有**的章仍然必须被拒
+        bogus = self.put_chapter(student_id, "第99章 并不存在的章")
+        self.assertEqual(bogus.status_code, 422, bogus.text)
 
     def test_clearing_needs_no_kb_and_writes_null(self) -> None:
         """★ 空串 = 清除：**不需要 kb**（清一个值不该依赖清单），且库里写的是 NULL。

@@ -130,9 +130,25 @@ class TestSignalExtraction(unittest.TestCase):
         self.assertIn("口语=", reading.raw)
 
     def test_vocab_term_at_current_level_is_neutral_but_recorded(self) -> None:
-        reading = extract_vocab_signal("机器学习是什么", "junior")
+        """同档术语 → 方向 0，但仍算证据（要落库）。
+
+        ★ 学段跟着**术语表**走，不是写死的：接入 K12KnowledgeBase 后
+          ``terminology.json`` 按正文实际位置重建下限，``机器学习`` 的 ``min_grade``
+          由 junior 下调到 primary_low（见 ``scripts/import_knowledge.py`` 的
+          ``build_terminology()``）。「同档」的判定必须取**表里的当前值**，
+          否则这条用例测的就不再是「同档」，而是「低一档」（那会得到 -1.0，
+          覆盖不到本用例要盯的『值为 0 但 has_evidence 为真』）。
+        """
+        from app.grade.signals import default_terminology
+
+        min_grade = next(
+            entry["min_grade"]
+            for entry in default_terminology()["terms"]
+            if entry["term"] == "机器学习"
+        )
+        reading = extract_vocab_signal("机器学习是什么", min_grade)
         self.assertEqual(reading.value, 0.0)
-        self.assertEqual(reading.level_hint, "junior")
+        self.assertEqual(reading.level_hint, min_grade)
         self.assertTrue(reading.has_evidence, "同档术语也是证据，要落库（值为 0）")
 
     def test_vocab_without_any_hit_has_no_evidence(self) -> None:
@@ -706,7 +722,7 @@ class TestEnginePersistence(GradeEngineCase):
         self.assertEqual((summary.attempts, summary.current_streak), (0, 0), "没有记录 → 没有信号")
 
         for correct in (True, True, True):
-            self.store.add_history(kp_id="jr-ai-what", activity="quiz", is_correct=correct)
+            self.store.add_history(kp_id="ai-definition-jr", activity="quiz", is_correct=correct)
         summary = quiz_performance_from_history(self.store)
         self.assertEqual((summary.attempts, summary.correct, summary.current_streak), (3, 3, 3))
 
@@ -720,8 +736,8 @@ class TestEnginePersistence(GradeEngineCase):
         self.assertEqual(self.engine.current_level(self.student_id), "junior")
 
         # 连错两题后再来一轮 → 下调（连错 ≥2）
-        self.store.add_history(kp_id="jr-ai-what", activity="quiz", is_correct=False)
-        self.store.add_history(kp_id="jr-ai-what", activity="quiz", is_correct=False)
+        self.store.add_history(kp_id="ai-definition-jr", activity="quiz", is_correct=False)
+        self.store.add_history(kp_id="ai-definition-jr", activity="quiz", is_correct=False)
         self.assertEqual(quiz_performance_from_history(self.store).current_streak, -2)
 
     # ------------------------------------------------------------------ D1 --
