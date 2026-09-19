@@ -494,6 +494,22 @@ export class SidecarManager {
       return
     }
 
+    /**
+     * ★★ 端点必须**在这里**清，不能只靠 `start()` 开头那一次（本轮修正）。
+     *
+     * `clearSidecarEndpoint()` 原本只在「不重启」的分支被调用；重启分支只是把
+     * `state.port` 置空，而**全局端点**（`bridge/client.ts` 里那个只存在于主进程内存的
+     * `{port, token}`）要等 500ms 后 `start()` 开头才被清掉。
+     *
+     * 这 500ms 正是最危险的一段：进程已经**死了**，但端点还指着它的旧端口与旧 token ——
+     * 期间学生发消息、或右栏点开取数，`apiFetch` 会拿着旧端口发请求，
+     * 换来一句 `ECONNREFUSED`，而学生会看到英文的 `fetch failed`（不经归一化的话）。
+     * 端点在此刻就已经**不成立**了（持有它的进程都没了），没有任何理由多留 500ms。
+     *
+     * ⚠️ `start()` 开头那次**保留**：它不是冗余 —— 正常启动路径（非重启）也要清，
+     *   而且它顺带覆盖「`start()` 被别处直接调用」的情形。两次调用都是 `endpoint = null`，幂等。
+     */
+    clearSidecarEndpoint()
     this.setState({
       restarts: this.state.restarts + 1,
       phase: 'starting',

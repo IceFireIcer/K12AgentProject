@@ -219,7 +219,46 @@ test('S1 门：判定违规时**先发 blocked 再补 done**（顺序反了撤�
   assert.equal(inner.finishes, 1, '撤回之后仍要收尾，否则界面停在「回答中…」')
 })
 
-test('S1 门：本轮以 error 收尾时不跑终审（没有正文要撤，且 error 已是终态）', async () => {
+test('★ S1 门（P0 回归）：degraded 的**工具失败**之后，本轮**仍然**走到终审', async () => {
+  // 真实场景（不是构造出来的）：sidecar 没起来时 `rag_search` / `get_student_profile` 失败 →
+  // `events.ts` 发 `error{degraded:true}`（**不终结本轮**）→ 模型继续用文字把这一轮讲完 →
+  // `agent_end` → `done`。这段正文必须经过终审，否则它未经审核直接放行给 K12 学生。
+  const inner = recordingSink()
+  let finalizedText = ''
+  const gate = createSafetyGateSink({
+    inner,
+    finalize: async (text) => {
+      finalizedText = text
+      return {
+        decision: decideGate({ inputVerdict: null, assistantText: text }, verdict({ allowed: true })),
+        source: 'none',
+        selfReviewRan: false,
+        available: true
+      }
+    },
+    log: () => {}
+  })
+
+  gate.emit({ name: 'error', data: { message: '「教材检索」这一步没有成功：…', degraded: true } })
+  // 工具失败之后模型继续写的正文（这正是要审的那一段）
+  gate.emit({ name: 'delta', data: { delta: '那我直接讲讲这个概念：' } })
+  gate.emit({ name: 'done', data: { messageId: 'pi-message:degraded' } })
+  gate.finish()
+  await gate.settled()
+
+  assert.deepEqual(
+    names(inner.events),
+    ['error', 'delta', 'done'],
+    'degraded 的 error 是提示（原样转发），本轮继续 —— done 随后照常放行'
+  )
+  assert.equal(gate.finalizations, 1, '★ 工具失败的降级 error **不得**让本轮跳过终审（P0）')
+  assert.equal(finalizedText, '那我直接讲讲这个概念：', '终审必须拿到工具失败之后写的那段正文')
+  assert.equal(inner.finishes, 1)
+})
+
+test('★ S1 门（P0 反向对照）：degraded:false 的**真终态**错误仍然跳过终审', async () => {
+  // 这条是上面那条的对照组，**不能因为修复而丢失**：真正的终态失败（供应商错误、凭证缺失、
+  // 装配故障）没有正文要撤，也不该再拖一次终审 —— 那只会让界面多等一次超时。
   const inner = recordingSink()
   let finalized = 0
   const gate = createSafetyGateSink({
@@ -231,12 +270,38 @@ test('S1 门：本轮以 error 收尾时不跑终审（没有正文要撤，且 
     log: () => {}
   })
 
-  gate.emit({ name: 'error', data: { message: '云端不可用', degraded: true } })
+  gate.emit({ name: 'error', data: { message: '云端模型暂时不可用：网络连接不上。', degraded: false } })
   gate.finish()
   await gate.settled()
 
   assert.deepEqual(names(inner.events), ['error'], 'error 原样转发，不额外发明事件')
-  assert.equal(finalized, 0, 'error 收尾的轮次没有正文要撤，不该再拖一次终审')
+  assert.equal(finalized, 0, '终态失败收尾的轮次没有正文要撤，不该再拖一次终审')
+  assert.equal(gate.finalizations, 0)
+  assert.equal(inner.finishes, 1)
+})
+
+test('S1 门：degraded error 之后**再**来一条终态 error —— 按终态处理，不重复终审', async () => {
+  // 降级提示与真终态在同一条链路上都会出现（工具先失败、随后供应商连接彻底断开）。
+  // 门必须认「最后那个终态」，而不是被先到的 degraded 提示永久锁进审核路径或跳出审核路径。
+  const inner = recordingSink()
+  let finalized = 0
+  const gate = createSafetyGateSink({
+    inner,
+    finalize: async () => {
+      finalized += 1
+      throw new Error('不该被调用')
+    },
+    log: () => {}
+  })
+
+  gate.emit({ name: 'error', data: { message: '「教材检索」这一步没有成功：…', degraded: true } })
+  gate.emit({ name: 'error', data: { message: '云端模型暂时不可用：网络连接不上。', degraded: false } })
+  gate.emit({ name: 'done', data: { messageId: 'pi-message:late' } })
+  gate.finish()
+  await gate.settled()
+
+  assert.equal(finalized, 0, '以终态失败收尾的轮次不该跑终审')
+  assert.deepEqual(names(inner.events), ['error', 'error', 'done'], '两条 error 都要原样投递（UI 各有用处）')
   assert.equal(inner.finishes, 1)
 })
 
@@ -687,6 +752,30 @@ test('★ S7 接线守卫：runtime.ts 在真实回合里调用了输入检查 /
   assert.ok(checkAt > 0 && promptAt > 0 && checkAt < promptAt, '输入侧检查必须排在 session.prompt() 之前')
   // ★ 终审必须**等**（不等的话 blocked 可能晚于 done 到达）
   assert.ok(source.includes('await gate.settled()'), '本轮的收尾必须等终审走完')
+})
+
+test('★ S7 接线守卫：学段观察夹在「输入侧检查之后、无 Key 早退之前」', () => {
+  // 两个约束夹出来的唯一位置，往任何一边挪都会坏掉一件事：
+  //   - 挪到 `reviewInput` **之前** → 被安全拦下的那条消息（一个字都没发给模型）
+  //     照样按它的用词/深度提取学段信号、参与连续 3 轮同向计数，甚至改学段；
+  //   - 挪到「无 Key」早退**之后** → 无 Key 世界里学段永远不动
+  //     （`grade.ts` 原本挂在 Pi 的 `input` 事件上，那条路根本没被走到 —— 票 21 的返工根因）。
+  // ★ 依赖去注释后的源码：文件头与那两段注释里**引用**了这些标识符做论证，拿原文匹配会永远为真。
+  const source = runtimeCode()
+  const checkAt = source.indexOf('reviewInput(')
+  const observeAt = source.indexOf('gradeExtension.observeTurn(')
+  const missingKeyAt = source.indexOf('if (!credentialState.hasKey && !useProbe)')
+  assert.ok(checkAt > 0, 'runtime.ts 必须调用 reviewInput(')
+  assert.ok(observeAt > 0, 'runtime.ts 必须调用 gradeExtension.observeTurn(')
+  assert.ok(missingKeyAt > 0, 'runtime.ts 必须有无 Key 早退分支')
+  assert.ok(
+    checkAt < observeAt,
+    '★ 学段观察必须在输入侧安全检查**之后**（被拦下的消息不该产生学段证据）'
+  )
+  assert.ok(
+    observeAt < missingKeyAt,
+    '★ 学段观察必须在「无 Key」早退**之前**（否则无 Key 世界里学段永远不动）'
+  )
 })
 
 test('★ S7 接线守卫：动画扩展拿到的是「接了 generate 的」工厂（默认导出没接）', () => {

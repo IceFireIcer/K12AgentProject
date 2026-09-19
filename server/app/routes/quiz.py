@@ -256,7 +256,7 @@ def level_order_from_graph(
     conn,
     *,
     start_kp_ids: Sequence[str],
-    limit: int = 40,
+    limit: int | None = None,
     max_depth: int | None = None,
     allowed_grades: Sequence[str] | None = None,
 ) -> list[str]:
@@ -265,6 +265,16 @@ def level_order_from_graph(
     从 ``start_kp_ids`` 出发做 BFS（沿 ``from → to`` 的后继边），先去重、再按
     (跳数, kp_id) 排序。**depth 上限由 ``deps.py`` 的递归 CTE 保证**（防环死循环），
     本函数只负责把多棵树拼成一条稳定的顺序。
+
+    ★★ ``limit`` 默认**不截断**（``None``），这是有意的修复，不是「忘了给默认值」：
+      早年这里是 ``limit: int = 40``，而 K12KnowledgeBase 接入后**每个学段有 57 个知识点**
+      —— 每学段后缀 17 关不进路径，其中 **9 关的前置就在前 40 关里**（正常游玩就会被
+      :func:`unlocked_successor_ids` 解锁，于是它出现在 ``progress`` 表里、却不在路径上）。
+      结果：这些关被 :func:`progress_snapshot` 的 ``rank.get(kp_id, fallback)`` 兜到最后，
+      学生看到的是「下一关明明已经解锁了，却排在所有旧关后面」。
+      40 这个数字的来历查无性能依据（路径长度按学段规模本就不同），
+      因此改成「按实际规模给全」，而不是把它调成另一个魔法数字（57 也会被下一次扩容撞破）。
+      给得出理由的调用方仍可显式传 ``limit``（截断语义原样保留）。
 
     ★ ``max_depth`` 默认取 :data:`app.knowledge.deps.MAX_DEPTH_LIMIT`（不是 ``DEFAULT_DEPTH``）：
       关卡路径要覆盖**整条链**，而 ``DEFAULT_DEPTH=3`` 恰好会在第四跳把
@@ -301,6 +311,8 @@ def level_order_from_graph(
                 seen[row.kp_id] = row.depth
 
     ordered = _topological_order(conn, seen)
+    if limit is None:
+        return ordered
     return ordered[: max(1, int(limit))]
 
 
@@ -361,6 +373,19 @@ RUBRIC_MAX_CHARS = 800
 #: 选项文本长度上限。
 OPTION_MAX_CHARS = 200
 
+#: ★ **生成题的 qid 前缀**（``gen-``），与 ``desktop/src/main/agent/extensions/quiz.ts``
+#: 的 ``variantQid()`` 逐字同源（``gen-<kpId>-<随机段>-<序号>``）。
+#:
+#: 为什么要卡这个前缀（不只是"统一命名"）：``_locate_question`` 的查题次序是
+#: **先生成题、后题库**，而 ``save_generated_questions`` 是 ``ON CONFLICT(qid) DO UPDATE``
+#: —— 一个与真题同名的生成 qid 会把那道真题的**标准答案静默改写**（学生做的是真题、
+#: 判分用的是模型的答案）。前缀让生成题与题库真题在**命名空间上**不可能相交
+#: （题库 qid 形如 ``<slug>-q<序号>``，而 ``slug`` 来自导入脚本的 SLUGS），
+#: 这比"每次登记去对比一遍全库"更早、更便宜地挡住同一类错误。
+#: ⚠️ 两道都不删：前缀挡"将来可能出现的怪异 qid"，撞名检查挡"前缀规则被放宽"，
+#: 各自的失败信息也指向不同的人（生成侧 / 题库维护侧）。
+GENERATED_QID_PREFIX = "gen-"
+
 #: 客观题 / 主观题两种判分路径（``contracts.py`` 的 ``QuizResult.scored_by``）。
 GRADED_BY_RULE = "rule"
 GRADED_BY_LLM = "llm"
@@ -405,6 +430,10 @@ class VariantQuestionIn(CamelModel):
 
     ``reference_answer`` 就是**标准答案**：它进 ``learning.db``，绝不出现在任何出参里。
     方向与 :class:`app.contracts.QuizGradeRequest.answer`（学生作答）**相反**，别混。
+
+    ★ ``qid`` 必须带 :data:`GENERATED_QID_PREFIX` 前缀（``gen-``，与
+      ``desktop/src/main/agent/extensions/quiz.ts`` 的 ``variantQid()`` 同源）——
+      见 :func:`register_variants` 的说明：不带前缀的 qid 能**伪装成题库真题**。
     """
 
     qid: str = Field(min_length=1, max_length=64)
@@ -531,6 +560,23 @@ def feedback_for(question: QuizQuestion, correct: bool) -> str:
     if correct:
         return f"答对了！{question.explanation}"
     return f"这次还差一点，先看看思路：{question.explanation} 想一想再选一次吧。"
+
+
+#: 重复作答时附加在反馈后面的说明（**要说实话**：读起来必须像「又练了一次」，
+#: 而不是「你刚答对了」。判分口径是**首次作答决定**，见 :func:`_record_attempt`）。
+REPEAT_ATTEMPT_SUFFIX = "（这道题你之前已经答过，这次不计分，掌握度和闯关进度都不会变。）"
+
+
+def repeat_attempt_feedback(feedback: str) -> str:
+    """给重复作答的反馈加一句说明（**不改判分结论**，只把「计不计分」讲清楚）。
+
+    ★ 为什么必须加：判分口径是「首次作答决定」，而反馈文案不说的话，
+      学生（和模型）会以为「我刚才这一次答对了，掌握度涨了」——
+      界面上的掌握度却纹丝不动，看起来就像系统坏了。
+      **不加一句实话都不行**，但也**只加这一句**：把对错结论原样保留
+      （学生要看到自己这次对没对，这正是他重复作答的原因）。
+    """
+    return f"{feedback}{REPEAT_ATTEMPT_SUFFIX}"
 
 
 def is_subjective(record: GeneratedQuestionRecord) -> bool:
@@ -803,6 +849,16 @@ def find_question(entries: Iterable[BankEntry], qid: str) -> QuizQuestion | None
     return None
 
 
+def bank_question_ids(report: BankReport) -> set[str]:
+    """题库里**所有可定位的 qid**（登记变式题时用来挡撞名，见 :func:`register_variants`）。
+
+    只取 ``entries`` 里的题（坏题已被 ``load_bank`` 跳过）—— 这不是偷懒，而是**对齐**：
+    ``_locate_question`` 也只在 ``entries`` 里找题，所以真正能被"覆盖"的
+    恰好就是这一个集合；把 skipped 的 qid 也算进来反而会让拒绝理由凭空多几条。
+    """
+    return {entry.question.qid for entry in report.entries}
+
+
 def select_questions(
     report: BankReport,
     *,
@@ -975,6 +1031,7 @@ def progress_snapshot(
     *,
     kp_ids: Sequence[str] | None = None,
     order: Sequence[str] | None = None,
+    fallback_order: Sequence[str] | None = None,
     known_kp_ids: Collection[str] | None = None,
 ) -> list[dict[str, object]]:
     """给前端/事件载荷用的进度快照（纯数据，**不含答案**）。
@@ -988,6 +1045,17 @@ def progress_snapshot(
       ``kp_id`` 字典序**，于是「变量」可能排在「循环」后面 —— 进度条会显示成
       「下一关已经解锁、上一关还没做」的怪样子（这正是票 15 说的
       「关卡顺序由依赖图拓扑序决定」，不是按 id 排）。
+    - ★★ ``fallback_order`` 是**主序之外的补位序**（``None`` = 退回按 kp_id 排）。
+      用来给「不在本学段关卡路径上、但确实有进度记录」的 kp 一个**拓扑序位置**，
+      而不是把它们一律甩到最后。
+
+      **为什么必须有它**（实测缺陷）：关卡路径 = 本学段（:func:`_default_level_order`），
+      而取题允许**向上兼容**（学生能回头刷更低学段的题）—— 那些关不在主序里。
+      再加上「每学段 57 个知识点、而路径曾被 ``limit=40`` 截断」，
+      于是「前置在前 40 关里、已经被正常解锁的那 9 关」全部落在主序之外 →
+      一律命中 fallback → 学生看到「下一关明明已经解锁了，却排在所有旧关之后」。
+      截断已经去掉（治本）；补位序是同一类场景的第二道保险
+      （旧库里指向已改学段的进度行也走这条路）。
     - ★★ ``known_kp_ids`` 给了就**只保留教材里真的存在的那几关**
       （``None`` = 不过滤，保留原行为）。
 
@@ -1005,7 +1073,12 @@ def progress_snapshot(
     mastery = store.mastery_map()
     wanted = set(kp_ids) if kp_ids is not None else None
     rank = {kp_id: index for index, kp_id in enumerate(order or ())}
-    fallback = len(rank)
+    # 补位序只填**主序里没有的** kp（``setdefault``）：主序的相对次序一个字不动，
+    # 否则「学生自己的学段」会被更低学段的补位序挤开。
+    tail = len(rank)
+    for index, kp_id in enumerate(fallback_order or ()):
+        rank.setdefault(kp_id, tail + index)
+    fallback = tail + len(fallback_order or ())
     rows = [
         row
         for row in store.progress_rows()
@@ -1154,13 +1227,24 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
       - ``learning_history``：一条 ``activity="quiz"`` 记录（票 20 的个性化闭环要吃它）；
       - ``progress``：闯关状态机（**票 15**，见 :func:`apply_level_progress`）。
 
+    ★★ **判分幂等：首次作答决定**（``store.question_attempt(qid)`` 判首次，与主观路径同源）。
+      第一次提交这道题 → 照常判分 + 计掌握度 + 推进闯关 + 计徽章；
+      **之后的重复提交** → **照常判分、照常给反馈**（学生要看到这次对没对），
+      但**不再改掌握度、不重复计数、不重复推进/解锁**，反馈里附一句
+      :data:`REPEAT_ATTEMPT_SUFFIX` 把「不计分」说明白（**不说谎**）。
+
+      为什么「答错后再答」不改变掌握度：掌握度是**能力信号**（推荐/画像要吃它），
+      连点 4 次同一道题就能把 0.15 刷到 0.6 并解锁后继 —— 那不是能力，是点击次数。
+      学习需要的是**即时反馈**，那一条一个字没少（判分与反馈照旧）。
+
     题目来源有两处，**按此顺序**查（票 15 起）：
       ① 该学生库里的 LLM 生成题（``generated_question``）—— 变式题走这条；
       ② 随包分发的题库。
     两处都要求「这条库里有这道题」，否则 404（**不猜、不新建**）。
 
     ``mastery_delta`` 回传的是**实际生效**的变化量（``新值 - 旧值``）：已经满分时再答对就是 0，
-    而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）。
+    而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）；重复作答时它**恒为 0**
+    （掌握度没动，回传任何非零值都是谎报）。
     """
     if not STUDENT_ID_RE.match(body.student_id):
         raise HTTPException(
@@ -1196,11 +1280,23 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
             )
 
         correct = is_correct_answer(question, body.answer)
+        # ★★ 幂等判据在**这里**取、判分之前：`question_attempt` 只认 learning_history 里
+        #   `activity='quiz'` 且 detail.qid 相同的行（两条判分路径的落库点都是 _record_attempt）。
+        #   放在判分之前是因为「是不是第一次」与「这次答得对不对」是两件独立的事 ——
+        #   先判分再查会让重复作答的反馈里混进一个没发生的掌握度变化。
+        repeat = store.question_attempt(question.qid) is not None
         feedback = feedback_for(question, correct)
-        before, _, _ = store.mastery(question.kp_id)
-        delta = MASTERY_GAIN_CORRECT if correct else -MASTERY_LOSS_WRONG
-        after = store.apply_mastery(question.kp_id, delta, correct=correct)
-        effective = round(after - before, 6)
+        if repeat:
+            feedback = repeat_attempt_feedback(feedback)
+            # 掌握度一个字不动：读回当前值当 after，delta 恒为 0（回传非 0 就是谎报）
+            before, _, _ = store.mastery(question.kp_id)
+            after = before
+            effective = 0.0
+        else:
+            before, _, _ = store.mastery(question.kp_id)
+            delta = MASTERY_GAIN_CORRECT if correct else -MASTERY_LOSS_WRONG
+            after = store.apply_mastery(question.kp_id, delta, correct=correct)
+            effective = round(after - before, 6)
         outcome = _record_attempt(
             request,
             store,
@@ -1214,12 +1310,13 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
             session_id=body.session_id or "",
             stem=question.stem,
             grade_level=_student_grade(store, body.student_id),
+            repeat=repeat,
         )
     finally:
         store.close()
 
     logger.info(
-        "判分（rule）：qid=%s kp=%s 对错=%s 掌握度 %.3f → %.3f（delta=%.3f）关卡=%s%s",
+        "判分（rule）：qid=%s kp=%s 对错=%s 掌握度 %.3f → %.3f（delta=%.3f）关卡=%s%s%s",
         question.qid,
         question.kp_id,
         correct,
@@ -1228,6 +1325,7 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
         effective,
         outcome.stage,
         f" 解锁 {list(outcome.unlocked)}" if outcome.unlocked else "",
+        "（重复作答，不计分）" if repeat else "",
     )
     return QuizResult(
         qid=question.qid,
@@ -1249,7 +1347,19 @@ def _validate_variant(
     校验层**复查学段的超纲问题**（票 15 明确要求「学段写进 prompt 且校验层复查」）：
     prompt 里已经写了学段，但模型可能无视 —— 所以这里用与教材自检同一份术语文表
     再审一遍，超纲的题**直接拒**（不静默收下：超纲题会让学生看到没学过的名词）。
+
+    ★ 还要卡 ``qid`` 前缀（见 :data:`GENERATED_QID_PREFIX`）：不带 ``gen-`` 的 qid
+      既可能是生成侧漏了 ``variantQid()``，**也可能是一次故意的撞名尝试** ——
+      两种都该在门口被挡下，而不是等它把某道真题的答案改写掉之后再查。
     """
+    if not item.qid.startswith(GENERATED_QID_PREFIX):
+        return (
+            "qid",
+            f"生成题的 qid 必须以 {GENERATED_QID_PREFIX!r} 开头（收到 {item.qid!r}）。"
+            f"它由客户端生成，规则见 extensions/quiz.ts 的 variantQid()："
+            f"{GENERATED_QID_PREFIX}<知识点>-<随机段>-<序号>。"
+            "不带这个前缀的 qid 可能与题库真题同名，从而覆盖真题的标准答案。",
+        )
     if item.type == "choice":
         if not item.options or len(item.options) < 2:
             return ("options", "选择题至少要两个选项（否则学生没法作答）")
@@ -1284,8 +1394,18 @@ def register_variants(
        转换只走 ``QuizPayload.from_internal``，不存在第二条投影路径。
 
     ★ ``qid`` 由 TS 侧生成（带随机段，见 ``quiz.ts`` 的 ``variantQid``）：
-      Python 侧只做**形状校验**（长度/字符集），不重新编号 ——
+      Python 侧只做**形状校验**（长度/字符集/``gen-`` 前缀），不重新编号 ——
       重新编号会让「学生卡片上的 qid」与「后端登记的 qid」对不上，判分必 404。
+
+    ★★ **撞名防护（两道，见 :data:`GENERATED_QID_PREFIX` 的说明）**：
+      ① 形状：``qid`` 必须带 ``gen-`` 前缀（在 :func:`_validate_variant` 里逐题拒）；
+      ② 硬检查：与**题库真题的 qid** 撞名 → **整批拒**（与「同批 qid 重复」同一处置）。
+
+      为什么②必须是整批拒、而不是"只丢撞名那一道"：走到这一步说明生成侧给出了一个
+      **与真题同名**的题，那不是「一道题没写好」，而是「这道题的去向搞错了」——
+      它的答案会被写进 ``generated_question``，而 ``_locate_question`` **先生成题后题库**
+      → 那道真题从此在这个学生这里判的是模型的答案（学生做的是真题，得分却是别人的答案）；
+      同时批里其余的题也来自同一个有问题的生成调用，收下它们只是把问题藏起来。
     """
     student = student_id or studentId
     if not student or not STUDENT_ID_RE.match(student):
@@ -1294,8 +1414,13 @@ def register_variants(
             detail="studentId 不合法（只允许字母、数字、下划线、连字符）",
         )
 
+    # 题库真题的 qid 集合（读一次，整批复用）。读不到题库不是错误：
+    # 空集等于"这一批没有可撞的对象"，登记照常进行 —— 撞名防护是加固，不是前置条件。
+    bank_ids = bank_question_ids(load_bank(bank_dir_for(request)))
+
     rejected: list[str] = []
     duplicates: list[str] = []
+    collisions: list[str] = []
     accepted: list[GeneratedQuestionRecord] = []
     seen: set[str] = set()
     for item in body.questions:
@@ -1307,6 +1432,11 @@ def register_variants(
             duplicates.append(item.qid)
             continue
         seen.add(item.qid)
+        # ★★ 与**题库真题**撞名 → 同样整批拒。`_locate_question` 先查生成题，
+        #   所以这个名字一旦落库，那道真题的标准答案就被静默改写了。
+        if item.qid in bank_ids:
+            collisions.append(item.qid)
+            continue
         problem = _validate_variant(item, grade_level=body.grade_level)
         if problem is not None:
             rejected.append(f"{item.qid}/{problem[0]}: {problem[1]}")
@@ -1325,6 +1455,21 @@ def register_variants(
                 source="generated",
                 created_at=None,
             )
+        )
+
+    if collisions:
+        # ★ 与真题撞名：说清是**哪道题**、以及为什么整批都不收（上面的 docstring 有完整理由）
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "生成题的 qid 与题库真题撞名："
+                + "、".join(sorted(set(collisions)))
+                + "。这个 qid 已经在随包题库里（判分时先查生成题、后查题库），"
+                "登记成功会把那道真题的标准答案**静默改写** —— 学生做的是真题、"
+                "判分用的却是模型的答案。整批已拒绝。"
+                "请让生成侧改用 `gen-` 前缀（`quiz.ts` 的 `variantQid` 会带上它），"
+                "或换一个不会被误认成真题的名字。"
+            ),
         )
 
     if duplicates:
@@ -1410,6 +1555,16 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
 
     写库与 ``/quiz/grade`` **共用** :func:`_record_attempt`（同一个事务边界、
     同一套进度推进），所以两条判分路径在数据侧不可能出现两套语义。
+
+    ★★ **判分幂等同样成立**（与 ``/quiz/grade`` 一条口径，判据也是
+      ``store.question_attempt(qid)``）：这道主观题第二次提交时**照常落一条
+      ``learning_history`` 流水**，但**不再改掌握度、不再推进闯关/解锁**，
+      反馈里附一句 :data:`REPEAT_ATTEMPT_SUFFIX`。
+
+      ⚠️ 主观题**尤其**需要这一条：LLM 判分不是确定性的（同一份答案可能这次 0.8、
+      下次 1.0），同一道开放题反复提交就能靠分数抖动把掌握度一路推上去 ——
+      而 ``SUBJECTIVE_PASS_RATIO`` 的「多少分算过」在服务端，学生只要反复点就够了。
+      幂等判据落在**服务端**（不是靠 TS 侧记得别重复提交）。
     """
     if not STUDENT_ID_RE.match(body.student_id):
         raise HTTPException(
@@ -1443,10 +1598,20 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
         feedback = subjective_feedback(
             score=body.score, correct=correct, raw_feedback=body.feedback
         )
+        # ★★ 幂等判据与 `/quiz/grade` **同一处语义**（见该端点的说明）：
+        #   查的是 learning_history 里这道题有没有作答过 —— 两条判分路径的落库点都是
+        #   `_record_attempt`，所以「主观题先答、再用同一个 qid 走客观路径」这类交叉也不会漏判
+        #   （客观路径那边同样查一次，判据是同一张表、同一个 qid）。
+        repeat = store.question_attempt(generated.qid) is not None
         before, _, _ = store.mastery(generated.kp_id)
-        delta = MASTERY_GAIN_CORRECT if correct else -MASTERY_LOSS_WRONG
-        after = store.apply_mastery(generated.kp_id, delta, correct=correct)
-        effective = round(after - before, 6)
+        if repeat:
+            after = before
+            effective = 0.0
+            feedback = repeat_attempt_feedback(feedback)
+        else:
+            delta = MASTERY_GAIN_CORRECT if correct else -MASTERY_LOSS_WRONG
+            after = store.apply_mastery(generated.kp_id, delta, correct=correct)
+            effective = round(after - before, 6)
         outcome = _record_attempt(
             request,
             store,
@@ -1461,12 +1626,13 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
             stem=generated.stem,
             grade_level=_student_grade(store, body.student_id),
             extra={"llmScore": round(float(body.score), 4)},
+            repeat=repeat,
         )
     finally:
         store.close()
 
     logger.info(
-        "判分（llm）：qid=%s kp=%s 得分=%.2f 对错=%s 掌握度 %.3f → %.3f 关卡=%s%s",
+        "判分（llm）：qid=%s kp=%s 得分=%.2f 对错=%s 掌握度 %.3f → %.3f 关卡=%s%s%s",
         body.qid,
         generated.kp_id,
         body.score,
@@ -1475,6 +1641,7 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
         after,
         outcome.stage,
         f" 解锁 {list(outcome.unlocked)}" if outcome.unlocked else "",
+        "（重复作答，不计分）" if repeat else "",
     )
     return QuizResult(
         qid=generated.qid,
@@ -1525,6 +1692,13 @@ def read_progress(
         )
         # ★ 按依赖图拓扑序输出（不是 kp_id 字典序）：见 `progress_snapshot` 的注释。
         order = _default_level_order(request, grade_level=student.grade_level)
+        # ★★ 路径外关卡（更低学段的历史记录）也要有**拓扑序位置**，不能一律甩到最后：
+        #    关卡路径只含本学段，而取题允许向上兼容 —— 学生回头刷过的更低学段关卡
+        #    本来就不在主序里。没有这一份补位序时它们全排到最后，
+        #    表现就是「这关早就通过了却排在最后」（与 limit 截断同一类症状）。
+        scope_order = _level_order_for_grades(
+            request, grades=_allowed_grades(student.grade_level)
+        )
         # ★★ 只回教材里真实存在的关卡：老学生的库里可能还留着**指向已删除知识点**的
         #    进度行（教材换代过 —— 2026-09-19 接入 K12KnowledgeBase 时就整库换过），
         #    不过滤就会渲染成一串查不到中文名的裸 kp_id（实测某学生 55 关里 15 关是旧 kp）。
@@ -1535,6 +1709,7 @@ def read_progress(
             store,
             kp_ids=wanted,
             order=order,
+            fallback_order=scope_order,
             known_kp_ids=_known_kp_ids(request),
         )
     finally:
@@ -1618,6 +1793,21 @@ def _default_level_order(request: Request, *, grade_level: str) -> list[str]:
       对初中生而言是已经学过的基础，不该挡住他 —— 这正是「每个学段各自成图」的含义。
       取题侧的兼容隔离一个字没改，学生想回头复习随时取得到。
     """
+    return _level_order_for_grades(request, grades=(grade_level,))
+
+
+def _level_order_for_grades(request: Request, *, grades: Collection[str]) -> list[str]:
+    """给定**学段集合**的依赖图拓扑序（:func:`_default_level_order` 的泛化版）。
+
+    ``grades`` 是**本次排序的可见范围**（判据由调用方给）：关卡路径传「本学段」，
+    给「路径外的已知 kp 补位」时传兼容范围（本学段 + 更低学段）。
+
+    ★ 为什么补位要单独算一份**兼容范围**的拓扑序、而不是拿现成的路径凑：
+      路径是按「本学段」建的（见上），它整份都不含更低学段的关；而学生**确实可能**
+      持有更低学段的进度行（取题允许向上兼容）。拿路径补位等于没补 ——
+      那些关仍然只能按 kp_id 排，而 kp_id 前缀是「概念 slug」不是顺序，
+      排在哪儿纯属巧合（这正是「解锁了却排在最后」那个缺陷的另一半）。
+    """
     from app.rag.retriever import default_kb_path
     from app.store.connections import connect
 
@@ -1631,17 +1821,17 @@ def _default_level_order(request: Request, *, grade_level: str) -> list[str]:
         logger.warning("打开知识库失败，跳过默认关卡路径初始化：%s", exc)
         return []
 
-    own = {grade_level}
+    own = set(grades)
     try:
         rows = conn.execute("SELECT kp_id, grade_level FROM kp ORDER BY kp_id").fetchall()
         known = {str(r["kp_id"]) for r in rows}
         in_scope = [str(r["kp_id"]) for r in rows if str(r["grade_level"]) in own]
-        # 根 = 本学段内**没有前置**的知识点。判据落在本学段内（不是「全图无前置」）：
-        # 若某个 kp 的前置只存在于更高学段（数据将来变动时可能出现），把它当起点
+        # 根 = 本范围内**没有前置**的知识点。判据落在范围内（不是「全图无前置」）：
+        # 若某个 kp 的前置只存在于范围外更高学段（数据将来变动时可能出现），把它当起点
         # 才能让它进入路径；否则它既不是根、又走不到，会**整关消失**。
         roots = [kp_id for kp_id in in_scope if not _has_prerequisite(conn, kp_id, own)]
         if not roots:
-            # 本学段内全都有前置：拿该范围全部知识点当起点，顺序仍由拓扑排序决定，
+            # 范围内全都有前置：拿该范围全部知识点当起点，顺序仍由拓扑排序决定，
             # 至少保证「有内容可做」。
             roots = in_scope
         return [
@@ -1716,6 +1906,23 @@ def _locate_question(
     return (bank_question, None)
 
 
+def _current_outcome(store: LearningStore, kp_id: str) -> LevelOutcome:
+    """读这一关**当前**的关卡状态（不写任何东西）。
+
+    给重复作答用：那时进度按口径**不动**，但日志与出参仍需要一个如实的快照，
+    不能拿一个「没发生的推进结果」去糊弄（那会让日志与库里的值对不上）。
+    """
+    existing = store.progress_map().get(kp_id)
+    if existing is None:  # pragma: no cover - 有历史作答就一定有进度行
+        return LevelOutcome(kp_id=kp_id, stage="learning", badge=None, correct_count=0)
+    return LevelOutcome(
+        kp_id=kp_id,
+        stage=existing.stage,
+        badge=existing.badge,
+        correct_count=correct_count_from_badge(existing.badge),
+    )
+
+
 def _record_attempt(
     request: Request,
     store: LearningStore,
@@ -1731,6 +1938,7 @@ def _record_attempt(
     stem: str,
     grade_level: str,
     extra: dict[str, object] | None = None,
+    repeat: bool = False,
 ) -> LevelOutcome:
     """一次作答的**统一落库点**（两种判分路径共用，票 15）。
 
@@ -1739,20 +1947,36 @@ def _record_attempt(
       ② ``progress``（闯关状态机 + 徽章 + 解锁后继）；
       ③ 返回 :class:`LevelOutcome`（供日志与断言）。
 
+    ★★ **判分幂等：首次作答决定**（``repeat=True`` 时改什么、不改什么）：
+
+    | 落库项 | 重复作答时 | 为什么 |
+    | --- | --- | --- |
+    | ``learning_history`` | **照写** | 它是流水账：学生**确实**又答了一次，抹掉等于篡改记录；错题本/学习报告也要能看到重复的错 |
+    | ``progress``（stage / 徽章 / 解锁） | **不写** | 闯关是「走过没走过」的进度，重复提交不改变「走过」这件事 |
+    | ``mastery``（调用方负责） | **不动** | 掌握度是**能力信号**：连点 4 次同一题就把 0.15 刷到 0.6、顺手解锁后继，那不是能力 |
+
+    ★ 为什么「答错后可以再答」仍然成立、但掌握度只由第一次决定：这两件事服务于不同目的。
+      再答是为了**看到对错**（学习需要即时反馈），而掌握度是给推荐/画像用的**稳定信号**。
+      让反复刷改变它，等于把「谁点得多」当成「谁会」。
+      所以重复作答**照常判分、照常给反馈**，只是不再计入。
+
     ★ **不写对话正文**：``question`` 列只放题干**前 120 字**（题干是题目本身，
       不是学生的话）；学生原话与模型回答一律不入库（§8.1 合规红线）。
 
     ★ ``grade_level`` 是学生的学段，**解锁后继时按它过滤**（见 :func:`_safe_successors`）：
       路径与解锁必须同一学段口径，否则会放出取不到题的关卡。
     """
-    successor_ids = _safe_successors(request, kp_id, grade_level=grade_level)
-    outcome = apply_level_progress(
-        store,
-        kp_id=kp_id,
-        correct=correct,
-        mastery_score=mastery_after,
-        successor_ids=successor_ids,
-    )
+    if repeat:
+        outcome = _current_outcome(store, kp_id)
+    else:
+        successor_ids = _safe_successors(request, kp_id, grade_level=grade_level)
+        outcome = apply_level_progress(
+            store,
+            kp_id=kp_id,
+            correct=correct,
+            mastery_score=mastery_after,
+            successor_ids=successor_ids,
+        )
     detail: dict[str, object] = {
         "qid": qid,
         "type": question_type,
@@ -1764,6 +1988,11 @@ def _record_attempt(
     }
     if outcome.unlocked:
         detail["unlocked"] = list(outcome.unlocked)
+    if repeat:
+        # ★ 显式落一个判据，而不是靠「masteryDelta == 0」去猜：
+        #   已经满分后再答对也是 0，两者在流水账里必须分得开（否则将来没人能复原口径）。
+        detail["repeat"] = True
+        detail["counted"] = False
     if extra:
         detail.update(extra)
     store.add_history(

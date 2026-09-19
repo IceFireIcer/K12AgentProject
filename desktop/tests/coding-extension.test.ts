@@ -83,6 +83,11 @@ import {
 } from '../src/main/agent/extensions/coding.ts'
 // ★ 渲染进程侧：执行桥（主进程下发 → 渲染进程 Pyodide Worker 执行 → 回传）
 import { installCodeExecutionBridge } from '../src/renderer/src/sandbox/pyodide-runner.ts'
+// ★ 轨迹的失败判据（载荷 `toolOk` 的**读取方**：这条断言就是「学生写错 ≠ 工具失败」的落点）
+import { toolResultOk } from '../src/main/agent/trace.ts'
+// ★ 学习记录回流的判据（`extractCorrectness` **只认** `correct` / `passed`，不认 `ok` ——
+//   载荷改名/toolOk 都不该影响它。这里把「不受影响」写成可执行的对照，而不是口头确认。）
+import { extractCorrectness, extractKpId } from '../src/main/agent/extensions/learning-log.ts'
 // ★ 渲染进程侧：编程卡片的载荷投影（前后端交界处的契约消费方，和上面同一个文件里测）
 import {
   buildHintRequestMessage,
@@ -775,6 +780,64 @@ test('G18-2c: ★ 失败路径：中文反馈 + 结构化 error + 第 1 级提�
   assert.equal(hint.level, 1)
   // 传给服务端的 stderr 是 Worker 的**原文**（翻译是 Python 的职责，TS 不重写一份）
   assert.equal(seen[0].body?.stderr, FAIL_OUTCOME.stderr)
+})
+
+test('G18-2c2 ★★ 「学生代码没跑通」不得被轨迹读成「工具失败」（toolOk / codeOk 分离）', async () => {
+  // 这是最常见的一条教学路径：**学生第一次写错** —— 工具本身完全正常。
+  // 若载荷把「学生代码跑通没有」铺在 `details.ok` 上，`trace.ts` 的 `toolResultOk()`
+  // 会判它失败，于是轨迹图（报告「设计合理性 25%」的核心证据）在每一段正常的教学对话里
+  // 都画出一个假 `fail` 节点。断言必须直接打在**真实载荷**上（不是手写的形状）。
+  bindStudent()
+  const { tools } = setup({
+    outcomes: [FAIL_OUTCOME],
+    server: {
+      runHint: () => ({
+        ok: false,
+        stdout: '',
+        error: {
+          type: 'IndentationError',
+          message: '第 3 行附近的缩进不对。',
+          rawTraceback: 'IndentationError: unexpected indent',
+          line: 3
+        },
+        feedback: '运行没有通过（缩进错误）。',
+        nextHint: { level: 1, hint: '先想想这段代码属于谁。' }
+      })
+    }
+  })
+  const result = await callTool(tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'if True:\nprint(1)' })
+
+  // ① 卡片读的领域字段（名字直说它是什么意思）
+  assert.equal(result.details.codeOk, false, 'codeOk 才是「学生代码跑通没有」')
+  // ② 工具级：这次调用成功了（失败的形态根本到不了这里，走 failed()）
+  assert.equal(result.details.toolOk, true, '工具级成败必须显式声明，不能让学生代码的正确性冒充它')
+  // ③ ★ 真正的缺陷断言：轨迹读取方必须判成「工具成功」
+  assert.equal(
+    toolResultOk(result),
+    true,
+    '★ 学生写错一行代码（工具正常）在轨迹里必须是 ok —— 否则轨迹图在正常教学路径上全部失真'
+  )
+
+  // 反向对照：工具**真的**失败时（运行器故障 / 服务不可用）轨迹必须记成失败
+  const broken = setup({
+    outcomes: [{ stdout: '', stderr: '', interrupted: false, elapsedMs: 0, failure: RUNNER_UNWIRED_TEXT }]
+  })
+  const failedRun = await callTool(broken.tools, 'evaluate_code', { kpId: 'prog-loop-jr', code: 'print(1)' })
+  assert.equal(toolResultOk(failedRun), false, '反向对照：工具级失败仍要如实记成失败（修复不能把失败一起抹平）')
+
+  // ★ 学习记录回流**不受本次改动影响**：`extractCorrectness` 只认 `correct` / `passed`，
+  //   不认识 `ok`（那是它在注释里就定好的口径：「ok 在不同扩展里含义不同」）。
+  //   `codeOk` / `toolOk` 都是**新增**字段，既没有冒充 `correct`，也没有把 kpId 挤掉。
+  assert.equal(
+    extractCorrectness(result),
+    undefined,
+    '载荷里不得出现 correct / passed —— 代码练习的对错由 ok/codeOk 表达，掌握度不靠它'
+  )
+  assert.equal(
+    extractKpId({ kpId: 'prog-loop-jr' }, result),
+    'prog-loop-jr',
+    'kpId 必须仍在载荷里（学习记录与卡片都靠它归属）'
+  )
 })
 
 test('G18-2d: ★★ 死循环被中断：interrupted 标志 + 「停不下来」文案 + 不抛异常', async () => {

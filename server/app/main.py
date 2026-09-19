@@ -69,6 +69,7 @@ from app.security import (  # noqa: E402
     ALLOWED_ORIGIN_REGEX,
     ALLOWED_ORIGINS,
     AUTH_HEADER,
+    DebugModeCredentialGuard,
     TokenAuthMiddleware,
 )
 
@@ -154,10 +155,29 @@ def bind_listening_socket(host: str, port: int) -> socket.socket:
 
 
 def create_app(cfg: RuntimeConfig) -> FastAPI:
+    # ★★ 日志脱敏**必须在建 handler 之后、任何业务日志之前**生效，且**两条启动路径都要**。
+    #   历史缺陷：它只在 `main()` 里调用，于是『手动调试』那条路径
+    #   （`uv run uvicorn app.main:app`，走本文件末尾的模块级 app）**一点脱敏都没有** ——
+    #   LLM/嵌入的明文 Key 一旦被任何一行日志带出来就是明文（审计 M-7）。
+    #   本函数幂等：重复调用只会把过滤器挂到**新出现的** handler 上，不会叠加第二个
+    #   （见 `app/safety/guard.py` 的 `install_log_redaction`）。
+    #   ⚠️ `main()` 里仍保留同一次调用：那里先 `configure_logging()` 建好 root handler、
+    #     再调本函数，顺序与原来一致（只是现在多跑一遍幂等调用）。
+    #   ⚠️ 必须放在**创建 FastAPI 之前**：路由挂载期就可能打日志。
+    install_log_redaction()
+
     app = FastAPI(
         title=APP_TITLE,
         version=APP_VERSION,
-        docs_url="/docs",
+        # ★ 打包态关掉 `/docs` 与 `/openapi.json`：两者都免鉴权，等于把**完整接口面**
+        #   （34 条路径 / 85 个 schema，含 `/api/settings/runtime` 及其明文 `apiKey` 字段说明）
+        #   连带一个可交互的控制台暴露给任何本机进程（审计 L 项）。
+        #   生产包不需要它们：契约的 TS 类型是**构建期**由 `scripts/export_openapi.py`
+        #   生成好的，Pi 与渲染进程都不在运行期读这份 schema。
+        #   开发/调试态（源码运行，`cfg.frozen` 为假）保留 —— 那是排查便利。
+        #   ⚠️ `/health` 不受影响：它是探活端点，必须一直可达（有意免鉴权）。
+        docs_url=None if cfg.frozen else "/docs",
+        openapi_url=None if cfg.frozen else "/openapi.json",
         redoc_url=None,
     )
     # 运行期配置挂在 app.state 上，路由通过 Request 取用（避免全局变量）
@@ -199,9 +219,11 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
 
     # ★ 中间件顺序是**有讲究的**，别调换：
     #   Starlette 的洋葱模型里「最后 add 的在最外层」，所以：
-    #   先 add 鉴权（内层）→ 后 add CORS（外层）。
-    #   若反过来，鉴权提前 return 的 401 就不带 CORS 头，
+    #   先 add 调试模式凭据收口（最内层）→ 再 add 鉴权（中层）→ 最后 add CORS（外层）。
+    #   若把鉴权与 CORS 反过来，鉴权提前 return 的 401 就不带 CORS 头，
     #   浏览器会把它伪装成 `TypeError: Failed to fetch`，排查成本极高。
+    #   （调试收口排最内层的理由见 `app/security.py` 的 `DebugModeCredentialGuard`。）
+    app.add_middleware(DebugModeCredentialGuard, token=cfg.token)
     app.add_middleware(TokenAuthMiddleware, token=cfg.token)
     app.add_middleware(
         CORSMiddleware,
@@ -227,6 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     # ★ 日志脱敏：LLM/嵌入的明文与 API Key 不得进日志（执行文档 §12）。
     #   放在 configure_logging 之后、任何业务日志之前；它会保留 %s / %(name)s 占位符，
     #   否则 record.getMessage() 会抛 TypeError（见 P-009）。
+    #   ⚠️ `create_app()` 里**也**调了一次（两条启动路径必须都有脱敏，见那里的说明）。
+    #     两处都调是**刻意**的，不是重复：这里保证「main 路径在建 app 之前就已脱敏」，
+    #     那里保证「只有 app 被建出来时（`uvicorn app.main:app` 调试路径）也脱敏」。
+    #     函数是幂等的（按 RedactionFilter 实例去重），后一次调用只会补齐新出现的 handler。
     install_log_redaction()
     logger = logging.getLogger(APP_TITLE)
 
@@ -287,6 +313,13 @@ def main(argv: list[str] | None = None) -> int:
 # 供 `uv run uvicorn app.main:app` 使用（执行文档 §7.5 的手动调试命令）。
 # 这条路径**不发握手**（没有端口 0、没有 token），只用于人工 curl。
 # 纯解析、无副作用：不建目录、不碰数据库。
+# ⚠️ **调试模式的两条收口**（审计 M-7，改动下面这行前先读 `app/security.py`）：
+#   ① `/api/settings/runtime`（唯一返回**明文 API Key** 的出口）在本路径下**被拒**（403 + 可读理由）；
+#      其余 `/api/*` 与 `/health` 照旧免鉴权，调试便利保留；
+#   ② 日志脱敏由 `create_app()` 内的 `install_log_redaction()` 负责（本路径过去完全没有脱敏）。
+#   要连这条接口就得显式给 token —— 走**模块入口**带上本应用自己的 `--token`
+#   （`uvicorn` 的 CLI 不认这个选项，实测报 `No such option '--token'`）：
+#       uv run python -m app.main --port 8756 --token <t>
 app = create_app(build_runtime_config())
 
 

@@ -8,6 +8,9 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { SidecarPhase, SidecarState } from '../../../main/sidecar/protocol'
+// ★ 连接层失败必须变成中文：`fetch failed` 的真正原因（ECONNREFUSED）在 error.cause 里，
+//   直接透传 error.message 就是把英文递给用户。判据与主进程 `ipc/handlers.ts` 同一口径。
+import { describeClientError } from '../api/student-facing'
 
 export const PHASE_TEXT: Record<SidecarPhase, string> = {
   idle: '等待启动',
@@ -52,7 +55,7 @@ export const useSidecarStore = defineStore('sidecar', () => {
         state.value = info
       })
       .catch((error: unknown) => {
-        loadError.value = `读取本地数据服务状态失败：${describeError(error)}`
+        loadError.value = `读取本地数据服务状态失败：${describeClientError(error)}`
       })
   }
 
@@ -63,7 +66,3 @@ export const useSidecarStore = defineStore('sidecar', () => {
 
   return { state, loadError, phase, phaseText, errorText, connect, disconnect }
 })
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}

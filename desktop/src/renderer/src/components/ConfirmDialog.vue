@@ -16,8 +16,9 @@
  *   if (await dlg.ask({ title: '...', body: '...', danger: true })) { ...真正执行... }
  * 全局只挂一个实例（App.vue），避免每个页面各写一套。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useEscape } from '@/composables/useEscape'
+import { useFocusReturn } from '@/composables/useFocusReturn'
 import { TriangleAlert, HelpCircle } from 'lucide-vue-next'
 
 const props = withDefaults(
@@ -45,6 +46,22 @@ const confirmLabel = computed(() => props.confirmText || (props.danger ? '确认
 
 /** Esc 关闭：模态必须有键盘出口，否则键盘用户被卡在里面。 */
 useEscape(() => emit('cancel'), () => props.open)
+
+/**
+ * 焦点契约（打开移入 → Tab 层内循环 → 关闭归还触发元素）。
+ *
+ * ★ 文件头那句「危险操作的确认按钮用 danger 色，且默认聚焦在**取消**上」
+ *   此前**只有前半句有代码**：没有 `useFocusReturn`、没有初始 `focus()`、
+ *   也没有 `tabindex` —— 于是对话框一开，焦点还停在背后的页面上，
+ *   一路按回车就是「连点两下确认」（配合 Esc 之外的键盘操作尤其危险）。
+ * ★ 初焦点显式给**取消键**而不是「第一个可聚焦元素」：
+ *   这里第一个恰好在 DOM 里就是取消键，但那属于**巧合**（改一行模板顺序就变了），
+ *   而「危险操作默认落在取消」是本组件的安全契约，必须写死。
+ */
+const panelRef = ref<HTMLElement | null>(null)
+useFocusReturn(panelRef, () => props.open, {
+  initial: () => panelRef.value?.querySelector<HTMLElement>('.cd__btn--cancel') ?? null
+})
 </script>
 
 <template>
@@ -52,6 +69,7 @@ useEscape(() => emit('cancel'), () => props.open)
     <Transition name="cd-fade">
       <div
         v-if="open"
+        ref="panelRef"
         class="cd"
         role="dialog"
         aria-modal="true"
@@ -69,7 +87,9 @@ useEscape(() => emit('cancel'), () => props.open)
           <p v-if="body" class="cd__body">{{ body }}</p>
 
           <div class="cd__foot">
-            <button type="button" class="cd__btn" @click="emit('cancel')">{{ cancelText }}</button>
+            <button type="button" class="cd__btn cd__btn--cancel" @click="emit('cancel')">
+              {{ cancelText }}
+            </button>
             <button
               type="button"
               class="cd__btn cd__btn--primary"

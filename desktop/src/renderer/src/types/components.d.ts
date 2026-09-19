@@ -51,6 +51,7 @@ declare module 'vue' {
     ProgressBar: typeof import('./../components/ProgressBar.vue')['default']
     ProgressCard: typeof import('./../cards/ProgressCard.vue')['default']
     QuizCard: typeof import('./../cards/QuizCard.vue')['default']
+    SessionList: typeof import('./../components/SessionList.vue')['default']
     SidecarBadge: typeof import('./../components/SidecarBadge.vue')['default']
     SourceChips: typeof import('./../components/SourceChips.vue')['default']
     SurfacePanel: typeof import('./../components/SurfacePanel.vue')['default']

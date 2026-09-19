@@ -82,6 +82,16 @@ export interface SessionSummaryShape {
   modifiedAt: number
   createdAt: number
   preview: string
+  /**
+   * ★★ 从哪条会话分出来的（`null` = 独立会话，不是分支）。
+   *
+   * 它是**分支关系**（Pi 在新会话文件头里记的 `parentSession`）——
+   * 侧栏据此把分支显示成「来自〈父会话标题〉」，学生一眼能认出
+   * 「这是我刚才重新问过的那条」。
+   */
+  parentId?: string | null
+  /** 父会话的标题（父不在本列表里时为 `null`；仅用于展示）。 */
+  parentTitle?: string | null
 }
 
 export interface SessionTranscriptShape {

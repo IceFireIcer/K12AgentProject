@@ -17,6 +17,10 @@
 6. ★ **2026-09-17 修复回归**（见 ``architecture/review-2026-09-17.md`` 的 D1/D2/D3/D8）：
    课堂用语不再产生下调信号、概念提问不误判成推导档、冷却期不被跨会话拉长、
    ``DECISION_ORDER`` 与实现顺序一致。
+7. ★ **2026-09-19 修复回归**（见 ``architecture/review-2026-09-19.md`` 的 H-1 / M-10）：
+   冷却锚点 ``(turn, source)`` 必须来自 ``grade_history`` 的**同一行**
+   （``test_h1_*``）、**每一轮至少留一行读数**，使「连续 3 轮同向」真的是连续
+   （``test_m10_*``）。
 
 跑法::
 
@@ -47,14 +51,18 @@ from app.grade.rules import (  # noqa: E402
     DEGRADED_NO_LLM,
     LAYER2_FIRST_TURN,
     LAYER2_RETRY_TURN,
+    MANUAL_COOLDOWN_TURNS,
     MAX_STEP_LEVELS,
+    NO_EVIDENCE_RAW,
     REASON_AT_BOUNDARY,
     REASON_CHANGED,
     REASON_COOLDOWN,
     REASON_LLM_CONFLICT,
     REASON_LOW_CONFIDENCE,
     REASON_NO_DIRECTION,
+    RECENT_SIGNAL_ROWS,
     SIGNALS_REQUIRED_FOR_CHANGE,
+    SOURCE_EXPLICIT,
     SOURCE_INFERRED,
     GradeEngine,
     GradeProposal,
@@ -66,6 +74,7 @@ from app.grade import rules as rules_module  # noqa: E402
 from app.grade.signals import (  # noqa: E402
     DEFAULT_QUESTION_LEVEL,
     MIN_QUESTION_CONTENT_CHARS,
+    SIGNAL_TYPES,
     QuizPerformance,
     classify_depth,
     consecutive_same_direction,
@@ -389,13 +398,13 @@ class TestDecisionRules(unittest.TestCase):
 
         for turn in (4, 5, 6, 7):
             blocked = decide(
-                current_level="primary_low", turn=turn, verdicts=self.up, last_change_turn=3
+                current_level="primary_low", turn=turn, verdicts=self.up, anchor_turn=3
             )
             self.assertFalse(blocked.changed, f"第 {turn} 轮（冷却期内）不该改")
             self.assertEqual(blocked.reason, REASON_COOLDOWN)
             self.assertGreater(blocked.cooldown_remaining, 0)
 
-        allowed = decide(current_level="primary_low", turn=8, verdicts=self.up, last_change_turn=3)
+        allowed = decide(current_level="primary_low", turn=8, verdicts=self.up, anchor_turn=3)
         self.assertTrue(allowed.changed, "第 8 轮刚好满 5 轮冷却，应当放行")
         self.assertEqual(allowed.cooldown_remaining, COOLDOWN_TURNS, "第 8 轮的这次调整又开启 5 轮冷却")
 
@@ -417,7 +426,7 @@ class TestDecisionRules(unittest.TestCase):
 
     # ------------------------------------------------------------------ D1 --
     def test_d1_cooldown_never_exceeds_the_designed_window(self) -> None:
-        """★ D1 回归：``turn`` 小于 ``last_change_turn`` 时冷却**不得超过** ``COOLDOWN_TURNS``。
+        """★ D1 回归：``turn`` 小于锚点轮次时冷却**不得超过** ``COOLDOWN_TURNS``。
 
         修复前：``elapsed = 1 - 8 = -7`` → ``remaining = 5 - (-7) = 12``，
         冷却期从设计的 5 轮被**跨会话拉长**到 12 轮（轮次号是每会话计数器，
@@ -428,7 +437,7 @@ class TestDecisionRules(unittest.TestCase):
                 current_level="primary_low",
                 turn=turn,
                 verdicts=self.up,
-                last_change_turn=8,
+                anchor_turn=8,
             ).cooldown_remaining
             with self.subTest(turn=turn):
                 self.assertLessEqual(remaining, COOLDOWN_TURNS)
@@ -438,14 +447,63 @@ class TestDecisionRules(unittest.TestCase):
         """钳位不改变正常方向：改在 8，第 9..12 轮仍在冷却、第 13 轮放行。"""
         for turn in (9, 12):
             blocked = decide(
-                current_level="primary_low", turn=turn, verdicts=self.up, last_change_turn=8
+                current_level="primary_low", turn=turn, verdicts=self.up, anchor_turn=8
             )
             self.assertEqual(blocked.reason, REASON_COOLDOWN, f"第 {turn} 轮")
             self.assertGreater(blocked.cooldown_remaining, 0)
         allowed = decide(
-            current_level="primary_low", turn=13, verdicts=self.up, last_change_turn=8
+            current_level="primary_low", turn=13, verdicts=self.up, anchor_turn=8
         )
         self.assertTrue(allowed.changed, "第 8 + 5 = 13 轮刚好满冷却")
+
+    def test_h1_manual_window_reads_the_anchor_source_and_turn_from_one_row(self) -> None:
+        """★ H-1（纯函数层）：窗口长度取自 ``anchor_source``、已过轮次取自 ``anchor_turn``。
+
+        学生**显式确认当前学段**（``from_level == to_level`` 的 explicit 行）不改变学段，
+        但它是冷却锚点：确认发生在第 12 轮 → 第 12..21 轮一律被冷却挡住、第 22 轮放行。
+        修复前 ``observe_turn`` 把 ``turn`` 换成「上一次**真变更**的轮次」（第 3 轮）、
+        ``source`` 却仍取「最近一次写入」（explicit）→ 第 12 轮就只剩 1 轮冷却，
+        两个出口（``GET /grade/state`` 与 ``POST /grade/turns``）报出互相矛盾的数。
+        """
+        for turn in (12, 13, 21):
+            blocked = decide(
+                current_level="primary_low",
+                turn=turn,
+                verdicts=self.up,
+                anchor_turn=12,
+                anchor_source=SOURCE_EXPLICIT,
+            )
+            with self.subTest(turn=turn):
+                self.assertEqual(blocked.reason, REASON_COOLDOWN, f"第 {turn} 轮仍在手动冷却内")
+                self.assertGreater(blocked.cooldown_remaining, 0)
+        self.assertEqual(
+            decide(
+                current_level="primary_low", turn=12, verdicts=self.up, anchor_turn=12,
+                anchor_source=SOURCE_EXPLICIT,
+            ).cooldown_remaining,
+            MANUAL_COOLDOWN_TURNS,
+            "确认的那一刻报一个完整的手动窗口（10 轮）",
+        )
+        released = decide(
+            current_level="primary_low", turn=22, verdicts=self.up, anchor_turn=12,
+            anchor_source=SOURCE_EXPLICIT,
+        )
+        self.assertTrue(released.changed, "第 12 + 10 = 22 轮刚好满冷却 → 自动推断重新接管")
+        self.assertEqual(released.cooldown_remaining, COOLDOWN_TURNS, "放行后的这次改动是**自动**窗口")
+
+        # 反向对照（P-053）：**同一个锚点轮次**，来源换成 inferred → 窗口只有 5 轮，
+        # 第 17 轮（12 + 5）就放行，而第 13 轮仍在冷却。窗口长度确实来自 source，
+        # 不是「一律 10 轮」也不是「一律 5 轮」——否则上面那条断言照不出问题。
+        blocked_auto = decide(
+            current_level="primary_low", turn=13, verdicts=self.up, anchor_turn=12,
+            anchor_source=SOURCE_INFERRED,
+        )
+        self.assertEqual(blocked_auto.reason, REASON_COOLDOWN, "自动窗口下第 13 轮仍在冷却")
+        released_auto = decide(
+            current_level="primary_low", turn=17, verdicts=self.up, anchor_turn=12,
+            anchor_source=SOURCE_INFERRED,
+        )
+        self.assertTrue(released_auto.changed, "自动窗口 5 轮：第 12 + 5 = 17 轮放行")
 
     # ------------------------------------------------------------------ D8 --
     def test_d8_decision_order_matches_the_implementation(self) -> None:
@@ -542,7 +600,7 @@ class TestDecisionRules(unittest.TestCase):
     def test_low_confidence_is_reported_before_cooldown(self) -> None:
         """判定顺序冻结：置信度不足 + 冷却期未过 → 报 ``low_confidence``。"""
         weak = [TurnVerdict(turn=n, direction=-1, strength=0.2) for n in (1, 2, 3)]
-        decision = decide(current_level="primary_high", turn=4, verdicts=weak, last_change_turn=3)
+        decision = decide(current_level="primary_high", turn=4, verdicts=weak, anchor_turn=3)
         self.assertEqual(decision.reason, REASON_LOW_CONFIDENCE)
 
 
@@ -631,6 +689,108 @@ class TestEnginePersistence(GradeEngineCase):
         kinds = {row["signal_type"] for row in rows}
         self.assertIn("vocab", kinds)
         self.assertNotIn("meta_cognition", kinds, "童言 1 里没有元认知表达，就不写这一路")
+
+    # ------------------------------------------------------------------ M-10 --
+    def test_m10_a_turn_without_evidence_still_leaves_exactly_one_neutral_reading(self) -> None:
+        """★ M-10：四路全空的轮次也要留一行**中性读数**（否则这一轮在库里不存在）。
+
+        第 1 轮童言（有证据）之后再来一轮「今天天气不错」（四路都没有命中）：
+        断言它恰好留一行、值恒为 0、``raw`` 是那句可读的说明（不是学生原话），
+        并且 :meth:`GradeEngine.verdicts` 读出来的这一轮方向是 0、强度是 0 ——
+        即「这一轮来过，但它是中性轮」。
+        """
+        self.engine.observe_turn(student_id=self.student_id, turn=1, text=CHILD_TURN_1, session_id="s")
+        before = len(self.rows("SELECT id FROM grade_signals"))
+        self.engine.observe_turn(
+            student_id=self.student_id, turn=2, text="今天天气不错", session_id="s"
+        )
+        rows = self.rows("SELECT signal_type, value, raw FROM grade_signals ORDER BY id")
+        added = rows[before:]
+        self.assertEqual(len(added), 1, "全无证据的轮次也要留**恰好一行**读数")
+        self.assertEqual(added[0]["value"], 0.0, "占位读数的值恒为 0（不贡献方向也不贡献强度）")
+        self.assertEqual(str(added[0]["raw"]), f"t2|{NO_EVIDENCE_RAW}", "raw 是轮次锚点 + 可读说明")
+        self.assertNotIn("天气", str(added[0]["raw"]), "raw 里绝不放学生原话（合规）")
+
+        verdicts = {verdict.turn: verdict for verdict in self.engine.verdicts()}
+        self.assertIn(2, verdicts, "这一轮必须能被还原出来（否则连续计数会跨过去）")
+        self.assertEqual(verdicts[2].direction, 0, "没有证据的轮次方向为 0")
+        self.assertEqual(verdicts[2].strength, 0.0, "占位读数也不贡献任何强度")
+
+    def test_m10_gap_turns_break_the_streak_instead_of_being_skipped(self) -> None:
+        """★★ M-10 主断言：**三次隔着空白的同向证据**不许累成「连续 3 轮」。
+
+        修复前：第 2..8 轮的「今天天气不错」四路全空 → 一行都不写 → 那一轮在
+        ``grade_signals`` 里**不存在** → 第 1、9、10 轮的三条同向证据被当成连续三轮，
+        学段当场被推走（实测就是这么发生的：中间隔了一周、还跨了会话）。
+
+        修复后：第 2..8 轮各留一行中性读数 → 第 9 轮读到的连续只有 1、第 10 轮是 2，
+        第 11 轮才够 3。★ 对照组是**同一批句子**在连续三轮里（第 11..13 轮）照样能改 —
+        证明证据本身够格，是「空白轮不留痕」这一条在改结果。
+        """
+        self.engine.observe_turn(student_id=self.student_id, turn=1, text=CHILD_TURN_1, session_id="s")
+        for turn in range(2, 9):
+            decision = self.engine.observe_turn(
+                student_id=self.student_id, turn=turn, text="今天天气不错", session_id="s"
+            )
+            self.assertEqual(decision.decision.streak, 0, f"第 {turn} 轮是中性轮，连续必须断在这里")
+            self.assertEqual(decision.decision.reason, REASON_NO_DIRECTION)
+
+        # 第 9、10 轮：真正的连续只有 1、2 轮 —— 不够 3，学段纹丝不动
+        reseed = [CHILD_TURN_2, CHILD_TURN_3]
+        for offset, text in enumerate(reseed):
+            turn = 9 + offset
+            decision = self.engine.observe_turn(
+                student_id=self.student_id, turn=turn, text=text, session_id="s"
+            )
+            self.assertFalse(decision.changed, f"第 {turn} 轮：连续只有 {offset + 1} 轮，不该改")
+            self.assertEqual(decision.decision.streak, offset + 1, "空白轮打断了连续，只能从 1 重新数")
+        self.assertEqual(
+            self.engine.current_level(self.student_id),
+            "primary_high",
+            "★ 第 1/9/10 轮的三条同向证据**不许**被当成「连续 3 轮」（修复前这里已经是 primary_low）",
+        )
+
+        # 对照组：再补第 11 轮（连续 3 轮）→ 立刻放行。同一批句子，差别只在有没有空白轮
+        final = self.engine.observe_turn(
+            student_id=self.student_id, turn=11, text=CHILD_TURN_1, session_id="s"
+        )
+        self.assertTrue(final.changed, "对照组：真正的连续 3 轮照样能改（证据本身是够格的）")
+        self.assertEqual(final.decision.streak, SIGNALS_REQUIRED_FOR_CHANGE)
+        self.assertEqual(self.engine.current_level(self.student_id), "primary_low")
+
+    def test_m10_the_recent_signal_window_still_covers_the_decision_horizon(self) -> None:
+        """M-10 的副作用检查：每轮多写一行**不许**把判定需要的轮次挤出读取窗口。
+
+        最坏情况是一轮写满四路读数（4 行），所以窗口至少要容得下
+        「手动冷却（10 轮）+ 连续窗口（3 轮）」这么多轮。
+        """
+        worst_case_per_turn = len(SIGNAL_TYPES)
+        horizon = MANUAL_COOLDOWN_TURNS + SIGNALS_REQUIRED_FOR_CHANGE
+        self.assertGreaterEqual(
+            RECENT_SIGNAL_ROWS,
+            worst_case_per_turn * horizon,
+            f"{RECENT_SIGNAL_ROWS} 行不够覆盖 {horizon} 轮 × 每轮最多 {worst_case_per_turn} 行",
+        )
+
+    def test_m10_placeholder_rows_stay_out_of_the_evidence_list(self) -> None:
+        """★ M-10 的展示侧对照：占位读数是**轮次账本**，不许冒充「证据」出现在界面上。
+
+        它要是跟着 ``recent_signals()`` 回传，界面与学习报告上会冒出
+        「词汇复杂度 · 本轮无证据」这种卡片，还会把真证据挤出那个 20 条的列表 ——
+        而「无证据轮」正是 D2 之后的常态（课堂用语不许产生信号），几句「继续吧」就能刷空。
+        """
+        self.engine.observe_turn(student_id=self.student_id, turn=1, text=CHILD_TURN_1, session_id="s")
+        for turn in (2, 3, 4):
+            self.engine.observe_turn(
+                student_id=self.student_id, turn=turn, text="我们继续吧", session_id="s"
+            )
+        # 库里有 4 轮的行（第 2..4 轮是占位读数），但回传的证据只有第 1 轮那两路
+        all_rows = self.rows("SELECT raw FROM grade_signals")
+        self.assertGreaterEqual(len(all_rows), 4, "第 2..4 轮各留了一行占位读数")
+        signals = self.engine.recent_signals()
+        self.assertTrue(signals, "第 1 轮的真证据照常回传")
+        for signal in signals:
+            self.assertNotIn(NO_EVIDENCE_RAW, str(signal.raw), "占位读数不得出现在证据列表里")
 
     def test_students_sentence_never_reaches_the_database_file(self) -> None:
         """★ 合规：原话经 HTTP 传进来，但 SQLite 里**一个字都不能留**。"""

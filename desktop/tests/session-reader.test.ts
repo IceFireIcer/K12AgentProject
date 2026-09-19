@@ -13,9 +13,14 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
 import type { SessionInfo } from '@earendil-works/pi-coding-agent'
+
+const desktopRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 import {
   MAX_TRANSCRIPT_MESSAGES,
@@ -64,6 +69,54 @@ test('★ 白名单对齐：命中的那条带回的是**Pi 给的 path**（不�
   const infos = [info({ id: 'sess-a', path: 'C:/real/sessions/sess-a.jsonl' })]
   const found = findSessionById(infos, 'sess-a')
   assert.equal(found?.path, 'C:/real/sessions/sess-a.jsonl')
+})
+
+/**
+ * ★★ 负向对照：递进来一条**真实存在的、别人的**会话文件路径 —— 必须被拒。
+ *
+ * 为什么这条比上面那条更值得单独写：上面递的是 `'../../config.json'` 这类
+ * **一看就不像 id** 的东西，任何实现都能挡住；真正危险的是**一条合法、存在、但属于
+ * 别的学生的路径**（渲染进程从别处拿到 `students/student_002/.../x.jsonl` 再递进来）——
+ * 那种输入在「看起来对不对」这一层毫无破绽，只能靠**白名单对齐**挡住。
+ *
+ * 所以这里同时钉住两道防线（`handlers.ts` 的 `session:transcript` 与
+ * `sessions.ts` 的 `readStudentSessionEntries` 各是一道）：
+ *   ① 按 id 白名单查（`findSessionById`）—— 路径**永远**匹配不上一个 id；
+ *   ② 路径包含判定（`isInside`）—— 即便有人绕过第一道把 `info` 直接塞给读取函数，
+ *      第二道也会因为「不在本学生会话目录内」而拒绝。
+ */
+test('★★ 负向对照：别的学生的真实会话路径被两道防线各自拒绝', async () => {
+  const { isInside, resolveStudentPiPaths } = await import('../src/main/agent/pi-paths.ts')
+
+  const userDataDir = 'C:/tmp/k12-test-userdata'
+  const mine = resolveStudentPiPaths(userDataDir, 'student_001')
+  const other = resolveStudentPiPaths(userDataDir, 'student_002')
+
+  // 一条**真实存在**的别人会话：路径形态完全合法，不是 `../../` 那种一眼可辨的穿越
+  const otherStudentFile = `${other.sessionDir}/--C--k12--/2026-09-17T01-00-00.jsonl`.replace(/\\/g, '/')
+  const myOwnFile = `${mine.sessionDir}/--C--k12--/2026-09-17T01-00-00.jsonl`.replace(/\\/g, '/')
+
+  // 白名单里只有**我自己**那条（`loadSessions()` 只会列当前学生的会话）
+  const infos = [info({ id: 'my-session', path: myOwnFile })]
+
+  // ① 第一道：拿别人的路径当 id 递进来 → 查不到（handlers 随即返回「找不到会话」）
+  assert.equal(
+    findSessionById(infos, otherStudentFile),
+    null,
+    '别人的会话路径不得被当成 id 命中 —— 一旦命中，渲染进程就等于能读任意会话文件'
+  )
+  // 反向对照：**连自己的路径也不行**（约束是「只接受 id」，不是「只接受安全的路径」）
+  assert.equal(findSessionById(infos, myOwnFile), null, '自己的路径同样不是 id，也不该命中')
+  assert.ok(findSessionById(infos, 'my-session'), '而真正的 id 必须能命中（否则上面的断言可能是「什么都没找到」）')
+
+  // ② 第二道：绕过第一道也不放行 —— 别人的路径不在我的会话目录内
+  assert.equal(
+    isInside(mine.sessionDir, otherStudentFile),
+    false,
+    '★ 别人的会话文件必须落在「我的会话目录」之外（第二道防线就靠这条包含判定）'
+  )
+  // 反向对照：我自己的路径确实在目录内 —— 证明上面的 false 不是因为判定写得过严
+  assert.equal(isInside(mine.sessionDir, myOwnFile), true, '自己的会话路径应当在目录内')
 })
 
 // ── 会话列表投影 ───────────────────────────────────────────────────────
@@ -253,4 +306,46 @@ test('搜索：命中在开头 / 结尾时不加多余的省略号', () => {
   assert.equal(hits[0].snippet.startsWith('…'), false)
   const tail = searchSessions([info({ id: 'a', allMessagesText: '结尾有关键词' })], '关键词')
   assert.equal(tail[0].snippet.endsWith('…'), false)
+})
+
+/* ------------------------------------------------------------------ *
+ * ★★ cwd 一致性：建会话与列会话必须用**同一个** cwd
+ * ------------------------------------------------------------------ */
+
+test('★★ 「列出历史会话」与「建会话」必须用同一个 cwd（写错就是列表恒为空）', () => {
+  // 缺陷形态（实测踩到，见 `pi-paths.ts` 的 `piSessionCwd` 注释与 P-102）：
+  //   Pi 的 `SessionManager.list(cwd, sessionDir)` 在**传了自定义 sessionDir** 时
+  //   会**额外按 cwd 过滤**（源码：`filterCwd` + `sessionCwdMatches`）。
+  //   于是「建会话用 A、列会话用 B」的结果是**列表恒为空** ——
+  //   不报错、不告警、文件全在盘上，只是历史会话一条都看不见。
+  //   实测：建会话用 `<studentDir>/pi-agent`，列表却用 `<studentDir>` ⇒ 0 条
+  //   （而同一目录下实际有 19 个会话文件）。
+  //
+  // 这项判据只有真跑一次 Pi 才测得出来（喂假对象测不到），所以这里做**源码级**断言：
+  // 两处必须都经由 `piSessionCwd()` 取 cwd —— 任何一处写回字面量就是漂移的起点。
+  const runtime = readFileSync(
+    join(desktopRoot, 'src', 'main', 'agent', 'runtime.ts'),
+    'utf8'
+  )
+  const sessions = readFileSync(
+    join(desktopRoot, 'src', 'main', 'study', 'sessions.ts'),
+    'utf8'
+  )
+
+  assert.match(
+    runtime,
+    /piSessionCwd\(paths\)/,
+    '★ 建会话（runtime.ts 的 openSessionManager）必须用 piSessionCwd(paths) 取 cwd'
+  )
+  assert.match(
+    sessions,
+    /SessionManager\.list\(piSessionCwd\(paths\),\s*paths\.sessionDir\)/,
+    '★★ 列出会话必须用**同一个** piSessionCwd(paths)：用别的值会让列表恒为空'
+  )
+  // 反向对照：不许再出现「用 studentDir 当 list 的 cwd」那种写法
+  assert.doesNotMatch(
+    sessions,
+    /SessionManager\.list\(paths\.studentDir/,
+    '★ 不许用 paths.studentDir 当 list 的 cwd —— 那与会话文件里记的 cwd 不一致（列表恒为空）'
+  )
 })

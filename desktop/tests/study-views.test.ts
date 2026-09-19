@@ -13,10 +13,13 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
+import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+
+const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * ★ 与 `renderer-quiz.test.ts` 同一个手法：渲染进程的模块只按 Vite 的口味写相对导入
@@ -165,20 +168,107 @@ test('布局：mastered 标记被原样带到输出（界面据此上色）', ()
 })
 
 test('边的路径是直角折线（起点竖 → 横 → 终点竖），且不穿过节点矩形', () => {
-  const layout = layoutGraph([node('a', 0), node('b', 1, { chapterTitle: '第2章' })], [
-    { fromKpId: 'a', toKpId: 'b' }
-  ])
+  /*
+   * ⚠️ 起点与终点**必须落在不同的 x 上**，否则「竖 → 横 → 竖」这个形状根本区分不出来：
+   *    第一版这里只放了每层各一个节点（都被居中），于是 x1 === x2，
+   *    连「把第一段画成斜线」这种改动都测不出来（变异验证时当场发现）。
+   *    现在第 0 层 1 个、第 1 层 2 个 —— 窄层居中，两端 x 天然不同。
+   */
+  const layout = layoutGraph(
+    [node('a', 0), node('b', 1, { chapterTitle: '第2章' }), node('c', 1, { chapterTitle: '第2章' })],
+    [{ fromKpId: 'a', toKpId: 'b' }]
+  )
   const path = edgePath(layout.edges[0])
   // 四个点：起点 → 中点 → 中点 → 终点
   const numbers = path.match(/-?\d+(\.\d+)?/g)!.map(Number)
   assert.equal(numbers.length, 8, `路径应当有 4 个坐标点：${path}`)
-  const [x1, y1, , midY1, x2, midY2, , y2] = numbers
-  assert.equal(x1, x2 === numbers[4] ? x1 : x1, '路径第一段是竖直的')
-  assert.equal(midY1, midY2, '中间两个拐点同一水平线')
+  const [x1, y1, x1b, midY1, x2, midY2, x2b, y2] = numbers
+  /*
+   * ★★ 这里原来写的是 `assert.equal(x1, x2 === numbers[4] ? x1 : x1)` ——
+   *   「第一段是竖直的」这句话**从来没被真的验证过**：那个三元的两个分支都是 `x1`，
+   *   而 `x2` 本身就是 `numbers[4]` 解构来的，所以条件恒真、断言退化成 `assert.equal(x1, x1)`。
+   *   （变异验证：把两个分支改成任意别的值，它照样通过。）
+   *
+   * 真正要断的是「起点与**第一个拐点**同 x」（竖直段），以及对称的另一头。
+   * 路径形态是 `M x1 y1 L x1 midY L x2 midY L x2 y2`，所以：
+   *   numbers = [x1, y1, x1, midY, x2, midY, x2, y2]
+   *                ↑0  ↑1  ↑2         ↑4  ↑5  ↑6  ↑7
+   * 竖直：0 与 2 同 x（第一段）、4 与 6 同 x（最后一段）；水平：3 与 5 同 y（中间那段）。
+   */
+  assert.notEqual(x1, x2, '两端的 x 必须不同，否则这个形状断言没有判别力（见上面的注释）')
+  assert.equal(x1, x1b, '路径第一段是竖直的（起点与第一个拐点同 x）')
+  assert.equal(midY1, midY2, '中间两个拐点同一水平线（中段是水平的）')
+  assert.equal(x2, x2b, '路径最后一段是竖直的（第二个拐点与终点同 x）')
   assert.ok(y1 < midY1, '拐点在起点下方')
   assert.ok(midY2 < y2, '第二段拐点在终点上方')
   assert.ok(path.startsWith('M '), '路径以 moveto 开头')
   assert.equal(path.includes('C'), false, '不用贝塞尔曲线（保证任意缩放下观感一致）')
+})
+
+/**
+ * ★ 上面那条测试的标题写了「且不穿过节点矩形」，但**正文从来没有断言过它** —— 补上。
+ *
+ * 补的时候先搞清楚了实现**到底**保证什么（这比抄一句标题重要）：
+ *
+ *   ✅ **相邻层的边**不穿过任何节点矩形 —— 这才是实现真正保证的性质，也是本测试钉的。
+ *      原因很直接：`midY` 正好落在两行之间的空隙里（`y1` 是源节点下边缘、`y2` 是目标上边缘，
+ *      `midY` 取两者中点），而那一整段 y 区间里没有任何节点矩形。
+ *
+ *   ⚠️ **跨层的边**（layer 0 → layer 2）会压住中间层的节点：实测
+ *      `midY=170` 正落在中间节点 `b` 的矩形 `y=[150,190]` 里。
+ *      这是**已知且被接受的取舍** —— `layout.ts` 文件头明写「不做边的路由优化（不要曲线、不要避让）」，
+ *      本测试**不**断言它不穿过（那会把一个有意决策判成失败）。
+ *      它没有在这里被修，只是被如实记录：真实数据里存在跨层边时，图上会出现
+ *      「一条横线从某个节点矩形中间穿过」的观感（不是渲染错误，是布线策略的代价）。
+ *      → 已写进本轮审计报告，交给收口的人决定要不要动布局。
+ */
+test('★ 相邻层的边不穿过任何节点矩形（实现真正保证的性质；跨层边不在保证范围内）', () => {
+  // 第 0 层 2 个、第 1 层 3 个 —— 列不齐，横段要横跨一段真实距离
+  const layout = layoutGraph(
+    [
+      node('a', 0),
+      node('b', 0, { chapterTitle: '第2章' }),
+      node('c', 1, { chapterTitle: '第2章' }),
+      node('d', 1, { chapterTitle: '第2章' }),
+      node('e', 1, { chapterTitle: '第2章' })
+    ],
+    [
+      { fromKpId: 'a', toKpId: 'd' },
+      { fromKpId: 'b', toKpId: 'c' },
+      { fromKpId: 'b', toKpId: 'e' }
+    ]
+  )
+  const rects = layout.nodes.map((item) => ({ kpId: item.kpId, ...nodeRect(item) }))
+
+  /** 两个轴对齐矩形是否相交（含边界相切：相切也算「压住」）。 */
+  const hits = (r: { x: number; y: number; width: number; height: number }, x: number, y: number): boolean =>
+    x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height
+
+  assert.equal(layout.edges.length, 3, '三条边都应当画出来（两端节点都在）')
+  for (const edge of layout.edges) {
+    const midY = (edge.y1 + edge.y2) / 2
+    // 直角折线的四段用「有限个采样点」判定：三点足够（两端 + 中点），
+    // 因为每一段都是轴对齐的直线段，端点在内就等价于整段在内。
+    const samples: Array<[number, number]> = [
+      [edge.x1, edge.y1],
+      [edge.x1, midY],
+      [edge.x2, midY],
+      [edge.x2, edge.y2]
+    ]
+    for (const { kpId, ...rect } of rects) {
+      // 边与它自己的两个端点节点是**贴着**的（起止于矩形边缘），那是设计如此，跳过
+      if (kpId === edge.fromKpId || kpId === edge.toKpId) continue
+      for (const [x, y] of samples) {
+        assert.equal(
+          hits(rect, x, y),
+          false,
+          `边 ${edge.fromKpId}→${edge.toKpId} 的路径压住了节点 ${kpId} 的矩形` +
+            `（采样点 ${x.toFixed(1)}, ${y.toFixed(1)}；矩形 ${rect.x.toFixed(1)},${rect.y.toFixed(1)} ` +
+            `${rect.width}×${rect.height}）—— 直角折线应当走在层间空隙里`
+        )
+      }
+    }
+  }
 })
 
 test('节点标签：超过上限按**字符**截断（不把汉字切半个）', () => {
@@ -202,6 +292,127 @@ test('节点矩形：由中心点换算左上角，尺寸来自布局常量', ()
   assert.equal(rect.height, LAYOUT.nodeHeight)
   assert.equal(rect.x + rect.width / 2, 100)
   assert.equal(rect.y + rect.height / 2, 50)
+})
+
+/* ------------------------------------------------------------------ *
+ * ★ 画布是「固定像素 + 容器滚动」，不是「等比缩到装得下」
+ * ------------------------------------------------------------------ */
+
+/** 132×40 的节点在 1120 窗口下会被缩到多少（13px 的字会变成多少 px）。 */
+const SHELL_SIDEBAR_W = 264
+const SHELL_CONTENT_PADDING = 48
+const NARROW_WINDOW_W = 1120
+const NODE_LABEL_FONT_PX = 13
+
+/**
+ * 造一张**与真实数据同形**的图：每个学段 57 个知识点，最宽一层 10 个。
+ *
+ * ⚠️ 用合成数据而不是去读 `kb.sqlite`：布局是纯函数，单测不该依赖本地库
+ *   （干净克隆里 `_data/` 不存在）。层数与宽度按真实形状摆好，
+ *   算出来的画布尺寸才和真机一致。
+ */
+function juniorShapedGraph(): {
+  nodes: Array<ReturnType<typeof node>>
+  edges: Array<{ fromKpId: string; toKpId: string }>
+} {
+  const nodes: Array<ReturnType<typeof node>> = []
+  // 13 层：第 0 层放 10 个（最宽），其余 47 个摊到后面 12 层
+  const layers = 13
+  let index = 0
+  for (let layer = 0; layer < layers; layer += 1) {
+    const count = layer === 0 ? 10 : Math.ceil(47 / (layers - 1))
+    for (let column = 0; column < count && index < 57; column += 1) {
+      nodes.push(node(`kp-${String(index).padStart(2, '0')}`, layer))
+      index += 1
+    }
+  }
+  // 78 条边：每条都从上一层连到下一层（保证「箭头向下」这条性质也一起成立）
+  const edges: Array<{ fromKpId: string; toKpId: string }> = []
+  for (let layer = 1; layer < layers; layer += 1) {
+    const prev = nodes.filter((n) => n.layer === layer - 1)
+    const curr = nodes.filter((n) => n.layer === layer)
+    for (let column = 0; column < Math.min(prev.length, curr.length) && edges.length < 78; column += 1) {
+      edges.push({ fromKpId: prev[column].kpId, toKpId: curr[column].kpId })
+    }
+  }
+  return { nodes, edges }
+}
+
+test('★ 画布尺寸是**固定像素**：真实形状（57 点 / 最宽 10）算出来就是 1610 × 1600', () => {
+  const { nodes, edges } = juniorShapedGraph()
+  const layout = layoutGraph(nodes, edges)
+
+  assert.equal(nodes.length, 57, '构造的图应当是 57 个节点（与每个学段的知识点数一致）')
+  assert.equal(layout.nodes.length, 57, '悬空节点不该被丢（只有悬空**边**才丢）')
+  // 10 × 132 + 9 × 26 + 28 × 2 = 1610
+  assert.equal(layout.width, 10 * LAYOUT.nodeWidth + 9 * LAYOUT.columnGap + LAYOUT.paddingX * 2)
+  assert.equal(layout.width, 1610, '这是 junior 那张图的真实画布宽度（改布局常量时请同步这一处）')
+  assert.equal(layout.height, 1600, '13 层 → 1600（与真机一致；数字变了说明密度改了）')
+})
+
+test('★★ 画布宽度超出最窄窗口的内容区 → 必须靠容器滚动，缩到装得下会把 13px 压成 6.5px', () => {
+  const { nodes, edges } = juniorShapedGraph()
+  const layout = layoutGraph(nodes, edges)
+
+  // 1120（窗口下限）− 264（侧栏）− 48（内容 padding）= 808px 可用
+  const available = NARROW_WINDOW_W - SHELL_SIDEBAR_W - SHELL_CONTENT_PADDING
+  assert.equal(available, 808, '可用宽度按 shell 版式算（侧栏 264 / padding 48，见 assets/base.css 的 min-width）')
+
+  const shrinkScale = available / layout.width
+  assert.ok(
+    shrinkScale < 0.6,
+    `「缩到装得下」的比例是 ${shrinkScale.toFixed(2)} —— 这个数必须**小于 0.6** 才说明本测试的前提还成立` +
+      '（若外壳版式变宽了，请重新评估「滚动 vs 缩字」这个取舍，而不是把这条断言调松）'
+  )
+  assert.ok(
+    NODE_LABEL_FONT_PX * shrinkScale < 8,
+    `缩放下节点文字只剩 ${(NODE_LABEL_FONT_PX * shrinkScale).toFixed(1)}px（= 13 × ${shrinkScale.toFixed(2)}）` +
+      ' —— 这就是不能让 SVG 自适应的量化理由'
+  )
+  // 1:1 渲染时字号恒为设计值（`--k12-fs-xs` = 13px）
+  assert.equal(NODE_LABEL_FONT_PX * 1, 13)
+})
+
+/**
+ * ★ 渲染层守卫（源码级）：`.map` 不得把固定像素画布缩回去。
+ *
+ * 为什么用源码断言而不是渲染后量 DOM：`node --test` 里没有浏览器，
+ * 而这条约束**恰恰只存在于 CSS 里** —— 它错了不会让任何逻辑断言变红，
+ * 只会让节点文字在窄窗口下悄悄变成 6.5px（且外层容器永远不出现滚动条）。
+ * 手法与 `ux-queue-and-scroll.test.ts` 一致：读源码，钉住那条不能再犯的写法。
+ */
+test('★ 渲染层守卫：SVG 画布 1:1 渲染（不得 max-width:100% / 100% 宽 / transform: scale）', () => {
+  const source = readFileSync(join(desktopRoot, 'src', 'renderer', 'src', 'study', 'map', 'GraphMap.vue'), 'utf8')
+  // 只看 <style> 段（模板里 `width` 属性是另一回事）
+  const styleBlock = source.slice(source.indexOf('<style'), source.lastIndexOf('</style>'))
+  // ★ 先去掉注释再匹配：`.map` 那段注释**故意举了这些坏写法的例子**（讲清楚为什么不能写），
+  //   不去注释的话守卫会被自己的说明书绊倒 —— 与 build-pipeline.test.ts 同一个手法。
+  const rules = styleBlock.replace(/\/\*[\s\S]*?\*\//g, '')
+  assert.ok(
+    styleBlock.includes('max-width: none'),
+    '`.map` 必须显式 `max-width: none`（对上任何会缩窄它的规则）'
+  )
+
+  const shrinkers = [
+    { pattern: /max-width:\s*100%/, label: 'max-width: 100%' },
+    { pattern: /(?<!max-)width:\s*100%/, label: 'width: 100%' },
+    { pattern: /transform:\s*scale/, label: 'transform: scale(...)' }
+  ]
+  const offenders = shrinkers.filter(({ pattern }) => pattern.test(rules)).map(({ label }) => label)
+
+  // ★ `height: auto` 单独出现是**无害**的（尺寸仍由 width/height 属性决定），
+  //   只有与一条会缩窄宽度的规则同时出现才是「等比缩放」那个写法。
+  //   判据写精确一点：无条件报它会造出假阳性，而假阳性会让人白查一轮（本项目实测过）。
+  const narrowsWidth = /max-width:\s*(?!none)\S|(?<!max-)width:\s*\d+%/.test(rules)
+  if (narrowsWidth && /height:\s*auto/.test(rules)) {
+    offenders.push('宽度受限 + height: auto（等比缩放的组合写法）')
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `GraphMap.vue 的样式里出现 ${offenders.join(' / ')} —— 会让 SVG 等比缩小，` +
+      '窄窗口下把 13px 的节点文字压到 6.5px（见 layout.ts 的 GraphLayout.width 注释）'
+  )
 })
 
 /* ------------------------------------------------------------------ *

@@ -46,9 +46,20 @@ from app.routes.quiz import MASTERY_GAIN_CORRECT, MASTERY_UNLOCK_THRESHOLD  # no
 REAL_KB = Path(ROOT) / "_data" / "shared" / "kb.sqlite"
 
 
+def _gq(qid: str) -> str:
+    """用例里的短名 → 生成题的**真实** qid（幂等：已经带前缀的原样返回）。
+
+    服务端硬校验 ``gen-`` 前缀（见 ``routes/quiz.py`` 的 ``GENERATED_QID_PREFIX``）：
+    不带前缀的 qid 与题库真题同处一个命名空间，而判分**先查生成题** ——
+    撞名等于把那道真题的标准答案静默改写。夹具里仍写短名（读起来清楚），
+    由这里统一补前缀，**发出去的请求是真实形状**。
+    """
+    return qid if qid.startswith("gen-") else f"gen-{qid}"
+
+
 def _variant(qid: str, kp_id: str, *, answer: object = "2", rubric: str | None = None) -> dict:
     body: dict = {
-        "qid": qid,
+        "qid": _gq(qid),
         "kpId": kp_id,
         "type": "blank",
         "stem": f"{kp_id} 的练习题",
@@ -100,7 +111,8 @@ class PersonalizationCase(unittest.TestCase):
             "/api/quiz/grade",
             json={
                 "studentId": self.student,
-                "qid": qid,
+                # 夹具里 qid 既可以写短名、也可以是 `register` 回传的真名 → `_gq` 幂等补前缀
+                "qid": _gq(qid),
                 "answer": value if correct else "完全不沾边的答案",
                 "sessionId": "sess-personal",
             },
@@ -487,7 +499,7 @@ class TestCrossSessionMemory(PersonalizationCase):
         # 另一个学生：自己的库里没有这道生成题（判分 404），推荐也不受第一个学生影响
         response = self.client.post(
             "/api/quiz/grade",
-            json={"studentId": other, "qid": "iso-1", "answer": "2"},
+            json={"studentId": other, "qid": _gq("iso-1"), "answer": "2"},
         )
         self.assertEqual(response.status_code, 404)
         other_profile = self.client.get(f"/api/profile/{other}/recommendation")

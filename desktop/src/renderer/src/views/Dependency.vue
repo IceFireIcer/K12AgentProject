@@ -163,6 +163,21 @@ watch(
   { immediate: true }
 )
 
+/**
+ * 手动重试：再发一次图请求。
+ *
+ * ★ 这一页**必须**有它（实测缺陷）：取数只由上面那个 watch 触发，而它的依赖是
+ *   `chat.currentGrade` —— 学段不变就永远不会再发一次；本页又挂在 `<KeepAlive>` 里、
+ *   也不走 `useOnBackendReady`，切走再切回来组件不重挂 ——
+ *   于是「冷启动头几秒（sidecar 还在起）就点进来」会得到一个**点了也没救**的红框。
+ * ★ 不需要额外的「强制刷新」参数：`study.loadGraph` 每次都真发请求
+ *   （没有「已取到同一学段就短路」那层缓存，那是 `loadChapters` 才有的），
+ *   重调一次就是强制刷新。
+ */
+function retryGraph(): void {
+  void study.loadGraph(chat.currentGrade)
+}
+
 /** 图变了：焦点若已不在图里（换学段 / 首次到位），落到 0 层的第一个入口知识点。 */
 watch(
   nodes,
@@ -373,13 +388,18 @@ function exportCsv() {
     />
 
     <template v-else>
-      <!-- 取数失败（sidecar 没起来 / 端点报错）：一句可读中文，不让画布静默空着。 -->
+      <!-- 取数失败（sidecar 没起来 / 端点报错）：一句可读中文 + **重试**，
+           不让画布静默空着，也不让这一页变成「只能重启应用」的死胡同。
+           按钮文案与 `.disabled` 态与闯关 / 知识库 / 动画三页一致（同一种失败同一套出口）。 -->
       <EmptyState
         v-if="study.errors.graph"
         tone="error"
         title="依赖图没取上来"
         :desc="study.errors.graph"
-      />
+        data-testid="dependency-error"
+      >
+        <el-button :disabled="study.loading.graph" @click="retryGraph()">重试</el-button>
+      </EmptyState>
       <EmptyState v-else-if="study.loading.graph && nodes.length === 0" tone="loading" title="正在读取知识结构…" />
 
       <!-- 服务端没有这一学段的知识点：如实说清"库里还没有"，而不是画一张空图 -->

@@ -54,6 +54,7 @@ from app.routes.quiz import (  # noqa: E402
     is_subjective,
     level_order_from_graph,
     normalize_answer,
+    progress_snapshot,
     subjective_feedback,
     unlocked_successor_ids,
 )
@@ -65,6 +66,19 @@ SENTINEL_RUBRIC = "哨兵评分细则-ZX92-不得出现在任何响应里"
 
 #: 真实知识库（含依赖图）。缺失时依赖图的用例跳过。
 REAL_KB = Path(ROOT) / "_data" / "shared" / "kb.sqlite"
+
+#: 生成题 qid 的标准前缀（与 `extensions/quiz.ts` 的 `variantQid()` 同源；
+#: 服务端的 `GENERATED_QID_PREFIX` 会**硬校验**它 —— 不带前缀的 qid 可能与题库真题同名，
+#: 而判分先查生成题，于是能把那道真题的标准答案静默改写）。
+#: 夹具里仍写短名（`_variant("v-1", ...)`），由 :func:`_variant` 与
+#: :meth:`LoopCase.grade` / :meth:`LoopCase.grade_subjective` 统一补前缀 ——
+#: 用例读起来是短名，**发出去的请求是真实形状**。
+GEN_QID_PREFIX = "gen-"
+
+
+def _gq(qid: str) -> str:
+    """用例里的短名 → 真实 qid（幂等：已经是 ``gen-`` 开头的原样返回）。"""
+    return qid if qid.startswith(GEN_QID_PREFIX) else f"{GEN_QID_PREFIX}{qid}"
 
 
 def _variant(
@@ -78,7 +92,7 @@ def _variant(
     rubric: str | None = None,
 ) -> dict:
     body: dict = {
-        "qid": qid,
+        "qid": _gq(qid),
         "kpId": kp_id,
         "type": qtype,
         "stem": stem,
@@ -127,7 +141,7 @@ class LoopCase(unittest.TestCase):
             "/api/quiz/grade",
             json={
                 "studentId": self.student,
-                "qid": qid,
+                "qid": _gq(qid),
                 "answer": answer,
                 "sessionId": "sess-test",
             },
@@ -138,7 +152,7 @@ class LoopCase(unittest.TestCase):
             "/api/quiz/grade-subjective",
             json={
                 "studentId": self.student,
-                "qid": qid,
+                "qid": _gq(qid),
                 "score": score,
                 "feedback": feedback,
                 "sessionId": "sess-test",
@@ -222,6 +236,40 @@ class TestAnswerNeverLeavesBackend(LoopCase):
         super().setUp()
         self.set_student("student_leak")
 
+    def test_explanation_is_withheld_from_the_question_payload_but_kept_in_feedback(
+        self,
+    ) -> None:
+        """★★ 解析（``explanation``）**取题时不下发、判分后照常给**（H-6 的两半）。
+
+        为什么两半都要断言：修法很容易走成「干脆不要解析了」——
+        那会把解析的教学价值一起丢掉（学生答完正是最该看「为什么」的时刻）。
+        正确形态是**时间差**：答之前看不到（否则等于送答案，43% 的解析里直接写着答案），
+        答之后在 ``QuizResult.feedback`` 里看到。
+
+        ★ 用一道**解析里直接写着答案**的题做夹具（这正是那 43% 的形态）：
+        「取题载荷不含解析」与「反馈含解析」在同一个 qid 上同时成立，
+        才说明隔离是**按时机**做的，不是把这个字段禁掉了。
+        """
+        explanation = "答案是 2 —— 1 加 1 等于 2。"
+        self.register(
+            [{"qid": "gen-exp-1", "kpId": "prog-variable-jr", "type": "blank",
+              "stem": "1 + 1 = ___", "referenceAnswer": "2", "explanation": explanation}]
+        )
+
+        # ① 取题载荷：连 `explanation` 这个键都没有（不是空串，是根本没带）
+        payload = self.register(
+            [{"qid": "gen-exp-2", "kpId": "prog-variable-jr", "type": "blank",
+              "stem": "2 + 2 = ___", "referenceAnswer": "4", "explanation": explanation}]
+        ).json()
+        for question in payload["questions"]:
+            self.assertNotIn("explanation", question, "★ 取题载荷不该带解析")
+            self.assertNotIn(explanation, json.dumps(question, ensure_ascii=False))
+
+        # ② 判分反馈：解析**在**里面（学生答完就该看到它）
+        graded = self.grade("exp-1", "2").json()
+        self.assertTrue(graded["correct"])
+        self.assertIn(explanation, graded["feedback"], "★ 判分反馈必须保留解析（教学价值）")
+
     def test_sentinel_absent_from_variant_registration_response(self) -> None:
         """登记变式题：**入参带答案**，出参里哨兵必须零命中。"""
         response = self.register(
@@ -245,11 +293,11 @@ class TestAnswerNeverLeavesBackend(LoopCase):
         keys = self._all_keys(payload, [])
         for forbidden in ("answer", "referenceAnswer", "rubric"):
             self.assertNotIn(forbidden, keys, f"★ 登记回执里出现了 {forbidden} 键：{raw}")
-        # 每道题就是对外形态的那 6 个字段
+        # 每道题就是对外形态的那 5 个字段（`explanation` 与答案、细则一样不下发）
         for question in payload["questions"]:
             self.assertEqual(
                 set(question),
-                {"qid", "kpId", "type", "stem", "options", "explanation"},
+                {"qid", "kpId", "type", "stem", "options"},
                 f"对外题目字段不对：{question}",
             )
 
@@ -483,16 +531,24 @@ class TestSubjectiveGrading(LoopCase):
         self.assertLessEqual(abs(body["masteryDelta"]), MASTERY_DELTA_LIMIT)
 
     def test_pass_threshold_is_enforced_server_side(self) -> None:
-        """★「多少分算过」由服务端定：送进来的只有 score，没有对错。"""
+        """★「多少分算过」由服务端定：送进来的只有 score，没有对错。
+
+        ★ 阈值两侧各用**一道不同的题**（而不是同一道题判两次）：判分口径是
+          **首次作答决定**（H-3），同一 qid 的第二次提交不再改掌握度 ——
+          拿同一道题判两次，`masteryDelta > 0` 那半句就永远测不到。
+        """
         self.register(
-            [_variant("sub-q2", "prog-variable-jr", stem="开放题", answer="参考", rubric="要点")]
+            [
+                _variant("sub-q2a", "prog-variable-jr", stem="开放题一", answer="参考", rubric="要点"),
+                _variant("sub-q2b", "prog-variable-jr", stem="开放题二", answer="参考", rubric="要点"),
+            ]
         )
-        low = self.grade_subjective("sub-q2", SUBJECTIVE_PASS_RATIO - 0.01)
+        low = self.grade_subjective("sub-q2a", SUBJECTIVE_PASS_RATIO - 0.01)
         self.assertFalse(low.json()["correct"], "低于阈值应判错（即便模型说「还不错」）")
         # 掌握度本来就在 0，扣分被下限夹到 0 → delta 是 0（而不是一个没发生的 -0.1）
         self.assertEqual(low.json()["masteryDelta"], 0.0)
 
-        high = self.grade_subjective("sub-q2", SUBJECTIVE_PASS_RATIO)
+        high = self.grade_subjective("sub-q2b", SUBJECTIVE_PASS_RATIO)
         self.assertTrue(high.json()["correct"], "到阈值即判对")
         self.assertGreater(high.json()["masteryDelta"], 0)
 
@@ -596,12 +652,95 @@ class TestVariantRegistration(LoopCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("重复", response.json()["detail"])
 
+    # ---------------------------------------------------------------- H-4 --
+    def test_rejects_qid_without_the_generated_prefix(self) -> None:
+        """★ 生成题的 qid 必须带 `gen-` 前缀（生成侧漏了 `variantQid()` 的第一道拦网）。
+
+        不带前缀的 qid 形如 ``<slug>-q<序号>``，与题库真题**同一个命名空间** ——
+        而判分先查生成题，所以撞名就等于把真题的标准答案改写掉。
+        """
+        response = self.register(
+            [{"qid": "prog-loop-jr-q1", "kpId": "prog-loop-jr", "type": "blank",
+              "stem": "伪装成真题", "referenceAnswer": "随便"}]
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("gen-", response.json()["detail"], "拒绝理由必须说明前缀要求")
+
+    def test_bank_question_qid_cannot_be_hijacked(self) -> None:
+        """★★ 拿**题库真题的 qid** 登记生成题 → 整批拒，且那道真题的答案一个字不变。
+
+        缺陷形态（修之前实测）：``register_variants`` 只在**同一批之内**查重，
+        落库是 ``ON CONFLICT(qid) DO UPDATE`` —— 于是用一个真题 qid 登记生成题，
+        就能把那道真题的**标准答案静默改写**。而 ``_locate_question`` 的次序是
+        「先生成题、后题库」，学生此后做的是真题、判分用的是模型的答案。
+
+        断言分两半：**拒绝**（HTTP 422 + 可读理由），以及**真题仍然按原答案判分**
+        （只断言前一半的话，一个「拒了但已经写进去」的实现也能通过 —— 那种实现
+        的后果和没修一样）。
+        """
+        bank_qid = "prog-loop-jr-q1"
+        bank_correct = "循环变量"  # 真题的标准答案（ch08.json）
+        victim = "student_hijack"
+
+        # 先确认夹具前提：这道真题按原答案判对、按别的答案判错
+        clean = self.client.post(
+            "/api/quiz/grade",
+            json={"studentId": victim, "qid": bank_qid, "answer": bank_correct},
+        )
+        self.assertEqual(clean.status_code, 200, clean.text)
+        self.assertTrue(clean.json()["correct"], "前提：这道真题的标准答案就是它")
+
+        # 拿同一个 qid 登记一道「答案是别的」的生成题
+        response = self.client.post(
+            f"/api/quiz/variants?student_id={victim}",
+            json={
+                "gradeLevel": "junior",
+                "questions": [
+                    {"qid": bank_qid, "kpId": "prog-loop-jr", "type": "blank",
+                     "stem": "我是来抢名字的", "referenceAnswer": "被改写的答案"}
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("撞名", response.json()["detail"])
+        self.assertIn(bank_qid, response.json()["detail"], "要说清是哪个 qid 撞了")
+
+        # ★ 后半：真题没被改写 —— 原来的错误答案仍然是错的、原答案仍然对
+        still_wrong = self.client.post(
+            "/api/quiz/grade",
+            json={"studentId": victim, "qid": bank_qid, "answer": "被改写的答案"},
+        )
+        self.assertFalse(still_wrong.json()["correct"], "★ 抢名没有成功（答案没被改写）")
+
+    def test_whole_batch_is_rejected_when_any_qid_collides_with_the_bank(self) -> None:
+        """一道撞名 → **整批拒**（与「同批重复」同一处置：收下其余只会把问题藏起来）。
+
+        ⚠️ 撞名的那一道不能借 :func:`_variant` 构造 —— 它会补 `gen-` 前缀，
+        那样就不叫撞名了。这里直接写原始请求体（**真实攻击形状**）。
+        """
+        response = self.register(
+            [
+                _variant("ok-1", "prog-loop-jr"),
+                {"qid": "prog-loop-jr-q2", "kpId": "prog-loop-jr", "type": "blank",
+                 "stem": "与真题同名", "referenceAnswer": "随便"},
+            ]
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("撞名", response.json()["detail"])
+
+        # 整批拒 = **一道都没进库**（否则「拒了但写了一半」会让同一批出现两种状态）。
+        # 判据走 HTTP：那一批里合格的那道题也应当查不到（判分 404）。
+        # ⚠️ 不能用 `self.query(...)` 直接读表：整批拒发生在**打开学生库之前**，
+        #    这个用例从没写过库，`learning.db` 根本不存在。
+        probe = self.grade("ok-1", "2")
+        self.assertEqual(probe.status_code, 404, "整批拒的批次里不该有任何一道落库")
+
     def test_generated_question_is_persisted_in_the_student_database(self) -> None:
         """生成题落**该学生自己的库**（一人一库，不写进随包题库文件）。"""
         self.register([_variant("v-6", "prog-variable-jr", answer="2")])
         rows = self.query(
             "SELECT qid, kp_id, reference_answer FROM generated_question WHERE qid = ?",
-            ("v-6",),
+            (_gq("v-6"),),
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["kp_id"], "prog-variable-jr")
@@ -613,7 +752,7 @@ class TestVariantRegistration(LoopCase):
         other = "student_other_variants"
         response = self.client.post(
             "/api/quiz/grade",
-            json={"studentId": other, "qid": "shared-q", "answer": "2"},
+            json={"studentId": other, "qid": _gq("shared-q"), "answer": "2"},
         )
         self.assertEqual(response.status_code, 404, "跨学生的生成题不该可见")
 
@@ -1120,6 +1259,126 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
         self.assertEqual(direct.status_code, 404, "★ 直接请求更高学段的内容仍应 404（隔离未被削弱）")
 
 
+    def test_path_covers_every_kp_of_the_students_grade(self) -> None:
+        """★★ 关卡路径**不得被长度上限截断**：本学段有几个知识点，路径就得有几关。
+
+        缺陷形态（修之前实测）：``level_order_from_graph`` 的 ``limit: int = 40`` 把每个
+        学段的后 **17 关**切掉，而其中 **9 关的前置就落在那 40 关里** —— 正常游玩就会被
+        :func:`unlocked_successor_ids` 解锁，于是它出现在 ``progress`` 表里、却不在路径上，
+        再被 :func:`progress_snapshot` 的 ``rank.get(kp_id, fallback)`` 兜到进度条**最末**。
+        学生看到的是「下一关明明已经解锁了，却排在所有旧关后面」——
+        既像排序坏了，也让「下一关该做哪一关」失去意义。
+
+        判据落在**行为**上（不查源码里有没有 ``limit`` 这个字面量）：
+        路径条数 == 该学段在教材里的知识点数；且路径集合 == 该学段知识点集合。
+        """
+        grades = self._kp_grades()
+        own = {grade: sum(1 for value in grades.values() if value == grade) for grade in GRADE_LEVELS}
+        for grade_level in GRADE_LEVELS:
+            with self.subTest(grade=grade_level):
+                self.set_student(f"student_pathlen_{grade_level}")
+                self.set_grade(grade_level)
+                levels = [item["kpId"] for item in self.progress().json()["levels"]]
+                self.assertEqual(
+                    len(levels),
+                    own[grade_level],
+                    f"★ {grade_level} 的路径被截断了：只有 {len(levels)} 关，"
+                    f"而该学段有 {own[grade_level]} 个知识点",
+                )
+                self.assertEqual(
+                    {kp for kp, value in grades.items() if value == grade_level},
+                    set(levels),
+                    f"★ {grade_level} 的路径应与该学段的知识点集合一一对应",
+                )
+
+    def test_unlocked_levels_stay_inside_the_path(self) -> None:
+        """★★ 解锁出来的关卡必须落在路径**之内**（否则它会被排到进度条最末）。
+
+        这是上一条缺陷的**可观察症状**：关卡一旦不在路径上，``progress_snapshot``
+        就取不到它的 ``rank``，只好按 ``fallback`` 排到所有旧关之后。
+        这条用例真的把路径上靠前的一关打通、让它的后继被解锁，再检查解锁出来的关
+        确实还在路径里。**不是**把「有没有被排到最后」当成判据 ——
+        排序由 ``order`` 决定，这里验的是它的输入（路径）本身没有漏洞。
+        """
+        self.set_student("student_unlock_in_path")
+        self.set_grade("primary_low")
+        body = self.progress().json()
+        path = [item["kpId"] for item in body["levels"]]
+        grades = self._kp_grades()
+
+        # 打通路径上的第一关（它必定是 learning），让它的后继逐个解锁
+        first = next(item["kpId"] for item in body["levels"] if item["stage"] == "learning")
+        questions = [
+            _variant(f"inpath-{i}", first, stem=f"练习 {i}", answer="2") for i in range(1, 5)
+        ]
+        response = self.register(questions, grade="primary_low")
+        self.assertEqual(response.status_code, 200, response.text)
+        for item in response.json()["questions"]:
+            self.grade(item["qid"], "2")
+
+        after = self.progress().json()["levels"]
+        self.assertGreater(len(after), 0, "进度不该变空")
+        unlocked = [item["kpId"] for item in after if item["stage"] != "locked"]
+        self.assertIn(first, unlocked, "被打通的那一关应已推进")
+        for kp_id in unlocked:
+            if grades.get(kp_id) != "primary_low":
+                continue  # 更低学段的兼容记录：按设计不在本学段路径里（另有补位序兜底）
+            self.assertIn(
+                kp_id,
+                path,
+                f"★ 已解锁的 {kp_id} 不在关卡路径里 —— 它会被排到进度条最末",
+            )
+
+
+# --------------------------------------------------------------------------- #
+# 6.6 路径外关卡的补位序（`progress_snapshot` 的 `fallback_order`）
+# --------------------------------------------------------------------------- #
+class TestProgressSnapshotOrdering(unittest.TestCase):
+    """★ 进度排序：主序（本学段路径）优先，路径外**已知 kp** 按补位拓扑序排，而非一律队尾。
+
+    这组断言不碰 HTTP，直接用 ``LearningStore`` + ``progress_snapshot`` —— 排序是纯逻辑，
+    把它绑在端到端用例上只会让失败原因变模糊（「排序错了」还是「路径取错了」）。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.store = LearningStore(self.tmp / "ordering.db")
+        self.addCleanup(self.store.close)
+        self.store.seed_progress(["z-main", "b-out", "a-out"])
+
+    def _order(self, **kwargs) -> list[str]:
+        return [row["kpId"] for row in progress_snapshot(self.store, **kwargs)]
+
+    def test_fallback_order_replaces_alphabetical_order(self) -> None:
+        """路径外的 kp 按 ``fallback_order`` 排，而不是按 kp_id 字典序。
+
+        字典序是**巧合序**：kp_id 前缀是概念 slug（``ai-definition-pl`` / ``prog-loop-jr``），
+        与「先学哪个」无关。所以本条特意让补位序与字典序**相反**，
+        否则用例会在「刚好一样」的假象里通过。
+        """
+        self.assertEqual(
+            self._order(order=["z-main"], fallback_order=["b-out", "a-out"]),
+            ["z-main", "b-out", "a-out"],
+        )
+
+    def test_main_order_is_never_disturbed_by_the_fallback(self) -> None:
+        """主序里的 kp **保持它的主序位次**（补位用 ``setdefault``，不覆盖已有 rank）。
+
+        否则「学生自己学段的路径」会被更低学段的补位序挤开 —— 那是比原来的缺陷更糟的倒退：
+        现在至少本学段的关是排对的。
+        """
+        self.assertEqual(
+            self._order(order=["z-main", "b-out"], fallback_order=["a-out"]),
+            ["z-main", "b-out", "a-out"],
+        )
+
+    def test_without_fallback_order_behaviour_is_unchanged(self) -> None:
+        """不传补位序时退回原行为（按 kp_id 排）—— 既有调用方字节不变。"""
+        self.assertEqual(self._order(order=["z-main"]), ["z-main", "a-out", "b-out"])
+
+
 # --------------------------------------------------------------------------- #
 # 7. 冷启动
 # --------------------------------------------------------------------------- #
@@ -1220,7 +1479,7 @@ class TestLearningHistory(LoopCase):
             "/api/quiz/grade",
             json={
                 "studentId": self.student,
-                "qid": "body-1",
+                "qid": _gq("body-1"),
                 "answer": student_words,
                 "sessionId": "s-secret",
             },

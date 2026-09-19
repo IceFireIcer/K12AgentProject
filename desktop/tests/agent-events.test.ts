@@ -148,8 +148,30 @@ test('G1e citation：rag_search 无结果 / 结构不认时不发空 citation �
 })
 
 test('G1f payload：表内 7 个 Tool 各映射到正确 kind（表只有一份，漂移即失败）', () => {
-  const expected = Object.entries(TOOL_TO_KIND) as Array<[string, string]>
+  /**
+   * ★★ **期望表硬编码在这里**（以前是 `Object.entries(TOOL_TO_KIND)`，那是**自引用**：
+   *    从实现里取一份再逐条断言同一对象的值，等于拿实现证明实现 —— 表整体改错它也绿，
+   *    「双保险」是假的）。现在两边各写一次，任一边改动而另一边没跟上就会红。
+   *
+   * 这份表是**冻结契约**（§9.3 的 Tool 名 → 事件 `kind` 映射），不是实现细节：
+   * 前端靠 `kind` 决定渲染哪种卡片，改错就是「卡片画不出来」或「画成别的卡片」。
+   * 真正的防线在 `architecture-guards.test.ts` 的字面量断言（那条不在这里）。
+   */
+  const expected: Array<[string, string]> = [
+    ['generate_animation', 'animation'],
+    ['get_code_template', 'coding'],
+    ['get_coding_hint', 'coding'],
+    ['evaluate_code', 'coding'],
+    ['generate_quiz', 'quiz'],
+    ['submit_quiz', 'quiz'],
+    ['generate_variants', 'quiz']
+  ]
   assert.equal(expected.length, 7, '冻结表必须是 7 个 Tool')
+  assert.deepEqual(
+    [...expected].sort(),
+    [...(Object.entries(TOOL_TO_KIND) as Array<[string, string]>)].sort(),
+    '★ 硬编码期望表与实现必须逐条一致（两边都改才算改对）'
+  )
 
   for (const [toolName, kind] of expected) {
     const events = mapAll([
@@ -182,6 +204,42 @@ test('G1g payload：不在表内的 Tool（检索 / 画像 / 未知）不发 pay
   }
   // 表内名单与映射键集合一致（防止有人只改一边）
   assert.deepEqual(Object.keys(TOOL_TO_KIND), [...PAYLOAD_TOOL_NAMES])
+})
+
+test('★ G1g2 静默丢弃必须有痕迹：未登记 Tool 与「检索空了」都计入 ignoredEvents', () => {
+  // 为什么这条重要：**新增 Tool 忘了登记**在界面上只表现为「少一张卡片」，
+  // 不计这个数的话日志里一个字都没有（智能靠人肉比对「模型说调了但卡片没出来」）。
+  // 这两条路径以前是裸 `return []` —— 唯一不留痕的忽略分支。
+  const unregistered = mapOne({
+    type: 'tool_execution_end',
+    toolCallId: 'c1',
+    toolName: 'smoke_echo',
+    isError: false,
+    result: { details: { anything: 1 } }
+  })
+  assert.deepEqual(unregistered.events, [], '未登记 Tool 仍然不发 payload（绝不猜 kind）')
+  assert.equal(unregistered.state.ignoredEvents, 1, '★ 未登记的 Tool 名必须留痕（否则卡片静默消失）')
+
+  const emptySearch = mapOne({
+    type: 'tool_execution_end',
+    toolCallId: 'c2',
+    toolName: RAG_SEARCH_TOOL,
+    isError: false,
+    result: { details: { citations: [] } }
+  })
+  assert.deepEqual(emptySearch.events, [], '检索无结果不发空 citation（对 UI 没有意义）')
+  assert.equal(emptySearch.state.ignoredEvents, 1, '「引用块一直不出现」在排查时必须有个入口')
+
+  // 对照组：正常发出的 payload **不**计数（否则这个数就没有诊断价值了）
+  const payload = mapOne({
+    type: 'tool_execution_end',
+    toolCallId: 'c3',
+    toolName: 'generate_quiz',
+    isError: false,
+    result: { details: { concept: '决策树' } }
+  })
+  assert.equal(payload.events.length, 1)
+  assert.equal(payload.state.ignoredEvents, 0, '正常产出不计入忽略数')
 })
 
 test('G1h error：provider 异常 → 可读 error（degraded=false 真终态），四类原因文案可分', () => {
@@ -217,11 +275,78 @@ test('G1i error：缺凭证的文案与「运行时故障」严格区分开', ()
   assert.match(missing, /不是程序故障/, '缺 Key 的文案必须排除「程序坏了」的误读')
   assert.match(missing, /API Key/, '缺 Key 的文案必须指向配置动作')
 
+  // ★ 与 describeRuntimeFailure 无关的第三类：网络
   const runtimeFailure = describeRuntimeFailure(new Error('Cannot find package esbuild'))
   assert.ok(runtimeFailure !== missing, '装配失败与缺 Key 不能是同一句话')
   assert.match(runtimeFailure, /运行时/, '装配失败必须说清是运行时问题')
   assert.match(runtimeFailure, /不是密钥或网络问题/, '装配失败必须排除「缺 Key / 网络」的误读')
   assert.match(runtimeFailure, /esbuild/, '装配失败要保留原始原因便于排查')
+})
+
+test('★★ G1j 脱敏：供应商原文里的凭据绝不进学生的对话文案', () => {
+  // 为什么这条不是洁癖：`describeProviderError` 的兜底分支会把**供应商原文**拼进面向学生的
+  // `error` 文案，而这段文字出现在**学生的聊天界面里**。部分网关（尤其是校内自建的那种）
+  // 的 401 正文就是回显请求头或完整 URL —— 不脱敏时学生屏幕上会出现 `Bearer sk-…`。
+  const key = 'sk-abcdefghijklmnopqrstuvwxyz0123456789'
+  const cases: string[] = [
+    `401 Unauthorized: {"Authorization":"Bearer ${key}"}`,
+    `unauthorized: api_key=${key}`,
+    `认证失败 https://gw.school.edu/v1/chat/completions?key=${key}&stream=true`,
+    `认证失败 https://gw.school.edu/v1?api-key=${key}`,
+    `认证失败 https://gw.school.edu/v1?token=${key}`,
+    `${key} 被拒绝`
+  ]
+
+  for (const raw of cases) {
+    // ① 显式把当前这把 Key 传进去
+    const withSecret = describeProviderError(raw, key)
+    assert.ok(!withSecret.includes(key), `文案里残留了明文 Key：${withSecret}`)
+    // ② ★ 兜底：**不传** secret 时也要挡住（凭据形态匹配）。
+    //    安全属性不能建立在「每个调用点都记得传 secret」上 —— 漏传是静默泄漏。
+    const shape = 'sk-abcdefghijklmnopqrstuvwxyz0123456789'
+    const withoutSecret = describeProviderError(raw)
+    assert.ok(!withoutSecret.includes(shape), `未传 secret 时形态匹配必须兜住：${withoutSecret}`)
+    assert.ok(!/bearer\s+[A-Za-z0-9._~+/=-]{8,}/i.test(withoutSecret), `残留 Bearer 凭据：${withoutSecret}`)
+  }
+
+  // ③ 文案仍然可读（脱敏不能把整句话打成马赛克）
+  assert.match(describeProviderError(cases[2], key), /API Key 被拒绝|云端模型暂时不可用/)
+  assert.ok(describeProviderError(cases[2], key).length > 8)
+
+  // ④ 正常文案**不受影响**（脱敏不该误伤普通内容）
+  const normal = describeProviderError('502 Bad Gateway from upstream')
+  assert.match(normal, /云端模型暂时不可用/)
+  assert.ok(!normal.includes('***'), '没有凭据可抹时不该凭空出现 ***')
+
+  // ⑤ `describeTurnException` 的 `exception` 分支同样要脱敏（它也会拼原文）
+  const exception = describeTurnException(new Error(`boom at https://gw.x.edu/v1?key=${key}`), key)
+  assert.equal(exception.status, 'exception')
+  assert.ok(!exception.message.includes(key), '「内部异常」不该成为绕过脱敏的那条路')
+})
+
+test('★★ G1j2 端到端：映射出来的 error 事件里没有明文 Key（含未传 secret 的路径）', () => {
+  const key = 'sk-zzzzzzzzzzzzzzzzzzzzzzzzzzzz'
+  const raw = `401 Unauthorized: {"Authorization":"Bearer ${key}"}`
+  const state = createTurnMapperState()
+  const events = mapPiEvent(
+    { type: 'message_update', assistantMessageEvent: { type: 'error', reason: 'error', error: { errorMessage: raw } } },
+    state,
+    { requestId: 'turn_leak', secret: key }
+  )
+  assert.equal(events.length, 1)
+  assert.equal(events[0].name, 'error')
+  if (events[0].name !== 'error') return
+  assert.ok(!events[0].data.message.includes(key), `事件载荷里残留了明文 Key：${events[0].data.message}`)
+  // 反向对照：不传 secret 也不能漏（形态兜底）
+  const bare = createTurnMapperState()
+  const events2 = mapPiEvent(
+    { type: 'message_update', assistantMessageEvent: { type: 'error', reason: 'error', error: { errorMessage: raw } } },
+    bare,
+    { requestId: 'turn_leak_2' }
+  )
+  if (events2[0].name === 'error') {
+    assert.ok(!events2[0].data.message.includes(key), '未传 secret 时事件载荷同样不得含明文 Key')
+  }
 })
 
 /* ------------------------------------------------------------------ *

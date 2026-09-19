@@ -94,6 +94,20 @@ class ProfileCase(unittest.TestCase):
         finally:
             conn.close()
 
+    def exec_sql(self, student_id: str, sql: str, params: tuple = ()) -> None:
+        """直接改这个学生的库（造「并发改动落在读-写窗口里」这类只有直查才能摆出的状态）。
+
+        ★ 与 ``query`` 同一手法、同一理由：这些列（``grade_level`` / ``current_chapter``）
+          的正常写入口要经过 kb 或学段冷却，摆状态时反而是噪音 ——
+          本用例要的是**库里已经是新值**这个前提，而不是「怎么变的」。
+        """
+        conn = sqlite3.connect(student_learning_db_path(self.tmp, student_id))
+        try:
+            conn.execute(sql, params)
+            conn.commit()
+        finally:
+            conn.close()
+
 
 # --------------------------------------------------------------------------- #
 # 一人一库
@@ -301,6 +315,117 @@ class TestLearningEvents(ProfileCase):
         self.assertGreater(after, before)
         # 行数不减（重启不清库）
         self.assertEqual(self.query(student_id, "SELECT COUNT(*) AS n FROM learning_history")[0]["n"], 1)
+
+    def test_event_reflux_leaves_grade_and_chapter_byte_for_byte(self) -> None:
+        """★ 回流只刷活跃时间：``grade_level`` / ``current_chapter`` **一字未动**。
+
+        本端点每轮 ``agent_end`` 都会发一次。曾经它靠 ``upsert_student`` 回写整行
+        （把 ``get_student`` 读到的学段快照一起写回去）—— 那是
+        ``UPDATE student SET grade_level`` 之外**第四个**学段落点：不写 ``grade_history``、
+        不清 ``current_chapter``、也**不走规则引擎的冷却与置信度判据**。
+        这里先摆好「学段是 senior、章节已选定、活跃时间是过去」的状态，
+        再发一次事件，断言后两列（学段 / 章节）逐字不变。
+
+        ★ 除了查库，还**盯住这次请求没有走整行回写**：学生行已存在，
+          刷新活跃时间不该调 ``upsert_student``（它的 ON CONFLICT 分支会连带写
+          ``grade_level`` / ``nickname``）。只查列的话，「读到的值恰好等于库里的值」
+          会让整行回写也通过 —— 这条钩子把「是不是整行回写」变成可断言的。
+        """
+        from app.store.learning import LearningStore
+
+        student_id = self.create_student("回流", "primary_low")["studentId"]
+        self.exec_sql(
+            student_id,
+            "UPDATE student SET grade_level = ?, current_chapter = ?, last_active_at = ? "
+            "WHERE student_id = ?",
+            ("senior", "第8章 编程实践（补充）", int(time.time()) - 3 * 86_400, student_id),
+        )
+
+        original_upsert = LearningStore.upsert_student
+        upserts: list[str] = []
+
+        def recording_upsert(store: LearningStore, target_id: str, nickname: str, grade_level: str):
+            upserts.append(target_id)
+            return original_upsert(store, target_id, nickname, grade_level)
+
+        LearningStore.upsert_student = recording_upsert  # type: ignore[method-assign]
+        try:
+            response = self.post_event(student_id, activity="quiz", kpId="prog-loop-jr", isCorrect=False)
+        finally:
+            LearningStore.upsert_student = original_upsert  # type: ignore[method-assign]
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(upserts, [], "学生行已存在，刷新活跃时间不该回写整行（那是学段的第四个落点）")
+
+        row = self.query(
+            student_id, "SELECT grade_level, current_chapter, last_active_at FROM student"
+        )[0]
+        self.assertGreaterEqual(
+            row["last_active_at"], int(time.time()) - 5, "刷新活跃时间仍是本端点的职责（重启后数据仍在）"
+        )
+        self.assertEqual(row["grade_level"], "senior", "事件回流不该碰学段")
+        self.assertEqual(
+            row["current_chapter"], "第8章 编程实践（补充）", "事件回流不该碰学生选定的章节"
+        )
+
+    def test_stale_read_does_not_revert_a_grade_changed_mid_flight(self) -> None:
+        """★★ 并发对照（缺陷本身）：读快照 → 写回之间学段被改掉，回流**不许**把它打回旧值。
+
+        真实时序：``POST /api/profile/{id}/events``（每轮 ``agent_end``）与
+        ``POST /api/grade/override``（学生手动选学段）**并发** —— 后者正好落在前者的
+        「``get_student`` 读快照」与「写回」之间。旧实现里那次写回会把学段打回快照里的旧值，
+        而 ``grade_history`` 里已经有一条「切到新学段」的行、章节也已被清空 ——
+        **两处真相**（现象是「学生明明被切到高中了，几轮后又变回小学」）。
+
+        ★ 为什么在 ``get_student`` 上挂钩子而不是真开一个线程抢窗口：真并发的触发点是
+          调度的运气，写出来是个**偶发红**的测试；钩子把并发写**确定性地**放在
+          读与写之间（正是缺陷的定义），红/绿只取决于实现有没有「读-改-写」窗口。
+        ★ 钩子只在**第一次**读时动手：修复前 ``upsert_student`` 内部还会再读一次，
+          每次都改的话第二次读会把回写过的旧值又翻新，反而把缺陷盖住（变异验证会变绿）。
+        """
+        from app.store.learning import LearningStore
+
+        student_id = self.create_student("竞态", "primary_low")["studentId"]
+        original_get_student = LearningStore.get_student
+        fired: list[bool] = []
+
+        def racing_get_student(store: LearningStore, target_id: str):
+            snapshot = original_get_student(store, target_id)
+            if snapshot is not None and not fired:
+                fired.append(True)
+                # 复刻 `GradeEngine.override_level` 换学段那一支：改学段 + 清章节 + 留一行 explicit 轨迹
+                store.conn.execute(
+                    "UPDATE student SET grade_level = 'senior', current_chapter = NULL "
+                    "WHERE student_id = ?",
+                    (target_id,),
+                )
+                store.conn.execute(
+                    "INSERT INTO grade_history(ts, turn, from_level, to_level, source, confidence) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (int(time.time()), 8, "primary_low", "senior", "explicit", 1.0),
+                )
+                store.conn.commit()
+            return snapshot
+
+        LearningStore.get_student = racing_get_student  # type: ignore[method-assign]
+        try:
+            response = self.post_event(student_id, activity="quiz", kpId="prog-loop-jr", isCorrect=True)
+        finally:
+            LearningStore.get_student = original_get_student  # type: ignore[method-assign]
+        self.assertEqual(response.status_code, 200, response.text)
+
+        row = self.query(student_id, "SELECT grade_level, current_chapter FROM student")[0]
+        self.assertEqual(
+            row["grade_level"],
+            "senior",
+            "事件回流把学段打回了它读到的旧值（读-写窗口竞态）—— 轨迹与库会互相矛盾",
+        )
+        self.assertEqual(row["current_chapter"] or "", "", "并发切换清掉的章节不该被回流写回")
+        # 轨迹与 student 表必须是同一个真相：一条 explicit 的「→ senior」，没有别的
+        history = self.query(student_id, "SELECT from_level, to_level, source FROM grade_history")
+        self.assertEqual(
+            [(r["from_level"], r["to_level"], r["source"]) for r in history],
+            [("primary_low", "senior", "explicit")],
+        )
 
 
 # --------------------------------------------------------------------------- #

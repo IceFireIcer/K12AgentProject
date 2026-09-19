@@ -220,28 +220,48 @@ test('G9-3 assertSessionManagerIsolated：正确的 SessionManager 放行，Pi �
 
 // ── G9-3b ★ 生产接线：runtime.ts 真的把 sessionDir 传给了 Pi ──────────
 
-test('★ G9-3b 接线守卫：runtime.ts 建会话时传了 `paths.sessionDir` 且当场校验隔离', () => {
+test('★ G9-3b 接线守卫：runtime.ts 三条会话来源**都**传了 `paths.sessionDir` 且当场校验隔离', () => {
   // 为什么必须有这条：上面 G9-3 把 `assertSessionManagerIsolated` 当**纯函数**测（喂假对象），
   // 于是「生产里到底有没有调它、第二个参数有没有传」完全没有机器判据 ——
   // 有人重构 `createChatRuntime` 时删掉这次调用（或删掉第二个参数让 Pi 退回
   // `~/.pi/agent/sessions/--<cwd>--/`），单测全绿，只能靠现场手查 `~/.pi`。
   // 这条守卫读的是**去注释后的源码**（注释里写 `SessionManager.create(a, b)` 说明纪律不算接线）。
+  //
+  // ★★ 本轮扩充（会话恢复功能）：会话有**三种来源**（`create` / `continueRecent` / `open`），
+  //    三者都吃 `(…, sessionDir)` 这第二个参数、也都可能漏传。
+  //    漏传 `open` 那份**比漏传 `create` 更严重**：新建只是写错地方，
+  //    而恢复会**读到别的会话**（Pi 会去 `~/.pi/agent/sessions/` 里找）。
+  //    所以判据从「一个调用」改成「三个调用一个都不许漏」。
   const source = stripComments(
     readFileSync(join(desktopRoot, 'src', 'main', 'agent', 'runtime.ts'), 'utf8')
   )
 
-  // ① 必须真的创建 SessionManager，且 cwd 与 sessionDir **都**传了（两个实参）
-  const created = /SessionManager\.create\(\s*[^,]+,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)/.exec(source)
-  assert.ok(
-    created,
-    'runtime.ts 里必须出现 `SessionManager.create(<cwd>, <sessionDir>)`（两个实参都传）—— ' +
-      '只传 cwd（或整个调用被删掉）会让 Pi 把会话写进 ~/.pi/agent/sessions/，跨学生混放的合规硬伤'
-  )
-  assert.equal(
-    created[1],
-    'paths.sessionDir',
-    `SessionManager.create 的第二个实参必须是 paths.sessionDir，实际是 ${created[1]}`
-  )
+  /** 三种会话来源（与 `ChatSessionSource` 一一对应）。 */
+  const FORMS: Array<{ call: string; why: string }> = [
+    { call: 'create', why: '新建会话（「新对话」按钮）' },
+    { call: 'continueRecent', why: '续上最近一条（应用冷启动）' },
+    { call: 'open', why: '打开指定一条（历史列表里点开）' }
+  ]
+
+  for (const form of FORMS) {
+    // ★ 必须锚在 `manager.` 上：`ModelRuntime.create({…})` 也含 `.create(`
+    //   （它吃的是一个对象、与 sessionDir 无关），只写 `\.create\(` 会命中那一处 ——
+    //   于是这条守卫变成「检查了一个不相关的调用」，而真正的漏传静默通过。
+    const pattern = new RegExp(`\\bmanager\\.${form.call}\\(([^)]*)\\)`, 's')
+    const hit = pattern.exec(source)
+    assert.ok(
+      hit,
+      `runtime.ts 里必须出现 \`manager.${form.call}(…)\` —— 它承担「${form.why}」；` +
+        '整个调用被删掉会让这条路走不成（而不是安静降级）'
+    )
+    const args = hit[1]
+    assert.ok(
+      args.includes('paths.sessionDir'),
+      `\`${form.call}(…)\` 的实参里必须含 \`paths.sessionDir\`（${form.why}）—— ` +
+        '漏传第二个参数会让 Pi 退回 `~/.pi/agent/sessions/`：新建是写错地方，' +
+        `恢复是**读到别的会话**。实际实参：${args.trim()}`
+    )
+  }
 
   // ② 紧接着必须**当场校验**（相信 Pi 会照做 = 没有防线）
   const assertAt = source.indexOf('assertSessionManagerIsolated(')
@@ -255,10 +275,23 @@ test('★ G9-3b 接线守卫：runtime.ts 建会话时传了 `paths.sessionDir` 
     call.includes('paths.sessionDir'),
     `assertSessionManagerIsolated 必须拿 paths.sessionDir 去校验：${call.slice(0, 160)}`
   )
-  // ③ 顺序：先 create 再 assert（反过来没有意义）
+  // ③ ★ 三条来源必须收敛在**同一处**：各写一遍就会有一条忘了校验，
+  //    而漏掉的那条正好是「读到别的学生的会话」这条路。
+  const managerCalls = [...source.matchAll(/\bmanager\.(?:create|open|continueRecent)\(/g)]
+  assert.equal(
+    managerCalls.length,
+    3,
+    `三种会话来源应当只在**同一个** helper 里各出现一次，实际 ${managerCalls.length} 处 —— ` +
+      '散在多处就会出现「新建那条校验了、恢复那条忘了」这种不对称'
+  )
+  // 而那个 helper 必须**只有一个**（三个调用都在它里面）
+  const helperAt = source.indexOf('function openSessionManager(')
+  assert.ok(helperAt > 0, '三种会话来源必须收敛到 `openSessionManager` 这一个 helper')
+  // ④ 顺序：先建/开会话再 assert（校验一个还没存在的对象没有意义）
+  const firstCall = source.indexOf('openSessionManager(')
   assert.ok(
-    source.indexOf('SessionManager.create(') < assertAt,
-    '必须先建 SessionManager 再校验落盘目录'
+    firstCall > 0 && firstCall < assertAt,
+    '必须先建/开 SessionManager 再校验落盘目录'
   )
 })
 

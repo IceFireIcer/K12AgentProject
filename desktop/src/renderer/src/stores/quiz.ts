@@ -17,10 +17,13 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
   resolveDataBridge,
+  type DataBridge,
   type QuizBankView,
   type QuizProgressView,
   type QuizResultView
 } from '../api/data'
+// ★ 面向学生的失败文案只有一处实现（HTTP 状态码 / 服务器路径 / 内部 kp_id 都要翻掉）
+import { describeClientError, toStudentFacingMessage } from '../api/student-facing'
 
 /** 页面上一题的作答状态（本地，不落库；落库由判分端点负责）。 */
 export interface QuizAttempt {
@@ -50,8 +53,19 @@ export const useQuizStore = defineStore('quiz', () => {
   const correctCount = ref(0)
 
   const bridgeError = ref<string | null>(null)
-  /** 非响应式：同一知识点的并发取题只发一次。 */
-  let bankInFlight: Promise<void> | null = null
+  /**
+   * 非响应式：**同一请求键**的并发取题只发一次（键 = `kpId` + `count`）。
+   *
+   * ★★ 去重必须看请求键，不能只看「有没有请求在飞」：旧写法
+   *   `if (bankInFlight) return await bankInFlight` 会在学生连点两个关卡时
+   *   把**第二个请求静默丢掉** —— 而 `activeKpId` 已经切到 B、`bank` 还是 A 的题，
+   *   于是「学生对着错误标题作答」。键相同才复用（同一关连点不必发两次），
+   *   键不同就并发发新的，且**只让最后一次写结果**。
+   *   对照组是 `stores/study.ts` 的 `chaptersInFlight === gradeLevel`。
+   */
+  let bankInFlight: { key: string; promise: Promise<void> } | null = null
+  /** 取题的请求序号（只让最后一次发出的请求写结果）。 */
+  let bankRequestSeq = 0
 
   /* ---------------------------------------------------------------- *
    * 派生
@@ -127,7 +141,11 @@ export const useQuizStore = defineStore('quiz', () => {
 
   /** 取某知识点的题目（默认 3 道；数量由主进程校验上限）。 */
   async function loadBank(kpId: string, count = 3): Promise<void> {
-    if (bankInFlight) return await bankInFlight
+    const key = `${kpId}#${count}`
+    // 键相同 → 复用那次在途请求；键不同 → 往下走，**并发发新的**（题量与知识点都算键）
+    if (bankInFlight !== null && bankInFlight.key === key) {
+      return await bankInFlight.promise
+    }
     const lookup = resolveDataBridge()
     if (!lookup.ready) {
       bridgeError.value = lookup.message
@@ -135,19 +153,38 @@ export const useQuizStore = defineStore('quiz', () => {
     }
     bankLoading.value = true
     bankError.value = null
-    bankInFlight = (async () => {
-      try {
-        const result = await lookup.bridge.readQuizBank({ kpId, count })
-        bank.value = result.ok ? (result.data as QuizBankView) : null
-        if (!result.ok) bankError.value = result.message
-      } catch (thrown) {
-        bankError.value = thrown instanceof Error ? thrown.message : String(thrown)
-      } finally {
-        bankLoading.value = false
+    const request = fetchBank(kpId, count, lookup.bridge)
+    bankInFlight = { key, promise: request }
+    try {
+      await request
+    } finally {
+      // 只有仍然登记在案的那次负责收尾（被更新的一次顶掉的请求不该关掉新请求的加载态）
+      if (bankInFlight !== null && bankInFlight.promise === request) {
         bankInFlight = null
+        bankLoading.value = false
       }
-    })()
-    await bankInFlight
+    }
+  }
+
+  /**
+   * 发一次取题的请求（拆出来是为了有一个**绝不同步抛**的边界）。
+   *
+   * ★ 只有**最后一次**发出的请求能写结果：迟到的旧响应若照写，
+   *   学生已经点开 B 了却会被 A 的题与失败文案盖回去。
+   * ★ 失败也过翻译：后端 detail 里带着服务器上的题库目录
+   *   （`知识点 'x-jr' … （题库文件：server/resources/quizbank/）`）。
+   */
+  async function fetchBank(kpId: string, count: number, bridge: DataBridge): Promise<void> {
+    const seq = (bankRequestSeq += 1)
+    try {
+      const result = await bridge.readQuizBank({ kpId, count })
+      if (seq !== bankRequestSeq) return
+      bank.value = result.ok ? (result.data as QuizBankView) : null
+      if (!result.ok) bankError.value = toStudentFacingMessage(result.message, { topic: 'quiz' })
+    } catch (thrown) {
+      if (seq !== bankRequestSeq) return
+      bankError.value = describeClientError(thrown, { topic: 'quiz' })
+    }
   }
 
   /**
@@ -197,7 +234,14 @@ export const useQuizStore = defineStore('quiz', () => {
       } else {
         attempts.value = {
           ...attempts.value,
-          [qid]: { qid, answer: trimmed, result: null, submitting: false, error: result.message }
+          [qid]: {
+            qid,
+            answer: trimmed,
+            result: null,
+            submitting: false,
+            // 判分失败也是「一句学生看得懂的话」：后端 detail 可能带内部标识与服务器路径
+            error: toStudentFacingMessage(result.message, { topic: 'quiz' })
+          }
         }
       }
     } catch (thrown) {
@@ -208,7 +252,7 @@ export const useQuizStore = defineStore('quiz', () => {
           answer: trimmed,
           result: null,
           submitting: false,
-          error: thrown instanceof Error ? thrown.message : String(thrown)
+          error: describeClientError(thrown, { topic: 'quiz' })
         }
       }
     }

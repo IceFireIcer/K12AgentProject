@@ -13,6 +13,12 @@
 不清表就重跑的话，调试期数据会翻倍，检索结果里会出现一堆重复条目，
 而且「为什么有两条一模一样的 citation」这个问题能查很久。
 
+**原子**：清表 → 写正文 → 重建 FTS → 写依赖图 属于**同一个事务**，只在全部成功时提交一次。
+失败（依赖清单有悬空引用、重建途中关掉应用）必须留下**重建前那一份完整库**，
+而不是「chunk 清了、FTS 索引空了、依赖图没了」的半成品 —— 后者看起来只是一句
+「重建失败」，实际上 FTS 兜底级已经静默变成 0 命中、推荐路径与学习地图同时失效
+（为什么必须这样、代价是什么，见 :func:`build` 里的那段注释）。
+
 **模型缺失直接报错**，不静默产出空向量：没有向量的知识库会让检索一路降级到 FTS，
 表面上「还能用」，实际上主路径从没被验证过 —— 这种「看起来正常」最危险。
 真要只建 FTS（例如排障），显式加 ``--no-vectors``。
@@ -22,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
@@ -75,7 +82,10 @@ class BuildResult:
 def _insert_documents(conn, docs: list[KnowledgeDoc], drafts: list[ChunkDraft], embedder) -> int:
     """写 ``kp`` + ``chunk`` + ``chunk_vec``（父块先写，子块随后，顺序稳定）。
 
-    事务由 sqlite3 的隐式事务 + 末尾一次 ``commit`` 承担：中途任何异常都不会留下半个库。
+    ★ **本函数不提交事务**：它只是「整库重建」这一个事务里的一段（见 :func:`build`）。
+    在这里提前 ``commit`` 会把「清表」永久落盘，于是后面任何一步失败（依赖图有悬空引用、
+    重建到一半关掉应用）都会留下半成品库 —— 那时 ``chunk`` 是新的、``chunk_fts``
+    索引是空的（外部内容表，``DELETE`` 正文后不重建索引就永久不一致）、依赖图为空。
     """
     kp_ids: set[str] = set()
     for doc in docs:
@@ -117,7 +127,6 @@ def _insert_documents(conn, docs: list[KnowledgeDoc], drafts: list[ChunkDraft], 
             is_parent=draft.is_parent,
             embedding=embedding,
         )
-    conn.commit()
     return len(kp_ids)
 
 
@@ -192,9 +201,36 @@ def build(
                 load_sqlite_vec(conn)
             except Exception as exc:  # noqa: BLE001
                 notes.append(f"sqlite-vec 不可用（本次不建 chunk_vec）：{exc}")
+                if kb_repo.table_exists(conn, "chunk_vec"):
+                    # 库里有 vec0 表但扩展加载不了 → 那张表**清不掉**（见
+                    # store/kb.py 的 _clear_vec_table），旧向量行会留在原地。
+                    # 本次重建因此不写向量，检索走 numpy 兜底（正文完好）。
+                    # 要消除残留：扩展恢复可用后**再重建一次**即可（正常路径会先清后写）。
+                    notes.append(
+                        "提示：库内已有的 chunk_vec 本轮未能清空（扩展不可用），"
+                        "其中可能残留上一版向量；sqlite-vec 恢复后请再重建一次。"
+                    )
             vec_ready = vec_available(conn)
 
         ensure_kb(conn, dim=EMBEDDING_DIM, vec_ready=bool(vec_ready))
+        # ------------------------------------------------------------------ 事务 --
+        # ★★ 下面四步是**一个事务**，且只在全部成功时提交一次。
+        # 为什么非这样不可：SQLite 的 ``DELETE`` 一旦提交就撤不回来。若在清表之后、
+        # 写依赖图之前提交过（旧实现是 _insert_documents 末尾那次 commit），
+        # 「依赖清单里有一条悬空引用」（有意报错中止）或「重建到一半关掉应用」
+        # （before-quit 走 taskkill /PID /T /F，线程池里的重建被直接掐断）
+        # 都会留下半成品库：chunk 被清空 → chunk_fts 这个**外部内容表**的索引
+        # 与正文永久不一致（空索引）→ 依赖图为空。
+        # 后果是 FTS5 兜底级静默变成 0 命中、检索扩展 / 推荐路径 / 学习地图同时失效，
+        # 而 /api/knowledge/rebuild 只回一句「重建失败」—— 学生与老师都看不出
+        # 旧内容已经被改坏（实测：真实随包库 MATCH "人工智能" 从 99 掉到 0、
+        # 依赖边从 483 掉到 0，而 rebuild 的回执只有 ok=false）。
+        #
+        # 代价（有意接受，不要试图优化掉）：全量重建期间整库对外不可见 ——
+        # 别的连接读到的是提交前的那一份旧内容（不会读到半成品），且日志
+        # （WAL / 回滚日志）会随写入量变大（教材规模下是 MB 量级）。
+        # 「要么整体成功、要么完整退回旧库」值这个价；这也正是不做断点续跑的原因
+        # （脚本的设计就是「先清再写」整体幂等，一次不成下次整个重来）。
         kb_repo.clear_knowledge_tables(conn)  # ★ 幂等：先清再写
         _insert_documents(conn, docs, drafts, embedder)
         kb_repo.rebuild_fts(conn)  # 外部内容表：写完正文后重建索引
@@ -209,10 +245,21 @@ def build(
             )
             for e in manifest.dependencies
         ]
-        # ★ 悬空引用 / 有环 → 直接抛异常并中止（不静默跳过）
+        # ★ 悬空引用 / 有环 → 直接抛异常并中止（不静默跳过）；此时上面的清表与写入
+        #   都还没提交，异常路径会把整库退回重建前那一份。
         insert_dependencies(conn, edges)
-        conn.commit()
+        conn.commit()  # ★ 全程唯一一次提交
         stats = kb_repo.stats(conn)
+    except BaseException:
+        # 显式回滚。**不依赖 close() 的隐式回滚**：那是驱动的实现细节，而这里正是
+        # 「原子性」的落点 —— 读代码的人必须一眼看得见失败路径发生了什么。
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            # 连接已经不可用时，不要用一个新异常把原始错误盖掉：
+            # 真正要报给用户的是「重建为什么失败」。
+            logger.warning("回滚重建事务失败（连接已不可用），原异常继续向上抛", exc_info=True)
+        raise
     finally:
         conn.close()
     invalidate_cache(kb_path)

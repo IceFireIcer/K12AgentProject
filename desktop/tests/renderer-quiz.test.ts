@@ -518,3 +518,91 @@ test('批改结果进 store 后，题目卡片能按 qid 取到它（跨轮反�
   assert.equal(result?.correct, true)
   assert.equal(result?.masteryDelta, 0.15)
 })
+
+/* ------------------------------------------------------------------ *
+ * 5. 闯关 store（独立页那条路）：失败文案按受众改写
+ * ------------------------------------------------------------------ */
+
+/**
+ * 装一个只够闯关 store 用的假桥（`window.api` 白名单的一个切片）。
+ *
+ * ★ 为什么单独装一个而不是复用文件顶部那个：那个是给对话 store 用的
+ *   （`sendChat` / `onChatEvent` / 学段推送），本组要的是数据面的三条闯关通道 ——
+ *   合成一个「全能假桥」会让两边都读不清自己依赖的是哪几条。
+ */
+function installQuizBridge(options: {
+  bank?: unknown
+  bankFailure?: string
+  gradeFailure?: string
+}): void {
+  const api = {
+    readQuizProgress: async () => ({
+      ok: true as const,
+      data: { studentId: 's1', gradeLevel: 'junior', seeded: true, levels: [] }
+    }),
+    readQuizBank: async () =>
+      options.bankFailure !== undefined
+        ? { ok: false as const, message: options.bankFailure }
+        : { ok: true as const, data: options.bank ?? { kpId: 'data-processing-jr', source: 'bank', questions: [] } },
+    gradeQuiz: async () =>
+      options.gradeFailure !== undefined
+        ? { ok: false as const, message: options.gradeFailure }
+        : { ok: true as const, data: { qid: 'q1', correct: true, scoredBy: 'rule', feedback: '答对了', masteryDelta: 0.1 } },
+    // 其余数据面方法不在本组的能力范围内（`resolveDataBridge` 要求它们都在，所以给空实现）
+    getStudent: async () => ({ ok: false as const, message: '本组不测' }),
+    readProfile: async () => ({ ok: false as const, message: '本组不测' }),
+    readRecommendation: async () => ({ ok: false as const, message: '本组不测' }),
+    readGradeSignals: async () => ({ ok: false as const, message: '本组不测' }),
+    readGradeHistory: async () => ({ ok: false as const, message: '本组不测' }),
+    readCodeTemplate: async () => ({ ok: false as const, message: '本组不测' }),
+    readCodeHint: async () => ({ ok: false as const, message: '本组不测' }),
+    analyzeCodeRun: async () => ({ ok: false as const, message: '本组不测' }),
+    readAnimationTemplates: async () => ({ ok: false as const, message: '本组不测' }),
+    renderAnimation: async () => ({ ok: false as const, message: '本组不测' }),
+    hostAnimation: async () => ({ ok: false as const, message: '本组不测' }),
+    readKnowledgeStats: async () => ({ ok: false as const, message: '本组不测' }),
+    readKnowledgePoints: async () => ({ ok: false as const, message: '本组不测' }),
+    importKnowledge: async () => ({ ok: false as const, message: '本组不测' }),
+    rebuildKnowledge: async () => ({ ok: false as const, message: '本组不测' }),
+    onTraceChanged: () => () => {}
+  }
+  ;(globalThis as unknown as { window: unknown }).window = { api }
+}
+
+test('★★ 闯关页取题失败：后端排障文案（HTTP 状态码 / 服务器路径 / 内部 kp_id）不许上屏', async () => {
+  installQuizBridge({
+    // 后端真实的 404 detail 形态（面向排障：内部 kp_id + 服务器上的题库目录）
+    bankFailure:
+      "读取失败（HTTP 404）：知识点 'data-processing-jr' 在 junior 及更低学段没有题目" +
+      '（题库文件：server/resources/quizbank/）'
+  })
+  setActivePinia(createPinia())
+  const { useQuizStore } = await import('../src/renderer/src/stores/quiz.ts')
+  const quiz = useQuizStore()
+
+  await quiz.loadBank('data-processing-jr')
+
+  assert.ok(quiz.bankError !== null, '要有可读原因，不能静默什么都不显示')
+  assert.doesNotMatch(
+    quiz.bankError,
+    /HTTP\s*\d{3}|server[\\/]|resources[\\/]|'[a-z][a-z0-9-]*-[a-z]/,
+    `界面上不该出现排障细节：${quiz.bankError}`
+  )
+  assert.equal(quiz.bank, null, '失败时不许留着上一关的题（那会让学生对着错误标题作答）')
+})
+
+test('★ 闯关页判分失败：同一套翻译（提交回执里的 detail 也不许带排障细节）', async () => {
+  installQuizBridge({
+    gradeFailure: "操作失败（HTTP 500）：/api/quiz/grade 写库失败（知识点：'prog-loop-jr'）"
+  })
+  setActivePinia(createPinia())
+  const { useQuizStore } = await import('../src/renderer/src/stores/quiz.ts')
+  const quiz = useQuizStore()
+
+  await quiz.submit('q1', 'A')
+
+  const error = quiz.attempts['q1']?.error
+  assert.ok(error !== null && error !== undefined)
+  assert.doesNotMatch(error, /HTTP\s*\d{3}|\/api\/|'[a-z][a-z0-9-]*-[a-z]/, `界面上不该出现排障细节：${error}`)
+  assert.equal(quiz.attempts['q1']?.result, null, '失败时不许有判分结论（前端不自己判对错）')
+})

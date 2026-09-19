@@ -600,25 +600,129 @@ class TestDegradationChain(RagCase):
         self.assertEqual(result.hits, [])
         self.assertEqual(result.degraded, "outline")
 
+    def _fts_only_service(self) -> retriever.RagService:
+        """本地模型不可用 + 没配云端：链路必然落在 FTS / 大纲这一档（要测的就是它）。"""
+        service = retriever.RagService(
+            self.kb_path,
+            embedder=retriever.LocalEmbedder(model_dir=Path(tempfile.mkdtemp())),
+            embedding_config={"mode": "none"},
+        )
+        self.addCleanup(service.close)
+        return service
+
     def test_sentence_query_still_hits_on_fts_level(self) -> None:
         """★ 学生整句提问（逐字取自教材初中「循环」正文）在 FTS 级也必须能找到东西。
 
         中文没有分词器：整句若不拆 n-gram，会被当成一个十数字的词条，
         trigram 的 MATCH 与 LIKE 都匹配不到任何行 —— 「FTS 永不失败」就成了空话。
         """
-        empty = Path(tempfile.mkdtemp())
-        service = retriever.RagService(
-            self.kb_path,
-            embedder=retriever.LocalEmbedder(model_dir=empty),
-            embedding_config={"mode": "none"},
+        result = self._fts_only_service().search(
+            query=SENTENCE_QUERY, grade_level="junior", top_k=3
         )
-        self.addCleanup(service.close)
-        result = service.search(query=SENTENCE_QUERY, grade_level="junior", top_k=3)
         self.assertEqual(result.degraded, "fts")
         self.assertIn(LOOP_JUNIOR, {h.kp_id for h in result.hits})
 
+    # ------------------------------------------------------------------ 回归 --
+    #: 常见学生提问（四学段都会问到的概念，逐条是从教材正文里问得出来的整句）。
+    #: 它们**全部**必须在 FTS 级拿到候选 —— 见下一条用例为什么这是硬要求。
+    COMMON_QUESTIONS = (
+        "什么是循环",
+        "循环里怎么累加总分",
+        "为什么要用列表",
+        "列表能用来做什么",
+        "什么是条件判断",
+        "变量是什么",
+        "什么是人工智能",
+        "机器学习和深度学习有什么区别",
+        "什么是神经网络",
+        "大语言模型是怎么工作的",
+        "什么是提示词",
+        "计算机视觉能做什么",
+        "语音识别是怎么实现的",
+        "数据在人工智能里有什么用",
+        "算力是什么",
+        "什么是监督学习",
+        "强化学习是怎么回事",
+        "什么是训练和推理",
+        "为什么AI会出错",
+        "智能体是怎么做计划的",
+    )
+
+    def test_common_questions_never_drop_to_outline(self) -> None:
+        """★★ 回归：整句提问不许整批掉到大纲级（FTS 兜底失效）。
+
+        缺陷形态（真实 kb 上实测，20 条常见提问里 4 条中招）：中文片段 ≤4 字**整词入列、
+        不拆 n-gram**，于是「累加总分」只产出 3-gram「累加总/加总分」—— 而教材正文写的是
+        「累加」「总分」，一个都匹配不上；更典型的「条件判断」（4 字，剥掉「什么是」之后的
+        剩余部分）在正文里也从来不是连写的。加上覆盖率的分母是**所有 n-gram 碎片**
+        （整句提问能拆出 10+ 条），一个真正相关的块也只能拿到 1/10 —— 于是**必然**被判掉。
+        学生感觉到的就是「问得好好的，AI 却答得很泛」（其实是完全没有检索到内容）。
+
+        这条把整张表钉住：**每一条**都要落在 fts 级且有命中。
+        """
+        service = self._fts_only_service()
+        dropped: list[str] = []
+        for question in self.COMMON_QUESTIONS:
+            result = service.search(query=question, grade_level="junior", top_k=5)
+            if result.degraded != "fts" or not result.hits:
+                dropped.append(f"{question} → {result.degraded}（命中 {len(result.hits)} 条）")
+
+        self.assertEqual(
+            dropped,
+            [],
+            "下列整句提问在 FTS 级拿不到候选（分词/覆盖率又把它们判死了）：\n" + "\n".join(dropped),
+        )
+
+    def test_short_cjk_segments_also_produce_bigrams(self) -> None:
+        """★ 根因守卫：中文片段**一律**产出 2-gram（短片段也要拆）。
+
+        这一条单独把分词规则钉住，而不只是钉「那 20 条问题的结果」——
+        否则将来有人为了「减少噪声词条」把短片段改回「整词入列」，表上可能一时看不出来，
+        但「条件判断」「累加总分」这类**写在教材里的双字词组合**会立刻重新查不到。
+        """
+        from app.rag import fallback
+
+        terms = fallback.query_terms("什么是条件判断")
+        self.assertIn("条件", terms, "「条件判断」必须拆出「条件」—— 教材里就是这么写的")
+        self.assertIn("判断", terms)
+        self.assertIn("条件判断", terms, "整词也要留一条：四字术语在教材里常是连写")
+
+        # 双字/三字片段同样要拆（此前「≤4 字整词入列」把这一整类都漏掉了）
+        self.assertIn("循环", fallback.query_terms("循环"))
+        self.assertIn("累加", fallback.query_terms("循环里怎么累加总分"))
+
+    def test_coverage_denominator_counts_content_units_not_ngram_fragments(self) -> None:
+        """★ 根因守卫：覆盖率的分母是**实词**，不是 n-gram 碎片。
+
+        用「碎片数」当分母时，「循环里怎么累加总分」对一个真正讲循环的块给出 1/6 ≈ 0.17，
+        低于 ``MIN_FTS_COVERAGE`` → 判掉。换成实词分母后同一块是 1/2 —— 这才是真实相关性。
+        """
+        from app.rag import fallback
+
+        query = "循环里怎么累加总分"
+        units = fallback.content_units(query)
+        terms = fallback.query_terms(query)
+        self.assertEqual(units, ["循环", "累加总分"], "虚词切出来的实词段")
+        self.assertGreater(len(terms), len(units), "分词碎片本来就该比实词多")
+
+        loop_text = "循环用于重复执行一段代码。它解决的是「一批数据挨个处理」这两类需求。"
+        self.assertGreaterEqual(
+            fallback._content_coverage(loop_text, units),  # noqa: SLF001 - 守卫钉的就是这个口径
+            fallback.MIN_FTS_COVERAGE,
+            "真正讲循环的块必须过线",
+        )
+        # ★ 反向对照：一个实词都没蒙中的块仍然要被判掉
+        self.assertEqual(fallback._content_coverage("轮回一次就算一次", units), 0.0)
+        # 纯虚词提问没有实词 → 交给调用方跳过过滤（那种查询本就不该在 FTS 级算命中）
+        self.assertEqual(fallback.content_units("为什么"), [])
+        self.assertEqual(fallback.content_units("怎么办"), [])
+
     def test_fts_rejects_weak_partial_matches(self) -> None:
-        """只蒙中一个二字片段的块不算命中（否则会把不相干片段当教材喂给模型）。"""
+        """只蒙中一个词条的块不算命中（否则会把不相干片段当教材喂给模型）。
+
+        ★ 换了分母口径之后这条**依然必须成立**：SQL 会返回所有含「循环」的块（十几条），
+        而提问里另有 3 个教材里根本不存在的实词 —— 覆盖率 1/4 < 1/3，全部判掉。
+        """
         from app.rag import fallback
 
         conn = self.service()._ensure_conn()
@@ -630,6 +734,20 @@ class TestDegradationChain(RagCase):
             top_k=5,
         )
         self.assertEqual(hits, [])
+
+        weak = "循环里的量子纠缠与薛定谔的猫坍缩算符"
+        self.assertEqual(fallback.content_units(weak), ["循环", "量子纠缠", "薛定谔", "猫坍缩算符"])
+        self.assertEqual(
+            fallback.fts_search(
+                conn,
+                query=weak,
+                grade_levels=["junior", "primary_high", "primary_low"],
+                requested_grade="junior",
+                top_k=5,
+            ),
+            [],
+            "只命中 4 个实词里的 1 个，不该整片返回",
+        )
 
     def test_outline_prefers_student_grade(self) -> None:
         """★ 大纲兜底要先把**学生自己学段**的内容摆出来。

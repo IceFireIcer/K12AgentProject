@@ -11,6 +11,23 @@
  * ⚠️ `architecture/` 是被 `.git/info/exclude` 挡住的本地目录，别人克隆下来没有它 ——
  *    所以缺了它只跳过、不报错（这个脚本是入库的，不能在干净克隆上一跑就红）。
  *
+ * ---------------------------------------------------------------------------
+ * 两层判据（测试数为什么要分两层）
+ * ---------------------------------------------------------------------------
+ *
+ * 第一层（**默认就跑**，毫秒级）：文档**自洽性**——
+ *   README 里声明的三个数（后端 / 桌面 / 合计）必须彼此对得上（合计 = 两者之和），
+ *   且「声明了一部分」也算失败（半更新正是这条要抓的形态）。
+ *   兜住的是最常发生的那种漂移：改了 `627` 却忘了改 badge 上的 `1546`。
+ *
+ * 第二层（`--tests`，**慢**）：与**真实值**比对 —— 真跑两个套件取用例数。
+ *   ⚠️ 为什么不默认跑：后端套件实测约 95s，塞进 `npm test` 会把每次回归的时间翻倍
+ *     （而 `npm test` 本来就已经跑了一遍桌面套件）。数字的正确性属于「收口前查一次」，
+ *     不属于「每次提交都查」—— 所以留在显式开关后面，由第一层保证不会静默半更新。
+ *   ⚠️ 拿到真实值之后，判据是**关键词锚定 + 逐处枚举**（见下方 checks 表），
+ *     **不是** `text.includes(String(count))` —— 那种全文档子串匹配任何一处命中就算过，
+ *     正是同一份文件里已经批评过的写法（见 checks 表的注释）。
+ *
  * 跑法：`npm run check:docs`（加 `--tests` 会真跑两个套件，慢但最准）
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
@@ -127,6 +144,9 @@ const kbPoints = collect(join(ROOT, 'server', 'knowledge'), ['.md']).filter((f) 
  */
 const checks = [
   { label: '知识点数', re: /([\d,]+)\s*个?\s*知识点/g, value: kbPoints, where: ['README', 'index.html'] },
+  // ⚠️ 每个 check 默认取「第 1 个非空捕获组」；`group` 用于**一条声明里含两个数**的写法
+  //   （例如「后端 919 + 桌面 627」），此时同一条正则按 group 拆成多条 check。
+  //   见下方 testCountChecks()。
   { label: '教材篇数', re: /([\d,]+)\s*篇/g, value: kbPoints, where: ['index.html'] },
   { label: '契约模型数', re: /([\d,]+)\s*个?\s*契约模型/g, value: facts['契约模型数'], where: ['index.html'] },
   { label: 'preload 白名单通道', re: /白名单\s*([\d,]+)\s*通道/g, value: channelCount, where: ['index.html'] },
@@ -148,20 +168,165 @@ if (kb) {
 /** 去掉会影响匹配的排版标记：HTML 标签、Markdown 粗体、全角空格。 */
 const plain = (text) => text.replace(/<[^>]+>/g, '').replace(/\*\*/g, '').replace(/\u00a0/g, ' ')
 
+/* ------------------------------------------------------------------ *
+ * 测试数：声明点逐处锚定
+ * ------------------------------------------------------------------ */
+
+/**
+ * README / index.html 里「测试数」的声明点锚（**一处一条**，不写宽泛的 `([\d,]+)\s*项`）。
+ *
+ * ★ 为什么每条都带一大串前后文：同一个文档里还有大量**别的**「N 项」
+ *   （`26 项产物自检` / `23 项` UX 体检 / `28 项决策` / 历史叙事里的 `877 项测试全绿`），
+ *   宽泛正则会把它们全卷进来，然后按当前值判错（第一版就是这么误报一屏的）。
+ *   锚得越窄越可信 —— 代价是措辞改动会让它报「没找到」，那是**响亮失败**，可以接受。
+ *
+ * `group` 的语义：一条声明里含多个数时，用同一个正则按捕获组拆成多条 check。
+ */
+const TEST_COUNT_ANCHORS = {
+  /** README 顶部 badge：`回归测试-1546%20项%20全绿` */
+  readmeTotal: { re: /回归测试-([\d,]+)%20项/g, where: ['README'], label: '测试总数（badge）' },
+  /** README 两条命令注释：`npm test  # 627 项 …` */
+  readmeDesktop: { re: /npm test[^\n]*?([\d,]+)\s*项/g, where: ['README'], label: '桌面测试数（npm test）' },
+  /** README 命令注释：`unittest discover -s tests  # 919 项` */
+  readmeBackend: {
+    re: /unittest discover -s tests[^\n]*?([\d,]+)\s*项/g,
+    where: ['README'],
+    label: '后端测试数（unittest）'
+  },
+  /** README 目录树：桌面那行带括号说明，后端那行不带 —— 用括号反选区分（同一写法两处） */
+  readmeTreeDesktop: { re: /tests\/\s+([\d,]+)\s*项回归（/g, where: ['README'], label: '目录树-桌面测试数' },
+  readmeTreeBackend: { re: /tests\/\s+([\d,]+)\s*项回归(?!（)/g, where: ['README'], label: '目录树-后端测试数' },
+  /** index.html 的合并声明：`1,546 项测试（后端 919 + 桌面 627）`（同一句式出现两处，值必须一致） */
+  archCombined: {
+    re: /([\d,]+)\s*项测试（后端\s*([\d,]+)\s*\+\s*桌面\s*([\d,]+)）/g,
+    where: ['index.html'],
+    label: '合并声明'
+  },
+  /** index.html 的「规模」行：`规模：后端 919 项（…）+ 桌面 627 项（…）= 1,546 项` */
+  archScale: {
+    re: /规模：后端\s*([\d,]+)\s*项[^\n]*?桌面\s*([\d,]+)\s*项[^\n]*?([\d,]+)\s*项/g,
+    where: ['index.html'],
+    label: '规模行'
+  },
+  /** index.html 的另一处合计：`npm test 1,546 项全绿时` */
+  archGreen: { re: /([\d,]+)\s*项全绿/g, where: ['index.html'], label: '合计（全绿）' }
+}
+
+/**
+ * 真实测试数 → 一组**关键词锚定**的 checks（逐处枚举，任一处不对就红）。
+ *
+ * ⚠️ 这里刻意**不**写成 `docs.README.includes(String(count))`：
+ *   那种全文档子串匹配任何一处命中就算过，而同一个数字在文档里往往出现两三处
+ *   （正文一处、目录树一处、命令注释一处），只改一处留下的「半更新」会被它放行。
+ *   本文件 checks 表上方的注释已经把这条判据讲得很清楚了 —— 测试数没有理由例外。
+ */
+function testCountChecks(counts) {
+  const { backend, desktop } = counts
+  const total = backend !== null && desktop !== null ? backend + desktop : null
+  const entries = []
+
+  if (total !== null) {
+    entries.push({ ...TEST_COUNT_ANCHORS.readmeTotal, value: total })
+    entries.push({ ...TEST_COUNT_ANCHORS.archGreen, value: total })
+    // index.html 的合并声明 / 规模行：同一正则按 group 拆成三条
+    entries.push({ label: `${TEST_COUNT_ANCHORS.archCombined.label}-合计`, ...TEST_COUNT_ANCHORS.archCombined, group: 1, value: total })
+    entries.push({ label: `${TEST_COUNT_ANCHORS.archScale.label}-合计`, ...TEST_COUNT_ANCHORS.archScale, group: 3, value: total })
+  }
+  if (backend !== null) {
+    entries.push({ ...TEST_COUNT_ANCHORS.readmeBackend, value: backend })
+    entries.push({ ...TEST_COUNT_ANCHORS.readmeTreeBackend, value: backend })
+    entries.push({ label: `${TEST_COUNT_ANCHORS.archCombined.label}-后端`, ...TEST_COUNT_ANCHORS.archCombined, group: 2, value: backend })
+    entries.push({ label: `${TEST_COUNT_ANCHORS.archScale.label}-后端`, ...TEST_COUNT_ANCHORS.archScale, group: 1, value: backend })
+  }
+  if (desktop !== null) {
+    entries.push({ ...TEST_COUNT_ANCHORS.readmeDesktop, value: desktop })
+    entries.push({ ...TEST_COUNT_ANCHORS.readmeTreeDesktop, value: desktop })
+    entries.push({ label: `${TEST_COUNT_ANCHORS.archCombined.label}-桌面`, ...TEST_COUNT_ANCHORS.archCombined, group: 3, value: desktop })
+    entries.push({ label: `${TEST_COUNT_ANCHORS.archScale.label}-桌面`, ...TEST_COUNT_ANCHORS.archScale, group: 2, value: desktop })
+  }
+  return entries.filter((entry) => entry.value !== null && entry.value !== undefined)
+}
+
+/**
+ * ★ 第一层（默认跑的）：**文档自洽性** —— 三个声明数彼此必须对得上。
+ *
+ * 不跑套件，只比文档里的数字，所以是毫秒级：能挂在 `npm test` 上。
+ * 它抓的是最常见的那种漂移：**改了套件数、忘了改合计**（或反过来）。
+ * 真实值比对留给 `--tests`（慢），两者分工见文件头。
+ *
+ * @returns 问题描述数组（空数组 = 通过 / 或文档没声明过、无从判断）
+ */
+function readmeConsistencyIssues(text) {
+  const numbers = {
+    backend: firstNumber(text, TEST_COUNT_ANCHORS.readmeBackend.re),
+    desktop: firstNumber(text, TEST_COUNT_ANCHORS.readmeDesktop.re),
+    total: firstNumber(text, TEST_COUNT_ANCHORS.readmeTotal.re)
+  }
+  const known = Object.entries(numbers).filter(([, value]) => value !== null)
+  if (known.length === 0) return [] // 文档不再声明测试数：无从判断，静默跳过（不造一个假要求）
+  if (known.length < 3) {
+    const missing = Object.entries(numbers).filter(([, value]) => value === null).map(([key]) => key)
+    return [`README 的测试数声明不完整：缺 ${missing.join(' / ')} —— 半更新正是这条要抓的形态`]
+  }
+  if (numbers.total !== numbers.backend + numbers.desktop) {
+    return [
+      `README 的测试数彼此对不上：后端 ${numbers.backend} + 桌面 ${numbers.desktop} ` +
+        `= ${numbers.backend + numbers.desktop}，但 badge 写的是 ${numbers.total}`
+    ]
+  }
+  return []
+}
+
+/** 取某个锚的**第一个**捕获值（去掉千分位逗号）。 */
+function firstNumber(text, re) {
+  const match = [...text.matchAll(re)][0]
+  if (!match) return null
+  const raw = (match[1] ?? '').trim()
+  return raw ? Number(raw.replace(/,/g, '')) : null
+}
+
 console.log('── 磁盘真实值 ──────────────────────────────')
 for (const [k, v] of Object.entries(facts)) console.log(`  ${k.padEnd(16)} ${v}`)
 console.log(`  ${'教材篇数'.padEnd(16)} ${kbPoints}`)
 if (kb) console.log(`  ${'知识库'.padEnd(16)} kp=${kb.kp} chunk=${kb.chunk} deps=${kb.deps} 章=${kb.chapters}`)
 else console.log(`  ${'知识库'.padEnd(16)} （没找到 kb.sqlite 或 sqlite3，跳过）`)
 
-console.log('\n── 文档是否与磁盘一致 ──────────────────────')
 const failures = []
-for (const { label, re, value, where } of checks) {
+
+/* ------------------------------------------------------------------ *
+ * 第一层：文档自洽性（默认跑；毫秒级）
+ * ------------------------------------------------------------------ */
+
+if (docs.README) {
+  const issues = readmeConsistencyIssues(plain(docs.README))
+  for (const issue of issues) failures.push(issue)
+  if (issues.length === 0) {
+    console.log('  ✓ README 的测试数彼此自洽（后端 + 桌面 = 合计）')
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 第二层：真跑两个套件取真实值（`--tests`，慢）
+ * ------------------------------------------------------------------ */
+
+if (process.argv.includes('--tests')) {
+  console.log('\n── 真实测试数（较慢）───────────────────────')
+  const t = testCounts()
+  console.log(`  后端 ${t.backend} / 桌面 ${t.desktop} / 合计 ${t.backend + t.desktop}`)
+  // ★ 逐处锚定 + 全量枚举（**不是** includes 子串匹配）——
+  //   同一份文档里每个数字都声明了不止一处，只改一处必须红。
+  checks.push(...testCountChecks(t))
+}
+
+console.log('\n── 文档是否与磁盘一致 ──────────────────────')
+for (const { label, re, value, where, group } of checks) {
   for (const name of where) {
     if (docs[name] === undefined) continue
     const text = plain(docs[name])
-    // 抓出所有「数字 + 关键词」，第 1 个非空捕获组就是那个数字
-    const found = [...text.matchAll(re)].map((m) => (m[1] ?? m[2] ?? '').trim()).filter(Boolean)
+    // 抓出所有「数字 + 关键词」，默认取第 1 个非空捕获组（`group` 指定时按它取）
+    const found = [...text.matchAll(re)]
+      .map((m) => ((group === undefined ? (m[1] ?? m[2]) : m[group]) ?? '').trim())
+      .filter(Boolean)
     const bad = found.filter((s) => Number(s.replace(/,/g, '')) !== value)
     if (found.length === 0) {
       failures.push(`${name} 的「${label}」：磁盘是 ${value}，但文档里找不到对应的「数字+关键词」`)
@@ -172,18 +337,6 @@ for (const { label, re, value, where } of checks) {
     } else {
       console.log(`  ✓ ${name.padEnd(11)} ${label.padEnd(14)} ${value} ×${found.length} 处`)
     }
-  }
-}
-
-if (process.argv.includes('--tests')) {
-  console.log('\n── 真实测试数（较慢）───────────────────────')
-  const t = testCounts()
-  console.log(`  后端 ${t.backend} / 桌面 ${t.desktop} / 合计 ${t.backend + t.desktop}`)
-  if (t.backend !== null && !docs.README.includes(String(t.backend))) {
-    failures.push(`README 的『后端测试数』应为 ${t.backend}，文档里找不到`)
-  }
-  if (t.desktop !== null && !docs.README.includes(String(t.desktop))) {
-    failures.push(`README 的『桌面测试数』应为 ${t.desktop}，文档里找不到`)
   }
 }
 

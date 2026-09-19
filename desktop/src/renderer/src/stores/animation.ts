@@ -23,8 +23,11 @@ import {
   resolveDataBridge,
   type AnimationHostView,
   type AnimationPayloadView,
-  type AnimationTemplatesView
+  type AnimationTemplatesView,
+  type DataBridge
 } from '../api/data'
+// ★ 面向学生的失败文案只有一处实现（HTTP 状态码 / 服务器路径 / 内部 kp_id 都要翻掉）
+import { describeClientError, toStudentFacingMessage } from '../api/student-facing'
 
 /** 供 `AnimationSandboxHost` 使用的托管结果（含防串台标识）。 */
 export interface HostedAnimation {
@@ -49,8 +52,18 @@ export const useAnimationStore = defineStore('animation', () => {
   const hostError = ref<string | null>(null)
 
   const bridgeError = ref<string | null>(null)
-  /** 非响应式：并发取模板清单只发一次。 */
-  let templatesInFlight: Promise<void> | null = null
+  /**
+   * 非响应式：**同一请求键**的并发取模板清单只发一次（键 = `kpId` + `gradeLevel`）。
+   *
+   * ★★ 去重必须看请求键：旧写法 `if (templatesInFlight) return await templatesInFlight`
+   *   会在学生连点两个不同知识点时把**第二个请求静默丢掉** —— 而 `templates`
+   *   还是上一个知识点的那一份（舞台上播的与所选知识点对不上）。
+   *   键相同才复用，键不同就并发发新的，且**只让最后一次写结果**。
+   *   对照组是 `stores/study.ts` 的 `chaptersInFlight === gradeLevel`。
+   */
+  let templatesInFlight: { key: string; promise: Promise<void> } | null = null
+  /** 取模板清单的请求序号（只让最后一次发出的请求写结果）。 */
+  let templatesRequestSeq = 0
 
   /** 模板清单（`available` 是全部可用 id，`matched` 是与本次查询匹配上的）。 */
   const matched = computed(() => templates.value?.matched ?? [])
@@ -67,7 +80,11 @@ export const useAnimationStore = defineStore('animation', () => {
     input: { kpId?: string; gradeLevel?: GradeLevel } = {},
     force = false
   ): Promise<void> {
-    if (templatesInFlight) return await templatesInFlight
+    const key = `${input.kpId ?? ''}#${input.gradeLevel ?? ''}`
+    // 键相同 → 复用那次在途请求；键不同 → 往下走，**并发发新的**（不静默丢掉）
+    if (templatesInFlight !== null && templatesInFlight.key === key) {
+      return await templatesInFlight.promise
+    }
     if (templates.value !== null && !force && !input.kpId && !input.gradeLevel) return
     const lookup = resolveDataBridge()
     if (!lookup.ready) {
@@ -77,26 +94,48 @@ export const useAnimationStore = defineStore('animation', () => {
     bridgeError.value = null
     templatesLoading.value = true
     templatesError.value = null
-    templatesInFlight = (async () => {
-      try {
-        const result = await lookup.bridge.readAnimationTemplates(input)
-        if (result.ok) {
-          templates.value = result.data as AnimationTemplatesView
-          // 默认选中第一个匹配上的（学生进来就该看到东西，而不是空白舞台）
-          if (!activeTemplateId.value && matched.value.length > 0) {
-            activeTemplateId.value = matched.value[0]!.id
-          }
-        } else {
-          templatesError.value = result.message
-        }
-      } catch (thrown) {
-        templatesError.value = thrown instanceof Error ? thrown.message : String(thrown)
-      } finally {
-        templatesLoading.value = false
+    const request = fetchTemplates(input, lookup.bridge)
+    templatesInFlight = { key, promise: request }
+    try {
+      await request
+    } finally {
+      // 只有仍然登记在案的那次负责收尾（被更新的一次顶掉的请求不该关掉新请求的加载态）
+      if (templatesInFlight !== null && templatesInFlight.promise === request) {
         templatesInFlight = null
+        templatesLoading.value = false
       }
-    })()
-    await templatesInFlight
+    }
+  }
+
+  /**
+   * 发一次取模板清单的请求（拆出来是为了有一个**绝不同步抛**的边界）。
+   *
+   * ★ 只有**最后一次**发出的请求能写结果（迟到的旧响应不许把新知识点的清单盖回去）。
+   * ★ 失败也过翻译：后端 detail 里带着服务器上的模板目录
+   *   （`本机没有可用的动画模板（server/resources/templates/ 为空）`）。
+   */
+  async function fetchTemplates(
+    input: { kpId?: string; gradeLevel?: GradeLevel },
+    bridge: DataBridge
+  ): Promise<void> {
+    const seq = (templatesRequestSeq += 1)
+    const isLatest = (): boolean => seq === templatesRequestSeq
+    try {
+      const result = await bridge.readAnimationTemplates(input)
+      if (!isLatest()) return
+      if (result.ok) {
+        templates.value = result.data as AnimationTemplatesView
+        // 默认选中第一个匹配上的（学生进来就该看到东西，而不是空白舞台）
+        if (!activeTemplateId.value && matched.value.length > 0) {
+          activeTemplateId.value = matched.value[0]!.id
+        }
+      } else {
+        templatesError.value = toStudentFacingMessage(result.message, { topic: 'animation' })
+      }
+    } catch (thrown) {
+      if (!isLatest()) return
+      templatesError.value = describeClientError(thrown, { topic: 'animation' })
+    }
   }
 
   /**
@@ -132,11 +171,13 @@ export const useAnimationStore = defineStore('animation', () => {
       })
       if (result.ok) payload.value = result.data as AnimationPayloadView
       else {
-        renderError.value = result.message
+        // ★ 渲染失败是**预期内**的（模板校验不过 / 没有匹配的模板），文案要能直接给学生看：
+        //   后端给的是可读中文，但 404/503 那几条会带上服务器上的模板目录，过一遍翻译。
+        renderError.value = toStudentFacingMessage(result.message, { topic: 'animation' })
         payload.value = null
       }
     } catch (thrown) {
-      renderError.value = thrown instanceof Error ? thrown.message : String(thrown)
+      renderError.value = describeClientError(thrown, { topic: 'animation' })
     } finally {
       rendering.value = false
     }
@@ -172,7 +213,7 @@ export const useAnimationStore = defineStore('animation', () => {
     try {
       const result = await lookup.bridge.hostAnimation({ kpId, html: current.html, payloadId: id })
       if (!result.ok) {
-        hostError.value = result.message
+        hostError.value = toStudentFacingMessage(result.message, { topic: 'animation' })
         return null
       }
       const data = result.data as AnimationHostView
@@ -184,7 +225,7 @@ export const useAnimationStore = defineStore('animation', () => {
       hosted.value = next
       return next
     } catch (thrown) {
-      hostError.value = thrown instanceof Error ? thrown.message : String(thrown)
+      hostError.value = describeClientError(thrown, { topic: 'animation' })
       return null
     } finally {
       hosting.value = false

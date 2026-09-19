@@ -43,6 +43,8 @@ from app.contracts import (  # noqa: E402
     DEFAULT_LLM_PROVIDER_ID,
 )
 from app.main import create_app  # noqa: E402
+from app.rag import retriever  # noqa: E402
+from app.rag.embedder import build_cloud_embedder  # noqa: E402
 from app.routes import settings as settings_module  # noqa: E402
 from app.safety import guard  # noqa: E402
 from app.routes.settings import (  # noqa: E402
@@ -68,6 +70,7 @@ from app.settings_store import (  # noqa: E402
     default_settings,
     settings_from_json,
 )
+from tests.test_store import FakeEmbedder, build_fixture_kb  # noqa: E402
 
 TOKEN = "f" * 64  # 与 Electron 侧 randomBytes(32).toString('hex') 同形
 SECRET_KEY = "sk-9f3c2b7a41d0e8f6a5b4c3d2e1f09876"  # 测试用假 Key
@@ -496,6 +499,8 @@ class TestProbeDiagnosis(unittest.TestCase):
         )
 
     def test_rejected_ping_points_at_the_model_id(self) -> None:
+        """400 的收口口径：仍然指向 ModelID（用户要的就是「我该改哪一栏」），
+        但**对方的错误正文不再回显** —— 见 `_provider_reason`（外泄通道）。"""
         typed = "https://gateway.example.com/v1"
         transport = FakeTransport(
             {
@@ -509,17 +514,23 @@ class TestProbeDiagnosis(unittest.TestCase):
         result = self._probe(transport, base_url=typed)
 
         self.assertFalse(result.ok)
-        self.assertIn("Model Not Exist", result.message)
+        self.assertIn("400", result.message, "状态码必须留着 —— 它是用户判断问题的依据")
         self.assertIn("ModelID", result.message)
+        self.assertNotIn("Model Not Exist", result.message, "★ 对方正文不许回显")
 
-    def test_provider_error_body_is_sanitized(self) -> None:
-        """★ 供应商可能把请求头/Key 回显在错误体里 —— 回显给用户前必须先脱敏。"""
+    def test_provider_error_body_is_never_echoed_even_when_it_carries_the_key(self) -> None:
+        """★ 供应商可能把请求头/Key 回显在错误体里。
+
+        现在这条防线比「脱敏后回显」更硬：**正文整段不回显** —— 所以 Key 不会漏，
+        而对方塞进来的任何字（内网数据、引导话术）也一并进不了设置页。
+        """
         body = json_body({"error": {"message": f"invalid api key: {SECRET_KEY}"}})
         result = self._probe(FakeTransport(default=HttpOutcome(status=401, body=body)))
 
         self.assertFalse(result.ok)
         self.assertNotIn(SECRET_KEY, result.message)
-        self.assertIn("已隐藏", result.message)
+        self.assertNotIn("invalid api key", result.message)
+        self.assertIn("鉴权未通过", result.message)
 
     def test_success_message_mentions_missing_model_id_but_stays_ok(self) -> None:
         body = json_body({"data": [{"id": "deepseek-reasoner"}]})
@@ -1234,6 +1245,134 @@ class TestPartialPutKeepsUntouchedFields(unittest.TestCase):
 
         self.assertTrue(self.client.get("/api/settings").json()["llm"]["hasKey"])
         self.assertEqual(self.client.get("/api/settings/runtime").json()["apiKey"], SECRET_KEY)
+
+
+# --------------------------------------------------------------------------- #
+# ★ 嵌入配置改了必须**立刻生效**（检索单例不能抱着旧配置不放）
+# --------------------------------------------------------------------------- #
+class TestEmbeddingChangeResetsRagServices(unittest.TestCase):
+    """★★ 改了设置的「嵌入」那一栏，正在跑着的 sidecar 必须马上按新配置检索。
+
+    缺陷形态（实测）：``RagService`` 只在**构造时**读一次 ``<data-dir>/config.json``，
+    而服务实例按 kb 路径缓存在 ``_SERVICES`` 里、**没有 TTL**。学生先聊过一句
+    （``/api/rag/search`` 已把单例建起来）之后，再把 ``embedding.mode`` 从
+    ``local_fastembed`` 改成 ``cloud_api`` 并保存 —— 下一次检索仍然拿着构造时那份
+    ``{"mode": "none"}``，继续走 fts/outline，**直到重启应用**才生效。
+    同一路径也让「改成 none」这类降级配置延迟生效（学生的钱白花在云端调用上）。
+
+    修复在 ``PUT /api/settings`` 里：embedding 真的变了就 ``retriever.reset_services()``。
+
+    三条断言各管一件事：① 变了就重建（下一次检索真的会用新配置）；
+    ② **没变就不要清**（重新保存同一份配置不该把检索单例打掉、白重开一次连接）；
+    ③ 只动 LLM 那栏也不许清（嵌入没变，口径与 ② 一致）。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        # 与运行期布局一致：kb 落在 <data-dir>/shared/kb.sqlite（执行文档 §8.2）
+        self.kb_path = build_fixture_kb(self.data_dir, kb_name="kb.sqlite", embedder=FakeEmbedder())
+        retriever.reset_services()
+        self.addCleanup(retriever.reset_services)
+        self.app = app_with_data_dir(self.data_dir)
+        self.client = authed_client(self.app)
+
+    def _warm_service(self):
+        """制造「学生已经聊过一句」的状态：检索单例已建好并被缓存。"""
+        service = retriever.get_service(
+            self.kb_path, data_dir=self.data_dir, embedder=FakeEmbedder()
+        )
+        return service
+
+    def test_saving_a_new_embedding_mode_rebuilds_the_cached_service(self) -> None:
+        service = self._warm_service()
+        # 还没存过设置时 config.json 不存在 → 嵌入这级读到的就是 "none"
+        # （`read_embedding_config` 的容错口径：云端那一级没配 = 不启用）
+        self.assertEqual(service.embedding_config["mode"], "none")
+
+        response = self.client.put(
+            "/api/settings",
+            json={
+                "embedding": {
+                    "mode": "cloud_api",
+                    "baseUrl": "https://embed.example.com/v1",
+                    "apiKey": "emb-key-123456",
+                    "modelId": "bge-m3",
+                }
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        rebuilt = retriever.get_service(
+            self.kb_path, data_dir=self.data_dir, embedder=FakeEmbedder()
+        )
+        self.assertIsNot(rebuilt, service, "★ 单例没被清掉 —— 下一次检索还在用旧配置")
+        self.assertEqual(rebuilt.embedding_config["mode"], "cloud_api")
+        self.assertEqual(rebuilt.embedding_config["model_id"], "bge-m3")
+        # ★ 语义断言（不联网）：下一次检索真的会把云端那一级当成「已配置」
+        self.assertIsNotNone(
+            build_cloud_embedder(rebuilt.embedding_config),
+            "新配置没有进到检索服务里 —— 云端降级级仍然会被判为「未配置」",
+        )
+
+    def test_turning_embedding_off_takes_effect_immediately_too(self) -> None:
+        """反向病情同样要修：把云端**关掉**也必须立刻生效（否则继续花学生的钱）。"""
+        self.client.put(
+            "/api/settings",
+            json={
+                "embedding": {
+                    "mode": "cloud_api",
+                    "baseUrl": "https://embed.example.com/v1",
+                    "apiKey": "emb-key-123456",
+                }
+            },
+        )
+        service = self._warm_service()
+        self.assertEqual(service.embedding_config["mode"], "cloud_api")
+
+        self.client.put("/api/settings", json={"embedding": {"mode": "none"}})
+
+        rebuilt = retriever.get_service(
+            self.kb_path, data_dir=self.data_dir, embedder=FakeEmbedder()
+        )
+        self.assertIsNot(rebuilt, service)
+        self.assertEqual(rebuilt.embedding_config["mode"], "none")
+        self.assertIsNone(build_cloud_embedder(rebuilt.embedding_config))
+
+    def test_resaving_the_same_embedding_keeps_the_live_service(self) -> None:
+        """★ 对照断言：「重新保存同一份配置」不该把检索单例打掉（白重开连接 + 重探向量引擎）。"""
+        service = self._warm_service()
+        current = self.client.get("/api/settings").json()["embedding"]
+
+        self.client.put(
+            "/api/settings",
+            json={
+                "embedding": {
+                    "mode": current["mode"],
+                    "baseUrl": current["baseUrl"] or "",
+                    "apiKey": MASK,  # 界面会把读回来的掩码原样提交
+                    "modelId": current["modelId"] or "",
+                }
+            },
+        )
+
+        self.assertIs(
+            retriever.get_service(self.kb_path, data_dir=self.data_dir, embedder=FakeEmbedder()),
+            service,
+            "配置没变却清了单例：下一次检索要白付一次连接与向量引擎探测",
+        )
+
+    def test_an_llm_only_change_does_not_touch_rag_services(self) -> None:
+        """只动 LLM 那一栏不影响嵌入 —— 单例不该被清（两条线各自独立）。"""
+        service = self._warm_service()
+
+        self.client.put("/api/settings", json={"llm": {"apiKey": "sk-brand-new-key-0987"}})
+
+        self.assertIs(
+            retriever.get_service(self.kb_path, data_dir=self.data_dir, embedder=FakeEmbedder()),
+            service,
+        )
 
 
 # --------------------------------------------------------------------------- #

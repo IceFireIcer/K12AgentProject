@@ -11,7 +11,9 @@
 3. ★★ **答案不外流**：错题本**不 join 带标准答案的 ``generated_question``，
    响应里任何位置都不许出现 ``answer``（递归扫 JSON，与 ``test_contracts`` 同一手法）；
 4. ★ **时间按本地日期切天**：报告里的「连续学习 N 天」不能在跨零点学习时断掉；
-5. ★ **跨学生隔离**：A 的错题/报告里不出现 B 的任何数据。
+5. ★ **跨学生隔离**：A 的错题/报告里不出现 B 的任何数据；
+6. ★★ **错题本的汇总是全量**：``limit`` 只截断列表，``totalWrong`` / ``withoutStem``
+   是「累计答错 N 次」—— 截断后求和会让练得多的学生看到一个**偏小且不再增长**的数字。
 
 跑法::
 
@@ -36,6 +38,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import build_runtime_config  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.routes.study import MISTAKE_LIMIT  # noqa: E402
 from app.routes.students import student_learning_db_path  # noqa: E402
 
 TOKEN = "test-token-study"
@@ -301,6 +304,58 @@ class TestMistakes(StudyCase):
         loop = next(item for item in body["items"] if item["kpId"] == "prog-loop-jr")
         self.assertEqual(loop["wrongCount"], 2, "同一知识点的错次要累加")
         self.assertEqual(loop["stem"], "有题干", "题干取最近一次**有题干**的那条")
+
+    def test_totals_are_full_even_when_the_item_list_is_truncated(self) -> None:
+        """★★ ``limit`` 只截断**列表**；``totalWrong`` / ``withoutStem`` 恒为**全量**。
+
+        错题本界面上「累计答错 N 次」与页脚「已计入上面的错次统计」都是求和得出的。
+        以前这两个数是对**截断之后**的 records 求的和 —— 一旦错过的知识点超过 ``limit``
+        （默认 50，而一个学段就有 57 个知识点、跨学段取题还会更多），
+        那个数字就**偏小且永远不再增长**，页脚那句话也随之变成假话。
+        ``limit`` 描述的是「列表回几条知识点」，不是「统计范围」。
+
+        ★ 用 55 个虚构 kp（``kp-truncate-*``）而不是真实知识点：这条断言与 kb 无关
+          —— 它要的是「超过 ``limit`` 的错题分布」，不是「名字能不能从 kb 补上」
+          （那是 ``test_kp_name_and_chapter_come_from_kb`` 的事）。
+        """
+        from app.store.learning import LearningStore
+
+        student = self.create_student("全量统计", "junior")
+        total_kps = MISTAKE_LIMIT + 5
+
+        # 一次开库批量写（55 次开库只为了数据分布，会白花时间）；
+        # 每行都是「答错且没有题干」→ 两个汇总各自可预期。
+        store = LearningStore(student_learning_db_path(self.tmp, student))
+        try:
+            for index in range(total_kps):
+                store.add_history(
+                    kp_id=f"kp-truncate-{index:03d}",
+                    activity="coding",
+                    question="",
+                    is_correct=False,
+                )
+        finally:
+            store.close()
+
+        # ① 默认 limit：列表截到 MISTAKE_LIMIT 条，但两个汇总要覆盖全部 55 条
+        default_body = self.client.get(f"/api/quiz/mistakes/{student}").json()
+        self.assertEqual(
+            len(default_body["items"]), MISTAKE_LIMIT, "列表仍然只回 limit 条知识点"
+        )
+        self.assertEqual(
+            default_body["totalWrong"],
+            total_kps,
+            "累计答错次数必须是**全量**和（按截断后的列表求和会让它停在 limit 上）",
+        )
+        self.assertEqual(default_body["withoutStem"], total_kps, "无题干的错次同样是全量")
+
+        # ② 显式更小的 limit：列表跟着 limit 走，汇总**一个数都不变**
+        explicit = self.client.get(
+            f"/api/quiz/mistakes/{student}", params={"limit": 3}
+        ).json()
+        self.assertEqual(len(explicit["items"]), 3, "limit=3 只回 3 条知识点")
+        self.assertEqual(explicit["totalWrong"], total_kps, "汇总不随 limit 缩小（它不是列表的子集和）")
+        self.assertEqual(explicit["withoutStem"], total_kps)
 
     def test_rows_without_kp_id_are_skipped(self) -> None:
         """没有知识点归属的行（qa 轨未识别出 kp）按知识点聚合时无处可放 —— 跳过而不是崩。"""

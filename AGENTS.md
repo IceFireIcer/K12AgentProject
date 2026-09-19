@@ -414,10 +414,65 @@ D-020 曾让需求「学生可选择学段」的字面要求被主动放弃，D-
   ⚠️ 章节清单来自 `kb.sqlite`、学生进度来自 `learning.db`，**不要把教材清单存进学生库**。
   ⚠️ 章节顺序**只能按章号解析**（`第N章`）：既不能按标题字典序，**也不能按 rowid**
   （rowid 是文件名字典序，实测会排成 `1,6,1,3,5,2` —— 见 P-057）。
-- **历史会话只读回看（D-034）**：`session:transcript` **只接受会话 id，绝不接受路径** ——
-  主进程先用 `SessionManager.list()` 的结果做白名单对齐，再用 **Pi 给的 `path`** 打开；
-  会话目录必须显式指向该学生（否则 Pi 退回 `~/.pi/agent/sessions/`）。
-  本轮**不做**切会话续聊（要 dispose 当前 runtime 并处理代际竞态，是另一件事）。
+- **历史会话：回看 + 切换续聊 + 启动恢复（D-034，2026-09-19 补齐）**：
+  `session:transcript` 与 `session:open` 都**只接受会话 id，绝不接受路径** ——
+  主进程先用 `SessionManager.list()` 的结果做白名单对齐，再用 **Pi 给的 `path`** 打开。
+  ★★ 四条新通道：`session:open` / `session:new` / `session:state`（三条 invoke）+
+  `session:changed`（**推送**，唯一的 session 推送通道 —— 五条 invoke 不许进 `PUSH_CHANNELS`）。
+  ★★ **切换 = dispose 旧的 + 装配新的**，顺序不能反（`swapToSession()`）：
+    不 dispose 会让旧 JSONL 半写；先装配后 dispose 会让并发取数拿到旧实例
+    （表现是「会话切了一半，有的调用用新会话、有的用旧的」）。
+  ★ **冷启动来源是 `'recent'`**（`sessionSourceForBoot()`，`K12_NEW_SESSION_ON_BOOT=1` 可改回
+    `'new'`）—— 这一条就是「重启后数据延续演练」达标的落点（已实测：重开应用恢复出
+    66 轮的历史会话）。
+  ★★ **`cwd` 必须由 `piSessionCwd(paths)` 统一给出**（建会话与**列**会话共用）：
+    Pi 的 `list(cwd, sessionDir)` 在传了自定义 `sessionDir` 时**会额外按 cwd 过滤**
+    （且不报错）—— 两处写不同的值 = **列表恒为空**（实测踩到：改前列表永远是 0 条，
+    而磁盘上有 19 个会话文件。见 P-102）。
+  ★★ **三种会话来源（`create` / `continueRecent` / `open`）都必须传 `paths.sessionDir`**
+    并过 `assertSessionManagerIsolated`，三者收敛在**同一个** `openSessionManager()` 里。
+    漏传 `open` 那份最严重：新建只是写错地方，**恢复是读到别人的会话**（G9-3b 有断言）。
+  ★ `session:state`（挂载时读）**会装配** —— 恢复出来的正文只有主进程手里有；
+    不装配就回空，学生看到的是「关掉应用再打开，上一段对话消失了」（数据其实还在盘上）。
+- ★★ **会话分叉（「从这里重新问」，D-059）**：`session:branch` 一条新增通道
+  （**invoke**）。底层是 Pi 的 `createBranchedSession(entryId)` —— 它是**复制**
+  （写一个新 JSONL，头里记 `parentSession` 指回原文件），**原会话一个字节不动**。
+  ★ **分叉点用「条目 id」而不是「第几条消息」**：编号会漂（开场引导是一条 assistant
+    消息但不算一轮；失败/被拦下的轮次不留条目）—— `TranscriptMessage.entryId` 才是稳定标识。
+  ★★ **两道校验缺一不可**（`handlers.ts` 的 `branchFromMessage`）：
+    `sessionId` 走会话白名单；**`entryId` 必须属于那条会话**（先按 id 读回条目再对齐）——
+    少了后者就能「拿 B 会话的 id 去分叉 A」（`createBranchedSession` 只认 id、不认归属）。
+  ★★ **先分叉、后 dispose**（顺序有断言）：分叉只是写文件，失败时当前会话毫发无损；
+    反过来的话一次失败会让学生连当前对话都没了。
+  ★ 会话树：Pi 的分叉产生的是**新文件**，所以「树」就是「一串带 `parentSession`
+    指向的会话」—— 侧栏据此显示「来自〈父会话〉」，**父不在列表里时不给这个标记**。
+  ★★ **实时轮次也必须能分叉**（`turn:entries` 推送，P-105）：`entryId` 原先只由
+    「恢复历史」那条路填，于是按钮**只对历史消息出现**、对刚聊出来的回答不出现。
+    主进程在每轮结束后推该轮的 `{userEntryId, entryId}`（按 `requestId` 配对）；
+    渲染进程要**缓冲超前到达**的那条（推送可能早于 `sendChat` 的回执）。
+  ★★ **恢复历史要配成轮次**（P-106）：`restoreConversation` 里一问一答是**一轮**，
+    不是两条各占一轮 —— 初版那样写，界面长成「一半一半」（一轮只有学生气泡、
+    下一轮只有回答）。配对时别把学生那半丢掉。
+  守卫：`desktop/tests/session-branch.test.ts`（23，含 6 组变异验证）+
+  `npm run ux` 的 D7–D9 三项（真跑界面数按钮）。
+- ★★ **主动发起对话（D-055，需求原文「智能体也能主动发起对话引导学习章节内容」）**：
+  全项目**唯一一处「AI 先开口」**。服务端 `GET /api/profile/{id}/opening` 用**模板拼接**
+  （`routes/profile.py` 的 `_opening_text`，复用 `_recommendation_summary` 的措辞）——
+  **不调 LLM**：它在「新建会话」这条路上，零延迟 / 断网可用 / 无成本三条都重要。
+  ★ 主进程**只在 `messageCount === 0` 时发**（`swapToSession()` 里那一行）：
+  不是「刚刚新建」（切到一条空的历史会话同样该开场），不是 `getEntries().length`
+  （那里面还有 `model_change`，开场**永远发不出来**）。
+  ★★ **冷启动不发**（`session:state` 回空串）：那份恢复出来的历史里本来就有当时发过的那条，
+    再发一次就是「每次开应用都看到同一句招呼」。
+  ★★ 写进 Pi 会话用 **`appendMessage` + `role: 'assistant'`**，
+  **不许**用 `custom_message`（Pi 的 `convertToLlm` 会把它变成 **user** 消息 ——
+  模型以为「从X开始吧」是学生说的，属伪造对话记录）。
+  ★ 三种来源三种说法、`source == 'empty'` 时 `text` 为空串 → 前端**不发**（不硬凑寒暄）；
+  无 `kpId` 时不渲染动作按钮（点了什么都不发生）。
+  ★ `fetchOpening` 全仓**只有一个调用点**（切换/新建那条路）：每轮对话都不许碰它。
+  `usage` 全 0 **是事实**（模板拼出，没花 token）。
+  守卫：`server/tests/test_opening_guidance.py`（13）+ `desktop/tests/opening-guidance.test.ts`（12）+
+  `desktop/tests/session-switch.test.ts`（16）+ `desktop/tests/session-boot.test.ts`（7）。
 - **导出文件名用白名单重建（D-035）**：`sanitizeFileName()` 只保留
   「汉字/字母/数字/空格/`-`/`_`/`.`」并可强制 `.md`；回执**只回文件名**（完整路径不进渲染进程）。
 - **学习地图自绘内联 SVG（D-036）**：**不引入任何图表库**（零新增依赖 + 断网可用）；
@@ -500,7 +555,7 @@ npm run check:server:packaged     # 查**已装进安装包**的那一份
 ```bash
 cd desktop
 npm run dev                     # 另一个终端里带调试端口起：K12_DEBUG_PORT=9222 npm run dev
-npm run ux                      # ★ 对话页体检 23 项：键盘/滚动/触控目标/浮层几何/破坏性操作/运行期健康
+npm run ux                      # ★ 对话页体检 24 项：键盘/滚动/触控目标/浮层几何/破坏性操作/运行期健康
 npm run ux:scroll               # 滚动行为 7 项（跟随 / 停住 / 回到最新 / 发消息必跟随）
 npm run ux:busy                 # 忙时发送（排队是否可见、是否自动发出）
 npm run ux:attribute            # 滚动掉队归因（B1 红了先跑它，看是哪类内容掉队）
@@ -509,7 +564,7 @@ npm run ux:layout               # ★ 版式体检：三视口（1120/1280/1440�
 npm run ux:reload               # ★ 跑探针前先重载：改过 onMounted 后 HMR 不会重跑它
 ```
 
-**这套东西的定位（别把它当单测的重复）**：`npm test` 618 项**全部通过**时，
+**这套东西的定位（别把它当单测的重复）**：`npm test` 705 项**全部通过**时，
 它照样抓出过 **8 个缺陷**（P-076~P-083）。下面这张表是本轮最有价值的产出 ——
 它说明「什么样的缺陷是单测结构上测不到的」，照这个清单去写检查，比泛泛地说「多测点」有用：
 
@@ -687,12 +742,19 @@ npm run ux:reload               # ★ 跑探针前先重载：改过 onMounted �
   用 `bridge/client.ts` 的 8s 兜底会把一次**成功**的重建报成「响应超时」（最难查的假失败）。
   ★ 统计接口的 `vecReady` 有个坑：`chunk_vec` 是 `vec0` 虚表，**不先加载 sqlite-vec 扩展**连
   `COUNT(*)` 都会抛，于是行数恒为 0、界面会谎报「向量不可用」。`_vec_ready()` 负责加载并重数。
+> ★ 通道总数的权威口径是 `npm run check:docs` 打出来的 **54 条**（2026-09-19 的三批：
+> 数据面 18 + 会话 4 + 分支 1 + 开场引导复用 profile 取数层；更早的基线见 `index.html`）。
+> **推送通道 9 条**（`PUSH_CHANNELS`）—— 新增推送时别忘了登记，G7 会断言。
+
 - **数据面 IPC 通道**（本轮新增，18 条；细则见 `src/main/ipc/channels.ts` 的注释）：
   画像/推荐/学段证据（`profile:read` / `profile:recommendation` / `grade:signals` / `grade:history`）·
   闯关（`quiz:bank` / `quiz:grade` / `quiz:progress`）· 编程（`code:template` / `code:hint` / `code:run-hint`）·
   动画（`animation:templates` / `animation:render` / `animation:host`）·
   教材知识库（`knowledge:stats` / `knowledge:points` / `knowledge:import` / `knowledge:rebuild`）·
   学生身份（`student:get`）。
+  ★ 2026-09-19 又补了 **4 条会话通道**（`session:open` / `session:new` / `session:state`
+    + 推送 `session:changed`）与 **1 条开场引导**（复用 `profile:opening` 的取数层，
+    没有新增通道）。总数的权威口径是 `npm run check:docs` 打出来的 **52 条**。
   ★★ 三条不许走样的纪律：
   ① **学生 id 一律由主进程决定**（`resolveActiveStudentId()`），**绝不读渲染进程递来的值** ——
      与 `chapter:get/set` 同一条：身份一旦可指定，就是「读别人的画像与学习记录」；
@@ -728,6 +790,10 @@ npm run ux:reload               # ★ 跑探针前先重载：改过 onMounted �
   它覆盖的是 `npm test` 与 `server/tests` **都盖不到的那一层**：主进程取数层真连一次 Python，
   验路径拼接、超时、错误归一化，以及几条易破的硬约束（题库无 `answer`、代码模板无 `solution`、
   动画 HTML 无外部地址、RAG 命中带节级正文、学段隔离不越级）。跑法见脚本头部注释。
+  ★★ **起 sidecar 时 `--data-dir` 必须传，且必须不是 `server/_data`**（脚本头部有现成命令行）：
+  不传或传默认目录都会被判成「未显式传入」，profile / grade / 判分 / 动画托管
+  **一共 7 条会红成 503** —— 那是**跑法不对**，不是产品坏了。
+  用 `mktemp -d` 建一个临时 data-dir 并拷一份 `kb.sqlite` 进去，21 条全绿且不污染仓库。
 
 ## 9. Git / 远程仓库工作流
 

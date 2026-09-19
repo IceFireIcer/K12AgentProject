@@ -58,7 +58,10 @@
 import type { TurnEvent } from '../../ipc/chat-stream.ts'
 import type { GradeLevel } from '@shared/ipc-events'
 import { apiFetch } from '../../bridge/client.ts'
-import { planBlockedEvent, type TurnSink } from '../events.ts'
+// ★ `isTerminalTurnEvent` 与门的 `failed` 判据**必须同源**（见 `emit()` 的 `error` 分支）：
+//   两个模块各写一份「什么算终态」的判据，漂移的表现就是「终审被静默跳过」。
+//   ⚠️ 依赖方向是单向的：`events.ts` **不** import 本文件，所以这里不会产生循环导入。
+import { isTerminalTurnEvent, planBlockedEvent, type TurnSink } from '../events.ts'
 
 /* ------------------------------------------------------------------ *
  * 契约形状（与 `server/app/safety/route.py` 的 pydantic 出参一一对应）
@@ -351,7 +354,12 @@ export function createSafetyGateSink(options: SafetyGateSinkOptions): SafetyGate
 
   let buffer = ''
   let pendingDone: { name: 'done'; data: { messageId: string } } | null = null
-  /** 本轮以失败收尾（`error` 已转发）：没有正文要撤，也不再拖一次终审。 */
+  /**
+   * 本轮以**终态**失败收尾（`error{degraded:false}` 已转发）：没有正文要撤，也不再拖一次终审。
+   *
+   * ⚠️ `degraded:true` 的**工具失败提示**不置这一位（见 `emit()` 的 `error` 分支）——
+   *   它不终结本轮，后面还有正文与 `done`，终审必须照跑。
+   */
   let failed = false
   /** 终审/收尾已经启动（防止 `settled()` 与 `finish()` 各跑一次导致重复 emit）。 */
   let settling = false
@@ -400,7 +408,8 @@ export function createSafetyGateSink(options: SafetyGateSinkOptions): SafetyGate
     if (closed || settling) return
     settling = true
     if (failed) {
-      // 失败收尾：`error` 已经转发过了，直接放行 done（若有）并收尾
+      // **终态**失败收尾（`degraded:false`）：`error` 已经转发过了，直接放行 done（若有）并收尾。
+      // 注意这条路**不是**「工具失败」那条 —— 工具失败不置 `failed`，它会走到下面的终审。
       if (pendingDone) {
         inner.emit(pendingDone)
         pendingDone = null
@@ -455,8 +464,20 @@ export function createSafetyGateSink(options: SafetyGateSinkOptions): SafetyGate
           return true
 
         case 'error':
-          // 失败是终态：立刻转发，并让 finish() 走「不审核」的分支
-          failed = true
+          // ★★ 只有**终态** error 才算「本轮失败」（P0：这里曾经一律置 `failed`）。
+          //
+          // 判据与 `isTerminalTurnEvent()` **同源**，不能各写一份 —— `events.ts` 把
+          // **工具失败**发成 `error{degraded:true}` 且**本轮不终结**（那一段注释写得很清楚：
+          // 模型通常还会用文字把这一轮讲完，那两段正文必须继续送达）。
+          //
+          // 旧实现只认事件名，于是「sidecar 没起来时 rag_search 失败」这条**最常见的降级路径**
+          // （无 Key / 断网 / sidecar 挂了的环境恰恰最容易命中）会走到 `settle()` 的失败分支：
+          // 终审**一次都不跑**，`buffer` 里那段未经任何审核的模型正文直接放行给 K12 学生，
+          // 日志还记成「生成侧终审=0 次」的正常口径 —— 安全链路在最需要它的时候静默缺席。
+          //
+          // `degraded:true` 是**提示**（能力受限但本轮继续）：原样转发，但不置 `failed` ——
+          // 后面的 `done` 到达时照常走终审。
+          if (isTerminalTurnEvent(event)) failed = true
           return inner.emit(event)
 
         default:

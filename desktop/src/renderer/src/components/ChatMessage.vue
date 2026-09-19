@@ -24,13 +24,14 @@
  *   取不到时按钮显示「原文暂时取不到」，而不是点下去毫无反应。
  */
 import { computed, ref } from 'vue'
-import { BookMarked, X } from 'lucide-vue-next'
+import { BookMarked, GitBranch, X } from 'lucide-vue-next'
 import type { ChatTurn } from '../api/events'
 import type { CitationDetail } from '@shared/ipc-events'
 import { GRADE_LABELS, TURN_STATUS_LABELS } from '../labels'
 import { DEFAULT_LOGO_URL } from '../brand-logo'
 import { parseMarkdown } from '../markdown'
 import { useEscape } from '../composables/useEscape'
+import { useFocusReturn } from '../composables/useFocusReturn'
 import InlineCard from '../cards/InlineCard.vue'
 import BlockedNotice from './BlockedNotice.vue'
 import DegradedNotice from './DegradedNotice.vue'
@@ -40,7 +41,38 @@ const props = defineProps<{
   turn: ChatTurn
   /** 取某个引用的详情（来自 `stores/chat.ts` 的 `citationDetailOf`）。 */
   detailOf?: (chunkId: string) => CitationDetail | null
+  /** 分叉进行中（界面据此禁用按钮 + 显示「正在准备…」）。 */
+  branching?: boolean
 }>()
+
+/**
+ * ★★ 「从这里重新问」——把分叉点交给上层（`Chat.vue` → `chat.branchSession`）。
+ *
+ * ★ 组件**自己不调 store**：消息组件只负责「哪条消息被点了」，
+ *   「分叉之后界面怎么变」是 store 与页面的责任（与 `MessageComposer` 把文字
+ *   交给 `@send` 同一条纪律：组件不持有会话状态）。
+ * ★ 事件带的是**条目 id**（不是「第几轮」）：编号会漂，id 不会
+ *   （见 `main/study/sessions.ts` 的 `TranscriptMessage.entryId` 注释）。
+ */
+const emit = defineEmits<{ (event: 'branch', entryId: string): void }>()
+
+/**
+ * 这一轮能不能当分叉点。
+ *
+ * ★ 判据是「状态已终结 **且** 有助手那条回答的条目 id」：
+ *   - `streaming` 时不给（如上：分支点不该是半句话）；
+ *   - `entryId` 为空时不给（老会话 / 手改过的文件里认不出条目）。
+ */
+const branchable = computed(() => {
+  if (props.turn.status === 'streaming') return false
+  if (!props.turn.entryId) return false
+  return true
+})
+
+function emitBranch(): void {
+  const id = props.turn.entryId
+  if (id) emit('branch', id)
+}
 
 const streaming = computed(() => props.turn.status === 'streaming')
 const statusLabel = computed(() => TURN_STATUS_LABELS[props.turn.status])
@@ -76,6 +108,18 @@ useEscape(
   },
   () => sourceOpen.value !== null
 )
+
+/**
+ * 焦点契约（打开移入 → Tab 层内循环 → 关闭归还触发元素）。
+ *
+ * ★ 这一层已经是 `role="dialog" aria-modal="true"`，**只差焦点**（实测缺口）：
+ *   此前只有上面那个 `useEscape` —— 打开后 Tab 会一路跑到遮罩**后面**的按钮上
+ *   （读屏用户按自己的方式关掉它之后，还得从头 Tab 回去，且中途可能误触到别处）。
+ * ★ 初焦点交给 composable 的默认规则（面板里第一个可聚焦元素 = 关闭键）：
+ *   这一层没有「危险默认」，无需像确认对话框那样指定初始目标。
+ */
+const drawerRef = ref<HTMLElement | null>(null)
+useFocusReturn(drawerRef, () => sourceOpen.value !== null)
 </script>
 
 <template>
@@ -200,6 +244,25 @@ useEscape(
 
         <BlockedNotice v-if="turn.blocked" :notice="turn.blocked" />
         <DegradedNotice v-if="turn.error" :notice="turn.error" />
+
+        <!-- ── 分叉点：从这里重新问 ────────────────────────────────────────
+             ★ 只在**这一轮已经结束**时出现：流式途中点它，学生拿到的是一段
+               没写完的回答当分支点（他不会想要那个）。
+             ★ 只在**真的有条目 id** 时出现（`branchable`）：老会话 / 认不出条目
+               的历史消息没有分叉点 —— 宁可不给按钮，也不要给一个点了就报错的。 -->
+        <div v-if="branchable" class="branch" data-testid="turn-branch">
+          <button
+            type="button"
+            class="branch__btn"
+            data-testid="branch-restart"
+            title="保留这段对话，另开一条从这里接着问（原来的不会被改动）"
+            :disabled="branching"
+            @click="emitBranch()"
+          >
+            <GitBranch :size="13" />
+            <span>从这里重新问</span>
+          </button>
+        </div>
       </div>
     </div>
 
@@ -207,6 +270,7 @@ useEscape(
     <Teleport to="body">
       <div
         v-if="sourceOpen !== null"
+        ref="drawerRef"
         class="src"
         role="dialog"
         aria-modal="true"
@@ -628,5 +692,37 @@ useEscape(
   font-size: var(--k12-fs-xs);
   color: var(--k12-accent-ink);
   word-break: break-all;
+}
+/* ── 分叉点（从这里重新问）─────────────────────────────────────────────────
+ * 它是**每条回答的附属动作**，不是主干控件：常态淡、悬停才明显，
+ * 免得整页回答下面挂一排按钮把阅读节奏打散。
+ * ★ 尺寸走 28px 高（UX 体检 C1 的触控下限）—— 它虽小，但学生真会点。 */
+.branch {
+  display: flex;
+  margin-top: 6px;
+}
+.branch__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--k12-r-pill);
+  background: transparent;
+  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .branch__btn:hover:not(:disabled) {
+    border-color: var(--k12-border-strong);
+    background: var(--k12-surface-2);
+    color: var(--k12-accent-ink);
+  }
+}
+.branch__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 </style>

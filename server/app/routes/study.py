@@ -112,6 +112,11 @@ def list_mistakes(
     ★ ``without_stem`` 显式告诉前端「还有几条错题没有题干记录」：
       QA / 编程轨答错时 ``question`` 是空串（那一轨不写题干），
       静默丢掉的话，学生会觉得「我明明错过它，这里怎么没有」。
+
+    ★★ ``limit`` **只截断列表**，两个汇总（``total_wrong`` / ``without_stem``）**恒为全量**：
+      它们回答的是「累计答错多少次」，与学生这次翻到第几条知识点无关。
+      界面上「累计答错 N 次」与页脚「已计入上面的错次统计」都按全量口径写死 ——
+      截断后求和会让错得多的学生看到一个**偏小且不再增长**的数字。
     """
     validate_student_id(student_id)
     data_dir = require_data_dir(request)
@@ -125,10 +130,23 @@ def list_mistakes(
                 detail=f"还没有 {student_id} 的错题记录：该学生尚未建立学习记录",
             )
         try:
-            records = store.mistakes(limit=limit)
+            # ★★ 汇总与列表**口径不同**，必须分两步取：
+            #   ``total_wrong`` / ``without_stem`` 是「累计答错 N 次」，要的是**全量**和；
+            #   而 ``limit`` 描述的是「列表回几条**知识点**」，不是「统计范围」。
+            #   以前对着截断后的 ``records`` 求和 —— 学生错过的知识点一旦超过 ``limit``
+            #   （默认 50，一个学段就有 57 个知识点、跨学段取题更多），界面上那个数字
+            #   就永远不再增长，页脚「已计入上面的错次统计」也随之变成假话。
+            #   ``store.mistakes`` 的 SQL 本就取全量、只在返回前切片，所以这里一次
+            #   ``limit=None`` 拿全量，再自己切出给界面的列表（不是两次查询）。
+            all_records = store.mistakes(limit=None)
         except sqlite3.Error as exc:
             logger.exception("错题聚合失败：%s", student_id)
             raise HTTPException(status_code=503, detail=f"读取错题失败（本地数据库异常）：{exc}") from exc
+        # 列表仍然只回 ``limit`` 条；``max(1, ...)`` 与 ``store.mistakes`` 的边界口径一致
+        # （路由上是 ``ge=1``，这条主要是给直接调用本函数的调用方兜底）。
+        records = all_records[: max(1, limit)]
+        total_wrong = sum(record.wrong_count for record in all_records)
+        without_stem = sum(record.blank_count for record in all_records)
     finally:
         store.close()
 
@@ -149,8 +167,8 @@ def list_mistakes(
         student_id=student_id,
         grade_level=as_grade_level(student.grade_level),
         items=items,
-        total_wrong=sum(record.wrong_count for record in records),
-        without_stem=sum(record.blank_count for record in records),
+        total_wrong=total_wrong,
+        without_stem=without_stem,
     )
 
 

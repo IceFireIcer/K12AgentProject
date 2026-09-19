@@ -1,13 +1,15 @@
 /**
  * 票 15 / 20 的**编排层（TS）纯逻辑**测试。
  *
- * 盯住四条不能被「顺手改坏」的红线：
+ * 盯住五条不能被「顺手改坏」的红线：
  *
- * 1. ★★ **答案不出后端**：变式题登记时，含答案的那一份只发给后端；
- *    发给前端的载荷结构上就没有 `answer` / `rubric`（用哨兵串断言）；
+ * 1. ★★ **答案与解析都不出后端**：变式题登记时，含答案的那一份只发给后端；
+ *    发给前端的载荷结构上就没有 `answer` / `rubric` / `explanation`（用哨兵串断言）；
  * 2. ★ **主观题判分 Prompt 含评分细则 + 示例对照**（票 15 的「防漂移」口径）；
  * 3. ★ **判分结果的解析是严格校验**：认不准的分数返回 `null`，绝不把脏分数送去落库；
- * 4. ★ **无 API Key 时干净降级**：不判分、不抛异常、给出可读文案（挂起是最坏形态）。
+ * 4. ★ **无 API Key 时干净降级**：不判分、不抛异常、给出可读文案（挂起是最坏形态）；
+ * 5. ★ **投影是白名单**：`projectQuestion` 只放行五个字段 —— 解析（`explanation`）
+ *    的措辞经常直接写着答案，它只在**判分之后**经 `QuizResult.feedback` 回来。
  *
  * 这些函数都是纯函数（不 import Pi、不发 HTTP），所以 `node --test` 能直接覆盖。
  */
@@ -25,7 +27,9 @@ import {
   parseSubjectiveScore,
   parseVariantPayload,
   prepareVariants,
+  projectBankPayload,
   projectProgress,
+  projectQuestion,
   readCompletionContext,
   registerVariants,
   RUBRIC_SCAFFOLD,
@@ -38,6 +42,8 @@ import {
 /** ★ 哨兵：只可能来自题目的标准答案。它一旦出现在**给前端的**载荷里就是泄漏。 */
 const SENTINEL_ANSWER = '哨兵标准答案-ZX91-不得出现在前端载荷里'
 const SENTINEL_RUBRIC = '哨兵评分细则-ZX92-不得出现在前端载荷里'
+/** ★ 哨兵：只可能来自题目的解析 —— 解析里经常直接写着答案，同样不许下发。 */
+const SENTINEL_EXPLANATION = '哨兵解析-ZX93-解析里往往写着答案-不得出现在前端载荷里'
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const quizSourceFile = join(desktopRoot, 'src', 'main', 'agent', 'extensions', 'quiz.ts')
@@ -60,7 +66,7 @@ test('★ 变式题准备：含答案的那一份给后端，投影后的一份�
           type: 'blank',
           stem: '1 + 1 = ___',
           answer: SENTINEL_ANSWER,
-          explanation: '加法用 + 号'
+          explanation: SENTINEL_EXPLANATION
         }
       ]
     },
@@ -69,22 +75,22 @@ test('★ 变式题准备：含答案的那一份给后端，投影后的一份�
   assert.equal(result.ok, true)
   if (!result.ok) return
 
-  // 登记用：**有**答案（后端要判分）
+  // 登记用：**有**答案与解析（后端判分、判分后的反馈都要它们）
   assert.equal(result.questions.length, 1)
   assert.equal(result.questions[0].referenceAnswer, SENTINEL_ANSWER)
+  assert.equal(result.questions[0].explanation, SENTINEL_EXPLANATION)
 
-  // ★ 投影后（下发给前端的形态）：所有值里都不许出现哨兵
-  const projected = JSON.stringify(
-    result.questions.map((q) => ({
-      qid: q.qid,
-      kpId: q.kpId,
-      type: q.type,
-      stem: q.stem,
-      options: q.options,
-      explanation: q.explanation
-    }))
+  // ★ 发给前端的载荷**只有那五个字段**：多一个都算越界（哨兵串一并断言）
+  const projected = projectQuestion(result.questions[0])
+  assert.ok(projected, '登记用的那一份应当能投影成对外形态')
+  assert.deepEqual(
+    Object.keys(projected!).sort(),
+    ['kpId', 'options', 'qid', 'stem', 'type'],
+    '★ 对外题目只有五个字段（解析不在其中）'
   )
-  assert.ok(!projected.includes(SENTINEL_ANSWER), '★ 哨兵答案出现在投影结果里')
+  const serialised = JSON.stringify(projected)
+  assert.ok(!serialised.includes(SENTINEL_ANSWER), '★ 哨兵答案出现在投影结果里')
+  assert.ok(!serialised.includes(SENTINEL_EXPLANATION), '★ 哨兵解析出现在投影结果里')
 })
 
 test('★ 主观题的评分细则同样不出后端（只进 rubricCache 与登记请求）', () => {
@@ -97,7 +103,7 @@ test('★ 主观题的评分细则同样不出后端（只进 rubricCache 与登
           stem: '说说什么是变量',
           answer: '给数据起名字',
           rubric: SENTINEL_RUBRIC,
-          explanation: '开放题'
+          explanation: SENTINEL_EXPLANATION
         }
       ]
     },
@@ -111,6 +117,59 @@ test('★ 主观题的评分细则同样不出后端（只进 rubricCache 与登
   assert.equal(result.subjective.length, 1)
   assert.equal(result.subjective[0].rubric, SENTINEL_RUBRIC)
   assert.equal(result.subjective[0].answer, '给数据起名字')
+  // 主观题的解析同样只进后端（它是判分反馈的原料，不是题面的一部分）
+  assert.equal(result.questions[0].explanation, SENTINEL_EXPLANATION)
+  assert.equal(result.subjective[0].explanation, SENTINEL_EXPLANATION)
+})
+
+test('★ 投影是白名单：解析（explanation）不进对外载荷', () => {
+  // 这道题的解析里**直接写着答案** —— 正是那 41% 的形态。发到前端就等于把题做废。
+  const projected = projectQuestion({
+    qid: 'gen-x-1',
+    kpId: 'prog-loop-jr',
+    type: 'choice',
+    stem: '下面哪个是循环？',
+    options: ['for', 'if'],
+    answer: 'for',
+    explanation: `选 for。${SENTINEL_EXPLANATION}`
+  })
+  assert.ok(projected)
+  const keys = Object.keys(projected!)
+  assert.ok(!keys.includes('explanation'), '★ 解析不许进对外载荷')
+  assert.ok(!keys.includes('answer'), '★ 答案不许进对外载荷')
+  // 白名单而不是黑名单：连形状都不该带着这些键（`undefined` 也是泄漏的前兆）
+  assert.deepEqual(keys.sort(), ['kpId', 'options', 'qid', 'stem', 'type'])
+})
+
+test('★ 题库载荷同样走白名单投影（后端多带一个字段也进不来）', () => {
+  const payload = projectBankPayload(
+    {
+      kpId: 'prog-loop-jr',
+      source: 'bank',
+      questions: [
+        {
+          qid: 'gen-y-1',
+          kpId: 'prog-loop-jr',
+          type: 'blank',
+          stem: '1 + 1 = ___',
+          options: null,
+          // 假设后端某天又把 explanation 加回来了：编排层这一侧仍然不该放行
+          explanation: SENTINEL_EXPLANATION
+        }
+      ]
+    },
+    'prog-loop-jr'
+  )
+  assert.ok(payload)
+  assert.deepEqual(
+    Object.keys(payload!.questions[0]).sort(),
+    ['kpId', 'options', 'qid', 'stem', 'type'],
+    '★ 题库返回的题也只能投影出五个字段'
+  )
+  assert.ok(
+    !JSON.stringify(payload).includes(SENTINEL_EXPLANATION),
+    '★ 解析不得随题库载荷下发'
+  )
 })
 
 test('★ qid 由本侧统一生成（带随机段），模型给的 qid 不进载荷', () => {
@@ -129,6 +188,21 @@ test('变式题 qid 形状稳定且可读', () => {
   assert.equal(variantQid('prog-variable-jr', 0, 'ab'), 'gen-prog-variable-jr-ab-1')
   // 非法字符被清掉（qid 要能当 URL 段与 JSON 键用）
   assert.equal(variantQid('a/b c', 1, 'ab'), 'gen-abc-ab-2')
+})
+
+test('★★ 生成的 qid 必须带 `gen-` 前缀 —— 服务端会硬校验它', () => {
+  // 服务端（`routes/quiz.py` 的 `GENERATED_QID_PREFIX` + `_validate_variant`）拒绝
+  // 不带 `gen-` 的 qid，理由是**命名空间**：判分先查生成题、后查题库，
+  // 而与真题同名的生成题会把那道真题的标准答案静默改写。
+  // 这条断言把两端的约定钉在一起：改了 `variantQid` 的前缀，这里当场变红。
+  for (const kpId of ['prog-loop-jr', 'ai-definition-pl', 'a b/c']) {
+    for (const [index, seed] of [[0, 'ab'], [2, 'seed9']] as Array<[number, string]>) {
+      assert.ok(
+        variantQid(kpId, index, seed).startsWith('gen-'),
+        `★ variantQid(${kpId}, ${index}, ${seed}) 丢了 gen- 前缀，服务端会拒收`
+      )
+    }
+  }
 })
 
 test('变式题校验：没有题 / 没有答案 / 题型认不出都拒', () => {

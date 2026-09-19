@@ -14,7 +14,7 @@
 [![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](#技术栈)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](#技术栈)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#技术栈)
-[![Tests](https://img.shields.io/badge/回归测试-1546%20项%20全绿-2ea44f)](#测试与质量守卫)
+[![Tests](https://img.shields.io/badge/回归测试-1796%20项%20全绿-2ea44f)](#测试与质量守卫)
 [![Local](https://img.shields.io/badge/数据-本地优先%20·%20一人一库-8957e5)](#设计与取舍)
 
 </div>
@@ -43,6 +43,11 @@
   **四级降级链 `vector → cloud → FTS5 → 依赖图/大纲`**，并如实告知「本次检索能力受限」。
 - **个性化闭环**：学生画像（掌握度 / 偏好 / 错题摘要）**每轮**进 Prompt；模型可主动记偏好；
   另有学习报告、错题本、章节进度、学习地图与历史会话回看组成的**学习档案**。
+- **主动发起对话**：新会话建立、学生还没开口时，助手先提一句「我们从哪里开始」——
+  指向依赖图推荐出的那个知识点（这是全应用**唯一一处「AI 先开口」**）。
+  没有依据时（知识库不可用 / 已全部掌握）**不发**，而不是弹一句对谁都成立的寒暄。
+- **会话续聊与重启恢复**：对话页左侧列出该学生的历史对话，点一条就能接着聊；
+  关掉应用再打开自动续上最近一条，上一段对话还在（数据一直存在 Pi 的会话树里）。
 - **学段与章节**：默认从对话里自动推断学段并生效，学生也可**手动指定**（手动后 10 轮冷却回归自动）；
   还可选定「当前在学哪一章教材」作为软偏好。
 
@@ -112,7 +117,7 @@ npm run dev
 ```bash
 cd desktop
 npm run typecheck        # vue-tsc，契约漂移的第一道防线
-npm test                 # 627 项 node --test + check:api + check:tool-schema
+npm test                 # 765 项 node --test + check:api + check:tool-schema
 npm run build            # 先确保 sidecar 最新（过期内自动重打）→ 再编主/渲染进程
 npm run build:unpack     # 免安装目录（★ 验证 esbuild 原生依赖是否解包、Pi 能否加载、后端是否最新）
 npm run build:win        # 出 .exe（NSIS 安装包 + 绿色便携版）
@@ -165,7 +170,7 @@ K12Agent/
 │  ├─ src/renderer/         Vue 3 界面：八页面 + 内联卡片
 │  ├─ src/shared/           跨进程类型 · 品牌名（唯一来源）· 供应商目录
 │  ├─ scripts/              构建联动（build-server.mjs）· 契约生成 · 各类冒烟与证据脚本
-│  ├─ tests/                627 项回归（含架构守卫 G1–G13 · G18–G23 组）
+│  ├─ tests/                765 项回归（含架构守卫 G1–G13 · G18–G23 组）
 │  └─ build/ resources/     打包图标 · 学段 logo · Pyodide 运行时（本地自托管）
 ├─ server/                  Python sidecar
 │  ├─ app/                  FastAPI：contracts / routes / rag / safety / store / grade
@@ -173,7 +178,7 @@ K12Agent/
 │  ├─ knowledge-supplement/ 第 8 章「编程实践」（本项目自写，3 概念 × 四学段）——与用户源库分开存放
 │  ├─ resources/            题库（`quizbank/`，按章分片 ch01–ch08）· 动画模板 · 代码模板 · 敏感词表
 │  ├─ scripts/              导入教材 / 建库 / 取模型 / 导出 OpenAPI / 打包+指纹 / 生成品牌图标
-│  └─ tests/                919 项回归
+│  └─ tests/                1031 项回归
 ├─ K12KnowledgeBase/        教材源库（用户提供，54 概念 × 四学段；本项目只读地用 import_knowledge.py 导入）
 ├─ docs/                    设计文档 · 任务票 · 决策与踩坑素材 · 界面版式契约 · 对标材料
 ├─ logos/                   品牌原图（2048²，不入包）
@@ -215,8 +220,8 @@ K12Agent/
 ## 测试与质量守卫
 
 ```bash
-cd server  && uv run python -m unittest discover -s tests   # 919 项
-cd desktop && npm test                                      # 627 项 + 契约漂移比对 + Tool schema 一致性 + 文档数字自检
+cd server  && uv run python -m unittest discover -s tests   # 1031 项
+cd desktop && npm test                                      # 765 项 + 契约漂移比对 + Tool schema 一致性 + 文档数字自检
 ```
 
 回归里有相当一部分是**架构守卫**，写成正向断言而不是「禁止某历史实现」：
@@ -251,7 +256,7 @@ cd desktop && npm test                                      # 627 项 + 契约�
 ```bash
 cd desktop
 K12_DEBUG_PORT=9222 npm run dev   # 另一个终端
-npm run ux                        # 对话页体检 23 项（键盘/滚动/触控目标/破坏性操作）
+npm run ux                        # 对话页体检 24 项（键盘/滚动/触控目标/破坏性操作）
 npm run ux:pages                  # 逐页体检 28 项（八个页面各查四项）
 npm run ux:layout                 # 版式体检 24 格（3 视口 × 8 页：裁切/错位/表格对齐）
 npm run ux:scroll                 # 滚动行为 7 项     npm run ux:busy / ux:attribute

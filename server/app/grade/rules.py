@@ -48,7 +48,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from app.contracts import GradeLevel, GradeSignal
+from app.contracts import GradeLevel, GradeSignal, GradeSignalType
 from app.grade.signals import (
     GRADE_ORDER,
     QuizPerformance,
@@ -116,7 +116,35 @@ SOURCE_INFERRED = "inferred"
 SOURCE_EXPLICIT = "explicit"
 
 #: 从 ``grade_signals`` 里往回读多少行来还原「每轮方向」（够覆盖冷却期 + 连续窗口）。
+#:
+#: ★ 预算口径（M-10 之后每轮**至少**一行）：一轮最多写 4 行（四路各有证据），
+#: 所以 120 行**最坏**覆盖 30 轮 —— 仍远大于「冷却期（10 轮）+ 连续窗口（3 轮）」，
+#: 无论怎么组合都不会把判定期需要的轮次挤出窗口。逐轮写一行占位读数（见
+#: :data:`NO_EVIDENCE_RAW`）只会让**无证据的轮次**从 0 行变成 1 行，不改变这个上界。
 RECENT_SIGNAL_ROWS = 120
+
+#: 「本轮四路都没有证据」时也要落的那一行读数（M-10）。
+#:
+#: ★ 为什么必须落：:meth:`GradeEngine.verdicts` 是**从 ``grade_signals`` 还原轮次**的 ——
+#: 一行都不写的轮次在那张表里**不存在**，于是「连续 3 轮同向」实际退化成
+#: 「3 个有证据的轮次」：隔一周、跨会话的三次同向证据也能累成「连续 3 轮」把学段推走。
+#: 写一行值恒为 0 的占位读数，这一轮就会以**中性轮**的身份出现，
+#: :func:`consecutive_same_direction` 于是照常被它打断（方向 0 = 证据断了）。
+#:
+#: ★ 为什么借用 ``vocab`` 这个类型：``grade_signals.signal_type`` 的取值由契约
+#: （``contracts.GradeSignalType``）与 :data:`signals.SIGNAL_TYPES` 冻结为四类**证据通道**，
+#: 里面没有「无证据」这一档；新增取值要同时改契约 / 提取器 / 前端标签（跨端改动，本次不做）。
+#: 占位读数的 ``raw`` 明写「本轮无证据」、``value`` 恒为 0 —— 判定侧只把它读成一条中性轮，
+#: 不会贡献任何方向或强度（:func:`mean_strength` 也会跳过方向为 0 的轮次）。
+NO_EVIDENCE_SIGNAL_TYPE: GradeSignalType = "vocab"
+
+#: 占位读数的 ``raw``（它**不是**证据摘要，只是一句可读的说明；绝不放学生原话）。
+NO_EVIDENCE_RAW = "本轮无证据"
+
+#: ``recent_signals()`` 用的 ``LIKE`` 模式：按 ``raw`` 末尾那句说明认出占位读数。
+#: 真实证据的 ``raw`` 一律是「词表命中项」的形状（``口语=…`` / ``深度=…`` / …），
+#: 不会以这句话结尾，所以这个过滤不会误伤任何真证据。
+_NO_EVIDENCE_LIKE = f"%|{NO_EVIDENCE_RAW}"
 
 #: ``GET /api/grade/signals`` 最多回多少条信号（Prompt/网络预算；证据够看就行）。
 SIGNAL_LIST_LIMIT = 20
@@ -271,15 +299,20 @@ def decide(
     turn: int,
     verdicts: Sequence[TurnVerdict],
     proposal: GradeProposal | None = None,
-    last_change_turn: int | None = None,
-    last_change_source: str | None = None,
+    anchor_turn: int | None = None,
+    anchor_source: str | None = None,
 ) -> Decision:
     """规则引擎的决策核心（纯函数）。
 
     ``verdicts`` 是**按轮次升序**的读数序列（末尾是最近的轮）。判定顺序见 :data:`DECISION_ORDER`。
 
-    ``last_change_source`` 是最近一次写入 ``grade_history`` 的来源，只用来推导冷却**窗口长度**
-    （手动 :data:`MANUAL_COOLDOWN_TURNS` / 自动 :data:`COOLDOWN_TURNS`）。
+    ★★ ``anchor_turn`` / ``anchor_source`` 是冷却锚点的**同一行** —— 由
+    :meth:`GradeEngine.last_cooldown_anchor` 一次读出 ``(turn, source)``，**必须成对传进来**。
+    :func:`_cooldown_remaining` 把这两个值当成同一行用：窗口长度取自 ``source``、
+    已过轮次取自 ``turn``。混搭两个来源会算出一个**两个出口互相矛盾**的冷却值
+    （实测缺陷 H-1：``turn`` 取「上一次真变更」而 ``source`` 取「最近一次写入」，
+    于是学生显式确认当前学段后冷却当场失效 —— 详见 :meth:`GradeEngine.observe_turn`）。
+
     默认 ``None`` = 按自动窗口处理（纯函数的老调用方不必传）。
     """
     level = as_grade_level(current_level)
@@ -311,7 +344,7 @@ def decide(
         remaining = (
             COOLDOWN_TURNS
             if changed
-            else _cooldown_remaining(turn, last_change_turn, last_change_source)
+            else _cooldown_remaining(turn, anchor_turn, anchor_source)
         )
         return Decision(
             changed=changed,
@@ -343,7 +376,7 @@ def decide(
         return outcome(REASON_LOW_CONFIDENCE, confidence=confidence)
 
     # ④ 冷却期
-    if _cooldown_remaining(turn, last_change_turn, last_change_source) > 0:
+    if _cooldown_remaining(turn, anchor_turn, anchor_source) > 0:
         return outcome(REASON_COOLDOWN, confidence=confidence)
 
     # ⑤ 单次最多动 MAX_STEP_LEVELS 级；到顶/到底则无可动
@@ -365,6 +398,12 @@ def _cooldown_remaining(
     手动（:data:`SOURCE_EXPLICIT`）用 :data:`MANUAL_COOLDOWN_TURNS`、其余用
     :data:`COOLDOWN_TURNS`。**所以不需要为「手动冷却更长」新增列**：
     来源本来就在那一行里，冷却长度是它的函数。
+
+    ★★ 两个参数**必须来自同一行**（:meth:`GradeEngine.last_cooldown_anchor` 一次读出这一对）。
+    调用方若把 ``turn`` 换成「最近一次**真变更**的轮次」（``from_level <> to_level``）而
+    ``source`` 仍取最近一次写入，就会算出一个既非自动窗口也非手动窗口的数 —— 这正是 H-1：
+    学生显式确认当前学段（``from_level == to_level`` 的 explicit 行）本该开启 10 轮冷却，
+    却因为真变更还在更早那一行而**当场失效**，且与 ``GET /grade/state`` 报的值互相矛盾。
 
     ★★ 轮次号是**每会话**计数器（桌面端换一个会话就从 1 重来），而 ``anchor_turn``
     是上一会话写进库里、**长期保留**的那个号 —— 于是新会话的 ``turn`` 常常**小于**
@@ -473,6 +512,13 @@ class GradeEngine:
         只算一轮，否则学生多说两句就能把学段推走一级。
         没有轮次锚点（``t<n>|``）的旧行会被跳过：它们不属于任何一轮，不该参与连续计数。
 
+        ★★ **每轮至少一行**（M-10）：没有证据的轮次由 :data:`NO_EVIDENCE_RAW` 占位读数留痕，
+        所以「这一轮存在且是中性轮」与「这一轮压根没来过」在库里是可区分的 ——
+        前者出现在这里、方向为 0，会像任何一条中性轮那样**打断**连续
+        （:func:`consecutive_same_direction` 遇到 ``direction == 0`` 直接返回 ``(0, 0)``）。
+        ⚠️ 不要改成「没证据就不写」：那会让三次**隔着任意多轮空白**的同向证据累成
+        「连续 3 轮」，与执行文档「连续 3 轮同方向」的口径不符。
+
         ★ 分桶键是 ``(session_id, turn)`` 而**不是**光看 ``turn``（D1 ③）：轮次号是**每会话**
         计数器，换会话就从 1 重来，只按 ``turn`` 分桶会把「上一会话第 1 轮」与「本会话第 1 轮」
         的读数**求和**成同一轮 —— 两次不同交互的强度被叠加（各 0.2 合成 0.4），
@@ -562,10 +608,19 @@ class GradeEngine:
         return max([*signal_turns, int(anchor_turn or 0), 0])
 
     def recent_signals(self, limit: int = SIGNAL_LIST_LIMIT) -> list[GradeSignal]:
-        """最近若干条信号（按时间升序；``raw`` 原样带上轮次锚点，便于对齐演示脚本）。"""
+        """最近若干条**证据**读数（按时间升序；``raw`` 原样带上轮次锚点，便于对齐演示脚本）。
+
+        ★ **不含** :data:`NO_EVIDENCE_RAW` 占位读数（M-10）：那一行是给 :meth:`verdicts`
+          还原轮次用的**账本**，不是从学生话里读出来的证据。它们要是跟着回传，界面与学习报告
+          上会冒出「词汇复杂度 · 本轮无证据」这种卡片，还会把真正的证据挤出这个 20 条的列表
+          —— 而「每轮都可能是无证据轮」正是 D2 的常态（课堂用语不许产生信号），
+          连续几轮「继续吧」就能把证据列表刷空。**所以过滤只发生在这里，判定侧照常读全表。**
+        """
         rows = self.store.conn.execute(
-            "SELECT ts, signal_type, value, raw FROM grade_signals ORDER BY id DESC LIMIT ?",
-            (int(limit),),
+            "SELECT ts, signal_type, value, raw FROM grade_signals "
+            "WHERE raw IS NULL OR raw NOT LIKE ? "  # 占位读数是轮次账本，不是证据
+            "ORDER BY id DESC LIMIT ?",
+            (_NO_EVIDENCE_LIKE, int(limit)),
         ).fetchall()
         return [
             GradeSignal(
@@ -600,6 +655,12 @@ class GradeEngine:
         """当前状态快照（当前学段 + 连续轮次 + 冷却 + 待生效建议）。"""
         level = self.current_level(student_id)
         verdicts = self.verdicts()
+        # ★★ 两个「上一次」不是一回事（H-1 的根源）：
+        #   - `last_change` = 上一次**真正变更**的轮次（from<>to）→ **只作展示字段**
+        #     （`GradeState.last_change_turn` / `GradeStateOut.lastChangeTurn`，界面与报告用它）；
+        #   - `anchor_turn` / `anchor_source` = 最近一次**写入** grade_history 的那一行
+        #     （含「学生确认了当前学段」这种 from==to 的 explicit 行）→ **冷却读的是这一条**，
+        #     而且必须成对取出（窗口长度取自 source、已过轮次取自 turn）。
         last_change = self.last_change_turn()
         anchor_turn, anchor_source = self.last_cooldown_anchor()
         # 轮次水位要**同时**看信号与冷却锚点：手动覆盖可以在没有任何信号的轮次发生
@@ -615,8 +676,8 @@ class GradeEngine:
             turn=turn,
             verdicts=verdicts,
             proposal=None,
-            last_change_turn=last_change,
-            last_change_source=anchor_source,
+            anchor_turn=anchor_turn,
+            anchor_source=anchor_source,
         )
         suggested: GradeLevel | None = None
         if direction != 0 and streak >= SIGNALS_REQUIRED_FOR_CHANGE:
@@ -678,18 +739,36 @@ class GradeEngine:
                 raw=encode_turn_raw(turn, reading.raw),
                 session_id=session_id,
             )
+        if not turn_signals.evidence:
+            # ★★ 四路全空的轮次也要留一行（M-10）：「连续 3 轮同方向」的**单位是轮**，
+            #   而轮次是从 ``grade_signals`` 的轮次锚点还原出来的（:meth:`verdicts`）——
+            #   一行都不写，这一轮在那张表里就不存在，连续计数会**跨过它**继续累加。
+            #   实测后果：第 1 轮童言 + 第 2..8 轮全无证据（不留行）+ 第 9、10 轮童言
+            #   → 累成「连续 3 轮同向」并把学段改走（其中两轮间隔一周、跨了会话）。
+            #   写一行值恒为 0 的占位读数，它就变成一条**中性轮**：既参与「这一轮来过」的事实，
+            #   又照常打断连续（:func:`consecutive_same_direction` 见 0 即返回 ``(0, 0)``）。
+            self.store.add_grade_signal(
+                signal_type=NO_EVIDENCE_SIGNAL_TYPE,
+                value=0.0,
+                raw=encode_turn_raw(turn, NO_EVIDENCE_RAW),
+                session_id=session_id,
+            )
 
         verdicts = self.verdicts()
-        last_change = self.last_change_turn()
-        # 冷却窗口按**最近一次写入的来源**推导（手动覆盖后是 10 轮，自动调整是 5 轮）。
-        _anchor_turn, anchor_source = self.last_cooldown_anchor()
+        # ★★ 冷却锚点必须是**同一行**的一对（H-1）：
+        #   窗口长度取自 `anchor_source`、已过轮次取自 `anchor_turn` —— 两者都来自
+        #   :meth:`last_cooldown_anchor`（认「任何 from_level 非空的行」，含学生显式确认当前学段的
+        #   那一行）。**绝不要**把 `turn` 换成 :meth:`last_change_turn`（它只认 from<>to 的真变更，
+        #   拿不到「学生刚确认了当前学段但学段没变」那一行）—— 那会让手动冷却当场失效，
+        #   并与 `GET /api/grade/state` 报出的冷却值互相矛盾（实测缺陷 H-1）。
+        anchor_turn, anchor_source = self.last_cooldown_anchor()
         decision = decide(
             current_level=level,
             turn=turn,
             verdicts=verdicts,
             proposal=proposal,
-            last_change_turn=last_change,
-            last_change_source=anchor_source,
+            anchor_turn=anchor_turn,
+            anchor_source=anchor_source,
         )
         if decision.changed:
             decision = self._apply(decision, student_id=student_id, turn=turn)
@@ -871,6 +950,8 @@ __all__ = [
     "MANUAL_COOLDOWN_TURNS",
     "MAX_RULE_CONFIDENCE",
     "MAX_STEP_LEVELS",
+    "NO_EVIDENCE_RAW",
+    "NO_EVIDENCE_SIGNAL_TYPE",
     "REASON_AT_BOUNDARY",
     "REASON_CHANGED",
     "REASON_COOLDOWN",

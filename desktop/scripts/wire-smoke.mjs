@@ -7,8 +7,19 @@
  * 路径拼错（`?grade_level=` 写成 `?gradeLevel=`）、超时给错、
  * 把 422 当成 500 处理，这些都只会在**真连一次**的时候才暴露。
  *
- * 跑法：`cd server && uv run python -m app.main --port 8799 --token smoke-token &`
- *       `cd desktop && node scripts/wire-smoke.mjs`
+ * 跑法（**两处参数都不能省**）：
+ *   ```bash
+ *   SMOKE_DATA=$(mktemp -d)                       # 一个**非默认**的 data-dir
+ *   mkdir -p "$SMOKE_DATA/shared"
+ *   cp server/_data/shared/kb.sqlite "$SMOKE_DATA/shared/"   # 学生路由与检索都要 kb
+ *   cd server && uv run python -m app.main --port 8799 --token smoke-token --data-dir "$SMOKE_DATA" &
+ *   cd desktop && node scripts/wire-smoke.mjs
+ *   ```
+ * ⚠️ **`--data-dir` 必须传，且必须不是 `server/_data`**：
+ *   ① 不传 → `resolve_student_data_root()` 返回 None（有意设计：共享目录不能当学生数据根），
+ *      profile / grade / quiz 判分 / 动画托管**一共 7 条**会全红成 503；
+ *   ② 传成默认的 `server/_data` → 同样判为「未显式传入」，且真跑会往仓库里写学生目录。
+ *   用临时目录 + 拷贝一份 kb，既不污染仓库也能把 21 条全跑绿。
  *
  * ★ 它只读、不改任何数据（重建那一条会被跳过 —— 那是重活且会写库）。
  */
@@ -40,6 +51,8 @@ const { source, names } = readPathFactories()
 const REQUIRED = [
   'profilePath',
   'recommendationPath',
+  // ★ 开场引导（主动发起对话）：与推荐是两条端点（前者只在会话为空时有意义）
+  'openingPath',
   'gradeSignalsPath',
   'gradeHistoryPath',
   'quizBankPath',
@@ -130,6 +143,42 @@ await check('GET /api/profile/{id}/recommendation 回 source + items', async () 
   assert.equal(status, 200)
   assert.ok(typeof json.source === 'string' && json.source.length > 0, 'source 必须有值')
   assert.ok(Array.isArray(json.items), 'items 必须是数组')
+})
+
+await check('★★ GET /api/profile/{id}/opening 的开场语与推荐接口**同源**（主动发起对话）', async () => {
+  const { status, json } = await api(`/api/profile/${STUDENT}/opening`)
+  assert.equal(status, 200, '开场引导必须回 200（推不出内容时也是 200 + 空串，不是 404）')
+  // 契约三字段一个都不能少（前端按它们决定「发不发」「有没有动作按钮」）
+  assert.deepEqual(
+    Object.keys(json).sort(),
+    ['kpId', 'source', 'text'],
+    `开场引导的字段集合必须恰好是 kpId/source/text，实际：${Object.keys(json).join(', ')}`
+  )
+  assert.equal(typeof json.text, 'string')
+  assert.equal(typeof json.source, 'string')
+
+  // ★★ 最关键的一条：开场语指向的知识点必须与推荐接口第一位**一致** ——
+  //    两个端点各推各的 = 界面上一处说「建议学 X」、另一处说「我们从 Y 开始吧」。
+  const rec = await api(`/api/profile/${STUDENT}/recommendation`)
+  const first = rec.json.items?.[0]
+  if (first && json.text) {
+    assert.equal(
+      json.kpId,
+      first.kpId,
+      `开场引导指向 ${json.kpId}，而推荐第一位是 ${first.kpId}（两个端点必须同源）`
+    )
+    // ★ 中文名来自依赖图（裸 kp_id 说明拼接绕过了推荐接口）
+    if (first.name) {
+      assert.ok(
+        json.text.includes(first.name),
+        `开场语里必须出现图里解析出的中文名「${first.name}」，实际：${json.text}`
+      )
+    }
+  }
+  // ★ 反向对照：没有开场语时**不许**给 kpId（否则前端会渲染一个没有目标的按钮）
+  if (!json.text) {
+    assert.equal(json.kpId, null, '没有开场语时 kpId 必须是 null')
+  }
 })
 
 await check('GET /api/grade/signals/{id} 回 currentLevel + signals', async () => {

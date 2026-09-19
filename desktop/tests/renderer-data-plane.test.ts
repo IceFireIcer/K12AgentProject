@@ -31,12 +31,34 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { registerHooks } from 'node:module'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createPinia, setActivePinia } from 'pinia'
 
+/**
+ * `@shared/*` 别名 + 「相对且没写扩展名」的解析钩子。
+ *
+ * ★ 为什么现在要管 `@shared/*`：`stores/settings.ts` 会**值导入** `api/settings.ts`，
+ *   而后者值导入 `@shared/provider-catalog`（Pi 的 provider 目录不是 pydantic 契约，
+ *   形状定义在 shared 里）。那是 vite/tsconfig 的别名，Node 不认 ——
+ *   不解析它，「设置页失败文案」那一条就根本 import 不进来。
+ *   与 `settings-to-pi.test.ts` 里的钩子同一套做法。
+ */
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith('@shared/')) {
+      const base = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'shared')
+      const candidate = join(base, specifier.slice('@shared/'.length))
+      for (const suffix of ['.ts', '/index.ts']) {
+        if (existsSync(candidate + suffix)) {
+          return {
+            url: new URL(`file://${(candidate + suffix).replace(/\\/g, '/')}`).href,
+            shortCircuit: true
+          }
+        }
+      }
+    }
     try {
       return nextResolve(specifier, context)
     } catch (error) {
@@ -61,6 +83,8 @@ interface FakeBridge {
   calls: Record<string, number>
   /** 让某个方法回失败（下一个请求生效）。 */
   failWith(method: string, message: string | null): void
+  /** 让某个方法**抛异常**（覆盖渲染进程侧「传输层直接抛」那条路径）。 */
+  throwWith(method: string, error: unknown): void
   /** 覆盖某个方法的返回值。 */
   respond(method: string, data: unknown): void
   emitTrace(snapshot: unknown): void
@@ -92,6 +116,7 @@ const DATA_METHODS = [
 function installFakeBridge(omit: readonly string[] = []): FakeBridge {
   const calls: Record<string, number> = {}
   const failures = new Map<string, string>()
+  const throws = new Map<string, unknown>()
   const responses = new Map<string, unknown>()
   const traceListeners = new Set<(snapshot: unknown) => void>()
 
@@ -102,6 +127,8 @@ function installFakeBridge(omit: readonly string[] = []): FakeBridge {
     //   否则假响应会与真实后端不一致，测出来的「bug」其实是夹具的锅。
     api[method] = async (payload?: Record<string, unknown>) => {
       calls[method] = (calls[method] ?? 0) + 1
+      // 抛异常优先于回失败：渲染进程侧**两条路径**都要能变成可读中文
+      if (throws.has(method)) throw throws.get(method)
       const failure = failures.get(method)
       if (failure !== undefined) return { ok: false, message: failure }
       return {
@@ -135,6 +162,9 @@ function installFakeBridge(omit: readonly string[] = []): FakeBridge {
     failWith: (method, message) => {
       if (message === null) failures.delete(method)
       else failures.set(method, message)
+    },
+    throwWith: (method, error) => {
+      throws.set(method, error)
     },
     respond: (method, data) => {
       responses.set(method, data)
@@ -724,4 +754,154 @@ test('newPayloadId 稳定产出非空标识（防串台标识不能撞）', asyn
   const b = newPayloadId()
   assert.ok(a.length > 0)
   assert.notEqual(a, b, '两次生成不该相同（否则多张动画卡会串台）')
+})
+
+/* ------------------------------------------------------------------ *
+ * 10. 学生可见的失败文案（任务 ③ / ⑥）：排障细节不许上屏
+ * ------------------------------------------------------------------ */
+
+/** 后端**面向排障**的 detail 里那几类技术信息的判据（与翻译模块同一套特征）。 */
+const TROUBLESHOOTING = /HTTP\s*\d{3}|server[\\/]|resources[\\/]|\/api\/|traceback|'[a-z][a-z0-9-]*-[a-z]/
+
+test('★★ 编程：提示与运行分析的失败文案都要按受众改写（HTTP 状态码 / 服务器路径 / 内部 kp_id 不上屏）', async () => {
+  const bridge = installFakeBridge()
+  const { useCodeStore } = await import('../src/renderer/src/stores/code.ts')
+  setActivePinia(createPinia())
+  const code = useCodeStore()
+
+  await code.loadTemplate('prog-list-jr')
+
+  // 后端「没有分级提示」的真实形态：内部 kp_id + 服务器上的模板目录
+  bridge.failWith(
+    'readCodeHint',
+    "读取失败（HTTP 404）：知识点 'prog-variable-jr' 还没有分级提示（模板文件：server/resources/code-templates/）。"
+  )
+  await code.askForHint()
+  assert.ok(code.hintError !== null)
+  assert.doesNotMatch(code.hintError, TROUBLESHOOTING, `提示失败文案里不该有排障细节：${code.hintError}`)
+  assert.ok(code.hintError.length > 0, '仍要给学生一句可读的说明，而不是空着')
+
+  bridge.failWith('analyzeCodeRun', '操作失败（HTTP 503）：/api/code/run-hint 暂时不可用')
+  await code.analyzeRun({ code: 'print(1)', stdout: '1', stderr: '', attempt: 1 })
+  assert.ok(code.analyzeError !== null)
+  assert.doesNotMatch(code.analyzeError, TROUBLESHOOTING, `分析失败文案里不该有排障细节：${code.analyzeError}`)
+
+  // 本来就给学生看的可读中文**原样保留**（翻译不是「一律换掉」）
+  bridge.failWith('readCodeHint', '这道题的提示暂时取不到，稍后再试。')
+  await code.askForHint()
+  assert.equal(code.hintError, '这道题的提示暂时取不到，稍后再试。')
+})
+
+test('★ 动画：渲染失败同样过翻译（后端 503 那条带着服务器上的模板目录）', async () => {
+  const bridge = installFakeBridge()
+  const { useAnimationStore } = await import('../src/renderer/src/stores/animation.ts')
+  setActivePinia(createPinia())
+  const anim = useAnimationStore()
+
+  bridge.failWith('renderAnimation', '操作失败（HTTP 503）：本机没有可用的动画模板（server/resources/templates/ 为空）')
+  await anim.render({ templateId: 'nope' })
+
+  assert.ok(anim.renderError !== null)
+  assert.doesNotMatch(anim.renderError, TROUBLESHOOTING, `动画失败文案里不该有排障细节：${anim.renderError}`)
+})
+
+test('★★ 连接层失败翻成中文：`fetch failed` 真正的原因在 cause.code 里（英文不许直出）', async () => {
+  const bridge = installFakeBridge()
+  const { useCodeStore } = await import('../src/renderer/src/stores/code.ts')
+  setActivePinia(createPinia())
+  const code = useCodeStore()
+
+  // Node 的 fetch 在连接被拒时抛的就是这个形态：message 只有 `fetch failed`
+  const refused = new TypeError('fetch failed')
+  ;(refused as unknown as { cause: unknown }).cause = Object.assign(new Error('connect ECONNREFUSED'), {
+    code: 'ECONNREFUSED'
+  })
+  bridge.throwWith('readCodeTemplate', refused)
+
+  await code.loadTemplate('prog-list-jr')
+
+  assert.ok(code.templateError !== null)
+  assert.doesNotMatch(code.templateError, /fetch failed|ECONNREFUSED|TypeError/, '英文连接错误不许直出')
+  assert.ok(code.templateError.includes('本地数据服务'), `要说清「连不上本地数据服务」：${code.templateError}`)
+})
+
+test('★★ sidecar 状态读取失败也要是中文（渲染进程这一份 describeError 原来直接透传英文）', async () => {
+  const refused = new TypeError('fetch failed')
+  ;(refused as unknown as { cause: unknown }).cause = Object.assign(new Error('connect ECONNREFUSED'), {
+    code: 'ECONNREFUSED'
+  })
+  ;(globalThis as unknown as { window: unknown }).window = {
+    api: {
+      onSidecarChanged: () => () => {},
+      getSidecarInfo: () => Promise.reject(refused)
+    }
+  }
+  const { useSidecarStore } = await import('../src/renderer/src/stores/sidecar.ts')
+  setActivePinia(createPinia())
+  const sidecar = useSidecarStore()
+
+  sidecar.connect()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  assert.ok(sidecar.loadError !== null)
+  assert.doesNotMatch(sidecar.loadError, /fetch failed|ECONNREFUSED|TypeError/, '英文连接错误不许直出')
+  assert.ok(sidecar.loadError.includes('连不上本地数据服务'), `要说清是连不上 sidecar：${sidecar.loadError}`)
+})
+
+test('★★ 设置页读设置失败也要是中文（同一份 describeError 的第二处）', async () => {
+  const refused = new TypeError('fetch failed')
+  ;(refused as unknown as { cause: unknown }).cause = Object.assign(new Error('connect ECONNREFUSED'), {
+    code: 'ECONNREFUSED'
+  })
+  ;(globalThis as unknown as { window: unknown }).window = {
+    api: {
+      readSettings: () => Promise.reject(refused),
+      saveSettings: () => Promise.reject(refused),
+      probeSettings: () => Promise.reject(refused),
+      readProviderCatalog: () => Promise.resolve({ ok: true, data: [] }),
+      fetchProviderModels: () => Promise.reject(refused)
+    }
+  }
+  const { useSettingsStore } = await import('../src/renderer/src/stores/settings.ts')
+  setActivePinia(createPinia())
+  const settings = useSettingsStore()
+
+  await settings.load()
+
+  assert.ok(settings.errorText !== null)
+  assert.doesNotMatch(settings.errorText, /fetch failed|ECONNREFUSED|TypeError/, '英文连接错误不许直出')
+  assert.ok(
+    settings.errorText.includes('连不上本地数据服务'),
+    `要说清是连不上 sidecar：${settings.errorText}`
+  )
+})
+
+/* ------------------------------------------------------------------ *
+ * 11. 编程卡片的载荷：领域级 `codeOk` 优先，老载荷回落 `ok`
+ * ------------------------------------------------------------------ */
+
+test('★★ 编程卡片：`codeOk` 是「学生代码跑通没有」的判据，老载荷的 `ok` 仍作兜底', async () => {
+  const { readCodingCard } = await import('../src/renderer/src/cards/coding.ts')
+
+  // 新载荷：工具成功（toolOk）而学生代码没跑通 —— 领域级的结论只能来自 codeOk
+  const fresh = readCodingCard({
+    kpId: 'prog-list-jr',
+    codeOk: false,
+    toolOk: true,
+    ok: false,
+    stdout: '',
+    feedback: '缩进还不对',
+    consecutiveFailures: 1
+  })
+  assert.equal(fresh.kind, 'result')
+  assert.equal(fresh.kind === 'result' ? fresh.ok : null, false, 'codeOk=false → 卡片显示「运行失败」')
+
+  // 老载荷（历史数据 / 还没更新的生产者）：只有 `ok`，必须仍然认得出来
+  const legacy = readCodingCard({ kpId: 'prog-list-jr', ok: true, stdout: 'ok\n', feedback: '成功' })
+  assert.equal(legacy.kind, 'result', '缺 codeOk 的老载荷不许退化成 unknown')
+  assert.equal(legacy.kind === 'result' ? legacy.ok : null, true)
+
+  // `codeOk` 与 `ok` 同时在且不一致时，**以 codeOk 为准**（它是显式命名的领域字段）
+  const both = readCodingCard({ kpId: 'x', codeOk: true, ok: false, feedback: 'f' })
+  assert.equal(both.kind === 'result' ? both.ok : null, true, '读的是 codeOk，不是 ok')
 })

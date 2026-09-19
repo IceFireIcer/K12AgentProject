@@ -13,7 +13,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { GradeLevel, IpcEvent, PayloadKind } from '../src/shared/ipc-events.ts'
-import { ChatStreamRegistry, REQUEST_ID_PREFIX, type StreamTarget, type TurnEvent } from '../src/main/ipc/chat-stream.ts'
+import {
+  ChatStreamRegistry,
+  REQUEST_ID_PREFIX,
+  withRequestId,
+  type StreamTarget,
+  type TurnEvent
+} from '../src/main/ipc/chat-stream.ts'
 import { MAX_INPUT_CHARS, parseChatSendRequest } from '../src/main/ipc/chat-request.ts'
 import { IPC, PUSH_CHANNELS } from '../src/main/ipc/channels.ts'
 import {
@@ -115,6 +121,94 @@ test('分发：citation 里学段认不出的条目被丢掉（不给学生猜�
   const state = applyChatEvent(stateWithTurn(), broken)
   assert.equal(state.turns[0].citations.length, 0)
   assert.equal(state.ignoredEvents, 1)
+})
+
+// ── 1b. citation 的 details / degraded 端到端（主进程出帧 → 渲染侧归约）──────
+//
+// ★ 为什么这几条必须**经出帧口**（`withRequestId`）而不是手搓事件：手搓的用例只验证
+//   渲染侧认不认字段，而 2026-09 实测踩到的缺陷正好在中间那一跳 —— `case 'citation'`
+//   只搬了 `citations`，`details` / `degraded` 在**出帧处**被整块丢掉。
+//   于是右栏「四级降级链」恒显示「本轮没有查教材」（关卡 C 的核心演示证据是死的），
+//   回答里的「教材原文」抽屉恒显示「原文暂时取不到」，而两侧的用例都是绿的。
+//   所以这里从「主进程构造的事件」一路走到 store，把那一跳钉住。
+
+/** 一份 citation 的引用条目（形状与检索回执的投影一致）。 */
+function citationItem(): Extract<IpcEvent, { name: 'citation' }>['data']['citations'][number] {
+  return {
+    chunkId: 'kb-primary_low-ai-intro-1',
+    chapterTitle: '走进人工智能',
+    sectionTitle: '人工智能会做什么',
+    gradeLevel: 'primary_low' satisfies GradeLevel,
+    compat: false
+  }
+}
+
+/** 一份引用细节（`CitationDetail`，右栏「教材原文」抽屉的数据源）。 */
+function citationDetail() {
+  return {
+    chunkId: 'kb-primary_low-ai-intro-1',
+    text: '人工智能会看、会听，也会说话，但它不是人。',
+    score: 0.87,
+    parentChunkId: 'kb-primary_low-ai-intro',
+    degraded: 'fts' as const,
+    kpId: 'ai-definition-pl',
+    expanded: false
+  }
+}
+
+test('★ 端到端：citation 的 details / degraded 经出帧口一路到达 store（降级链与教材原文的数据源）', () => {
+  const target = new FakeTarget(11)
+  const registry = new ChatStreamRegistry({ generateRequestId: () => REQUEST_ID })
+  const handle = registry.open(target, '人工智能是怎么认出一只猫的？')
+
+  // 主进程侧的构造与 `agent/events.ts` 的 `mapToolExecutionEnd` 逐字一致：
+  // 只在真有内容时挂上可选字段（省略 = 「没有这项信息」）
+  const detail = citationDetail()
+  const mainEvent: Extract<TurnEvent, { name: 'citation' }> = {
+    name: 'citation',
+    data: { citations: [citationItem()], details: [detail], degraded: 'fts' }
+  }
+
+  assert.equal(handle.emit(mainEvent), true, '本轮应当是活跃的')
+
+  const frames = target.events.filter(
+    (event): event is Extract<IpcEvent, { name: 'citation' }> => event.name === 'citation'
+  )
+  assert.equal(frames.length, 1)
+  const frame = frames[0]
+
+  // ① 出帧处逐字段齐全（这里曾经只搬 citations，两个字段在这里蒸发）
+  assert.deepEqual(Object.keys(frame.data).sort(), ['citations', 'degraded', 'details', 'requestId'])
+
+  // ② 把**真实出帧**折进 store：两个字段都要落在本轮上
+  const state = applyChatEvent(stateWithTurn(), frame)
+  assert.equal(state.turns[0].citationDegraded, 'fts', '降级档位必须到达 store（右栏四级降级链据此点亮）')
+  assert.equal(state.turns[0].citationDetails.length, 1)
+  assert.equal(state.turns[0].citationDetails[0].chunkId, detail.chunkId)
+  assert.equal(state.turns[0].citationDetails[0].text, detail.text, '节级正文必须到达 store（否则抽屉只说「原文暂时取不到」）')
+  assert.equal(state.turns[0].citationDetails[0].score, 0.87)
+  assert.equal(state.ignoredEvents, 0, '这条事件不该被当成畸形数据丢掉')
+})
+
+test('★ 反向对照：没有 details / degraded 时不得凭空造出空数组或 null（省略 = 没有这项信息）', () => {
+  const content = { citations: [citationItem()] }
+
+  const frame = withRequestId({ name: 'citation', data: content }, REQUEST_ID)
+  // 「没带上这一项」与「带了一个空值」不是一回事：多发一个空值，
+  // 消费方就分不清「本轮没检索」与「检索了但没降级信息」了。
+  assert.equal(Object.hasOwn(frame.data, 'details'), false, '缺 details 时不许补成空数组')
+  assert.equal(Object.hasOwn(frame.data, 'degraded'), false, '缺 degraded 时不许补成 null')
+  assert.deepEqual(frame, { name: 'citation', data: { requestId: REQUEST_ID, ...content } })
+
+  // 空数组同样是「没有内容」：按存在性透传的条件是长度 > 0
+  const emptyDetails = withRequestId({ name: 'citation', data: { ...content, details: [] } }, REQUEST_ID)
+  assert.equal(Object.hasOwn(emptyDetails.data, 'details'), false, 'details 为空数组时不该透传')
+
+  // 到 store 也是「没收到这项信息」：轮次的初始态原样保留
+  const state = applyChatEvent(stateWithTurn(), frame)
+  assert.equal(state.turns[0].citationDegraded, null)
+  assert.deepEqual(state.turns[0].citationDetails, [])
+  assert.equal(state.turns[0].citations.length, 1, '正文引用照常收下（别把整条事件一起丢掉）')
 })
 
 test('分发：payload 按 kind 建卡，三种 kind 互不串台', () => {

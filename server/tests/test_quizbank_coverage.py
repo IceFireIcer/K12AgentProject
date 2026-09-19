@@ -64,6 +64,7 @@ from app.routes.quiz import (  # noqa: E402
     default_bank_dir,
     grade_from_kp_id,
     load_bank,
+    normalize_answer,
     select_questions,
 )
 
@@ -73,11 +74,18 @@ BANK_DIR = default_bank_dir()
 MIN_QUESTIONS_PER_KP = 2
 
 #: 对外题目**封闭字段集**（``QuizQuestionOut``）。多一个都算契约外字段，少一个前端就缺信息。
-OUTWARD_QUESTION_FIELDS = {"qid", "kpId", "type", "stem", "options", "explanation"}
+#: ⚠️ ``explanation`` **不在其中**（2026-09-19 起）：解析的措辞经常把答案直接写进去
+#: （本文件下面统计「含答案的解析占比」的那条用例量的就是这件事），
+#: 所以它与 ``answer`` 一起留在 Python 侧，只在判分**之后**经 ``QuizResult.feedback``
+#: 回传给学生 —— 那才是学生该看到「为什么」的时刻。
+OUTWARD_QUESTION_FIELDS = {"qid", "kpId", "type", "stem", "options"}
 
 #: ★ 答案类的**键名**（不管出现在哪一层，都不许进对外载荷）。
 #: 与 ``test_contracts.py`` 的答案泄漏哨兵同源：契约里查的就是这几个字段名。
-#: ``explanation`` 不在此列 —— 它是契约字段，本来就要发给学生当反馈。
+#: ``explanation`` 不在 ``OUTWARD_QUESTION_FIELDS`` 里，所以它**也不是**契约字段 ——
+#: 但这里仍不把它列进 ``LEAK_KEY_NAMES``：那一组的语义是「答案本身」，
+#: 而解析是「讲解文本，只是常常含答案」；把它混进来会让本文件那条
+#: 「题库解析含答案占比」的统计失去意义（它本来就是用来量化这个风险的）。
 LEAK_KEY_NAMES = {
     "answer",
     "answers",
@@ -591,11 +599,14 @@ class TestOutwardPayloadNeverLeaksTheAnswer(unittest.TestCase):
     def test_no_answer_key_anywhere_in_any_projected_payload(self) -> None:
         """★ 逐条投影 + 递归遍历键名：684 条里任何一条都不许出现 ``answer`` 类键。
 
-        ⚠️ 这里查的是**键名**，不是答案文本。原因：``explanation``（解析）按契约
-        **本来就要发给学生**（``QuizQuestionOut`` 的字段之一，答题后当反馈用），
-        而解析里天然会提到那个术语 —— 现有题库一直如此，做文本比对会误报。
+        ⚠️ 这里查的是**键名**，不是答案文本。原因：解析（``explanation``）的措辞天然会
+        提到标准答案那个术语 —— 现有题库一直如此（见下面那条统计用例），做文本比对会误报。
         答案泄漏在本项目里的定义是「**结构上**存在一个装着标准答案的字段」，
         所以判据必须落在键名上。
+
+        ★ `explanation` 本身现在也**不再下发**（H-6），但它仍不在 ``LEAK_KEY_NAMES`` 里：
+        那一组的语义是「答案本身」。同理，下面「字段集恰好是那 5 个」的断言
+        才是解析不下发的判据 —— 它比把它塞进 LEAK_KEY_NAMES 更准确。
         """
         self.assertTrue(self.report.entries, "题库为空，这条断言会空转")
         for entry in self.report.entries:
@@ -610,7 +621,7 @@ class TestOutwardPayloadNeverLeaksTheAnswer(unittest.TestCase):
                 self.assertEqual(
                     leaks, [], f"★ {question.qid} 的对外载荷出现答案类键：{leaks}\n{raw}"
                 )
-                # 白名单：题目字段必须**恰好**是那 6 个（多一个都算契约外字段）
+                # 白名单：题目字段必须**恰好**是 ``OUTWARD_QUESTION_FIELDS`` 那 5 个
                 self.assertEqual(
                     set(payload.questions[0].model_dump(by_alias=True)),
                     OUTWARD_QUESTION_FIELDS,
@@ -638,6 +649,50 @@ class TestOutwardPayloadNeverLeaksTheAnswer(unittest.TestCase):
         }
         keys = self._all_keys(leaky)
         self.assertIn("answer", keys, "递归遍历器漏掉了嵌套的 answer 键")
+
+    def test_explanation_usually_contains_the_answer(self) -> None:
+        """★★ **量化**「解析不下发」这条决定的依据：多少道题的解析里直接写着答案。
+
+        做法：取题目的标准答案文本（字符串或列表里的每一条），去掉空白后看它是否
+        作为子串出现在解析里。这是**下界**（解析换个说法讲答案是测不到的），
+        但足以说明问题：**这个比例很高，高到不能把解析当普通题面字段下发**。
+
+        ⚠️ 判据不能写成「某道题泄漏」：这是**内容质量**的事实，不是缺陷 ——
+        解析本来就是给人看的讲解，讲解里出现答案天经地义。所以这条用例**不失败**，
+        只打印数字并断言一个宽松下限（≥10%）；它的价值是**把"为什么"留在测试里**，
+        让将来有人想「顺手把 explanation 加回载荷」时先看到这个数字。
+
+        ★ 想收紧到「一道都不许含答案」= 要重写全部 684 条解析，那是内容工程，
+          不在本次范围；而且即使那样，靠文本比对去判「解析是否泄题」也依然不可靠。
+          真正的解法就是本文件上面那条：**结构上不把它下发**。
+        """
+        entries = load_bank(BANK_DIR).entries
+        self.assertTrue(entries, "题库为空，这条统计会空转")
+
+        leaking: list[str] = []
+        for entry in entries:
+            question = entry.question
+            explanation = normalize_answer(question.explanation or "")
+            if not explanation:
+                continue
+            answers = question.answer if isinstance(question.answer, list) else [question.answer]
+            if any(
+                token and token in explanation
+                for token in (normalize_answer(value) for value in answers if value)
+            ):
+                leaking.append(question.qid)
+
+        ratio = len(leaking) / len(entries)
+        print(
+            f"\n[统计] 解析里含标准答案原文的题：{len(leaking)}/{len(entries)}"
+            f"（{ratio:.0%}）—— 这就是「explanation 不下发」的依据"
+        )
+        self.assertGreaterEqual(
+            ratio,
+            0.1,
+            "★ 这个比例突然掉到 10% 以下多半意味着统计写错了（判据失效），而不是题库变好了；"
+            f"实测 {len(leaking)}/{len(entries)}",
+        )
 
 
 # --------------------------------------------------------------------------- #

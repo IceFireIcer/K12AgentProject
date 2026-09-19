@@ -10,13 +10,17 @@ import asyncio
 import contextlib
 import io
 import json
+import os
 import socket
+import tempfile
 import unittest
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.config import build_runtime_config
 from app.main import bind_listening_socket, create_app, emit_handshake, main
+from app.rag.embedder import LocalEmbedder
 from app.security import AUTH_HEADER, TokenAuthMiddleware
 
 TOKEN = "a" * 64  # 与 Electron 侧 randomBytes(32).toString('hex') 同形
@@ -107,6 +111,66 @@ class TestTokenAuth(unittest.TestCase):
         """未配置 token（手动 `uv run uvicorn ...` 调试）时不拦 —— 生产路径必然带 token。"""
         response = _client(token="").get("/api/whatever")
         self.assertEqual(response.status_code, 404)
+
+
+class TestHealthReportsTheSameModelDirAsRetrieval(unittest.TestCase):
+    """★★ `/health` 的 `embedderReady` 必须与**检索实际用的**模型目录同一个值。
+
+    缺陷形态（审计 L 项）：探活走 `app.config.model_files_present()`（**写死**
+    `EMBEDDING_MODEL_DIR`），而检索走 `app.rag.embedder.resolve_model_dir()`
+    （认 `K12_EMBEDDING_MODEL_DIR`）—— 同一个事实两个结论：探活灯亮着、
+    `LocalEmbedder.available` 已经是 `False`，检索一路降级。
+
+    触发场景不是理论上的：把 `K12_EMBEDDING_MODEL_DIR` 指到空目录正是
+    `app/rag/embedder.py` 注释里写的**演示四级降级链**的标准手法，
+    而演示者第一眼看的恰恰是探活灯。
+    """
+
+    def setUp(self) -> None:
+        self._saved = os.environ.get("K12_EMBEDDING_MODEL_DIR")
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self) -> None:
+        if self._saved is None:
+            os.environ.pop("K12_EMBEDDING_MODEL_DIR", None)
+        else:
+            os.environ["K12_EMBEDDING_MODEL_DIR"] = self._saved
+
+    def _point_model_dir_at(self, directory: str) -> None:
+        os.environ["K12_EMBEDDING_MODEL_DIR"] = directory
+
+    def test_both_say_unavailable_when_the_override_points_at_an_empty_dir(self) -> None:
+        empty = tempfile.TemporaryDirectory()
+        self.addCleanup(empty.cleanup)
+        self._point_model_dir_at(empty.name)
+
+        body = _client().get("/health").json()
+
+        self.assertFalse(
+            body["embedderReady"],
+            "覆盖目录里没有模型，探活必须与检索同一口径地说「不可用」",
+        )
+        # 反向对照：检索侧的判据（探活就是照它报的）
+        self.assertFalse(LocalEmbedder().available)
+
+    def test_both_say_available_when_the_override_points_at_a_model_dir(self) -> None:
+        """另一方向也要一致：只断言「不可用」会放过「永远报 False」这种假修复。"""
+        model_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(model_dir.cleanup)
+        # 只看文件存在性（探活不加载 ONNX），所以一个空的 .onnx 就够
+        Path(model_dir.name, "model_optimized.onnx").write_bytes(b"")
+        self._point_model_dir_at(model_dir.name)
+
+        body = _client().get("/health").json()
+
+        self.assertTrue(body["embedderReady"])
+        self.assertTrue(LocalEmbedder().available)
+
+    def test_health_keeps_its_shape_and_stays_anonymous(self) -> None:
+        """收窄目录解析不许顺手改契约（前端按 `embedderReady` 读）。"""
+        response = _client(token=TOKEN).get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()), {"status", "version", "embedderReady"})
 
 
 class TestHandshakeEmission(unittest.TestCase):

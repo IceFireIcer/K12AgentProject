@@ -347,11 +347,13 @@ class TestAnswerNeverLeavesBackend(QuizCase):
             self._keys(payload),
             f"对外题目载荷里出现了 answer 键：{raw}",
         )
-        # 题目字段就是 QuizQuestionOut 的那 6 个（多一个都算契约外字段）
+        # 题目字段就是 QuizQuestionOut 的那 5 个（多一个都算契约外字段）。
+        # ⚠️ `explanation` **不在**其中：解析里 43% 直接写着标准答案，随题面下发等于送答案。
+        #    它在**判分之后**经 `QuizResult.feedback` 回来（另有专门的用例盯着那条）。
         for question in payload["questions"]:
             self.assertEqual(
                 set(question),
-                {"qid", "kpId", "type", "stem", "options", "explanation"},
+                {"qid", "kpId", "type", "stem", "options"},
                 f"对外题目字段不对：{question}",
             )
 
@@ -473,11 +475,14 @@ class TestMasteryAndHistory(QuizCase):
         self.assertIsNotNone(row["last_seen_at"])
 
     def test_wrong_answer_delta_is_clamped_and_never_goes_below_zero(self) -> None:
-        # 先答对一次，把掌握度抬到 0.15，再答错 —— 否则 0 减去任何值都会被截到 0，
-        # 测出来是「0 变化」而不是「负变化」，等于没测到限幅。
+        # ★ 用**同一知识点的两道不同题**（`-q1` 答对、`-q2` 答错）而不是同一道题答两次：
+        #   判分口径是**首次作答决定**（H-3），同一 qid 的第二次提交不再改掌握度 ——
+        #   拿同一道题当夹具，测出来的是幂等（另有专门的用例），不是限幅。
+        #   先答对一次把掌握度抬到 0.15，再答错 —— 否则 0 减去任何值都会被截到 0，
+        #   测出来是「0 变化」而不是「负变化」，等于没测到限幅。
         self.grade(studentId="student_002", qid="prog-loop-jr-q1", answer="循环变量")
         result = self.grade(
-            studentId="student_002", qid="prog-loop-jr-q1", answer="循环次数"
+            studentId="student_002", qid="prog-loop-jr-q2", answer="随便选一个错的"
         ).json()
         self.assertFalse(result["correct"])
         self.assertAlmostEqual(result["masteryDelta"], -MASTERY_LOSS_WRONG, places=6)
@@ -496,19 +501,94 @@ class TestMasteryAndHistory(QuizCase):
         self.assertEqual(fresh["masteryDelta"], 0.0)
         self.assertEqual(self._mastery_row("student_012", "prog-loop-jr")["score"], 0.0)
 
-    def test_repeated_answers_converge_and_delta_stops_at_the_ceiling(self) -> None:
-        body = {"studentId": "student_003", "qid": "prog-loop-jr-q1", "answer": "循环变量"}
-        deltas = []
-        for _ in range(10):
-            payload = self.grade(**body).json()
-            deltas.append(payload["masteryDelta"])
-            self.assertLessEqual(abs(payload["masteryDelta"]), MASTERY_DELTA_LIMIT)
+    def test_repeated_answers_do_not_move_mastery_twice(self) -> None:
+        """★★ 判分幂等（H-3）：**首次作答决定** —— 重复提交同一道题不再改掌握度。
+
+        缺陷形态（修之前实测）：同一道题连点 4 次就能把掌握度从 0.15 刷到 0.6
+        （``attempts`` 记到 4），顺手满足解锁阈值 —— 而学生并没有多会一点。
+        掌握度是**能力信号**（推荐/画像要吃它），反复刷不该改变它。
+
+        ★ 同时钉住「答错后可以再答」这一半：重复提交**照常判分、照常给反馈**
+        （学生要看到这次对没对），只是反馈里必须**说实话**（说这是重复作答、不计分）。
+        """
+        wrong = self.grade(
+            studentId="student_003", qid="prog-loop-jr-q1", answer="循环次数"
+        ).json()
+        self.assertFalse(wrong["correct"])
+        self.assertEqual(wrong["masteryDelta"], 0.0, "全新学生答错，掌握度停在 0")
+        self.assertNotIn("已经答过", wrong["feedback"], "第一次作答不该被说成重复作答")
+
+        # 反手答对：**判分照旧**（correct 仍然是 true），但掌握度不动
+        repeat = self.grade(
+            studentId="student_003", qid="prog-loop-jr-q1", answer="循环变量"
+        ).json()
+        self.assertTrue(repeat["correct"], "重复作答照常判分（学生要看到这次对没对）")
+        self.assertEqual(repeat["masteryDelta"], 0.0, "★ 重复作答不得再动掌握度")
+        self.assertIn("已经答过", repeat["feedback"], "★ 必须如实告诉学生这次不计分")
 
         row = self._mastery_row("student_003", "prog-loop-jr")
-        self.assertAlmostEqual(row["score"], 1.0, places=6)
-        self.assertEqual(row["attempts"], 10)
-        self.assertEqual(row["correct"], 10)
-        self.assertEqual(deltas[-1], 0.0, "满分后再答对，回报的增量必须是 0（不能虚涨）")
+        self.assertEqual(row["score"], 0.0, "★ 掌握度只由第一次（答错）决定")
+        self.assertEqual(row["attempts"], 1, "★ attempts 不该被重复提交刷高")
+        self.assertEqual(row["correct"], 0, "★ correct 不该被后一次答对改写")
+
+    def test_repeat_attempt_still_lands_in_history_but_not_in_progress(self) -> None:
+        """★★ 重复作答的落库边界：``learning_history`` 照写，``progress`` 不重复推进。
+
+        :func:`_record_attempt` 写三样东西，重复作答时**只有流水账该长**：
+
+        - ``learning_history``：**照写**（学生确实又答了一次，抹掉等于篡改记录）；
+        - ``progress``（stage / 徽章 / 解锁）：**不写**（「走过没走过」不因重复提交改变）；
+        - ``mastery``：**不动**（上一个用例已断言）。
+        """
+        qid = "prog-loop-jr-q1"
+        for _ in range(4):
+            self.grade(studentId="student_013", qid=qid, answer="循环变量")
+
+        conn = sqlite3.connect(student_db_path(self.tmp, "student_013"))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = list(
+                conn.execute(
+                    "SELECT detail FROM learning_history WHERE activity = 'quiz' ORDER BY id"
+                )
+            )
+            # ① 流水账：4 次提交 = 4 条记录（别把学生的练习历史抹掉）
+            self.assertEqual(len(rows), 4, "重复作答也要留下流水（它是记录，不是计数）")
+            details = [json.loads(row["detail"]) for row in rows]
+            self.assertNotIn("repeat", details[0], "第一次作答不是重复")
+            for detail in details[1:]:
+                self.assertTrue(detail.get("repeat"), "第 2 次起都要标记成重复作答")
+                self.assertFalse(detail.get("counted"), "并显式记下「没计分」")
+                self.assertEqual(detail["masteryDelta"], 0.0)
+
+            # ② 闯关进度：徽章只反映第一次
+            progress = {
+                row["kp_id"]: dict(row)
+                for row in conn.execute("SELECT kp_id, stage, badge FROM progress")
+            }
+            self.assertEqual(progress["prog-loop-jr"]["badge"], "起步-1", "★ 徽章只计第一次")
+        finally:
+            conn.close()
+
+    def test_repeat_attempt_is_per_question_not_per_knowledge_point(self) -> None:
+        """★ 幂等判据是**按 qid** 的：换一道题就重新计分（不能把整关都锁死）。
+
+        反面形态：若判据写成「这个 kp 答过没有」，学生在同一关里的第 2 道题就永远
+        不再计分 —— 那会让「多练几道」变成「练了也白练」。
+        """
+        first = self.grade(
+            studentId="student_014", qid="prog-loop-jr-q1", answer="循环变量"
+        ).json()
+        self.assertAlmostEqual(first["masteryDelta"], MASTERY_GAIN_CORRECT, places=6)
+
+        second = self.grade(
+            studentId="student_014", qid="prog-loop-jr-q2", answer="`for`，因为它最常用"
+        ).json()
+        self.assertFalse(second["correct"], "这道题选了错的选项")
+        self.assertAlmostEqual(
+            second["masteryDelta"], -MASTERY_LOSS_WRONG, places=6,
+            msg="★ 换一道题必须重新计分（掌握度按题累加，不是按知识点只算一次）",
+        )
 
     def test_attempt_is_written_to_learning_history(self) -> None:
         self.grade(
@@ -650,7 +730,9 @@ class TestQuizRoutesRequireExplicitDataDir(unittest.TestCase):
                 "gradeLevel": "junior",
                 "questions": [
                     {
-                        "qid": "v-1",
+                        # ★ qid 用生成题的标准形状（`gen-` 前缀）：本用例要说的是「没 data-dir
+                        #   就 503」，若夹具先在**校验层**被拒（422），这条断言就测不到它想测的东西。
+                        "qid": "gen-prog-loop-jr-v1-1",
                         "kpId": "prog-loop-jr",
                         "type": "blank",
                         "stem": "1 到 5 用什么函数？",
@@ -663,7 +745,12 @@ class TestQuizRoutesRequireExplicitDataDir(unittest.TestCase):
 
         subjective = self.client.post(
             "/api/quiz/grade-subjective",
-            json={"studentId": "student_999", "qid": "v-1", "score": 0.9, "feedback": "不错"},
+            json={
+                "studentId": "student_999",
+                "qid": "gen-prog-loop-jr-v1-1",
+                "score": 0.9,
+                "feedback": "不错",
+            },
         )
         self.assertEqual(subjective.status_code, 503, subjective.text)
 

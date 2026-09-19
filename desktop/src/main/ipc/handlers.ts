@@ -26,7 +26,7 @@ import { gradeStatePath } from '../agent/extensions/grade.ts'
 import { bindCodeRunner, createRendererCodeRunner } from '../agent/extensions/coding.ts'
 import { builtinCatalog } from '../agent/pi-bootstrap.ts'
 import { assertStudentId } from '../agent/pi-paths.ts'
-import type { ChatRuntime } from '../agent/runtime.ts'
+import type { ChatRuntime, ChatSessionSource } from '../agent/runtime.ts'
 import { createChatRuntime } from '../agent/runtime.ts'
 import {
   refreshRuntimeLlmConfig,
@@ -52,7 +52,12 @@ import {
   type ProbeRequest,
   type ProbeResult,
   type ProviderCatalogEntry,
+  type SessionBranchRequest,
+  type SessionBranchResult,
+  type SessionCurrent,
+  type SessionOpenResult,
   type SessionSearchRequest,
+  type SessionStateResult,
   type SettingsCallResult,
   type SettingsSnapshot,
   type SettingsUpdateRequest,
@@ -60,6 +65,8 @@ import {
   type StudyGradeRequest,
   type StudyReportRequest
 } from './channels.ts'
+// 画像 / 推荐的取数层（开场引导也走这里：同一个 profile 端点族）
+import { dataRequests } from '../wire/data.ts'
 // 学习档案的取数层（路径工厂 + 归一化；聚合全在 Python）
 import {
   STUDY_GRADE_LEVELS,
@@ -85,6 +92,7 @@ import {
   findSessionById,
   listStudentSessions,
   projectSessionList,
+  projectSessionTree,
   projectTranscript,
   readStudentSessionEntries,
   searchSessions,
@@ -287,10 +295,46 @@ export function resolveActiveStudentId(): string {
  * ★ 唯一的会话持有者（模块级单例；`null` = 还没建或已经 dispose）。
  * 当前按「一个应用一个学生一个会话」使用：`studentId` 决定落盘目录，
  * 换学生必须先 `disposeChatRuntime()` 再重建（票 09 的会话目录与 learning.db 都按学生分）。
+ *
+ * ★★ 「切会话」= **换掉这个单例里的实例**，不是在里面并存两个会话：
+ *    Pi 的 `AgentSession` 每个都对应一个 JSONL 文件句柄，同时活着两个就会两份都在写。
+ *    所以切换必须先 `swapRuntime()`（dispose 旧的、建新的），见那个函数的注释。
  */
 let runtime: ChatRuntime | null = null
 /** 正在装配中的 Promise（并发首条消息只装配一次）。 */
 let runtimePending: Promise<ChatRuntime> | null = null
+
+/**
+ * ★★ **下一次装配用哪个会话**（`null` = 用默认值 `'recent'`，见 {@link sessionSourceForBoot}）。
+ *
+ * 为什么需要它：装配是「懒」的（首条消息 / 读学段时才建），而**切换会话**这个动作
+ * 发生在装配之前也发生在之后 —— 学生刚打开应用、会话还没建，就点开了历史里的一条。
+ * 那种情况下没有实例可以 dispose，只能把「下次该开哪一条」记在这里。
+ *
+ * ⚠️ 必须与单例**同时**更新（见 `swapRuntime`）：只改这个不改单例，界面切过去了、
+ *    实际还在用旧会话（对话写进旧文件）；只改单例不改这个，下次冷装配又回到旧的那条。
+ * ⚠️ 它**不持久化**：重启后回到「续上最近的会话」（`sessionSourceForBoot`）。
+ *    把「上次点开的是哪一条」存起来是另一件事（而且会让「重启后数据延续」这条验收
+ *    变成「重启后落回一条三天前的会话」—— 那不是学生要的）。
+ */
+let pendingSessionSource: ChatSessionSource | null = null
+
+/**
+ * ★ 冷启动用哪个会话来源：**续上最近的一条**。
+ *
+ * 为什么是 `'recent'` 而不是 `'new'`（这条决定了 AGENTS §10 的
+ * 「重启后数据延续演练」达不达标）：
+ *   - `'new'` 的表现是「关掉应用再打开，上一段对话消失了」—— 数据还在盘上，但界面上没了；
+ *   - `'recent'` 续上最后用过的那条，于是学生看到的就是他离开时的样子。
+ *
+ * ★ Pi 的 `continueRecent` 在没有历史会话时**自己会新建一条**（实测 `session-manager.js`：
+ *   `findMostRecentSession` 返回 null 时就 `new SessionManager(..., undefined, true)`），
+ *   所以首跑（一条会话都没有）也是安全的，不需要我们额外判断。
+ * ★ 环境变量 `K12_NEW_SESSION_ON_BOOT=1` 可改回 `'new'`：自动化脚本与「新机器演练」需要它。
+ */
+export function sessionSourceForBoot(): ChatSessionSource {
+  return process.env.K12_NEW_SESSION_ON_BOOT === '1' ? 'new' : 'recent'
+}
 
 /**
  * ★★ 会话**代际**：每次 `disposeChatRuntime()` 都 +1。
@@ -347,15 +391,18 @@ export async function ensureChatRuntime(): Promise<ChatRuntime> {
   if (!runtimePending) {
     // ★ 记下本次装配开始时的代际：装配期间被 dispose 过就作废（见 runtimeGeneration 的注释）
     const generation = runtimeGeneration
+    // ★ 本次装配要开哪一条会话：显式指定过就用它，否则走冷启动默认（续上最近的一条）。
+    const source: ChatSessionSource = pendingSessionSource ?? sessionSourceForBoot()
     runtimePending = (async () => {
       const llm = await refreshRuntimeLlmConfig()
       // ★ 记住这次是不是「拿不到配置」的降级装配 —— 单看 `runtime !== null` 是分不出来的。
       runtimeConfigDegraded = llm === null
+      const options = { ...chatRuntimeOptionsFromLlm(llm), sessionSource: source }
       // 注入点（生产恒为 null，见 setChatRuntimeFactoryForTests）
       if (chatRuntimeFactoryOverride) {
-        return await chatRuntimeFactoryOverride(chatRuntimeOptionsFromLlm(llm))
+        return await chatRuntimeFactoryOverride(options)
       }
-      return await createChatRuntime(chatRuntimeOptionsFromLlm(llm))
+      return await createChatRuntime(options)
     })()
       .then(async (instance) => {
         // ★★ 装配期间被 dispose 过（代际变了）：**就地收尾，绝不写回单例**。
@@ -365,6 +412,9 @@ export async function ensureChatRuntime(): Promise<ChatRuntime> {
           throw new Error(RUNTIME_SUPERSEDED_MESSAGE)
         }
         runtime = instance
+        // ★ 装配成功 = 这个来源已经生效，清掉待用值。留着它的话，下一次 dispose 后重建
+        //   会**又一次**开同一个文件（表现是「切了会话之后每次重启都回到那一条」）。
+        pendingSessionSource = null
         return instance
       })
       .finally(() => {
@@ -943,16 +993,41 @@ function registerStudyHandlers(): void {
 }
 
 /* ------------------------------------------------------------------ *
- * 历史会话（**只读回看**）
+ * 历史会话（列出 / 回看 / 搜索 / ★ 切换续聊 / 新建）
  *
- * ★ 不切会话、不写会话：切会话要 dispose 当前 runtime 并处理代际竞态，
- *   那是另一件事（见 `main/study/sessions.ts` 的文件头）。
+ * ★★ 这一切的硬约束只有一条：**切换 = dispose 旧的 + 装配新的**（见 `swapRuntime`）。
+ *    不 dispose 的话旧 JSONL 会半写 —— 那正是 AGENTS §5 第 13 条禁的东西。
+ * ★ 两条安全约束（在 `study/sessions.ts` 的文件头也写了一遍，两处是同一个判据）：
+ *    ① 渲染进程只能递**会话 id**（`findSessionById` 做白名单对齐，path 由 Pi 给）；
+ *    ② 会话目录必须显式指向该学生（`listStudentSessions` / `createChatRuntime` 各自负责）。
  * ------------------------------------------------------------------ */
 function registerSessionHandlers(): void {
+  /**
+   * ★ 列出历史会话（**带分支关系**）。
+   *
+   * 返回的是 `projectSessionTree` 的产物而不是裸摘要：每一项多了
+   * `parentId` / `parentTitle`（从哪条会话分出来的）—— 侧栏据此把分支显示成
+   * 「来自〈父会话标题〉」，学生一眼能看出「这是我重新问过的那条」。
+   *
+   * ★ 父路径 → id 的映射由**同一批 `SessionInfo`** 建（`pathToId`）：
+   *   不猜 Pi 的文件命名规则、也不读文件头 —— 那份对应关系 Pi 已经给出来了。
+   */
   ipcMain.handle(IPC.sessionList, async (): Promise<StudyCallResult> => {
     const loaded = await loadSessions()
     if (!loaded.ok) return { ok: false, message: loaded.message }
-    return { ok: true, data: projectSessionList(loaded.infos) }
+    const summaries = projectSessionList(loaded.infos)
+    const pathToId = new Map(loaded.infos.map((info) => [info.path, info.id]))
+    const parentPaths = new Map(loaded.infos.map((info) => [info.id, info.parentSessionPath]))
+    return {
+      ok: true,
+      data: projectSessionTree(
+        summaries.map((summary) => ({
+          ...summary,
+          parentPath: parentPaths.get(summary.id)
+        })),
+        pathToId
+      )
+    }
   })
 
   ipcMain.handle(IPC.sessionTranscript, async (_event, payload: unknown): Promise<StudyCallResult> => {
@@ -975,6 +1050,346 @@ function registerSessionHandlers(): void {
     if (!loaded.ok) return { ok: false, message: loaded.message }
     return { ok: true, data: searchSessions(loaded.infos, query) }
   })
+
+  /**
+   * ★★ 读当前会话的**完整状态**（含恢复出来的正文与开场引导）——
+   *    渲染进程挂载时调一次，这就是**冷启动恢复**那条路。
+   *
+   * 为什么它必须装配（而不是像其它只读通道那样「没有实例就回空」）：
+   * 启动时主进程按 `sessionSourceForBoot()` 续上了最近一条会话，恢复出来的正文
+   * **只有主进程手里有**。不装配就回空 → 学生看到的是
+   * 「关掉应用再打开，上一段对话从界面上消失了」（数据其实还在盘上）。
+   *
+   * ⚠️ 装配失败**不报错**：回一句可读中文，界面显示空对话 + 提示 ——
+   *    没有 Key / sidecar 没起来时应用**仍然要能用**（降级永不白屏）。
+   */
+  ipcMain.handle(IPC.sessionState, async (): Promise<SessionStateResult> => {
+    let instance: ChatRuntime
+    try {
+      instance = await ensureChatRuntime()
+    } catch (error) {
+      return { ok: false, message: `读取当前会话失败：${describeRuntimeFailure(error)}` }
+    }
+    const current = sessionStateOf(instance)
+    // ★ 冷启动那条路**不发**开场引导：它是「会话建立**之后**由主进程主动说一句」，
+    //   而启动时恢复会话的形态是「把学生离开时的样子还给他」—— 在那份历史里
+    //   已经有一条开场语（如果当时发过）。再发一次就会变成两条一样的招呼。
+    //   ★ 这也让「开场只发一次」这条纪律在两条路径上一致：发过就写进了 JSONL，
+    //     恢复出来的历史里它作为一条普通助手消息存在。
+    const restored = [...instance.restoredMessages]
+    return { ok: true, current, messages: restored, opening: '', openingKpId: '' }
+  })
+
+  ipcMain.handle(
+    IPC.sessionOpen,
+    async (_event, payload: unknown): Promise<SessionOpenResult> =>
+      await openSessionById(typeof payload === 'string' ? payload : '')
+  )
+
+  ipcMain.handle(IPC.sessionNew, async (): Promise<SessionOpenResult> => {
+    // 「新会话」= 开一个**全新的 JSONL 文件**（`sessionSource: 'new'`）。
+    // ★ 旧会话**不删**（删除需要单独的确认流程，本期不做）：它仍在列表里，随时可切回去。
+    return await swapToSession({ kind: 'new' })
+  })
+
+  ipcMain.handle(
+    IPC.sessionBranch,
+    async (_event, payload: unknown): Promise<SessionBranchResult> => {
+      const request = payload as SessionBranchRequest | undefined
+      const sessionId = typeof request?.sessionId === 'string' ? request.sessionId : ''
+      const entryId = typeof request?.entryId === 'string' ? request.entryId : ''
+      return await branchFromMessage(sessionId, entryId)
+    }
+  )
+}
+
+/**
+ * ★★ 从某条消息处分叉（`session:branch` 的唯一实现；见 `channels.ts` 的通道注释）。
+ *
+ * 三步，每一步都是一道必须有的闸门：
+ *
+ *   ① **会话白名单对齐**：`sessionId` 必须能在 `listSessions()` 里找到 ——
+ *      与 `session:open` 同一条纪律（渲染进程只能递 id，**path 由 Pi 给**）。
+ *   ② ★★ **条目归属校验**：`entryId` 必须**属于那条会话**。
+ *      做法是拿①对齐到的那条 `SessionInfo.path` 把它的条目读回来，
+ *      再看 `entryId` 在不在里面 —— **绝不**把前端递来的字符串直接交给 Pi。
+ *      少了这一步，「从 A 会话的某条消息分叉」就能作用到 B 会话上
+ *      （而 `createBranchedSession` 只认 id、不认它属于谁）。
+ *   ③ 分叉 → 把新会话装配起来（`swapToSession({path})`，它会 dispose 旧会话）。
+ *
+ * ⚠️ 分叉**在装配之前**：分叉只是写一个新文件，失败时当前会话毫发无损；
+ *    先 dispose 再分叉的话，一次失败会让学生连当前对话都没了。
+ */
+async function branchFromMessage(
+  sessionId: string,
+  entryId: string
+): Promise<SessionBranchResult> {
+  if (!sessionId || !entryId) {
+    return { ok: false, message: '分叉失败：需要给出会话与要分叉的那条消息。' }
+  }
+
+  // ① 会话白名单对齐（只认 id）
+  const loaded = await loadSessions()
+  if (!loaded.ok) return { ok: false, message: loaded.message }
+  const info = findSessionById(loaded.infos, sessionId)
+  if (!info) {
+    return { ok: false, message: `分叉失败：找不到会话 ${sessionId}（可能已被删除）。` }
+  }
+
+  // ② ★★ 条目归属校验：entryId 必须真的属于这条会话。
+  //    ⚠️ 这一步**不能省**，也不能只信前端：`createBranchedSession(leafId)` 只在整个
+  //       当前会话里找那条条目 —— 若前端递来别的会话的 id，它要么抛「找不到」
+  //       （表现成一句莫名其妙的错误），要么在恰好同名时**分叉出错误的对话分支**。
+  let belongs = false
+  try {
+    const entries = await readStudentSessionEntries(
+      app.getPath('userData'),
+      resolveActiveStudentId(),
+      info
+    )
+    belongs = projectEntriesForBranchCheck(entries).includes(entryId)
+  } catch (error) {
+    return {
+      ok: false,
+      message: `分叉失败：读取会话内容时出错（${describeRuntimeFailure(error)}）`
+    }
+  }
+  if (!belongs) {
+    return {
+      ok: false,
+      message: '分叉失败：那条消息不属于这条会话（历史列表可能已过期，请刷新后重试）。'
+    }
+  }
+
+  // ③ 分叉 + 装配（顺序见函数头注释）
+  let instance: ChatRuntime
+  try {
+    instance = await ensureChatRuntime()
+  } catch (error) {
+    return { ok: false, message: `分叉失败：对话运行时尚未就绪（${describeRuntimeFailure(error)}）` }
+  }
+
+  let newPath: string
+  try {
+    const result = await instance.branchFrom(entryId)
+    newPath = result.path
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+  }
+
+  const opened = await swapToSession({ kind: 'path', path: newPath, id: '' })
+  if (!opened.ok) return opened
+  console.warn(`[agent] 已切换到分叉出来的会话（原会话 ${sessionId} 未改动）`)
+  return opened
+}
+
+/**
+ * 从条目里取出**可用于分叉的 id 清单**（分支点白名单）。
+ *
+ * ★ 只认 `type === 'message'`：Pi 的 `createBranchedSession(leafId)` 接的是任意条目 id，
+ *   但把分叉点放在 `model_change` / `thinking_level_change` 这类**非对话条目**上
+ *   没有语义（学生看到的是消息，点的是消息）。
+ * ★ 用 `projectTranscript` 的同一份投影（不另写一遍过滤）：
+ *   两处过滤口径不同的话，「界面上有这条消息、而后端说它不能分叉」就会自相矛盾。
+ */
+function projectEntriesForBranchCheck(entries: unknown[]): string[] {
+  return projectTranscript(entries, { limit: Number.MAX_SAFE_INTEGER }).messages
+    .map((message) => message.entryId)
+    .filter((id) => id.length > 0)
+}
+
+/**
+ * 一条 runtime 的会话状态（**唯一的投影点**）。
+ *
+ * ★ 标题这里恒为空串：Pi 的 `session_info` 名字只在 `SessionManager.list()` 的
+ *   `SessionInfo.name` 上（那是列表的职责）。会话条数与 id 才是「当前在哪一条、
+ *   该不该发开场」要用的字段；标题由列表提供，不在这里再读一次文件。
+ */
+function sessionStateOf(instance: ChatRuntime): SessionCurrent {
+  let messageCount = 0
+  try {
+    messageCount = instance.messageCount
+  } catch {
+    messageCount = 0
+  }
+  return { sessionId: instance.sessionId, title: '', messageCount }
+}
+
+/**
+ * 按 id 打开一条历史会话（`session:open` 的唯一实现）。
+ *
+ * ★★ **只接受 id，绝不接受路径**：先用 `listStudentSessions()`（Pi 自己列出来的会话）
+ *   做白名单对齐，再用**那条 `SessionInfo.path`** 去 open。
+ *   若直接 `open(前端给的字符串)`，渲染进程就拿到了「读任意文件」的能力。
+ */
+async function openSessionById(id: string): Promise<SessionOpenResult> {
+  if (!id) return { ok: false, message: '切换会话失败：没有给出会话 id。' }
+  const loaded = await loadSessions()
+  if (!loaded.ok) return { ok: false, message: loaded.message }
+  const info = findSessionById(loaded.infos, id)
+  if (!info) {
+    return { ok: false, message: `切换会话失败：找不到会话 ${id}（可能已被删除）。` }
+  }
+  return await swapToSession({ kind: 'path', path: info.path, id: info.id })
+}
+
+/** 会话来源的两种意图（与 `ChatSessionSource` 的三种取值区分开：`'recent'` 只在冷启动用）。 */
+type SessionTarget = { kind: 'new' } | { kind: 'path'; path: string; id: string }
+
+/**
+ * ★★ **切换会话的核心**：dispose 旧的 → 记下新的来源 → 装配新的。
+ *
+ * 顺序与每一半的理由（改动前先读完，这里的顺序错了会静默丢数据）：
+ *
+ *   ① `disposeChatRuntime()` —— **必须第一步**。它会拨 `runtimeGeneration`、等飞行中的
+ *      装配 settle、并 `session.dispose()`（**JSONL flush**）。不 flush 就换文件，
+ *      旧会话最后几轮会半写（AGENTS §5 第 13 条）。
+ *   ② 记下 `pendingSessionSource` —— 之后 `ensureChatRuntime()` 会按它开新文件。
+ *   ③ 装配（`ensureChatRuntime()`）—— 此时单例是空的，于是真的会按 ② 走。
+ *
+ * ⚠️ **不能反过来**（先装配再 dispose）：装配中途持着新的假设、而单例还是旧的，
+ *    这中间任何一条 `ensureChatRuntime()`（渲染进程挂载时的 `grade:get` 就是一条）
+ *    都会拿到旧实例 —— 表现是「会话切了一半，有的调用用新会话、有的用旧的」。
+ * ⚠️ **失败要能回退**：装配失败时单例是 `null`，界面会拿到一句可读中文；
+ *    下一次 `ensureChatRuntime()` 仍会按 ② 的来源重试（不会卡在「什么都没有」）。
+ *    这一条比「保证切换一定成功」重要 —— 装配失败最常见的原因就是没有 Key，
+ *    而那种情况下学生仍然要能发消息（会收到「缺 Key」的可读提示，不是白屏）。
+ */
+async function swapToSession(target: SessionTarget): Promise<SessionOpenResult> {
+  try {
+    await disposeChatRuntime()
+  } catch (error) {
+    // 收尾失败也不拦切换：上面那条 dispose 已经尽力 flush 过了。
+    console.error('[main] 切换会话前 dispose 失败（继续切）：', error)
+  }
+
+  pendingSessionSource = target.kind === 'new' ? 'new' : { path: target.path }
+
+  let instance: ChatRuntime
+  try {
+    instance = await ensureChatRuntime()
+  } catch (error) {
+    return {
+      ok: false,
+      message: `切换会话失败：对话运行时未能建立（${describeRuntimeFailure(error)}）`
+    }
+  }
+
+  const current: SessionCurrent = {
+    sessionId: instance.sessionId,
+    title: '',
+    messageCount: instance.messageCount
+  }
+  const restored = [...instance.restoredMessages]
+
+  // ★★ 主动发起对话（需求原文）：**只在这是全新的一段对话时**才发开场。
+  //    判据是 `messageCount === 0`（只数可显示的问答条数，见 `runtime.ts` 的说明）——
+  //    不是「刚新建」（切到一条空的历史会话同样该开场），也不是「source === 'new'」
+  //    （那会让「上次开了没说话的会话」永远等不到开场）。
+  const opening = current.messageCount === 0 ? await fetchOpening() : { text: '', kpId: '' }
+  if (opening.text) {
+    // ★ 写进 Pi 会话（否则重启后这句开场消失）：内容与屏幕上显示的那一条**同一份文本**。
+    instance.appendOpeningMessage(opening.text)
+  }
+
+  pushSessionState(current)
+  // ★ 标题生成**不 await**：它要发一次模型调用（可能几秒），而学生此刻正等着
+  //   「会话切没切过去」。生成完推一条 `session:changed` 让列表更新标题即可。
+  void maybeGenerateTitle(instance)
+
+  return {
+    ok: true,
+    current,
+    messages: restored,
+    opening: opening.text,
+    openingKpId: opening.kpId
+  }
+}
+
+/**
+ * 取一次开场引导（`GET /api/profile/{id}/opening`）。
+ *
+ * ★★ **绝不抛、绝不阻断**：抓不到就回空（不发开场），对话照常。
+ *   开场引导是增强项 —— 让「本地数据服务没起来」把「新建会话」整条路带崩是更坏的结果。
+ * ★ kpId 只在**同时有开场语**时才有意义（服务端已保证，这里再核对一次：
+ *   「有话可说但没有可去的地方」与「有地方可去但无话可说」都不该渲染动作按钮）。
+ */
+async function fetchOpening(): Promise<{ text: string; kpId: string }> {
+  const result = await dataRequests.opening(resolveActiveStudentId())
+  if (!result.ok) return { text: '', kpId: '' }
+  const data = result.data as { text?: unknown; kpId?: unknown } | null
+  if (!data || typeof data !== 'object') return { text: '', kpId: '' }
+  const text = typeof data.text === 'string' ? data.text.trim() : ''
+  if (!text) return { text: '', kpId: '' }
+  const kpId = typeof data.kpId === 'string' ? data.kpId.trim() : ''
+  return { text, kpId }
+}
+
+/**
+ * 给当前会话生成一个标题（**失败安静降级**，绝不产出比「首条消息截断」更差的结果）。
+ *
+ * 降级链（§「降级永不白屏」）：
+ *   ① LLM 生成（`runtime.generateSessionTitle()`）→ 写进 Pi 的 `session_info` 条目；
+ *   ② 拿不到（无 Key / 断网 / 超时 / 模型返回空）→ **什么都不做**：
+ *      列表那边本来就会退回到 `SessionInfo.firstMessage` 截断（`projectSessionList`），
+ *      所以「没有标题」与「有标题」在界面上都是可读的一行字。
+ *
+ * ★ 只在**第一次**生成（会话里已经有 `session_info` 条目就不重复调模型）：
+ *   每次切换会话都生成一次 = 每次点列表都发一次模型请求，而标题并不会变。
+ */
+async function maybeGenerateTitle(instance: ChatRuntime): Promise<void> {
+  try {
+    const loaded = await loadSessions()
+    if (!loaded.ok) return
+    const info = findSessionById(loaded.infos, instance.sessionId)
+    if (info?.name) return
+    if (instance.messageCount === 0) return
+    await instance.generateSessionTitle()
+    // 标题生成完推一次（列表据此更新那一栏）——推的是**同一个投影函数**的产物
+    pushSessionState(sessionStateOf(instance))
+  } catch (error) {
+    // 标题是**装饰**：失败不记 error（只 warn），也绝不冒到 UI
+    console.warn(
+      `[main] 会话标题生成失败（保留首条消息预览）：${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
+  }
+}
+
+/**
+ * 推「本轮的两个条目 id」（`turn:entries`）。
+ *
+ * ⚠️ **不能经 6 事件的 `handle.emit()`**：事件词表被守卫 G4 冻结为恰好 6 个，
+ *   而这条信息不属于任何一轮的**对话状态机**（它既不改变正文，也不终结本轮）——
+ *   硬塞进 `payload` 或 `done` 会让每个消费方都被迫理解一个它不关心的字段
+ *   （与 `trace:changed` 同一判断：并列通道，不是第 7 个事件）。
+ * ⚠️ 按 `requestId` 精确配对：渲染进程直接找到那一轮填两个字段，不做任何
+ *   「第几轮 ↔ 第几条消息」的换算。
+ */
+function pushTurnEntries(
+  requestId: string,
+  entries: { userEntryId: string; entryId: string }
+): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    const webContents = window.webContents
+    if (webContents.isDestroyed()) continue
+    webContents.send(IPC.turnEntries, { requestId, ...entries })
+  }
+}
+
+/** 推一条 `session:changed`（值变了才推 —— 与学段/章节的推送同一手法，否则列表会闪）。 */
+let lastSessionPush: string | null = null
+
+function pushSessionState(state: SessionCurrent): void {
+  const key = `${state.sessionId}|${state.messageCount}`
+  if (key === lastSessionPush) return
+  lastSessionPush = key
+  for (const window of BrowserWindow.getAllWindows()) {
+    const webContents = window.webContents
+    if (webContents.isDestroyed()) continue
+    webContents.send(IPC.sessionChanged, state)
+  }
 }
 
 /** 列出当前学生的历史会话（走 Pi 的 `SessionManager.list`，目录**显式**指向该学生）。 */
@@ -1194,7 +1609,19 @@ async function readDetail(response: Response): Promise<string> {
   }
 }
 
-/** 异常 → 可读中文（区分「sidecar 没起来」「超时」「网络异常」三类，排查方向完全不同）。 */
+/**
+ * 异常 → 可读中文（区分「sidecar 没起来」「超时」「网络异常」三类，排查方向完全不同）。
+ *
+ * ★★ 连接被拒必须变成**一句中文**（本轮修正）。`fetch` 在连不上时抛的是
+ *   `TypeError: fetch failed`（cause 里才是 `ECONNREFUSED`）—— 旧实现直接 `return error.message`，
+ *   于是学生与右栏看到的是纯英文的 `fetch failed`。而这条**恰恰是最常发生的一种**：
+ *   sidecar 崩溃自愈的那 500ms 窗口里，任何一个取数请求都会命中它
+ *   （端点已清 → `apiFetch` 走 `sidecar 尚未就绪`；端点未清 → 打到已死端口 → `fetch failed`）。
+ *   两类都指向同一个处置动作（「等一下，服务正在重启」），文案就该说同一件事。
+ *
+ * ⚠️ `wire/data.ts` 与 `study/client.ts` 里各有一份同形实现 —— 那两处**不在本次改动范围**，
+ *    仍需各自修（同一个缺陷在三处，只修一处不算修好）。
+ */
 function describeError(error: unknown): string {
   if (error instanceof Error) {
     if (error.name === 'TimeoutError') return '请求超时（本地数据服务没有在超时时间内响应）。'
@@ -1202,9 +1629,41 @@ function describeError(error: unknown): string {
     if (error.message.includes('sidecar 尚未就绪')) {
       return '本地数据服务（sidecar）尚未就绪：请等界面上的状态变成「已就绪」后重试。'
     }
+    // ★ 连接层失败（`fetch failed` / `ECONNREFUSED` / `ECONNRESET` / `ENOTFOUND`）：
+    //   它们全是「对面没接上」，对用户是同一件事 —— 说清「服务正在重启/不可用，稍后重试」，
+    //   而不是把英文原文递出去。判据连同 cause 一起看：Node 把真正的原因放在 `cause` 里。
+    if (looksLikeConnectionFailure(error)) {
+      return '连不上本地数据服务（sidecar）：它可能正在重启或已经不可用。请稍等几秒后重试。'
+    }
     return error.message
   }
   return String(error)
+}
+
+/**
+ * 「连不上」的判据（`fetch failed` 的英文原文 + Node 的 errno 形态）。
+ *
+ * 为什么要连 `cause` 一起看：Node 的 `fetch` 在连接被拒时抛的 `TypeError` 的 message
+ * **只有** `fetch failed`，真正的原因（`ECONNREFUSED`）在 `error.cause.code` 里 ——
+ * 只看 message 会漏掉最典型的那一种。
+ */
+function looksLikeConnectionFailure(error: Error): boolean {
+  const parts = [error.message]
+  const cause = (error as { cause?: unknown }).cause
+  if (cause instanceof Error) parts.push(cause.message)
+  else if (typeof cause === 'string') parts.push(cause)
+  const code = (cause as { code?: unknown } | undefined)?.code
+  if (typeof code === 'string') parts.push(code)
+  const text = parts.join(' ').toLowerCase()
+  return (
+    text.includes('fetch failed') ||
+    text.includes('econnrefused') ||
+    text.includes('econnreset') ||
+    text.includes('enotfound') ||
+    text.includes('econnaborted') ||
+    text.includes('socket hang up') ||
+    text.includes('connection error')
+  )
 }
 
 /** 单行化 + 截断（错误行要能进状态栏，不能是一条 2KB 的 JSON）。 */
@@ -1243,6 +1702,30 @@ async function runChatTurn(text: string, handle: TurnHandle): Promise<void> {
       // 结论只进 stderr（面向排查），UI 那一份文案由 runtime 通过 6 事件给出
       console.warn(`[main] 本轮结论：${outcome.status} —— ${outcome.detail}`)
     }
+    // ★★ 本轮结束后推一次会话状态：**新会话的第一轮跑完，它才在磁盘上真的存在**
+    //    （Pi 的 `_persist` 在第一条 assistant 消息到达前不写文件），
+    //    于是左侧「历史对话」列表要刷新一次才能看见刚聊的这条。
+    //    ⚠️ 不推的话，表现是「聊完一轮，列表还是空的」—— 实测踩到过
+    //    （学生会以为对话没保存，其实文件已经在 `students/<id>/pi-agent/sessions/` 里）。
+    //    ★ `pushSessionState` 内部按 (sessionId, messageCount) 去重，所以这里
+    //      每轮调一次也只在**真的变了**的时候推。
+    pushSessionState(sessionStateOf(instance))
+
+    // ★★ 本轮的**条目 id**（见 `channels.ts` 的 `turnEntries`：「从这里重新问」要靠它）。
+    //    ★ 必须**在本轮结束之后**取：那两条条目正是刚追加进去的（见 `lastTurnEntries`）。
+    //    ★ 失败也不报错：取不到就推两个空串，界面那条回答上不显示分叉按钮
+    //      （而不是让整轮收尾挂掉）。
+    try {
+      const entries = instance.lastTurnEntries()
+      pushTurnEntries(handle.requestId, entries)
+    } catch (error) {
+      console.warn(
+        `[main] 取本轮条目 id 失败（该轮不显示分叉入口）：${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+    }
+
     // ★ 学段是**推断**出来的：每轮结束后读一次 sidecar 的真值，变了才推送。
     //   放在本轮之后（不是之前）—— 推断的输入就是这一轮的内容。
     //

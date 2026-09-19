@@ -214,8 +214,28 @@ class TestAnswerLeak(unittest.TestCase):
                 kp_id="kp1",
                 type="blank",
                 stem="1+1=?",
-                explanation="2",
                 answer="2",  # type: ignore[call-arg]
+            )
+
+    def test_outward_model_has_no_explanation(self) -> None:
+        """★★ 解析**也不下发**（H-6）：实测 684 道真题里 281 道（41%）的解析直接写着答案。
+
+        界面文案早就写着「答案与解析都不下发到界面」（``views/Quiz.vue``），
+        而契约一直带着它走完 HTTP —— 这条用例把承诺与载荷对齐。
+
+        ★ 教学价值没丢：解析仍在 ``feedback_for()`` 里，只在判分**之后**
+          经 ``QuizResult.feedback`` 回传（见 :class:`TestAnswerLeak` 的反馈用例）。
+        """
+        self.assertNotIn("explanation", QuizQuestionOut.model_fields)
+        # 塞进来必须当场报错（`extra="forbid"`），而不是静默忽略 ——
+        # 静默忽略会让「上游多带一个字段」在今天看起来无事发生。
+        with self.assertRaises(ValidationError):
+            QuizQuestionOut(
+                qid="q1",
+                kp_id="kp1",
+                type="blank",
+                stem="1+1=?",
+                explanation="等于 2",  # type: ignore[call-arg]
             )
 
     def test_internal_model_cannot_be_smuggled_into_outward_payload(self) -> None:
@@ -242,9 +262,11 @@ class TestAnswerLeak(unittest.TestCase):
         dumped = json.loads(raw)
         self.assertEqual(self._find_answer_keys(dumped), [], "序列化结果里出现 answer 键")
         self.assertEqual(sorted(dumped), ["kpId", "questions", "source"])
+        # ★ 对外题目**五个字段**：`explanation` 也在不下发之列（见 `QuizQuestionOut` 的说明
+        #   与下面那条专门的用例 —— 解析里 41% 直接写着答案）
         self.assertEqual(
             sorted(dumped["questions"][0]),
-            ["explanation", "kpId", "options", "qid", "stem", "type"],
+            ["kpId", "options", "qid", "stem", "type"],
         )
 
     def test_question_list_response_model_is_the_outward_one(self) -> None:
@@ -480,7 +502,17 @@ class TestPartialSubmitContracts(unittest.TestCase):
 
 # ---------------------------------------------------------------- 对话入参 --
 class TestChatRequestContract(unittest.TestCase):
-    """★ A5：`ChatRequest` 是 IPC 入参形状，**不带学段**（学段完全自动推断）。"""
+    """★ A5 / L-9：`ChatRequest` 是 IPC 入参形状 —— **只有 `text`**。
+
+    它必须与 ``desktop/src/main/ipc/channels.ts`` 的 ``ChatSendRequest`` **逐字段同形**
+    （守卫 G6c 把那一侧钉死为 ``['text']``）。曾经多出的 ``student_id`` / ``session_id``
+    是**第二形状**，也是漂移温床：
+
+    - **学生身份只能由主进程决定**（``resolveActiveStudentId()``）—— 契约里放一个
+      ``student_id``，等于给「读渲染进程递来的身份」留了一个合法入口，
+      而那正是「读别人的画像与学习记录」的那条路；
+    - **会话同理**：Pi 会话由主进程持有，渲染进程连会话 id 都不该知道。
+    """
 
     def test_chat_request_has_no_grade_field(self) -> None:
         self.assertNotIn("grade_level", ChatRequest.model_fields)
@@ -488,20 +520,38 @@ class TestChatRequestContract(unittest.TestCase):
         suspicious = [name for name in ChatRequest.model_fields if "grade" in name.lower()]
         self.assertEqual(suspicious, [], f"ChatRequest 里出现疑似学段字段：{suspicious}")
 
+    def test_chat_request_has_no_chapter_field(self) -> None:
+        """★ D-038：章节走 `chapter:set` 独立通道，**不混进对话请求**（同「不许加回学段」）。"""
+        self.assertNotIn("chapter", ChatRequest.model_fields)
+        self.assertNotIn("current_chapter", ChatRequest.model_fields)
+
+    def test_field_set_is_exactly_text(self) -> None:
+        """★★ 字段集合**恰好**是 ``['text']``（与 G6c 守卫同一口径）。
+
+        身份字段尤其不能进来：它一旦可被指定，就等于把「读谁的画像与学习记录」
+        交给了调用方。所以这条断言是**集合相等**，不是「包含」——
+        将来任何人想加字段（哪怕是"顺手"的），都必须先来这里改这行并有意识地解释。
+        """
+        self.assertEqual(sorted(ChatRequest.model_fields), ["text"])
+
     def test_ipc_shape_matches_what_the_main_process_sends(self) -> None:
-        """主进程只发 ``{text}``（外加可选的 studentId/sessionId）—— 契约里也要能这么构造。"""
-        request = ChatRequest(student_id="student_001", text="什么是循环？")
+        """主进程只发 ``{text}`` —— 契约里也能**只**这么构造。"""
+        request = ChatRequest(text="什么是循环？")
         self.assertEqual(request.text, "什么是循环？")
-        self.assertIsNone(request.session_id)
-        self.assertEqual(
-            sorted(request.model_dump(by_alias=True)),
-            ["sessionId", "studentId", "text"],
-        )
+        self.assertEqual(sorted(request.model_dump(by_alias=True)), ["text"])
+
+    def test_unknown_fields_are_rejected(self) -> None:
+        """多带一个字段必须报错：静默忽略会让「身份/学段被悄悄塞回来」看起来无事发生。"""
+        for extra in ({"studentId": "student_001"}, {"sessionId": "s1"}, {"gradeLevel": "junior"}):
+            with self.subTest(extra=extra):
+                with self.assertRaises(ValidationError):
+                    ChatRequest(text="x", **extra)
 
     def test_exported_schema_does_not_require_a_grade(self) -> None:
         schema = build_openapi_document()["components"]["schemas"]["ChatRequest"]
         self.assertNotIn("gradeLevel", schema["properties"])
-        self.assertEqual(sorted(schema["required"]), ["studentId", "text"])
+        self.assertEqual(sorted(schema["properties"]), ["text"])
+        self.assertEqual(sorted(schema["required"]), ["text"])
 
 
 # ---------------------------------------------------------------- HTTP 契约 --

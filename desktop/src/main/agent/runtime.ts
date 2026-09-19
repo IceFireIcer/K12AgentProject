@@ -16,7 +16,8 @@
  *      **学生情况**：由画像预取决定（`extensions/profile.ts` 的 `fetchStudentContext`）。
  *      ★ 两件事都由本文件**显式驱动**，不挂 Pi 事件（返工原因见 `grade.ts` 文件头）：
  *        - 观察：每轮开始调 `gradeExtension.observeTurn(text)`（**在无 Key 早退之前**，
- *          否则无 Key 世界里学段永远不动）；
+ *          否则无 Key 世界里学段永远不动；同时**在输入侧安全检查之后** ——
+ *          被拦下的消息不该产生学段证据，见 `runTurn` 里那处的说明）；
  *        - prompt：`chatFactory` 的 `before_agent_start` 调 `buildSystemPrompt()`。
  *      运行时**不读**渲染进程传来的学段 —— `ChatSendRequest` 里根本没有学段字段
  *      （字段集合被守卫 G6c 钉死为 `['text']`）。
@@ -37,7 +38,8 @@
  * ★ 无 Key 时的行为（本机现状：`DEEPSEEK_API_KEY` 未设置）：
  *   **不假装、不静默、不挂起** —— 直接发一条可读的 `error`（`degraded: true`）并收尾本轮，
  *   文案明确写「这是配置缺失，不是程序故障」（见 `events.ts` 的 `MISSING_KEY_MESSAGE`）。
- *   ★ 但**学段推断照常工作**：观察（`observeTurn`）发生在早退**之前**，第一层规则引擎
+ *   ★ 但**学段推断照常工作**：观察（`observeTurn`）发生在「无 Key」早退**之前**（但**在输入侧
+ *     安全检查之后** —— 被拦下的消息不产生证据），第一层规则引擎
  *     不依赖 LLM；只有第二层（LLM 复核）会退化成 `degraded="no_llm"`。这是刻意的 ——
  *     「没有 API Key 时应用仍然可用」的验收口径包含「学段仍然会动」。
  */
@@ -51,6 +53,9 @@ import {
   describeProviderError,
   describeTurnException,
   MISSING_KEY_MESSAGE,
+  // ★ 脱敏的**唯一实现处**在 `events.ts`（本文件只再导出，见文件末尾的说明）
+  redactSecret,
+  sanitizeProviderText,
   type PiNativeEvent,
   type TurnSink
 } from './events.ts'
@@ -113,9 +118,14 @@ import { createAnimationGenerator } from './animation/generator.ts'
 import {
   assertSessionManagerIsolated,
   ensureStudentPiDirs,
+  piSessionCwd,
   resolveStudentPiPaths,
   type StudentPiPaths
 } from './pi-paths.ts'
+// ★ 历史消息的投影（`SessionEntry[]` → 可显示的问答）：**与「只读回看」共用同一个纯函数**。
+//   两处各写一份解析就会出现「回看里显示的消息」与「恢复出来继续聊的消息」不一致 ——
+//   而它们读的是同一份 JSONL，任何不一致都是解析差异（不是数据差异）。
+import { projectTranscript, titleFromText, type TranscriptMessage } from '../study/sessions.ts'
 import {
   createTraceExtension,
   exportToolTrace,
@@ -127,6 +137,23 @@ import {
 /* ------------------------------------------------------------------ *
  * 选项与返回类型
  * ------------------------------------------------------------------ */
+
+/**
+ * ★★ 会话**怎么建立**（`ChatRuntimeOptions.sessionSource`；三种形态，别再发明第四种）。
+ *
+ *   - `'new'`    → `SessionManager.create()`：一个全新的 JSONL 文件（「新会话」按钮）；
+ *   - `'recent'` → `SessionManager.continueRecent()`：**续上最近用过的那一条**
+ *                  （启动时的默认行为 —— 「关掉应用再打开，上一段对话还在」这条验收）；
+ *   - `{ path }` → `SessionManager.open(path)`：**打开指定的那一条**（会话列表里点开的那一条、
+ *                  以及分叉出来的新文件）。
+ *
+ * ⚠️ **`path` 只能由主进程产生**（`SessionManager.list()` 的返回值，或
+ *   `createBranchedSession()` 的返回值）—— 渲染进程永远只能递一个**会话 id**
+ *   （这条安全约束的说明在 `study/sessions.ts` 的文件头，两处是同一个判据）。
+ * ⚠️ 三种形态**都要过 `assertSessionManagerIsolated`**（见 `createChatRuntime` 里那句）：
+ *   `open` / `continueRecent` 的第二个参数同样是 `sessionDir`，漏传就会读错目录。
+ */
+export type ChatSessionSource = 'new' | 'recent' | { path: string }
 
 export interface ChatRuntimeOptions {
   /** ★ 必须显式传入（Electron 里是 `app.getPath('userData')`）；**禁止回退 `~/.pi`**。 */
@@ -148,6 +175,11 @@ export interface ChatRuntimeOptions {
   baseUrl?: string
   /** 会话工作目录（决定 Pi 的项目级资源发现范围）。 */
   cwd?: string
+  /**
+   * 会话来源（默认 `'new'` —— **不改既有默认行为**，恢复由调用方显式要求）。
+   * 详见 {@link ChatSessionSource}。
+   */
+  sessionSource?: ChatSessionSource
   /**
    * 离线探针（默认关闭；也可用环境变量 `K12_OFFLINE_PROBE=1` 打开）：
    * 无 Key 时用**假 Key + 本机不可达地址**把一轮踢到 provider 边界，从而在无 Key 环境下
@@ -185,6 +217,28 @@ export interface ChatRuntime {
   readonly studentId: string
   /** Pi 的 JSONL 会话 id（与 `learning_history.session_id` 关联）。 */
   readonly sessionId: string
+  /**
+   * ★ 本次装配用的**会话来源**（调用方要据此判断「这是不是一条全新的会话」）。
+   *
+   * 为什么不看 `messageCount` 就够：**两者都会用到，且不是一回事** ——
+   * `sessionSource === 'recent'` 而 `messageCount === 0` 是真实存在的形态
+   * （上次开会话后一句话都没说就退出了）。
+   */
+  readonly sessionSource: ChatSessionSource
+  /**
+   * 会话里已有的**消息条数**（`type === 'message'` 的条目数）。
+   *
+   * ★ 它是「该不该发开场引导」的判据（`architecture/pending/04` 的判据原文：
+   *   「会话内消息数为 0」）。**不是** `getEntries().length` —— 那里面还有
+   *   `model_change` / `thinking_level_change` / 自定义条目，刚建的会话就有好几条，
+   *   用它判会让开场语**永远发不出来**（这类「判据选错代理量」的故障本仓库有前科）。
+   */
+  readonly messageCount: number
+  /**
+   * 本次装配时**从已有会话里读回来的对话**（按 `{role, text, at}` 投影，与回看同形）。
+   * 新会话 / 空会话时是空数组。界面把它铺成消息列表 —— **恢复历史对话的唯一数据源**。
+   */
+  readonly restoredMessages: readonly TranscriptMessage[]
   readonly credentials: PiCredentials
   /** 供应商是否具备凭证（`false` = 只能跑到「准备发请求」为止）。 */
   readonly authReady: boolean
@@ -233,6 +287,68 @@ export interface ChatRuntime {
    * 失败**抛可读异常**，由 `handlers.ts` 翻成可读中文回执（绝不抛过 IPC）。
    */
   setGradeLevel(gradeLevel: GradeLevel): Promise<{ changed: boolean; cooldownRemainingTurns: number }>
+  /**
+   * ★★ **主动发起对话**：把一句开场引导写进 Pi 会话（需求原文要求的那一半）。
+   *
+   * 写成**一条 assistant 消息**（不是 `custom_message`、不是纯 `custom` 条目）——
+   * 三个候选形态与取舍（改动前先读完，别"顺手改回更简单的那个"）：
+   *
+   * | 形态 | 会进模型上下文吗 | 为什么否掉 / 采用 |
+   * | --- | --- | --- |
+   * | `appendCustomEntry`（纯 `custom`） | **不会** | 它只落盘、不参与上下文。学生回一句「好呀」时模型**完全不知道**自己在跟什么约定 —— 「主动引导」当场退化成一句没人接得住的话 |
+   * | `appendCustomMessageEntry`（`custom_message`） | 会，但**变成 user 消息**（`convertToLlm` 的 `case "custom"`） | 模型会以为**是学生说的**「你好，我是团团。从X开始吧」—— 上下文里出现学生从未说过的话，属伪造对话记录 |
+   * | `appendMessage` + `role: 'assistant'` ★ **采用** | 会，就是助手自己说过的话 | 与真实情况一致（屏幕上它也确实显示为助手的第一条消息），重启后模型仍记得自己约过什么 |
+   *
+   * ★ `usage` 全 0 **不是占位符，是事实**：这句话由服务端模板拼出（`routes/profile.py` 的
+   *   `_opening_text`），**没有花掉任何 token**。写真实的 `provider` / `model` 让
+   *   轨迹与成本统计能对上账；`stopReason: 'stop'` 表示它是一次完整收尾的表述。
+   * ★ 由调用方保证「只在 `messageCount === 0` 时调用一次」——本方法不做幂等判断
+   *   （判据在 `ipc/handlers.ts` 的 `openSession` 里，那里同时决定前端拿不拿得到它）。
+   */
+  appendOpeningMessage(text: string): void
+  /**
+   * ★ 用一次轻量模型补全给当前会话起个名字（写进 Pi 的 `session_info` 条目）。
+   *
+   * 失败**抛出**由调用方决定降级（没有 Key / 断网时退回首条消息截断）——
+   * `ipc/handlers.ts` 的 `maybeGenerateTitle` 是唯一调用方，它自己吞异常。
+   * 返回生成的标题（已截断、已单行化）；没生成出可用标题时返回 `null`。
+   */
+  generateSessionTitle(): Promise<string | null>
+  /**
+   * ★★ **从某条消息处分叉**（会话分支 UI 的唯一实现点）。
+   *
+   * 语义：把「根 → 该消息」这一段**复制成一个新的会话文件**，交给调用方去装配
+   * （`ChatRuntimeOptions.sessionSource = { path }`）。学生在新会话里接着问，
+   * **原会话一个字节都不动** —— 这是「重新问一遍」而不是「改写历史」：
+   * 两条线的后续内容各自独立保存，都能在列表里找回。
+   *
+   * ★ 底层是 Pi 的 `SessionManager.createBranchedSession(leafId)`，它做三件事：
+   *   ① 沿 `getBranch(leafId)` 取出「根 → 该条目」的路径；
+   *   ② 在**同一个 sessionDir** 里写一个新 JSONL（新 id、新时间戳）；
+   *   ③ 在新文件的头部写 `parentSession = <当前文件路径>` —— **分支关系由 Pi 记录**，
+   *      我们不自己维护（那会变成第二处真相）。
+   *
+   * ⚠️ **`entryId` 必须是本条会话里真实存在的条目 id**（`restoredMessages` 给的）。
+   *   调用方负责先做白名单对齐（见 `ipc/handlers.ts` 的 `branchFromMessage`）——
+   *   本方法只兜住「Pi 说找不到」这一种（它会抛 `Entry <id> not found`）。
+   * ⚠️ 返回**新文件的完整路径**（只在主进程内流转，绝不进渲染进程 ——
+   *   渲染进程只拿得到新会话的 **id**，与 `session:open` 同一条安全约束）。
+   */
+  branchFrom(entryId: string): Promise<{ path: string }>
+  /**
+   * ★★ **刚刚结束的那一轮的条目 id**（`{userEntryId, entryId}`；认不出时是空串）。
+   *
+   * 为什么需要它 —— 实测抓到的缺陷（见 P-105）：**实时发出的轮次从来没有条目 id**。
+   * `entryId` 只由「恢复历史」那条路填过（`restoreConversation` 从投影里带过来），
+   * 于是「从这里重新问」按钮**只对历史消息出现**，对刚刚聊出来的那句话**不出现**
+   * —— 而那恰恰是这个按钮最主要的用法（学生刚读完一条回答，想换个问法再问）。
+   *
+   * 判据是「取投影里**末尾**的那一对 (user, assistant)」：
+   *   一轮正常结束 = 追加一条 user + 一条 assistant，所以末尾那对就是本轮的。
+   *   ⚠️ 不能按「条数差」算：开场引导、`model_change`、失败轮次都会让条数对不上
+   *      （本文件里已经有一条同类的教训，见 `messageCount` 的注释）。
+   */
+  lastTurnEntries(): { userEntryId: string; entryId: string }
   /** 跑一轮：事件经 `sink` 投递（`sink` 就是 `ChatStreamRegistry` 的 `TurnHandle`）。 */
   runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome>
   /**
@@ -271,6 +387,15 @@ export const BUSY_MESSAGE = '上一条回答还没说完，请等它结束再发
  * 连同退出流程一起拖住。超时 → `judge_error` → 本轮只用第一层（学段照常能改），代价可接受。
  */
 export const JUDGE_TIMEOUT_MS = 8_000
+
+/**
+ * 会话标题生成的单次超时（毫秒）。
+ *
+ * 比 `JUDGE_TIMEOUT_MS` 稍宽（要写一句完整的话，而不是一个 JSON），但仍然很短：
+ * 标题**不是**学生等待的东西（对话早已结束，他在读回答），它只是列表里的一栏；
+ * 挂死了也不能拖住任何东西 —— 调用方是 fire-and-forget，超时就走首条消息截断。
+ */
+export const TITLE_TIMEOUT_MS = 10_000
 
 /**
  * 退出前冲洗**学习记录队列**的上限（毫秒）。
@@ -773,14 +898,129 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   await resourceLoader.reload()
 
   // ③ ★ 会话落盘隔离（票 09 的核心）：目录**按学生**给，且建完当场校验 Pi 真的认了。
-  //    `SessionManager.create(cwd, sessionDir)` 的第二个参数一旦漏传，Pi 会静默退回
-  //    `~/.pi/agent/sessions/--<cwd>--/`（跨学生混放的合规硬伤），所以这里必须断言而不是相信。
-  const sessionManager = pi.SessionManager.create(
-    options.cwd ?? paths.root,
-    paths.sessionDir
-  ) as PiSessionManagerLike
+  //    `SessionManager.create/open/continueRecent` 的第二个参数（`sessionDir`）一旦漏传，
+  //    Pi 会静默退回 `~/.pi/agent/sessions/--<cwd>--/`（跨学生混放的合规硬伤）。
+  //    ★ 三种来源**都要过这道断言**（见下方 `openSessionManager`）：
+  //      「恢复会话」这条路同样可能读错目录 —— 而它读错的后果比新建更严重
+  //      （新建只是写错地方，恢复是**读到了别人的对话**）。
+  const sessionSource: ChatSessionSource = options.sessionSource ?? 'new'
+  const sessionManager = openSessionManager(sessionSource) as PiSessionManagerLike
   assertSessionManagerIsolated(sessionManager, paths.sessionDir, `学生 ${paths.studentId} 的会话`)
   const sessionId = sessionManager.getSessionId?.() ?? ''
+
+  /**
+   * 按来源建/开 `SessionManager`（三种形态的唯一落点）。
+   *
+   * ★ 为什么三种都在一个函数里：断言、目录参数、cwd 覆盖这三件事对三种形态是同一套，
+   *   分成三处写就会出现「新建那条传了 sessionDir、恢复那条忘了」这种不对称缺陷。
+   */
+  function openSessionManager(source: ChatSessionSource): unknown {
+    // ★★ cwd 取自 `piSessionCwd()`（**与「列出历史会话」共用同一个拼装点**）：
+    //    两处各写一个值 = 列表恒为空（Pi 在传了自定义 sessionDir 时会额外按 cwd 过滤，
+    //    且不报错）—— 见 `pi-paths.ts` 里 `piSessionCwd` 的注释与 P-102。
+    const cwd = options.cwd ?? piSessionCwd(paths)
+    const manager = pi.SessionManager as unknown as {
+      create(cwd: string, sessionDir?: string): unknown
+      continueRecent(cwd: string, sessionDir?: string): unknown
+      open(path: string, sessionDir?: string, cwdOverride?: string): unknown
+    }
+    // ★ `cwdOverride` 传学生目录：会话头里可能记着**另一台机器 / 另一个安装位置**的 cwd
+    //   （学生把 userData 拷过来的情况），不覆盖就会让 Pi 按一个不存在的路径去发现项目资源。
+    if (typeof source === 'object') return manager.open(source.path, paths.sessionDir, cwd)
+    if (source === 'recent') return manager.continueRecent(cwd, paths.sessionDir)
+    return manager.create(cwd, paths.sessionDir)
+  }
+
+  /**
+   * ★★ 从**已经打开的那条会话**里读回已有内容（恢复会话时用；新会话时全是空的）。
+   *
+   * 两件事一起做，因为它们读的是同一份 `getEntries()`（分两处各读一次会有两次全量解析）：
+   *
+   *   1. **`messageCount`** —— 「该不该发开场引导」的判据。★ 只数 `type === 'message'`
+   *      且角色是 user/assistant 的条目：刚建的会话已经有 `model_change` /
+   *      `thinking_level_change` 好几条，用 `getEntries().length` 判会让开场语**永远发不出来**。
+   *   2. **`restoredMessages`** —— 投影成 `{role, text, at}`，界面据此把历史铺回消息列表。
+   *
+   * ★ 用 `projectTranscript`（**与「只读回看」同一个纯函数**）：两处各写一份解析，
+   *   就会出现「回看里显示的消息」与「恢复出来继续聊的消息」不一致 ——
+   *   而它们读的是同一份 JSONL，任何不一致都是解析差异，不是数据差异。
+   * ★ 它**不抛**：读不出历史只是「这段对话显示不出来」，重启后重开一次就好；
+   *   让它抛会把「续聊最近会话」整条路带崩（学生看到的是打不开的应用）。
+   */
+  function readExistingSession(): { messageCount: number; restored: TranscriptMessage[] } {
+    try {
+      const entries = (sessionManager as { getEntries?(): unknown[] }).getEntries?.() ?? []
+      const projected = projectTranscript(entries)
+      return { messageCount: projected.messages.length, restored: projected.messages }
+    } catch (error) {
+      console.warn(
+        `[agent] 读取会话已有内容失败（按空会话处理）：${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+      return { messageCount: 0, restored: [] }
+    }
+  }
+
+  /**
+   * 只数「可显示的问答条数」（**不抽正文**）。
+   *
+   * ★ 与 `readExistingSession()` 分开是为了**代价**：`projectTranscript` 会把每条消息的
+   *   文本块拼出来（一个长会话就是几十 KB 的字符串拼接），而调用方要的往往只是一个数
+   *   （「该不该发开场语」）。两者的判据必须一致（都只认 user/assistant 的 message 条目），
+   *   所以这里复用同一个过滤口径：`projectTranscript` 的结果长度。
+   *   ⚠️ 不复用会漂移：一处按 `type === 'message'` 数、另一处按 `role` 数，
+   *   差值正好是 toolResult 那些条目 —— 而「数错一个」就能让开场语多发一次。
+   */
+  function countMessages(): number {
+    try {
+      const entries = (sessionManager as { getEntries?(): unknown[] }).getEntries?.() ?? []
+      return projectTranscript(entries).messages.length
+    } catch {
+      return 0
+    }
+  }
+
+  const existing = readExistingSession()
+
+  /**
+   * 取投影里**末尾那一对 (user, assistant)**的条目 id（见接口上的说明）。
+   *
+   * 从后往前找：第一条 assistant 就是本轮的回答；再往前找第一条 user 就是本轮的问题。
+   * 没有 assistant（本轮失败 / 还在跑）时，`entryId` 留空、只给 `userEntryId` ——
+   * 那样界面上「从我的提问处重来」仍然可用，而「从他那条回答处重来」不显示。
+   */
+  function lastTurnEntries(): { userEntryId: string; entryId: string } {
+    let messages: readonly TranscriptMessage[] = []
+    try {
+      const entries = (sessionManager as { getEntries?(): unknown[] }).getEntries?.() ?? []
+      messages = projectTranscript(entries).messages
+    } catch {
+      return { userEntryId: '', entryId: '' }
+    }
+    let entryId = ''
+    let userEntryId = ''
+    let index = messages.length - 1
+    // ① 末尾的 assistant（可能没有）
+    for (; index >= 0; index -= 1) {
+      const message = messages[index] as TranscriptMessage
+      if (message.role === 'assistant') {
+        entryId = message.entryId
+        break
+      }
+      // 遇到 user 就停：说明本轮还没产出回答
+      if (message.role === 'user') break
+    }
+    // ② 它前面最近的那条 user
+    for (let i = index >= 0 ? index : messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i] as TranscriptMessage
+      if (message.role === 'user') {
+        userEntryId = message.entryId
+        break
+      }
+    }
+    return { userEntryId, entryId }
+  }
 
   /**
    * ★ 把当前学生上下文写进扩展层（`extensions/index.ts` 的 `bindAgentSession`）。
@@ -991,6 +1231,18 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     paths,
     studentId: paths.studentId,
     sessionId,
+    sessionSource,
+    get messageCount() {
+      // ★ 读**当前**条数（不是装配时的快照）：跑过几轮之后它必须跟着长 ——
+      //   调用方（`ipc/handlers.ts`）靠它判断「这条会话该不该发开场语」，
+      //   拿一个永不更新的常量会让「新会话」与「已聊过的会话」再也分不开。
+      return countMessages()
+    },
+    // ★ 读**当前**投影（不是装配时的快照）：跑过几轮之后新消息也要带上各自的
+    //   条目 id —— 否则「从这里重新问」只对历史消息可用（实测踩到，见 P-105）。
+    get restoredMessages() {
+      return readExistingSession().restored
+    },
     credentials: useProbe ? { ...credentials, offlineProbe: true, source: 'offline-probe', apiKey: undefined } : credentials,
     // ★ 读**当前**凭证状态（可变）：热切换补上 Key 之后这里要跟着变，
     //   否则调用方会一直以为「还没配好」（实测踩到过）。
@@ -1097,7 +1349,13 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       // 诊断（`K12_PI_TRACE=1`）：只打结构性字段，**绝不打印 Key**
       if (tracePiEvents) {
         console.warn(
-          `[pi] 已热切换 LLM 配置：provider=${providerId} model=${config.modelId} baseUrl=${config.baseUrl}` +
+          `[pi] 已热切换 LLM 配置：provider=${providerId} model=${config.modelId}` +
+            // ★ `baseUrl` 必须过脱敏（本轮修正）：本项目支持「校内网关 / 自建服务」，
+            //   而这类网关的惯例是把凭据放**查询串**（`https://gw.school.edu/v1?key=…`）——
+            //   直接打印就把用户以为只存在配置里的凭据写进了日志。
+            //   诊断要的只是「打到哪个地址」，查询串对排查没有价值（`sanitizeProviderText`
+            //   会把它抹成 `key=***`，路径与主机名照旧可见）。
+            ` baseUrl=${sanitizeProviderText(config.baseUrl ?? '', activeApiKey)}` +
             ` authReady=${credentialState.authReady}`
         )
       }
@@ -1136,6 +1394,148 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       }
     },
 
+    /**
+     * ★★ 主动发起对话：把开场引导写进 Pi 会话（见接口上的形态取舍表）。
+     *
+     * **同步、不抛**：它写的是本地 JSONL 的一个条目，失败也只影响「这句开场重启后还在不在」，
+     * 不该让「新建会话」这个动作失败（那会更糟 —— 学生点一下新会话却什么都没发生）。
+     * ⚠️ 写成 `assistant` 消息而**不是** `custom_message`：后者在 `convertToLlm` 里
+     *    会变成 **user** 消息，于是模型以为「从X开始吧」是**学生**说的 —— 伪造对话记录。
+     */
+    appendOpeningMessage(text: string): void {
+      const trimmed = text.trim()
+      if (!trimmed || disposed) return
+      try {
+        const manager = sessionManager as {
+          appendMessage?(message: Record<string, unknown>): string
+        }
+        if (typeof manager.appendMessage !== 'function') {
+          // 形态不符（Pi 改过 API）：**只记日志**，界面那条开场语照常显示。
+          // 退路是「重启后开场语不在历史里」，比「点了新会话没反应」轻得多。
+          console.warn('[agent] SessionManager 没有 appendMessage，开场引导未能写入会话文件')
+          return
+        }
+        manager.appendMessage({
+          role: 'assistant',
+          content: [{ type: 'text', text: trimmed }],
+          // ★ 真实的 provider / model（不是占位符）：轨迹与成本报表按这两栏归类。
+          api: 'openai-completions',
+          provider: activeLlm.providerId,
+          model: activeLlm.modelId,
+          // ★ 全 0 **是事实**：这句由服务端模板拼出，没有花掉任何 token。
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+          },
+          stopReason: 'stop',
+          timestamp: Date.now()
+        })
+        console.warn(`[agent] 已把开场引导写入会话（${trimmed.length} 字符，未消耗 token）`)
+      } catch (error) {
+        console.warn(
+          `[agent] 开场引导写入会话失败（界面仍会显示）：${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      }
+    },
+
+    /**
+     * ★ 用一次轻量补全给当前会话起名（写进 Pi 的 `session_info` 条目）。
+     *
+     * 判据与降级：拿不到模型通道（无 Key / 探针）→ 直接返回 `null`，
+     * 由调用方退回首条消息截断（「降级永不白屏」：标题只是列表里的一个字段）。
+     *
+     * ★ 提示词只包含**学生自己说的第一句**（截断到 200 字）+ 一句格式要求：
+     *   不把整段对话喂进去（那是另一次不小的请求），也不要模型「总结这段对话」——
+     *   标题的价值是「一眼认出是哪一段」，不是概括。
+     */
+    async generateSessionTitle(): Promise<string | null> {
+      if (disposed) return null
+      const completer = completerHolder
+      if (!completer) return null
+
+      const first = existing.restored.find((message) => message.role === 'user')?.text
+      if (!first) return null
+
+      try {
+        const raw = await completer({
+          prompt:
+            '下面是一个学生在学习助手里说的第一句话。请为这段对话起一个标题：' +
+            '不超过 12 个字、只输出标题本身、不要引号、不要标点结尾、不要解释。\n\n' +
+            `学生说：${first.slice(0, 200)}`,
+          timeoutMs: TITLE_TIMEOUT_MS
+        })
+        const title = titleFromText(raw.trim())
+        // ★ 认不出（模型返回空 / 只有标点 / 返回了整段解释）时**不写**：
+        //   宁可继续用「首条消息截断」，也不要写一个比它更差的标题。
+        if (!title || title === '未命名') return null
+        const manager = sessionManager as { appendSessionInfo?(name: string): string }
+        if (typeof manager.appendSessionInfo !== 'function') return null
+        manager.appendSessionInfo(title)
+        console.warn(`[agent] 已生成会话标题：${title}`)
+        return title
+      } catch (error) {
+        // 断网 / 超时 / 模型拒答：都走同一条降级（调用方用 firstMessage 截断）
+        console.warn(
+          `[agent] 会话标题生成失败（退回首条消息截断）：${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+        return null
+      }
+    },
+
+    /**
+     * 从某条消息处分叉（见接口上的说明）。
+     *
+     * ⚠️ 这里**不做白名单对齐**（那是调用方的事，见 `handlers.ts` 的 `branchFromMessage`）：
+     *   本方法拿到的是「已经确认属于本条会话」的条目 id。但**它仍然兜一层** ——
+     *   `createBranchedSession` 对不存在的 id 会抛 `Entry <id> not found`，
+     *   这里把它翻成一句可读中文（与全项目「绝不抛异常穿过 IPC」一致）。
+     *
+     * ⚠️ **不 dispose 当前会话**：分叉只是**写一个新文件**，当前会话要一直活着 ——
+     *   由调用方在拿到新路径之后再走 `swapToSession({path})`（那时才 dispose）。
+     *   在这里提前 dispose 会让「分叉失败」变成「会话也没了」。
+     */
+    async branchFrom(entryId: string): Promise<{ path: string }> {
+      if (disposed) throw new Error('会话已关闭，无法分叉。')
+      const id = entryId.trim()
+      if (!id) throw new Error('分叉失败：没有指定要分叉的消息。')
+
+      const manager = sessionManager as {
+        createBranchedSession?(leafId: string): string | undefined
+      }
+      if (typeof manager.createBranchedSession !== 'function') {
+        throw new Error('分叉失败：当前 Pi 版本不支持会话分叉（缺 createBranchedSession）。')
+      }
+
+      let path: string | undefined
+      try {
+        path = manager.createBranchedSession(id)
+      } catch (error) {
+        // Pi 的原话是英文的 `Entry xxx not found` —— 翻成学生/排查都能用的一句中文。
+        // ★ 这条**不是**「不该发生」：学生点的那条消息可能来自一个刚刚被清理的会话
+        //   （渲染进程手里的历史快照已经过期），所以它是一条正常的失败路径。
+        throw new Error(
+          `分叉失败：这条会话里找不到那条消息（${id}）。可能它来自另一段对话，` +
+            `请刷新历史列表后重试。`
+        )
+      }
+      if (!path) {
+        // `undefined` = 这个 manager 不落盘（本应用恒为落盘，所以这是防御分支）
+        throw new Error('分叉失败：会话没有落盘，Pi 没有给出新会话文件。')
+      }
+      console.warn(`[agent] 已从消息 ${id} 分叉出新会话（原会话未改动）`)
+      return { path }
+    },
+
+    lastTurnEntries,
+
     async runTurn(input: ChatTurnInput, sink: ChatTurnSink): Promise<ChatTurnOutcome> {
       // ★★ 学段**不在这条路径上改**：推断由 `extensions/grade.ts` 独占，
       //    学生显式设定走独立的 `setGradeLevel()`（`grade:set` 通道），
@@ -1158,17 +1558,6 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       const target = useProbe ? probeSink(sink) : sink
 
       try {
-        // ★★ 学段观察必须在**这里**、在**两条对话路径之前**（票 21 返工的核心）：
-        //    `grade.ts` 原本把观察挂在 Pi 的 `input` 事件上，而下面「无 Key」那条分支
-        //    **不会调用 `session.prompt()`** —— 于是 `input` 一次都不发，学段永远不动。
-        //    观察本身只是「收证据 + 交给服务端」，与能否连上模型无关（第一层规则引擎不用 LLM）。
-        //    同步返回、fire-and-forget 上交：绝不拖慢本轮对话。
-        //    ⚠️ 顺便完成「上一轮判定 → 本轮生效」的交接（`applyPending` 就在这里面）。
-        gradeExtension.observeTurn(input.text)
-        // ★ 交接之后**再绑一次**：本轮的事件处理器（`agent_end` 写学习记录、Tool 读画像/题库）
-        //   必须看到「本轮真正生效的学段」，而不是上一轮那一份。两次调用都是纯对象赋值，很便宜。
-        bindCurrentSession()
-
         // ★★ 画像预取（票 20 的对话侧落点）：**必须在三条早退路径之前**
         //    （输入拦截 / 无 Key / 鉴权未过），否则那三条路径落盘的 `state.lastPrompt`
         //    与真正发出去的那一份不一致（它们都要走 `buildSystemPrompt`，读的就是这份快照）。
@@ -1204,6 +1593,30 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           )
           return { ok: false, status: 'blocked', detail: `输入侧命中 ${inputVerdict.category}` }
         }
+
+        // ★★ 学段观察就在**这里** —— 两个约束夹出来的唯一位置，两个方向都不能挪：
+        //
+        //  ① **必须在两条对话路径之前**（票 21 返工的核心）：`grade.ts` 原本把观察挂在 Pi 的
+        //     `input` 事件上，而下面「无 Key」那条分支**不会调用 `session.prompt()`** ——
+        //     于是 `input` 一次都不发，学段永远不动。观察本身只是「收证据 + 交给服务端」，
+        //     与能否连上模型无关（第一层规则引擎不用 LLM）。所以它必须待在下面那条早退**之前**。
+        //
+        //  ② **必须在输入侧安全检查之后**（本轮修正）：被拦下的那条消息**一个字都没发给模型**，
+        //     学生只看到 `blocked`。旧位置在 `reviewInput` 之前，于是「这条被拦下的话」
+        //     照样按它的用词与深度提取了学段信号、参与连续 3 轮同向计数、甚至把学段改掉 ——
+        //     等于让一段**从未进入教学**的文本影响后续所有轮的作答难度，且学生看不到任何关联。
+        //     证据必须是「真的发生过的事」，被拦下的输入不算。
+        //
+        //  两条约束的交集就是这里：`reviewInput` 的 return **之上**、被拦下的 return **之下**。
+        //  ⚠️ 与它相邻的 `studentContextBlock = await fetchStudentContext(...)` 是**另一件事**
+        //     （那是 Prompt 快照，必须在三条早退路径**之前**），不要顺手一起挪。
+        //
+        // 同步返回、fire-and-forget 上交：绝不拖慢本轮对话。
+        // ⚠️ 顺便完成「上一轮判定 → 本轮生效」的交接（`applyPending` 就在这里面）。
+        gradeExtension.observeTurn(input.text)
+        // ★ 交接之后**再绑一次**：本轮的事件处理器（`agent_end` 写学习记录、Tool 读画像/题库）
+        //   必须看到「本轮真正生效的学段」，而不是上一轮那一份。两次调用都是纯对象赋值，很便宜。
+        bindCurrentSession()
 
         /**
          * ★★ 内容安全【第三道：生成结束后整段终审】的**投递管道**（票 22）。
@@ -1248,7 +1661,10 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         const binding = bindTurnStream(
           session,
           gate,
-          { requestId: sink.requestId },
+          // ★ `secret` 是**给脱敏用的**（不是给日志用的）：供应商原文里的这一把 Key 会被抹掉
+          //   （见 `events.ts` 的 `describeProviderError`）。读 `activeApiKey`（可变）而不是
+          //   建会话时的快照 —— 热切换之后要抹的是**当前那把**。
+          { requestId: sink.requestId, secret: activeApiKey },
           // 诊断钩子（`K12_PI_TRACE=1`）：**只打事件名与结构性字段**，绝不记录消息正文或凭证
           tracePiEvents ? { onEvent: tracePiEvent } : {}
         )
@@ -1256,7 +1672,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           await session.prompt(input.text)
         } catch (error) {
           // ★ 兜异常：Pi 与 UI 同在主进程，抛出会同时带走两者。这里转成 `error` 事件（可读、非堆栈）
-          const { message, status } = describeTurnException(error)
+          //   ⚠️ 这个异常的正文可能带网关回显的 URL / 请求头 → 必须过脱敏（同 `describeProviderError`）
+          const { message, status } = describeTurnException(error, activeApiKey)
           binding.failWith(message)
           dumpPrompts(paths, state)
           return { ok: false, status, detail: message }
@@ -1444,11 +1861,18 @@ function probeSink(sink: ChatTurnSink): ChatTurnSink {
 /**
  * 密钥脱敏（§12 的第二道）：任何要落盘/外发的文本都先过这里。
  * 本项目从不打印 provider payload，所以这里主要保护**提示词落盘**这条路径。
+ *
+ * ★ **实现已搬到 `events.ts`**（那里是 `describeProviderError` 的所在地，而脱敏是它的前置），
+ *   本文件只**再导出**一次以保持既有调用点不变（`safety-review` 的接线守卫与既有的
+ *   `redactSecret(wire, activeApiKey)` 都读这个名字）。
+ *
+ * ⚠️ 为什么不在这里留着实现、让 `events.ts` 反向 import：`events.ts` **已被本文件 import**
+ *   （`bindTurnStream` / `describeProviderError` / `MISSING_KEY_MESSAGE` …）——
+ *   反过来再加一条边就是循环导入，谁先求值取决于 import 顺序，顺序一变就是启动期
+ *   TDZ 崩溃（本项目对这条纪律有前科，见 `flushLearningLog()` 的注释）。
+ *   放在 `events.ts`（纯字符串函数、不依赖任何模块）两边都能用，且**只有一份实现**。
  */
-export function redactSecret(text: string, secret: string | undefined): string {
-  if (!secret || secret.length < 6) return text
-  return text.split(secret).join('***')
-}
+export { redactSecret }
 
 /** 提示词落盘（排查与验收证据）：具体那份 + 网络上那份。**只写 prompt 本身，不含 Key**。 */
 function dumpPrompts(paths: StudentPiPaths, state: RuntimeState): void {

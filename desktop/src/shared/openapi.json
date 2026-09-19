@@ -189,31 +189,14 @@
       },
       "ChatRequest": {
         "additionalProperties": false,
-        "description": "一轮对话请求（**渲染进程 → 主进程 IPC**，不是 HTTP 端点）。\n\n§6.3 v2 变更：``POST /api/chat/stream`` 已从 Python 侧移除，对话改由主进程的\nPi Agent 处理；这里冻结的是 IPC 入参形状，供票 05/06 的主进程处理器与前端共用。\n``requestId`` 由**主进程**生成并贯穿一轮（§9.4），所以不在请求体里。\n\n⚠️ **没有学段字段**（AGENTS §5.1 / D-020）：学段完全由系统自动推断、自动生效，\n请求里带学段与硬约束直接冲突。历史上这里有过 ``grade_level: GradeLevel``\n（必填），与它自己的注释正好相反 —— 已删除，且测试钉住「不许再加回来」。",
+        "description": "一轮对话请求（**渲染进程 → 主进程 IPC**，不是 HTTP 端点）。\n\n§6.3 v2 变更：``POST /api/chat/stream`` 已从 Python 侧移除，对话改由主进程的\nPi Agent 处理；这里冻结的是 IPC 入参形状，供票 05/06 的主进程处理器与前端共用。\n``requestId`` 由**主进程**生成并贯穿一轮（§9.4），所以不在请求体里。\n\n★★ **只有 ``text`` 一个字段，且与 ``desktop/src/main/ipc/channels.ts`` 的\n  ``ChatSendRequest`` 逐字段同形**（守卫 G6c 把那一侧钉死为 ``['text']``）。\n  这里曾经多出 ``student_id`` / ``session_id`` —— 那是**第二形状**，也是漂移温床：\n\n  - **学生身份只能由主进程决定**（``resolveActiveStudentId()`` / ``currentAgentSession()``）。\n    契约里放一个 ``student_id``，等于给「读渲染进程递来的身份」留了一个合法入口 ——\n    而那条路一旦走通，就是读别人的画像与学习记录。身份不进对话请求。\n  - **会话同理**：Pi 会话由主进程持有，渲染进程连会话 id 都不该知道。\n\n  所以修法不是「把 TS 侧改成带上这两个字段」（那会把上面两条一起做废），\n  而是**把契约收敛到真实形状**：``{text}``。测试 ``TestChatRequestContract``\n  同时钉住字段集合恰好是这一个。\n\n⚠️ **没有学段/章节字段**（AGENTS §5.1 / D-037 / D-038）：学段与章节都**不由每轮对话携带**\n—— 学段自动推断、自动生效（学生手动指定走 ``grade:set``），章节走 ``chapter:set``。\n把它们放回请求里会让「发一条消息」变成「顺带改一次学段/章节」的副作用。\n历史上这里有过 ``grade_level: GradeLevel``（必填），与它自己的注释正好相反 —— 已删除，\n且测试钉住「不许再加回来」。",
         "properties": {
-          "sessionId": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Sessionid"
-          },
-          "studentId": {
-            "title": "Studentid",
-            "type": "string"
-          },
           "text": {
             "title": "Text",
             "type": "string"
           }
         },
         "required": [
-          "studentId",
           "text"
         ],
         "title": "ChatRequest",
@@ -2282,6 +2265,41 @@
         "title": "MistakeListResponse",
         "type": "object"
       },
+      "OpeningGuidance": {
+        "additionalProperties": false,
+        "description": "``GET /api/profile/{student_id}/opening``：新会话的**开场引导**。\n\n需求原文：「学生可主动提问对话，**智能体也能主动发起对话引导学习章节内容**。」\n这是全项目**唯一一处「AI 先开口」**的机制 —— 其余所有交互都是「学生问 → AI 答」。\n\n★★ 为什么它必须是一个**契约模型**而不是一句硬编码的欢迎语：开场语的内容来自\n  「依赖图 + 掌握度 + 冷启动」的推荐结论（``routes/profile.py`` 的\n  :func:`build_recommendation`，那是推荐路径的**唯一实现**）。写死的欢迎语\n  对谁都成立，等于没有引导 —— 而「针对性引导到合适的内容」才是这项功能的价值。\n\n★ ``source == \"empty\"`` 时 ``text`` **必须是空串**：前端据此**不发**开场，\n  而不是弹一句「今天想学什么？」这种对谁都成立的废话（没有依据的开场白\n  与随机挑一个知识点没有区别）。\n\n★ 它**不参与 6 事件词表**：开场语不是「一轮对话的流式事件」，而是\n  「会话建立」这一步的产物 —— 主进程在新建会话时取一次，作为一条独立消息\n  推给界面（与 `trace:changed` 同一性质：独立通道，不是第 7 个事件）。",
+        "properties": {
+          "kpId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kpid"
+          },
+          "source": {
+            "default": "empty",
+            "enum": [
+              "review",
+              "graph",
+              "cold_start",
+              "empty"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "title": "OpeningGuidance",
+        "type": "object"
+      },
       "PayloadKind": {
         "enum": [
           "animation",
@@ -2534,12 +2552,8 @@
       },
       "QuizQuestionOut": {
         "additionalProperties": false,
-        "description": "★ **对外模型**：没有 ``answer``，发给 TS 与前端（§6.3 答案泄漏防护）。\n\n判分所需的标准答案只留在 Python 侧：``POST /api/quiz/grade`` 按 ``qid`` 查库判分，\n前端与 TS 都不需要答案。",
+        "description": "★ **对外模型**：没有 ``answer``、也**没有** ``explanation``，发给 TS 与前端。\n\n判分所需的标准答案只留在 Python 侧：``POST /api/quiz/grade`` 按 ``qid`` 查库判分，\n前端与 TS 都不需要答案。\n\n★★ **为什么连 ``explanation`` 也不下发**（2026-09-19 定案，它本来是契约字段）：\n  ``explanation`` 是**解析**，而它的话术经常把答案直接写进去 ——\n  实测 **295/684 道真题（约 43%）** 的解析含标准答案原文\n  （形如「选 B。因为 range 是含头不含尾的……」）。发出去就等于把题做废：\n  学生（或模型）只要读题面载荷就能白拿答案，``mastery`` 随之失去意义。\n\n  ⚠️ 这个比例**有可复现的出处**：``tests/test_quizbank_coverage.py`` 的\n  ``test_explanation_usually_contains_the_answer`` 每次运行都会打印它\n  （不是从别处抄来的数字，题库改了它会跟着变）。\n\n  而这与闯关页界面上的白纸黑字一致 —— ``views/Quiz.vue`` 写着\n  「答案与解析都不下发到界面」。此前是契约与承诺不符：界面不渲染，\n  但载荷一直带着它走完了 HTTP。\n\n★ **解析的教学价值一个字没丢**：它仍然在 ``feedback_for()`` 里，\n  只在**判分之后**经 ``QuizResult.feedback`` 回传给学生 ——\n  「答完再讲为什么」正是有教育意义的那一步，而「答前先看到为什么」只是送答案。\n\n⚠️ 不要为「前端想提前显示解析」把它加回来：那需要先答过一次，\n  也就是说要先有一条判分记录（``store.question_attempt``），\n  而那件事的完整形态是「判分后从 ``feedback`` 取」—— 不是第二条下发通道。",
         "properties": {
-          "explanation": {
-            "title": "Explanation",
-            "type": "string"
-          },
           "kpId": {
             "title": "Kpid",
             "type": "string"
@@ -2580,8 +2594,7 @@
           "qid",
           "kpId",
           "type",
-          "stem",
-          "explanation"
+          "stem"
         ],
         "title": "QuizQuestionOut",
         "type": "object"
@@ -2890,6 +2903,16 @@
         "title": "RecommendationResponse",
         "type": "object"
       },
+      "RecommendationSource": {
+        "enum": [
+          "review",
+          "graph",
+          "cold_start",
+          "empty"
+        ],
+        "title": "RecommendationSource",
+        "type": "string"
+      },
       "RegisterVariantsRequest": {
         "additionalProperties": false,
         "description": "``POST /api/quiz/variants`` 的请求体：把 LLM 生成的题登记到该学生的库里。\n\n``student_id`` 在 query 里（与 ``/api/quiz/bank`` 的取题口径一致）；\n这里只放题目本身。**至少要有一道题**（空数组等于一次毫无意义的写入）。",
@@ -3165,7 +3188,7 @@
       },
       "VariantQuestionIn": {
         "additionalProperties": false,
-        "description": "登记一道 LLM 生成的变式题（**必须带标准答案**，否则后端判不了分）。\n\n``reference_answer`` 就是**标准答案**：它进 ``learning.db``，绝不出现在任何出参里。\n方向与 :class:`app.contracts.QuizGradeRequest.answer`（学生作答）**相反**，别混。",
+        "description": "登记一道 LLM 生成的变式题（**必须带标准答案**，否则后端判不了分）。\n\n``reference_answer`` 就是**标准答案**：它进 ``learning.db``，绝不出现在任何出参里。\n方向与 :class:`app.contracts.QuizGradeRequest.answer`（学生作答）**相反**，别混。\n\n★ ``qid`` 必须带 :data:`GENERATED_QID_PREFIX` 前缀（``gen-``，与\n  ``desktop/src/main/agent/extensions/quiz.ts`` 的 ``variantQid()`` 同源）——\n  见 :func:`register_variants` 的说明：不带前缀的 qid 能**伪装成题库真题**。",
         "properties": {
           "explanation": {
             "default": "",
@@ -4181,6 +4204,67 @@
         ]
       }
     },
+    "/api/profile/{student_id}/opening": {
+      "get": {
+        "description": "★ 「主动发起对话引导」的**唯一出口**（需求明文要求，此前零实现）。\n\n形态：**新会话建立后**调一次，把结果作为 AI 的第一条消息送进对话。\n不是「每轮打招呼」—— 它只在**会话内还没有任何消息**时才有意义。\n\n★★ 不要重写推荐逻辑：本端点与 ``/recommendation`` 共用 :func:`build_recommendation`\n   （它再往下走 :func:`app.knowledge.deps.recommend_next`，那是依赖图推荐的唯一实现）。\n   「开场语该说什么」这件事的全部信息都在那个返回值里，本端点只做拼接。\n\n**没有可推荐的内容时返回空串**（而不是一句放之四海皆准的寒暄）：\n知识库缺失、学生已全部掌握、依赖图为空 —— 这三种情况都推不出该学什么，\n此时**不发开场**才是诚实的；前端据 ``text == \"\"`` 直接跳过。\n\n与 ``/recommendation`` 一样，**学生不存在时自动建立**（冷启动的第一屏就是它的用例）。",
+        "operationId": "student_opening_api_profile__student_id__opening_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "覆盖学段（默认用画像里的当前学段）",
+            "in": "query",
+            "name": "grade_level",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "覆盖学段（默认用画像里的当前学段）",
+              "title": "Grade Level"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpeningGuidance"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "新会话开场引导（主动发起对话）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
     "/api/profile/{student_id}/preferences": {
       "put": {
         "description": "写一条学习偏好（``profile_pref`` 的**唯一生产写入口**）。\n\n需求要求「根据答题表现**和兴趣偏好**动态调整后续推荐」：「答题表现」那条链路\n（判分 → 掌握度 → 推荐）本就是通的，而「兴趣偏好」此前是条断头路 ——\n``profile_pref`` 表建好了、``GET /profile`` 也读它，但**生产代码从不写**。\n本端点补上这一半：写入的偏好会经 ``GET /profile`` 进入画像，\n再由 ``get_student_profile`` Tool 拼进每轮 Prompt。\n\n★ **为什么是 PUT 而不是 POST**：单键 upsert 是**幂等**操作 —— 同一个 key 提交两次，\n  库里的状态完全相同（``key`` 是主键，第二次是覆盖）。POST 会暗示「追加一条记录」，\n  与实际语义正好相反，调用方会以为「多写几条偏好更完整」而反复 POST。\n\n★ **为什么键是封闭词表**（``contracts.PreferenceKey``：``interest | explain_style |\n  pace | note``）：见该 Literal 的注释 —— 关键是「写掌握度」在**类型层面**就不可能。\n  掌握度是判分规则算出来的客观量，一旦模型能通过偏好通道写它，\n  就会出现「模型觉得学生懂了就改分」。这类多写路径的教训见 D-020。\n\n★ **为什么不改 ``StudentProfile`` 的形状**：偏好已经在该模型的 ``preferences`` 里，\n  本端点只写不读；出参复用 :class:`LearningEventAck`（``{ok: true}``）。\n\n冷启动兜底与 ``POST /events`` **完全一致**（学生行不存在时建一条）——\n两条写路径必须同口径，否则学生会遇到「写记录能用、写偏好 404」这类无谓差异。",
@@ -4441,7 +4525,7 @@
     },
     "/api/quiz/grade": {
       "post": {
-        "description": "按 ``qid`` 查库判分，并把结果写进该学生的 ``learning.db``。\n\n写入三处（都是结构化数据，**不写对话正文**）：\n  - ``mastery``：``score`` / ``attempts`` / ``correct`` / ``last_seen_at``；\n  - ``learning_history``：一条 ``activity=\"quiz\"`` 记录（票 20 的个性化闭环要吃它）；\n  - ``progress``：闯关状态机（**票 15**，见 :func:`apply_level_progress`）。\n\n题目来源有两处，**按此顺序**查（票 15 起）：\n  ① 该学生库里的 LLM 生成题（``generated_question``）—— 变式题走这条；\n  ② 随包分发的题库。\n两处都要求「这条库里有这道题」，否则 404（**不猜、不新建**）。\n\n``mastery_delta`` 回传的是**实际生效**的变化量（``新值 - 旧值``）：已经满分时再答对就是 0，\n而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）。",
+        "description": "按 ``qid`` 查库判分，并把结果写进该学生的 ``learning.db``。\n\n写入三处（都是结构化数据，**不写对话正文**）：\n  - ``mastery``：``score`` / ``attempts`` / ``correct`` / ``last_seen_at``；\n  - ``learning_history``：一条 ``activity=\"quiz\"`` 记录（票 20 的个性化闭环要吃它）；\n  - ``progress``：闯关状态机（**票 15**，见 :func:`apply_level_progress`）。\n\n★★ **判分幂等：首次作答决定**（``store.question_attempt(qid)`` 判首次，与主观路径同源）。\n  第一次提交这道题 → 照常判分 + 计掌握度 + 推进闯关 + 计徽章；\n  **之后的重复提交** → **照常判分、照常给反馈**（学生要看到这次对没对），\n  但**不再改掌握度、不重复计数、不重复推进/解锁**，反馈里附一句\n  :data:`REPEAT_ATTEMPT_SUFFIX` 把「不计分」说明白（**不说谎**）。\n\n  为什么「答错后再答」不改变掌握度：掌握度是**能力信号**（推荐/画像要吃它），\n  连点 4 次同一道题就能把 0.15 刷到 0.6 并解锁后继 —— 那不是能力，是点击次数。\n  学习需要的是**即时反馈**，那一条一个字没少（判分与反馈照旧）。\n\n题目来源有两处，**按此顺序**查（票 15 起）：\n  ① 该学生库里的 LLM 生成题（``generated_question``）—— 变式题走这条；\n  ② 随包分发的题库。\n两处都要求「这条库里有这道题」，否则 404（**不猜、不新建**）。\n\n``mastery_delta`` 回传的是**实际生效**的变化量（``新值 - 旧值``）：已经满分时再答对就是 0，\n而不是回一个没发生的 ``+0.15``（否则前端进度条会虚涨）；重复作答时它**恒为 0**\n（掌握度没动，回传任何非零值都是谎报）。",
         "operationId": "grade_quiz_api_quiz_grade_post",
         "requestBody": {
           "content": {
@@ -4483,7 +4567,7 @@
     },
     "/api/quiz/grade-subjective": {
       "post": {
-        "description": "把 **TS 侧模型判分**的结论落进 ``learning.db``（票 15 的混合批改）。\n\n★★ 为什么判分结论要从外面送进来、判分逻辑却仍在服务端：\n\n- **LLM 调用归 Ts 独占**（Pi 是编排层，Python 不装任何 LLM 客户端）——\n  所以模型给出的 ``score`` / ``feedback`` 只能从 TS 侧来；\n- **但「多少分算过」必须由服务端定**（:data:`SUBJECTIVE_PASS_RATIO`）：\n  TS 只送分数，不送 ``correct``。若让 TS 送对错，等于把判分规则复制一份到前端进程，\n  两边迟早漂移，而漂移的表现是「同样的答案，有时算对有时算错」；\n- **只有登记过评分细则的主观题**走得通（客观题一律 **409**），\n  这样 ``scored_by=\"llm\"`` 不会被用来绕开规则判分。\n\n写库与 ``/quiz/grade`` **共用** :func:`_record_attempt`（同一个事务边界、\n同一套进度推进），所以两条判分路径在数据侧不可能出现两套语义。",
+        "description": "把 **TS 侧模型判分**的结论落进 ``learning.db``（票 15 的混合批改）。\n\n★★ 为什么判分结论要从外面送进来、判分逻辑却仍在服务端：\n\n- **LLM 调用归 Ts 独占**（Pi 是编排层，Python 不装任何 LLM 客户端）——\n  所以模型给出的 ``score`` / ``feedback`` 只能从 TS 侧来；\n- **但「多少分算过」必须由服务端定**（:data:`SUBJECTIVE_PASS_RATIO`）：\n  TS 只送分数，不送 ``correct``。若让 TS 送对错，等于把判分规则复制一份到前端进程，\n  两边迟早漂移，而漂移的表现是「同样的答案，有时算对有时算错」；\n- **只有登记过评分细则的主观题**走得通（客观题一律 **409**），\n  这样 ``scored_by=\"llm\"`` 不会被用来绕开规则判分。\n\n写库与 ``/quiz/grade`` **共用** :func:`_record_attempt`（同一个事务边界、\n同一套进度推进），所以两条判分路径在数据侧不可能出现两套语义。\n\n★★ **判分幂等同样成立**（与 ``/quiz/grade`` 一条口径，判据也是\n  ``store.question_attempt(qid)``）：这道主观题第二次提交时**照常落一条\n  ``learning_history`` 流水**，但**不再改掌握度、不再推进闯关/解锁**，\n  反馈里附一句 :data:`REPEAT_ATTEMPT_SUFFIX`。\n\n  ⚠️ 主观题**尤其**需要这一条：LLM 判分不是确定性的（同一份答案可能这次 0.8、\n  下次 1.0），同一道开放题反复提交就能靠分数抖动把掌握度一路推上去 ——\n  而 ``SUBJECTIVE_PASS_RATIO`` 的「多少分算过」在服务端，学生只要反复点就够了。\n  幂等判据落在**服务端**（不是靠 TS 侧记得别重复提交）。",
         "operationId": "grade_subjective_api_quiz_grade_subjective_post",
         "requestBody": {
           "content": {
@@ -4525,7 +4609,7 @@
     },
     "/api/quiz/mistakes/{student_id}": {
       "get": {
-        "description": "把 ``is_correct = 0`` 的学习记录按知识点聚合成错题。\n\n- 学生不存在 → **404**（没有学习记录与「从没错过」是两件事，前端要能分开显示）；\n- 学生 id 非法 → **422**；库读写失败 → **503**。\n\n★ ``without_stem`` 显式告诉前端「还有几条错题没有题干记录」：\n  QA / 编程轨答错时 ``question`` 是空串（那一轨不写题干），\n  静默丢掉的话，学生会觉得「我明明错过它，这里怎么没有」。",
+        "description": "把 ``is_correct = 0`` 的学习记录按知识点聚合成错题。\n\n- 学生不存在 → **404**（没有学习记录与「从没错过」是两件事，前端要能分开显示）；\n- 学生 id 非法 → **422**；库读写失败 → **503**。\n\n★ ``without_stem`` 显式告诉前端「还有几条错题没有题干记录」：\n  QA / 编程轨答错时 ``question`` 是空串（那一轨不写题干），\n  静默丢掉的话，学生会觉得「我明明错过它，这里怎么没有」。\n\n★★ ``limit`` **只截断列表**，两个汇总（``total_wrong`` / ``without_stem``）**恒为全量**：\n  它们回答的是「累计答错多少次」，与学生这次翻到第几条知识点无关。\n  界面上「累计答错 N 次」与页脚「已计入上面的错次统计」都按全量口径写死 ——\n  截断后求和会让错得多的学生看到一个**偏小且不再增长**的数字。",
         "operationId": "list_mistakes_api_quiz_mistakes__student_id__get",
         "parameters": [
           {
@@ -4645,7 +4729,7 @@
     },
     "/api/quiz/variants": {
       "post": {
-        "description": "把 TS 侧生成的变式题**登记到该学生的 ``learning.db``**，并返回对外载荷。\n\n★ 两道闸门把「答案泄漏」挡在本端点之外：\n\n① **入参方向**：``reference_answer`` 是模型产出的**标准答案**，只进库、绝不回显；\n② **出参方向**：返回体是 :class:`QuizPayload`，``questions`` 全是\n   :class:`QuizQuestionOut`（结构上没有 ``answer``）——\n   转换只走 ``QuizPayload.from_internal``，不存在第二条投影路径。\n\n★ ``qid`` 由 TS 侧生成（带随机段，见 ``quiz.ts`` 的 ``variantQid``）：\n  Python 侧只做**形状校验**（长度/字符集），不重新编号 ——\n  重新编号会让「学生卡片上的 qid」与「后端登记的 qid」对不上，判分必 404。",
+        "description": "把 TS 侧生成的变式题**登记到该学生的 ``learning.db``**，并返回对外载荷。\n\n★ 两道闸门把「答案泄漏」挡在本端点之外：\n\n① **入参方向**：``reference_answer`` 是模型产出的**标准答案**，只进库、绝不回显；\n② **出参方向**：返回体是 :class:`QuizPayload`，``questions`` 全是\n   :class:`QuizQuestionOut`（结构上没有 ``answer``）——\n   转换只走 ``QuizPayload.from_internal``，不存在第二条投影路径。\n\n★ ``qid`` 由 TS 侧生成（带随机段，见 ``quiz.ts`` 的 ``variantQid``）：\n  Python 侧只做**形状校验**（长度/字符集/``gen-`` 前缀），不重新编号 ——\n  重新编号会让「学生卡片上的 qid」与「后端登记的 qid」对不上，判分必 404。\n\n★★ **撞名防护（两道，见 :data:`GENERATED_QID_PREFIX` 的说明）**：\n  ① 形状：``qid`` 必须带 ``gen-`` 前缀（在 :func:`_validate_variant` 里逐题拒）；\n  ② 硬检查：与**题库真题的 qid** 撞名 → **整批拒**（与「同批 qid 重复」同一处置）。\n\n  为什么②必须是整批拒、而不是\"只丢撞名那一道\"：走到这一步说明生成侧给出了一个\n  **与真题同名**的题，那不是「一道题没写好」，而是「这道题的去向搞错了」——\n  它的答案会被写进 ``generated_question``，而 ``_locate_question`` **先生成题后题库**\n  → 那道真题从此在这个学生这里判的是模型的答案（学生做的是真题，得分却是别人的答案）；\n  同时批里其余的题也来自同一个有问题的生成调用，收下它们只是把问题藏起来。",
         "operationId": "register_variants_api_quiz_variants_post",
         "parameters": [
           {

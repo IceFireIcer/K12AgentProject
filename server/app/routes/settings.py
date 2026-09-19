@@ -48,6 +48,7 @@ from app.contracts import (
     normalize_base_url,
     resolve_api_key,
 )
+from app.rag import retriever
 from app.settings_store import (
     ConfigFileSettingsStore,
     InMemorySettingsStore,
@@ -283,6 +284,16 @@ def update_settings(payload: SettingsUpdateRequest, request: Request) -> Setting
     # ★ 保存后立刻登记新 Key：这是一把**刚写进 config.json 的明文凭据**，
     #   登记之后任何日志/审计副本里都不会再出现它（与加载路径同一口径）。
     register_llm_secret(updated.llm.api_key)
+    if updated.embedding != current.embedding:
+        # ★★ 嵌入配置改了就要让**检索单例重新读配置**（否则「设置页改了不生效」）：
+        #   `RagService` 只在**构造时**读一次 `<data-dir>/config.json`，而服务实例按
+        #   kb 路径缓存在 `_SERVICES` 里、**没有 TTL**。学生先聊过一句（`/api/rag/search`
+        #   已把单例建起来）之后再把 `embedding.mode` 从本地改成云端，下一次检索仍拿着
+        #   构造时那份 `{"mode": "none"}`，一路走 fts/outline —— 直到重启应用才好。
+        #   （LLM 那条线本来就有热应用：主进程每次建会话都重写 Pi 的 models.json。）
+        #   清掉的服务会在下一次检索时按新配置重建，代价是重开连接 + 重新探测向量引擎。
+        #   只在**真的变了**时才清：「重新保存同一份配置」不该把学生的检索单例打掉。
+        retriever.reset_services()
     return to_response(updated)
 
 
@@ -386,8 +397,10 @@ PROBE_TIMEOUT_SECONDS = 3.0
 PROBE_TOTAL_BUDGET_SECONDS = 8.0
 #: 读取响应体的上限（防供应商返回超大页面把内存吃满；诊断只需要开头一段）。
 PROBE_MAX_BODY_BYTES = 64 * 1024
-#: 回显供应商错误文本的长度上限。
+#: 提示文案里**本地错误**详情的长度上限（对方响应正文一律不回显，见 `_provider_reason`）。
 PROBE_MAX_DETAIL_CHARS = 160
+#: 提示文案里模型 id 的长度上限（id 是对方控制的字符串，只用于展示）。
+PROBE_MAX_MODEL_ID_CHARS = 64
 #: 探测请求的 User-Agent（有些网关按 UA 拒绝空值；也方便对方日志里认出我们）。
 PROBE_USER_AGENT = "k12-agent-desktop/0.1 (settings-probe)"
 #: 1-token 请求用的最小提示词（只验证「这个地址能不能跑通一次对话」）。
@@ -724,8 +737,8 @@ def fetch_provider_models(
             ok=False,
             models=[],
             message=(
-                f"API Key 被拒绝（HTTP {outcome.status}）：{_provider_message(outcome.body, api_key)}"
-                "。请先填好 Key（或点「探测」确认鉴权通过）；也可以用 Pi 内置预设里的模型名手填。"
+                f"API Key 被拒绝（HTTP {outcome.status}）：{_provider_reason(outcome.status)}。"
+                "请先填好 Key（或点「探测」确认鉴权通过）；也可以用 Pi 内置预设里的模型名手填。"
             ),
         )
 
@@ -749,8 +762,8 @@ def fetch_provider_models(
             ok=False,
             models=[],
             message=(
-                f"{models_url} 返回 HTTP {outcome.status}：{_provider_message(outcome.body, api_key)}"
-                "。请检查 BaseURL 是否为该服务的根地址。"
+                f"{models_url} 返回 HTTP {outcome.status}：{_provider_reason(outcome.status)}。"
+                "请检查 BaseURL 是否为该服务的根地址。"
             ),
         )
 
@@ -834,7 +847,7 @@ def probe_llm_connectivity(
         return _models_ok(outcome, models_url, base_url, model_id)
 
     if outcome.status in (401, 403):
-        return _auth_failed(outcome, api_key)
+        return _auth_failed(outcome)
 
     if outcome.status in (404, 405, 400):
         # 路径形态可疑（而不是鉴权/网络问题）：先试对话端点，再试另一种写法。
@@ -874,14 +887,14 @@ def probe_llm_connectivity(
             )
 
         if ping.status in (401, 403):
-            return _auth_failed(ping, api_key)
+            return _auth_failed(ping)
 
         if 400 <= ping.status < 500 and ping.status not in (404, 405):
             return ProbeResult(
                 ok=False,
                 message=(
                     f"地址可达，但请求被供应商拒绝（HTTP {ping.status}）："
-                    f"{_provider_message(ping.body, api_key)}。"
+                    f"{_provider_reason(ping.status)}。"
                     f"多半是 ModelID 填错了（请核对「{model_id}」是否为该地址支持的模型名）。"
                 ),
             )
@@ -899,7 +912,7 @@ def probe_llm_connectivity(
                     ),
                 )
             if alt is not None and alt.status in (401, 403):
-                return _auth_failed(alt, api_key)
+                return _auth_failed(alt)
 
             alt_status = "无法连通（超时或网络不可达）" if alt is None else f"返回 HTTP {alt.status}"
             return ProbeResult(
@@ -912,10 +925,10 @@ def probe_llm_connectivity(
                 ),
             )
 
-        return _status_failure(outcome, base_url, api_key)
+        return _status_failure(outcome, base_url)
 
     if outcome.status is not None:
-        return _status_failure(outcome, base_url, api_key)
+        return _status_failure(outcome, base_url)
 
     return _error_failure(outcome, host, timeout)
 
@@ -938,7 +951,11 @@ def _models_ok(
             ).strip(),
         )
 
-    sample = "、".join(model_ids[:5])
+    # ★ 成功路径**不回显响应正文**，只回**解析出来的模型 id**（这是用户要的信息：
+    #   「这个地址有哪些模型可选」，`/settings/models` 也把同一份清单结构化地返回给界面）。
+    #   每个 id 设长度上限：它是对方控制的字符串，取值本身受 64KB 响应体上限约束，
+    #   直接拼进一句提示里会做出一个超大 message（界面上一行糊满整屏）。
+    sample = "、".join(_clip_id(model_id_str) for model_id_str in model_ids[:5])
     more = "…" if len(model_ids) > 5 else ""
     message = (
         f"连通成功：{models_url} 返回 HTTP {outcome.status}，可见模型 {len(model_ids)} 个"
@@ -946,30 +963,36 @@ def _models_ok(
     )
     if model_id and model_id not in model_ids:
         # 只是提醒：有些服务的 /models 列表不全，或用户填的是自建别名。
-        message += f"提醒：模型列表里没有看到「{model_id}」，请顺便核对 ModelID。"
+        message += f"提醒：模型列表里没有看到「{_clip_id(model_id)}」，请顺便核对 ModelID。"
     return ProbeResult(ok=True, message=message.strip())
 
 
-def _auth_failed(outcome: HttpOutcome, api_key: str) -> ProbeResult:
-    detail = _provider_message(outcome.body, api_key)
-    suffix = f"：{detail}" if detail else ""
+def _clip_id(value: str) -> str:
+    """展示用的模型 id 截断（**只影响提示文案**，结构化清单里仍是原值）。"""
+    text = " ".join(value.split())
+    if len(text) <= PROBE_MAX_MODEL_ID_CHARS:
+        return text
+    return text[:PROBE_MAX_MODEL_ID_CHARS] + "…"
+
+
+def _auth_failed(outcome: HttpOutcome) -> ProbeResult:
+    """鉴权失败（401/403）：**只说状态码与归类原因**，不回显对方正文（见 `_provider_reason`）。"""
     return ProbeResult(
         ok=False,
         message=(
-            f"API Key 被拒绝（HTTP {outcome.status}）{suffix}。"
+            f"API Key 被拒绝（HTTP {outcome.status}）：{_provider_reason(outcome.status)}。"
             f"请核对 Key 是否填错、是否已过期或额度耗尽；"
             f"供应商名称只用于显示，不影响调用。"
         ),
     )
 
 
-def _status_failure(outcome: HttpOutcome, base_url: str, api_key: str) -> ProbeResult:
-    detail = _provider_message(outcome.body, api_key)
-    suffix = f"：{detail}" if detail else ""
+def _status_failure(outcome: HttpOutcome, base_url: str) -> ProbeResult:
+    """其它失败状态码：同样只说状态码 + 归类原因（**对方的响应正文一律不带出去**）。"""
     return ProbeResult(
         ok=False,
         message=(
-            f"{base_url} 返回 HTTP {outcome.status}{suffix}。"
+            f"{base_url} 返回 HTTP {outcome.status}：{_provider_reason(outcome.status)}。"
             f"请检查 BaseURL 是否为该服务的地址；地址可达但没有可用接口时也会是这个结果。"
         ),
     )
@@ -1070,40 +1093,49 @@ def _extract_model_ids(body: bytes) -> list[str] | None:
     return ids
 
 
-def _provider_message(body: bytes, api_key: str) -> str:
-    """把供应商返回的错误文本压成一句可读中文线索（**先脱敏再截断**）。"""
-    if not body:
-        return ""
+#: 状态码 → 归类原因。**只看状态码，绝不看响应正文** —— 见 :func:`_provider_reason`。
+_PROVIDER_REASONS = {
+    400: "对方拒绝了这次请求（多半是 ModelID 或请求参数不被该地址接受）",
+    401: "鉴权未通过（Key 无效、已过期或额度耗尽）",
+    402: "对方要求付费（账户余额或配额不足）",
+    403: "鉴权通过，但没有访问该模型/路径的权限",
+    404: "该地址没有这个接口（常见原因是 BaseURL 少了或多写了 /v1）",
+    405: "该地址不接受这种请求方法",
+    408: "对方报告请求超时",
+    413: "请求体过大，对方拒收",
+    422: "对方认为请求参数不合法",
+    429: "请求被限流（稍后再试，或检查账户配额）",
+    500: "对方服务器内部错误",
+    502: "对方网关错误（上游不可达）",
+    503: "对方服务暂不可用",
+    504: "对方网关超时",
+}
 
-    text: str | None = None
-    with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
-        data = json.loads(body.decode("utf-8", errors="replace"))
-        text = _find_error_text(data)
-    if text is None:
-        text = body.decode("utf-8", errors="replace")
 
-    # ★ 万一供应商把请求头/Key 回显到错误体里，这里再兜一层脱敏。
-    if api_key:
-        text = text.replace(api_key, "（已隐藏）")
-    return _truncate(text)
+def _provider_reason(status: int | None) -> str:
+    """把一个失败状态码翻译成**归类原因**（可读中文，不含对方响应正文）。
 
+    ★★ 为什么**不再回显对方返回的错误文本**（实测复现过的一条外泄通道）：
 
-def _find_error_text(data: Any) -> str | None:
-    if isinstance(data, str):
-        return data
-    if not isinstance(data, dict):
-        return None
-    for key in ("message", "detail", "msg", "error_description", "error"):
-        if key not in data:
-            continue
-        value = data[key]
-        if isinstance(value, str) and value.strip():
-            return value
-        if isinstance(value, dict):
-            nested = _find_error_text(value)
-            if nested:
-                return nested
-    return None
+    探测按设计接受**任意** baseUrl（校内网关 / 自建服务是需求硬性要求，
+    不能加主机白名单），而设置页的失败文案会被主进程原样交给渲染进程显示。
+    旧实现把响应体里的 ``message`` 截断到 160 字后带出去，于是「在回环上起一个
+    返回 500、正文里塞进内网数据的服务」就能借设置页的回执把**任意回环/内网服务的
+    响应内容读出来**（那段正文既可能是别人塞进去的引导话术，也可能是本机的其他服务）。
+
+    用户真正需要的是「**是我的 Key 的问题，还是地址的问题**」—— 状态码 + 归类原因
+    已经完整回答了它，而对方那段文本对判断没有任何增量。
+    """
+    if status is None:
+        return "对方返回了无法识别的响应"
+    reason = _PROVIDER_REASONS.get(status)
+    if reason is not None:
+        return reason
+    if 500 <= status < 600:
+        return "对方服务器报错"
+    if 400 <= status < 500:
+        return "对方拒绝了这次请求"
+    return "对方返回了未预期的状态码"
 
 
 def _truncate(text: str) -> str:

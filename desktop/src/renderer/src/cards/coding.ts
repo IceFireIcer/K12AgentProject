@@ -79,7 +79,7 @@ function readNumberOr(value: unknown, fallback: number): number {
  * 把 `payload` 事件里的载荷投影成卡片视图。
  *
  * 判别顺序（**结构判别**，不看 `tool` 字段 —— `tool` 只是提示，不可信）：
- *   1. 有 `ok`（布尔）且有 `feedback` → 评估结果；
+ *   1. 有 `codeOk`（布尔，老载荷回落 `ok`）且有 `feedback` → 评估结果；
  *   2. 有非空 `scaffold` → 模板；
  *   3. 其余 → `unknown`（含失败形态 `{tool, kind, text}`，把文本原样交给卡片展示）。
  *
@@ -92,11 +92,18 @@ export function readCodingCard(payload: unknown): CodingCardView {
   const record = payload as Record<string, unknown>
 
   // 1) 评估结果（`evaluate_code`）：用**两个**字段一起判，降低误判概率
-  if (typeof record.ok === 'boolean' && typeof record.feedback === 'string') {
+  //
+  // ★★ 判据优先读 `codeOk`：主进程把「学生代码跑通没有」（`codeOk`）与「工具本身成功没有」
+  //   （`toolOk`）**分开命名**了 —— 因为 `details.ok` 一旦同时承载两者，学生写错一行代码
+  //   （工具完全正常）会在工具调用轨迹里被画成 `fail` 节点。
+  // ★ 但对**历史载荷 / 别处来的数据**保留对 `ok` 的兜底：两者同值，读谁都一样，
+  //   而少了这条兜底，一份还没更新的老载荷会让卡片退化成「认不出」。
+  const codeOk = typeof record.codeOk === 'boolean' ? record.codeOk : record.ok
+  if (typeof codeOk === 'boolean' && typeof record.feedback === 'string') {
     return {
       kind: 'result',
       kpId: readText(record.kpId) ?? '',
-      ok: record.ok,
+      ok: codeOk,
       stdout: typeof record.stdout === 'string' ? record.stdout : '',
       error: projectError(record.error),
       feedback: record.feedback,

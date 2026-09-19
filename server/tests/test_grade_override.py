@@ -11,7 +11,13 @@
 3. ★★ **冷却 10 轮**（本票核心验收）：手动改过之后，够格的自动证据也**动不了**学段，
    而**同一批证据**在没有手动改过的对照学生身上必须照常改 —— 反向对照证明
    「这组证据本身是够格的，冷却才是唯一挡住它的东西」；
-4. **冷却随轮次递减** + **不引入新列**（``grade_history`` 的表结构里没有 ``note``）。
+4. **冷却随轮次递减** + **不引入新列**（``grade_history`` 的表结构里没有 ``note``）；
+5. ★★ **2026-09-19 修复回归（H-1）**：冷却锚点 ``(turn, source)`` 必须来自 ``grade_history``
+   的**同一行** —— ``observe_turn``（``POST /api/grade/turns``）与 ``state()``
+   （``GET /api/grade/state``）**两个出口对同一状态给出同一个值**，
+   且「重复确认同一学段」真的**重新计时**（``test_h1_*``）。
+   ⚠️ 原来那条只读 ``state()`` 的断言是**假绿**：走对的那条路从来不报错，
+   而真出问题的 ``observe_turn`` 一次都没被问过。
 
 跑法::
 
@@ -55,6 +61,10 @@ CHILD_TURNS = (
     "我有点听不明白，再讲一遍好不好？",
 )
 
+#: 四路全空的轮次（M-10 之后每轮也会留一行读数，但方向恒为 0）——
+#: 用来把**轮次水位**推到指定轮次而不产生任何证据。
+NEUTRAL_TEXT = "我们继续吧"
+
 HISTORY_SQL = (
     "SELECT turn, from_level, to_level, source, confidence FROM grade_history ORDER BY id"
 )
@@ -79,6 +89,23 @@ class GradeOverrideRoutes(unittest.TestCase):
             f"/api/grade/override/{student_id or self.student_id}",
             json={"gradeLevel": grade_level},
         )
+
+    def advance_to(self, turn: int, *, session_id: str = "sess-1") -> None:
+        """把**轮次水位**推到 ``turn`` 轮（上交若干轮中性证据，每轮都会留一行读数）。
+
+        用途：真 HTTP 契约里 ``POST /grade/override`` **没有** turn 字段（锚点由服务端的
+        ``turn_watermark()`` 推算，见 ``rules.GradeEngine.override_level``），而 H-1 的
+        两条断言要的是「锚点落在第 N 轮」这个**受控前提**（真变更 @6 / 确认 @9 / 确认 @12）。
+        所以先老老实实把水位推上去，再走真路由切换 —— 全链路都是客户端视角的真实路径。
+        """
+        current = int(self.state()["lastTurn"])
+        for item in range(current + 1, turn + 1):
+            response = self.submit(
+                {"turn": item, "text": NEUTRAL_TEXT, "sessionId": session_id}
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.state()["lastTurn"], turn, f"水位应当推到第 {turn} 轮")
+
 
     def submit(self, *turns: dict, student_id: str | None = None) -> object:
         return self.client.post(
@@ -217,6 +244,136 @@ class GradeOverrideRoutes(unittest.TestCase):
         self.assertEqual(state["source"], SOURCE_EXPLICIT)
 
     # ------------------------------------------------------- ④ ★★ 冷却 --
+    def test_h1_observe_turn_agrees_with_state_after_an_explicit_confirmation(self) -> None:
+        """★★ H-1（本票核心验收的补充）：**两个出口必须对同一状态给出同一个冷却值**。
+
+        缺陷现场：``observe_turn`` 把冷却锚点的一对 ``(turn, source)`` **拆成了两行** ——
+        ``turn`` 取 ``last_change_turn()``（只认 ``from<>to`` 的真变更）、
+        ``source`` 取 ``last_cooldown_anchor()``（认任何 ``from_level`` 非空的行）。
+        于是「学生显式确认当前学段」（``from_level == to_level`` 的 explicit 行）
+        虽然写进了 ``grade_history``，冷却却按**更早那次真变更的轮次**起算 → 当场过期：
+
+        ====================  ==================  ====================
+        场景                  ``GET /state``      ``POST /turns``
+        ====================  ==================  ====================
+        inferred 真变更 @3    10（手动窗口）      1  ← 两行不一致
+        explicit 确认 @12     ——                  0（第 13 轮就放行）
+        ====================  ==================  ====================
+
+        这条**走 ``POST /api/grade/turns``**（``observe_turn`` 那条路）做反向对照，
+        因为原来那条断言（``test_repeating_the_same_level_writes_a_row_but_is_not_a_change``）
+        只读了走对的那条路的 ``state()`` —— 是**假绿**。
+        """
+        # 造出「真变更 @3」：第 1..3 轮童言本来就会在**第 3 轮**把学段调下去（自动路径）
+        self.submit(*self.child_evidence(1, 2, 3))
+        self.assertEqual(self.state()["grade"], "primary_low", "前提：自动路径在第 3 轮改过学段")
+        self.assertEqual(self.state()["lastChangeTurn"], 3, "前提：真变更落在第 3 轮")
+
+        # 推到第 12 轮，再显式**确认**当前学段（`from_level == to_level`）——
+        # 这一行不改变学段，但它是冷却锚点，窗口从这里重新起算
+        self.advance_to(12)
+        override = self.override("primary_low")
+        self.assertEqual(override.status_code, 200, override.text)
+        self.assertFalse(override.json()["changed"], "确认现状：from_level == to_level")
+        self.assertEqual(override.json()["turn"], 12, "锚点落在第 12 轮")
+        self.assertEqual(
+            self.state()["lastChangeTurn"], 3, "展示字段不变：真正变更过学段的仍是第 3 轮"
+        )
+
+        # ① 两个出口对同一状态给出**一致**的冷却值；② 时长按**手动窗口**从 12 起算
+        #    ⚠️ 只用 21 及之前的轮次：第 22 轮是「冷却满期」那一格，留给下面那一步（它会推进水位）
+        for turn in (13, 15, 19, 21):
+            submitted = self.submit({"turn": turn, "text": NEUTRAL_TEXT, "sessionId": "sess-2"})
+            self.assertEqual(submitted.status_code, 200, submitted.text)
+            body = submitted.json()
+            with self.subTest(turn=turn):
+                self.assertEqual(
+                    body["cooldownRemainingTurns"],
+                    self.state()["cooldownRemainingTurns"],
+                    f"第 {turn} 轮：POST /grade/turns 与 GET /grade/state 报的冷却必须一致（H-1）",
+                )
+                self.assertEqual(
+                    body["cooldownRemainingTurns"],
+                    max(0, MANUAL_COOLDOWN_TURNS - (turn - 12)),
+                    f"第 {turn} 轮：手动窗口必须从**确认的那一刻（12）**起算 10 轮",
+                )
+
+        # ③ 冷却期内的**够格证据**照样改不动学段：第 13..21 轮（连续 9 轮同向）一次性上交，
+        #    从第 3 轮起证据就够格了（方向一致、置信度 0.75 ≥ 0.6），挡住它的必须是**冷却**。
+        batch = self.submit(*self.child_evidence_upto(first=13, last=21, session_id="sess-3"))
+        self.assertEqual(batch.status_code, 200, batch.text)
+        body = batch.json()
+        self.assertFalse(body["changed"], "冷却期内不许改学段")
+        self.assertEqual(
+            [item["reason"] for item in body["evaluations"][2:]], [REASON_COOLDOWN] * 7,
+            "第 15 轮起证据已连续 3 轮同向 → 拦住它的只能是冷却（前两轮是「轮数还不够」）",
+        )
+        self.assertEqual(self.state()["grade"], "primary_low", "整批上交后学段纹丝不动")
+        self.assertEqual(
+            body["cooldownRemainingTurns"], self.state()["cooldownRemainingTurns"],
+            "整批上交之后两个出口仍然一致（第 21 轮 → 剩 1 轮）",
+        )
+        self.assertEqual(body["cooldownRemainingTurns"], 1)
+
+        # ③-b ★ `state()` 这一侧的锚点也必须成对读（H-1 的另一半）：
+        #    证据够格 + 被冷却挡住 → **待生效学段必须给出**（`suggested_level` 只在
+        #    ``reason in (low_confidence, cooldown)`` 时才有值）。若 `state()` 拿「上一次
+        #    真变更的轮次（3）」去算冷却，它算出来的剩余是 0 → 既不是 cooldown 也不是
+        #    low_confidence → `suggestedLevel` 变 null，界面上「待生效：小学高年级」凭空消失。
+        state = self.state()
+        self.assertGreater(state["cooldownRemainingTurns"], 0, "此刻真的还在冷却里")
+        self.assertEqual(state["streak"], 9, "证据已经连续 9 轮同向（够格）")
+        self.assertEqual(
+            state["suggestedLevel"], "primary_high",
+            "够格但被**冷却**挡住 → 待生效学段必须给出（锚点取错行时这里会是 null）",
+        )
+
+        # ④ 第 22 轮 = 12 + 10：冷却刚好期满 → 自动推断重新接管（不是被永久停用）
+        released = self.submit(
+            {"turn": 22, "text": CHILD_TURNS[0], "sessionId": "sess-3"}
+        )
+        self.assertEqual(released.status_code, 200, released.text)
+        self.assertEqual(
+            released.json()["reason"], "changed", "第 22 轮冷却期满，够格证据即可生效"
+        )
+        self.assertEqual(released.json()["grade"], "primary_high")
+        self.assertEqual(self.state()["source"], SOURCE_INFERRED, "回归自动后来源也切回去")
+
+    def test_h1_repeating_the_same_level_restarts_the_cooldown_window(self) -> None:
+        """★ H-1 的另一半：**重复选择同一学段 = 重新计时**（文档承诺原话）。
+
+        真变更 @6（手动切到 junior）+ 再次确认 @9：冷却必须从 **9** 起算（@19 满期），
+        而不是从 6 起算（@16 满期）。修复前 ``observe_turn`` 读的是 ``last_change_turn``
+        （还是 6），所以「我再点一次」在**判定侧**等于白点 —— ``state()`` 那一侧是正确的，
+        两个出口于是互相矛盾。
+        """
+        self.advance_to(6)
+        override = self.override("junior")
+        self.assertEqual(override.status_code, 200, override.text)
+        self.assertTrue(override.json()["changed"], "第 6 轮：小学高年级 → 初中，真变更")
+        self.assertEqual(override.json()["turn"], 6)
+
+        # 确认之前：从 6 起算
+        before = self.submit({"turn": 8, "text": NEUTRAL_TEXT, "sessionId": "sess-1"}).json()
+        self.assertEqual(before["cooldownRemainingTurns"], MANUAL_COOLDOWN_TURNS - (8 - 6))
+
+        # 学生**再点一次**同一个学段：不改学段，但重新计时
+        self.advance_to(9, session_id="sess-1")
+        again = self.override("junior")
+        self.assertEqual(again.status_code, 200, again.text)
+        self.assertFalse(again.json()["changed"], "重复选择不改学段，但**是**一次新的冷却锚点")
+        self.assertEqual(again.json()["turn"], 9)
+
+        for turn in (11, 15, 18, 19):
+            body = self.submit({"turn": turn, "text": NEUTRAL_TEXT, "sessionId": "sess-1"}).json()
+            with self.subTest(turn=turn):
+                self.assertEqual(
+                    body["cooldownRemainingTurns"],
+                    max(0, MANUAL_COOLDOWN_TURNS - (turn - 9)),
+                    f"第 {turn} 轮：冷却必须从**再次确认的第 9 轮**起算（而不是真变更的第 6 轮）",
+                )
+                self.assertEqual(body["cooldownRemainingTurns"], self.state()["cooldownRemainingTurns"])
+
     def test_manual_override_suppresses_the_automatic_change_for_ten_turns(self) -> None:
         """★★ 本票核心验收：手动改过之后，够格证据在 10 轮内动不了学段。
 

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -186,9 +187,17 @@ class TestBundledKbIsReadOnly(KbPathCase):
 # --------------------------------------------------------------------------- #
 class TestBundledBuildIsIdempotent(KbPathCase):
     def test_building_twice_into_same_target_does_not_duplicate_rows(self) -> None:
-        """★ 连建两次行数必须相同（``build_kb`` 的「先清再写」对 bundled 目标同样成立）。"""
+        """★ 连建两次行数必须相同（``build_kb`` 的「先清再写」对 bundled 目标同样成立）。
+
+        幂等现在是**在一个事务里**完成的（清表 + 写正文 + 重建 FTS + 写依赖图 → 一次 commit，
+        见 ``tests/test_kb_rebuild_atomicity.py``）。所以这里除了「不翻倍」，
+        还要确认**第二次建完之后 FTS 索引与正文仍然对得上** ——
+        ``chunk_fts`` 是外部内容表，正文被清掉而索引没跟着重建的话，
+        ``COUNT(*)`` 照样好看，检索却已经 0 命中（这正是原子性要守住的那条不变量）。
+        """
         import build_kb  # scripts/build_kb.py
         from app.rag import chunker  # noqa: PLC0415
+        from app.store.connections import connect  # noqa: PLC0415
 
         target = self.tmp / "staging" / "kb.sqlite"
         knowledge = Path(ROOT) / "knowledge"
@@ -212,6 +221,25 @@ class TestBundledBuildIsIdempotent(KbPathCase):
         self.assertEqual(first.stats, second.stats, "两次建库统计不一致（说明没先清表）")
         self.assertGreater(second.stats.get("kp", 0), 0)
         self.assertGreater(second.stats.get("chunk_vec", 0), 0)
+
+        # ★ FTS5 trigram **至少 3 个字符**才可能命中（两字一律 0，实测），从库里取一段真正文当探针
+        conn = connect(target, readonly=True, load_vec=False)
+        try:
+            text = str(
+                conn.execute("SELECT text FROM chunk WHERE is_parent = 1 ORDER BY rowid LIMIT 1")
+                .fetchone()["text"]
+            )
+            probe = re.split(r"[^\u4e00-\u9fff]+", text)[0][:6]
+            fts_matches = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM chunk_fts WHERE chunk_fts MATCH ?", (probe,)
+                ).fetchone()[0]
+            )
+        finally:
+            conn.close()
+        self.assertGreater(
+            fts_matches, 0, f"连建两次之后 FTS 索引必须仍然能命中（探针 {probe!r}）"
+        )
 
 
 # --------------------------------------------------------------------------- #

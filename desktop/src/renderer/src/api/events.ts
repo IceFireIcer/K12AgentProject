@@ -106,6 +106,22 @@ export interface ChatTurn {
   citationDegraded: Degraded | null
   cards: InlineCard[]
   status: TurnStatus
+  /**
+   * ★★ **分叉点：助手那条回答的条目 id**（`null` = 这条消息不能作为分叉点）。
+   *
+   * 「从这里重新问」挂在这条回答上 —— 点了之后：把「根 → 这条回答」复制成新会话，
+   * 学生换一种问法接着问。它是**文件里的稳定标识**，不是「第几轮」。
+   */
+  entryId: string | null
+  /**
+   * ★★ **分叉点：学生那句话的条目 id**（`null` = 不能从这句分叉）。
+   *
+   * 与 {@link entryId} 配对：一条 turn 里学生说了一句、助手答了一句，两者各是一个
+   * 条目、各能当分叉点。**两个都要** —— 学生的意图可能是
+   * 「我这句话问得不好，重问」（从 `userEntryId` 分叉）
+   * 也可能是「他这条答得不对，我换个方向」（从 `entryId` 分叉）。
+   */
+  userEntryId: string | null
   /** `done` 带来的消息 id（用于持久化/学习记录，票 09）。 */
   messageId: string | null
   blocked: BlockedNotice | null
@@ -133,6 +149,121 @@ export function emptyConversation(): ConversationState {
   return { turns: [], pending: {}, ignoredEvents: 0 }
 }
 
+/**
+ * ★ 一条**恢复出来的历史消息**（打开历史会话时由主进程投影后回传）。
+ *
+ * ★★ 为什么历史消息**必须是 `ChatTurn`**（而不是另建一个「历史消息列表」）：
+ *    界面的消息列表只有一个渲染路径（`ChatMessage.vue` 吃 `ChatTurn`）。
+ *    另建一条路径意味着两套气泡样式、两套滚动行为、两套「学生/AI」头像逻辑 ——
+ *    而它们迟早分叉（本项目在「两处各写一份」上有过多次前科）。
+ *
+ * ★ 为什么**不**恢复当时的卡片 / 引用 / 降级档位：那些是**当时那一次交互**的产物
+ *    （动画 iframe 的 nonce 早已过期、题库卡片也要重新取题），恢复它们等于伪造
+ *    一次并未发生的交互。回看只需要「他问了什么、AI 答了什么」。
+ * ★ `requestId` 用 `restored-` 前缀：它与 `turn_` 前缀的**真实轮次**区分开 ——
+ *    任何按 requestId 认领轮次的逻辑（如悬浮追问窗）都不会误认一条历史消息。
+ */
+export function restoredTurn(
+  index: number,
+  role: 'user' | 'assistant',
+  text: string,
+  gradeLevel: GradeLevel | null = null,
+  /**
+   * ★★ 这条消息在会话文件里的条目 id —— 「从这里重新问」拿它去分叉。
+   * 空串 = 认不出（老会话 / 别处造的状态），那条消息**不给**分叉按钮。
+   */
+  entryId = ''
+): ChatTurn {
+  const base = createTurn(`restored-${index}`, role === 'user' ? text : '', gradeLevel)
+  if (role === 'assistant') {
+    // 助手那条：正文落在 `text`，条目 id 落在 `entryId`
+    return {
+      ...base,
+      text,
+      status: 'done',
+      entryId: entryId || null,
+      userEntryId: null
+    }
+  }
+  // 学生那条：`userText` 承载正文（由 createTurn 传入），`entryId` 留空 ——
+  // ★ 两个字段各管一边，**不要串**：`entryId` 永远是「助手那条回答」的分叉点
+  return { ...base, status: 'done', entryId: null, userEntryId: entryId || null }
+}
+
+/**
+ * ★★ 把恢复出来的一批消息整段铺成**轮次**（**替换**，不是追加）。
+ *
+ * 为什么不追加：这是一次**会话切换** —— 手里那段消息属于**上一条**会话，
+ * 追加会让两段对话拼在一起（学生会看到自己没说过的话）。
+ *
+ * ★★★ **必须把 user 与 assistant 配成一轮**（实测抓到的缺陷，见 P-106）：
+ *   初版把每条消息各当成一轮，于是恢复出来的对话在界面上长成这样：
+ *
+ *   ```
+ *   [我的问题]        ← 一轮：有学生气泡 + **一个空的回答块**
+ *   [（空）][他的回答]  ← 另一轮：空的学生气泡 + 回答
+ *   ```
+ *
+ *   两半各占一轮，视觉上就是「一半一半的对话」。而 `restoredTurn` 的两条分支
+ *   本来就写着「学生消息的 `text` 留空 / 助手消息的 `userText` 留空」——
+ *   那正是**配对**的写法，初版却把它们拆开各建了一轮。
+ *
+ * ★ 配对规则（按文件里的顺序走）：
+ *   - `user` 开头 → 建一轮，`userText` 填上、`userEntryId` 记下；
+ *   - 紧跟的 `assistant` → **补进同一轮**（填 `text` / `entryId`），不新建轮；
+ *   - 连续两个 `user`（上一轮失败 / 被拦下，没有回答）→ 前一轮就那样收尾
+ *     （只有学生问题，没有回答）—— 那是**如实反映**，不是缺陷；
+ *   - 开头就是 `assistant`（开场引导被投影进来）→ 单独一轮（`userText` 空）。
+ *
+ * ★ 空数组返回**全新的空状态**：切到一条空会话时必须真的清空。
+ * ★ 不去重、不合并同文本消息：学生完全可能连着问两句一样的话。
+ */
+export function restoreConversation(
+  // ★ `at`（消息时间戳）收下但**不渲染**：它是主进程投影时带的（与「只读回看」同形），
+  //   而对话页的气泡上没有时间戳 —— 与其让调用方为了过类型而把它剥掉
+  //   （剥的过程会顺手丢掉别的字段），不如在这里明说「收下、暂不使用」。
+  messages: ReadonlyArray<{
+    role: 'user' | 'assistant'
+    text: string
+    at?: number
+    /** 条目 id（分叉点）；缺 = 那条消息不给分叉按钮。 */
+    entryId?: string
+  }>,
+  gradeLevel: GradeLevel | null = null
+): ConversationState {
+  const turns: ChatTurn[] = []
+  for (const message of messages) {
+    const entryId = message.entryId ?? ''
+    const last = turns[turns.length - 1]
+
+    if (message.role === 'user') {
+      // 学生的话**总是**开一轮（哪怕上一轮还没有回答：那是两次提问）
+      turns.push(
+        restoredTurn(turns.length, 'user', message.text, gradeLevel, entryId)
+      )
+      continue
+    }
+
+    // assistant：能补进上一轮就补进去（**这就是配对**），否则单独一轮
+    if (last !== undefined && last.status === 'done' && last.text === '') {
+      // ★★ 关键：`restoredTurn('assistant', …)` 造出来的对象 `userText` 是**空的** ——
+      //    直接替换会把刚放进去的学生问题丢掉（一变二之后又变回一半）。
+      //    所以这里**保留上一轮的 user 那一半**，只把回答那一半填上。
+      const withAnswer = restoredTurn(
+        turns.length - 1,
+        'assistant',
+        message.text,
+        gradeLevel,
+        entryId
+      )
+      turns[turns.length - 1] = { ...withAnswer, userText: last.userText, userEntryId: last.userEntryId }
+      continue
+    }
+    turns.push(restoredTurn(turns.length, 'assistant', message.text, gradeLevel, entryId))
+  }
+  return { turns, pending: {}, ignoredEvents: 0 }
+}
+
 export function createTurn(
   requestId: string,
   userText: string,
@@ -148,6 +279,8 @@ export function createTurn(
     citationDegraded: null,
     cards: [],
     status: 'streaming',
+    entryId: null,
+    userEntryId: null,
     messageId: null,
     blocked: null,
     error: null

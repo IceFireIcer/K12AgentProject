@@ -14,6 +14,11 @@
  *    这样的摘要，并且**默认丢弃**敏感键（key/token/secret…）与个人信息键（name/student/…）。
  * 2. **不改任何东西**。三个事件全部是**只读通知**：`tool_execution_end` 不能回写结果，
  *    `tool_call` 只用来读「是否被安全阀拦下」（拦下时不会再有执行事件）。
+ *    ★ **现状更正**：本扩展**只订阅** `turn_start` / `tool_call` / `tool_execution_start` /
+ *      `tool_execution_end` 四个事件，且 `tool_call` 那条**只做观察、不返回任何值** ——
+ *      **安全阀本身（返回 `{block, reason}` 的处理器）在生产链路里尚未实现**，
+ *      因此 `blocked` 相关的记录字段与 {@link ToolTraceRecorder.noteBlockedCall} 目前只有测试在走。
+ *      详见 `noteBlockedCall` 的注释（写明现状，免得留一个看着像已接线的死函数）。
  * 3. **导出物本身必须是合法 Mermaid**：节点 id 只允许 `[A-Za-z0-9_]`，标签里的引号/尖括号/竖线
  *    一律转义成 Mermaid 实体 —— 否则图在报告里渲染成一片红字，比没有图更糟。
  */
@@ -255,6 +260,32 @@ interface PendingCall {
 interface PendingBlock {
   toolName: string
   reason?: string
+  /** 属于第几轮（用于淘汰**上一轮**留下的孤儿条目，见 {@link ToolTraceRecorder.pruneStale}）。 */
+  turn: number
+}
+
+/**
+ * ★★ `pending` / `blocks` 两张表的**上限**（超过就丢最旧的那条）。
+ *
+ * 为什么必须有：这两张表的条目原本**只在 `tool_execution_end` 里删**。而一条 `tool_call`
+ * 之后拿不到对应 `tool_execution_end` 的情形是真实存在的 ——
+ *   - 本轮被中止（学生点了停止 / 会话被销毁）：后面的执行事件根本不会来；
+ *   - 被安全阀拦下：**永远不会有**执行事件（那正是「拦下」的含义）。
+ * 于是条目**永久留在内存里**，长会话（或者一节 40 分钟的课）里越积越多 ——
+ * 而它们**再也不会被任何读取方用到**（`noteToolEnd` 找不到配对时照常落一条记录）。
+ *
+ * 取 64 是因为：单轮的工具调用是个位数，64 足够覆盖「同一轮里连续几次调用同时没配对上」，
+ * 而它同时是**有界的** —— 内存不会随会话长度增长。
+ */
+const MAX_PENDING_CALLS = 64
+
+/** 值形态：`Map` 的插入序即时间序，所以「丢最旧」= 丢第一个 key。 */
+function capMap<T>(map: Map<string, T>, limit: number): void {
+  while (map.size > limit) {
+    const oldest = map.keys().next()
+    if (oldest.done) return
+    map.delete(oldest.value)
+  }
 }
 
 /**
@@ -339,9 +370,39 @@ export class ToolTraceRecorder {
    */
   noteTurn(index: number): void {
     const next = nextTurnFor(this.currentTurn, this.lastTurnIndex, index)
+    const advanced = next.turn > this.currentTurn
     this.currentTurn = next.turn
     this.lastTurnIndex = next.lastIndex
     this.maxTurn = Math.max(this.maxTurn, next.turn)
+    // 轮次一变，上一轮留下的悬空条目就**确定**不会再被配对了（见 `pruneStale`）
+    if (advanced) this.pruneStale()
+  }
+
+  /**
+   * ★★ 淘汰**上一轮**留下的悬空条目（`pending` / `blocks` 的过期机制）。
+   *
+   * 为什么需要它：这两张表原先只在 `tool_execution_end` 里删条目，而「有 `tool_call`
+   * 却没有对应 `tool_execution_end`」是**真实存在**的两种情形 ——
+   *   1. **本轮被中止**（学生点停止 / 会话被销毁）：后续的执行事件不会再来；
+   *   2. **被安全阀拦下**：永远不会有执行事件（那正是「拦下」的含义）。
+   * 于是条目永久留在内存里。虽然后果不严重（不会再被读取方用到），但长会话里它**无界增长**。
+   *
+   * 为什么挂在**轮次推进**上而不是 `agent_end`：
+   *   - 语义最准：`turn_start` 说「新一轮开始了」，那么**上一轮**的悬空条目就再也配不上对了；
+   *     而 `agent_end` 与工具执行事件的先后顺序在「中止」路径上并不确定，
+   *     在那里清表可能把一条**确实还会到**的 `tool_execution_end` 的计时与轮号提前丢掉；
+   *   - 不新增订阅：本扩展刻意只订阅 4 个只读事件（`tests/agent-trace.test.ts` 钉着这条），
+   *     为清表再加一个 `agent_end` 监听不值得 —— 同一件事用既有事件就能做对。
+   *
+   * ⚠️ 单轮之内仍可能积压（模型在一轮里连续发起多次调用），那条路由 `MAX_PENDING_CALLS` 兜住。
+   */
+  pruneStale(): void {
+    for (const [toolCallId, call] of this.pending) {
+      if (call.turn < this.currentTurn) this.pending.delete(toolCallId)
+    }
+    for (const [toolCallId, block] of this.blocks) {
+      if (block.turn < this.currentTurn) this.blocks.delete(toolCallId)
+    }
   }
 
   /**
@@ -356,7 +417,8 @@ export class ToolTraceRecorder {
     if (!toolCallId) return
     this.blocks.set(toolCallId, {
       toolName: String(payload.toolName ?? 'unknown'),
-      reason: undefined
+      reason: undefined,
+      turn: this.currentTurn
     })
     // 参数摘要用 `input`（tool_call 的形态）；执行事件里还有一份，二者取先到的那份。
     const summary = summarizeArgs(payload.input)
@@ -371,13 +433,16 @@ export class ToolTraceRecorder {
       const existing = this.pending.get(toolCallId) as PendingCall
       if (existing.argsSummary === '(无参数)') existing.argsSummary = summary
     }
+    capMap(this.pending, MAX_PENDING_CALLS)
+    capMap(this.blocks, MAX_PENDING_CALLS)
   }
 
   /** 记录安全阀的判定结果（`tool_call` 处理器返回 `{block, reason}` 时由调用方回填）。 */
   noteBlock(toolCallId: string, reason?: string): void {
     const block = this.blocks.get(toolCallId)
     if (block) block.reason = reason
-    else this.blocks.set(toolCallId, { toolName: 'unknown', reason })
+    else this.blocks.set(toolCallId, { toolName: 'unknown', reason, turn: this.currentTurn })
+    capMap(this.blocks, MAX_PENDING_CALLS)
   }
 
   /** `tool_execution_start`：开一个计时窗口。 */
@@ -395,6 +460,12 @@ export class ToolTraceRecorder {
           : summarizeArgs(payload.args),
       startedAt: Date.now()
     })
+    capMap(this.pending, MAX_PENDING_CALLS)
+  }
+
+  /** 悬空条目数（诊断/断言用：证明「中止或拦下的调用不会一直堆在内存里」）。 */
+  pendingSize(): { calls: number; blocks: number } {
+    return { calls: this.pending.size, blocks: this.blocks.size }
   }
 
   /** `tool_execution_end`：**只读通知**，这里只读取结果，不改写任何东西。 */
@@ -427,7 +498,26 @@ export class ToolTraceRecorder {
     return record
   }
 
-  /** 一条被安全阀拦下的调用也要留下痕迹（否则「模型想干什么」这段证据就丢了）。 */
+  /**
+   * 一条被安全阀拦下的调用也要留下痕迹（否则「模型想干什么」这段证据就丢了）。
+   *
+   * ★★ **现状（2026-09-19）：本方法在生产链路上没有被调用，因为没有安全阀处理器。**
+   *
+   * 事实是这样的（不要照着文件头那句「`tool_call` 只用来读是否被安全阀拦下」以为已经接好了）：
+   *   - `runtime.ts` 里**没有任何 `pi.on('tool_call')` 返回 `{block, reason}` 的处理器** ——
+   *     工具级的前置拦截（§12 的 Tool 安全阀）**尚未实现**；
+   *   - 所以 `ToolTraceRecord.blocked` 这个字段在生产里恒为不存在，
+   *     `noteBlock()` 也只有测试会调用（它记下的 `reason` 同样是 `undefined`）。
+   *
+   * 为什么保留而不是删掉：它是**记录结构的一部分**（`blocked` / `blockReason` 两个字段、
+   * Mermaid 的 `blocked` 样式类、Markdown 明细表的一列都已就位），删掉会把「将来接上安全阀时
+   * 需要的那半边」一起拆了；而留一个**看着像已接线**的死函数更糟 —— 所以在此写明现状。
+   *
+   * ⚠️ 接安全阀时的两个落点（都在别人手里，本文件只提供能力）：
+   *   ① `runtime.ts` 注册 `pi.on('tool_call', ...)`，判定后返回 `{block: true, reason}`；
+   *   ② 那个处理器里调 `noteBlock(toolCallId, reason)` + `noteBlockedCall(...)`（本方法）。
+   *   在此之前，界面上「工具调用」里不会有 blocked 条目 —— 那不是 bug，是**未实现**。
+   */
   noteBlockedCall(toolCallId: string, toolName: string, reason?: string): ToolTraceRecord {
     const record: ToolTraceRecord = {
       seq: ++this.recordSeq,
@@ -442,6 +532,7 @@ export class ToolTraceRecorder {
       at: new Date().toISOString()
     }
     this.pending.delete(toolCallId)
+    this.blocks.delete(toolCallId)
     this.items.push(record)
     return record
   }
@@ -499,10 +590,19 @@ export function degradedOf(result: unknown): string | undefined {
 /**
  * Tool 的 `execute()` **自兜异常**时约定上报失败（而不是抛异常）。
  *
- * 认两种标记，因为仓库里两处都真实存在：
- *   - `details.error === true`（`runtime.ts` 的 `safeToolExecute` 与 `extensions/index.ts` 的
- *     `toolFailure()` 都用这个 —— `events.ts` 靠它发 `error` 事件）；
- *   - `details.ok === false`（更口语化的写法，同样认可）。
+ * 认三种标记，判据顺序**不能调**：
+ *   1. ★ `details.toolOk`（布尔，**显式声明的工具级成败**）—— 有它就以它为准；
+ *   2. `details.error === true`（`runtime.ts` 的 `safeToolExecute` 与 `extensions/index.ts` 的
+ *      `toolFailure()` 都用这个 —— `events.ts` 靠它发 `error` 事件）；
+ *   3. `details.ok === false`（更口语化的写法，同样认可）。
+ *
+ * ★★ 为什么 `toolOk` 必须排在前面（这是一个真实发生过的失真）：
+ *   `ok` 这个名字太顺手，`evaluate_code` 一度把自己的**领域字段**（「学生代码跑通没有」）
+ *   铺在了 `details.ok` 上 —— 于是**学生在编程卡片里写错一行代码**（工具本身完全正常）
+ *   被第 3 条读成「工具失败」，轨迹图在**最常见的教学路径**上画出一个假 `fail` 节点，
+ *   而这张图是报告「设计合理性 25%」的核心证据。
+ *   所以：**载荷自带领域 `ok` 的 Tool 必须同时给出 `toolOk`**（见 `coding.ts` 的说明），
+ *   把「工具级」与「领域级」两个问题分开 —— 本函数不再靠猜。
  *
  * 为什么需要这条约定：Pi 的 `isError` 只看「有没有抛」——`execute()` 把异常吞掉并返回可读文本后，
  * 事件层看到的仍是「成功」。轨迹图要如实反映失败，就必须认这个标记。
@@ -513,6 +613,8 @@ export function toolResultOk(result: unknown): boolean {
   const details = (result as Record<string, unknown>).details
   if (!details || typeof details !== 'object') return true
   const record = details as Record<string, unknown>
+  // ① 显式声明优先：它回答了「工具成功没有」，其余两条是在**猜**同一个问题
+  if (typeof record.toolOk === 'boolean') return record.toolOk
   return record.ok !== false && record.error !== true
 }
 
@@ -582,8 +684,11 @@ export function createTraceExtension(
     })
     pi.on('tool_call', (event: unknown) => {
       recorder.noteToolCall(event)
-      // ⚠️ 这里**不返回**任何值：安全阀在别处（票 22 的 tool_call 处理器）。
+      // ⚠️ 这里**不返回**任何值：安全阀在别处 —— 而那个「别处」**当前并不存在**
+      //    （`runtime.ts` 里没有返回 `{block, reason}` 的 `tool_call` 处理器）。
       //    本扩展只观察，不参与放行/拦截决策（同一事件的多个处理器互不可见返回值）。
+      //    接上安全阀时：在那个处理器里调 `noteBlock()` + `noteBlockedCall()`，
+      //    本扩展这一条**不需要动**（它照常记参数摘要）。
     })
     pi.on('tool_execution_start', (event: unknown) => {
       recorder.noteToolStart(event)

@@ -101,12 +101,20 @@ interface HarnessOptions {
    * 「进到上交里时兑现 `entered`，然后一直等 `release`」—— 用来在 await 期间插入手动设定。
    */
   gate?: Gate
+  /**
+   * 让**第二层 LLM 判定**可控延迟（H-2）：给一个 `Gate` 就表示
+   * 「判定被调用时兑现 `entered`，然后一直等 `release`」—— 用来在**判定飞行途中**插入手动设定。
+   * 不传就没有第二层通道（`no_llm`）。
+   */
+  judgeGate?: Gate
+  /** 让 `GET /api/grade/state`（`refresh()` 的唯一出口）可控延迟（H-2 第二处）。 */
+  fetchGate?: Gate
 }
 
 interface Harness {
   extension: ReturnType<typeof createGradeExtension>
   logs: string[]
-  submitted: Array<{ studentId: string; turn: number; text: string }>
+  submitted: Array<{ studentId: string; turn: number; text: string; proposal?: GradeProposal }>
   setGrade(grade: GradeLevel): void
   /** 模拟「学生发了一轮」（与 `runtime.ts` 的调用入口逐字一致）。 */
   pushTurn(text: string): void
@@ -126,7 +134,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
     body: { turns: Array<{ turn: number; text: string; sessionId?: string; proposal?: GradeProposal }> }
   ): Promise<GradeTurnResponse> => {
     const turn = body.turns[body.turns.length - 1]
-    submitted.push({ studentId, turn: turn.turn, text: turn.text })
+    submitted.push({ studentId, turn: turn.turn, text: turn.text, proposal: turn.proposal })
     if (options.gate) {
       options.gate.entered.resolve()
       await options.gate.release.promise
@@ -147,15 +155,28 @@ function createHarness(options: HarnessOptions = {}): Harness {
 
   const extension = createGradeExtension({
     submitter,
-    fetcher: async (): Promise<GradeStateSnapshot> => ({
-      grade: nextGrade,
-      source: 'inferred',
-      lastTurn: 0,
-      cooldownRemainingTurns: 0,
-      streak: 0,
-      direction: 0,
-      confidence: 0
-    }),
+    fetcher: async (): Promise<GradeStateSnapshot> => {
+      if (options.fetchGate) {
+        options.fetchGate.entered.resolve()
+        await options.fetchGate.release.promise
+      }
+      return {
+        grade: nextGrade,
+        source: 'inferred',
+        lastTurn: 0,
+        cooldownRemainingTurns: 0,
+        streak: 0,
+        direction: 0,
+        confidence: 0
+      }
+    },
+    judge: options.judgeGate
+      ? async () => {
+          options.judgeGate!.entered.resolve()
+          await options.judgeGate!.release.promise
+          return { suggestedGrade: 'primary_low', confidence: 0.72 }
+        }
+      : null,
     sessionProvider: () => session,
     log: (line: string) => {
       logs.push(line)
@@ -316,6 +337,118 @@ test('G3c 被作废的那条结论不计入 submitted（计数只说「结论真
     '被 epoch 作废的结论没有进决策链路：submitted 不该 +1（否则「上交成功数」与「学段真的动过几次」对不上）'
   )
   assert.equal(harness.extension.snapshot().failed, 0, '它不是失败（HTTP 是成功的），只是被主动丢弃')
+})
+
+/* ------------------------------------------------------------------ *
+ * G6 在途的第二层判定 / 刷新（H-2）
+ * ------------------------------------------------------------------ */
+
+test('G6a ★★ LLM 判定在飞期间的手动设定必须作废这条在途结论（epoch 快照提到 runJudge 之前）', async () => {
+  // ★ H-2：`submitTurn` 的 epoch 快照原先拍在 `submitter` 的 await 之前、
+  //   `runJudge()` 的 await **之后** —— 于是「判定飞行途中点学段」这个窗口完全没被覆盖。
+  //   判定返回后 `pendingGrade` 照常落地，下一轮 `applyPending()` 把学生刚选的学段顶回去。
+  const judgeGate = { entered: deferred(), release: deferred() }
+  const harness = createHarness({ judgeGate })
+
+  // 第 1、2 轮先走完（没到第二层的触发轮次，也就没有在飞窗口）
+  harness.pushTurn('第一轮')
+  harness.pushTurn('第二轮')
+  await harness.extension.flush()
+  assert.equal(harness.submitted.length, 2, '前两轮不走第二层，正常上交')
+  assert.equal(harness.extension.snapshot().pendingGrade, null, '前两轮服务端说的就是当前学段')
+
+  // ★ 第 3 轮：第二层判定在飞（`LAYER2_FIRST_TURN` / `LAYER2_MIN_TURNS` 都是 3）
+  harness.setGrade('primary_low') // 这条在途结论算出来的是 primary_low（按**旧学段**算的）
+  harness.pushTurn('梯度下降是什么？')
+  await judgeGate.entered.promise // 判定已经在飞（正 await 那道 LLM 调用）
+
+  // ★ 学生**在判定飞行途中**手动选了高中
+  harness.extension.adoptOverride('senior', 10)
+  assert.equal(harness.extension.appliedGrade(), 'senior')
+
+  judgeGate.release.resolve() // 判定现在才回来
+  await harness.extension.flush()
+
+  assert.equal(
+    harness.extension.appliedGrade(),
+    'senior',
+    '★ 学生刚选的学段必须还在（判定回来的结论不许把它顶掉）'
+  )
+  assert.equal(
+    harness.extension.snapshot().pendingGrade,
+    null,
+    '★ 在途结论必须被整条作废：连 pendingGrade 都不许被 primary_low 占住'
+  )
+  assert.equal(
+    harness.submitted.length,
+    2,
+    '连提议都不许带上交（按旧学段算出来的提议对服务端也是过期的原料）'
+  )
+  assert.ok(
+    harness.logs.some((line) => line.includes('第二层判定期间') && line.includes('作废')),
+    '作废必须留一行可见日志（静默丢弃会让人以为「学段不响应」）'
+  )
+
+  // 下一轮：那个旧结论一个字都不许再冒出来
+  harness.pushTurn('再问一句')
+  await harness.extension.flush()
+  assert.equal(harness.extension.appliedGrade(), 'senior', '下一轮的交接不得覆盖手动选择')
+})
+
+test('G6b ★ P-053 反向对照：判定在飞期间**不**手动设定时，那条结论必须被采纳', async () => {
+  // 与 G6a 完全同一场景，唯一的差别是**不**调 adoptOverride。
+  // 这一条红了就说明 G6a 的断言照不出问题（比如 epoch 比对写反了、或干脆把判定结果丢了）。
+  const judgeGate = { entered: deferred(), release: deferred() }
+  const harness = createHarness({ judgeGate })
+
+  harness.pushTurn('第一轮')
+  harness.pushTurn('第二轮')
+  await harness.extension.flush()
+
+  harness.setGrade('primary_low') // 第 3 轮判出来的新学段
+  harness.pushTurn('梯度下降是什么？')
+  await judgeGate.entered.promise
+  judgeGate.release.resolve()
+  await harness.extension.flush()
+
+  assert.equal(harness.submitted.length, 3, '没有手动选择时第三轮照常上交')
+  assert.equal(
+    harness.submitted[2].proposal?.suggestedGrade,
+    'primary_low',
+    '第二层的提议必须跟着这一轮一起交上去'
+  )
+  assert.equal(
+    harness.extension.snapshot().pendingGrade,
+    'primary_low',
+    '没有手动选择时，服务端判出的学段必须照常进入「下一轮生效」'
+  )
+})
+
+test('G6c ★ refresh 的回执在途中被手动设定作废（fire-and-forget 的 GET 不许覆盖新选择）', async () => {
+  // ★ H-2 第二处：`refresh()` 由 `runtime.ts` **不 await** 地调用，sidecar 慢时（上限 8s）
+  //   它的回执带的是**旧的**学段值；无检查地写 `appliedGrade` 就把学生刚选的顶回旧值。
+  const fetchGate = { entered: deferred(), release: deferred() }
+  const harness = createHarness({ fetchGate, grade: 'primary_low' })
+
+  const pending = harness.extension.refresh()
+  await fetchGate.entered.promise // GET 已经在飞
+
+  harness.extension.adoptOverride('senior', 10) // 学生此刻点了高中
+  assert.equal(harness.extension.appliedGrade(), 'senior')
+
+  fetchGate.release.resolve() // 旧值的回执现在才回来
+  const result = await pending
+
+  assert.equal(result, null, '被作废的刷新没有可信结果可回（返回 null 而不是旧值）')
+  assert.equal(
+    harness.extension.appliedGrade(),
+    'senior',
+    '★ refresh 的回执不许把学生刚选的学段顶回旧值'
+  )
+  assert.ok(
+    harness.logs.some((line) => line.includes('取当前学段的回执') && line.includes('作废')),
+    '作废要留一行可见日志'
+  )
 })
 
 /* ------------------------------------------------------------------ *

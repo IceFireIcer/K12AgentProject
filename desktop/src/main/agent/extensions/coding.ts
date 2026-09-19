@@ -969,6 +969,33 @@ export function createCodingExtension(
           asCodingPayload({
             kpId,
             ...evaluation,
+            /**
+             * ★★ 「学生代码跑通没有」与「这次工具调用成功没有」是**两个**问题，
+             *    绝不能共用一个 `ok` 字段（这里曾经就是共用的，代价如下）。
+             *
+             * `evaluation.ok` 是前者。它被原样铺进 `details` 之后，`details.ok` 的含义
+             * 就从「工具级成败」变成了「学生的代码对不对」—— 而工具调用轨迹
+             * （`agent/trace.ts` 的 `toolResultOk()`）正是靠 `details.ok === false` 判失败的，
+             * 于是**学生在编程卡片里写错一行代码（工具本身完全正常）**会在轨迹图上被画成
+             * `fail` 节点、标签写 `error`。轨迹图是报告「设计合理性 25%」的**核心证据**，
+             * 它必须在最常见的教学路径上如实 —— 而「跑代码 → 学生第一次没跑通」正是那条路径。
+             *
+             * 现在的三个字段各司其职（**读之前先看清自己读的是哪一个**）：
+             *   - `codeOk` —— 学生代码跑通没有（**显式命名**，卡片与轨迹都该读它）；
+             *   - `toolOk` —— ★ **工具级**：这次 `evaluate_code` 调用本身成功了。失败的形态
+             *                 走 `failed()`（= `toolFailure()`，`details.error === true`），
+             *                 根本到不了这里；两个字段同时存在，正是为了不让读取方去猜；
+             *   - `ok`     —— 与 `codeOk` **同值**，是渲染进程卡片（`renderer/src/cards/coding.ts`
+             *                 的 `readCodingCard`）当前读的那个字段。它保留在这里是**兼容**：
+             *                 那个文件不在本次改动范围内，改名要连它一起改（见下方的 TODO）。
+             *
+             * ⚠️ TODO（跨文件，需要与渲染进程一起改）：把渲染进程的 `readCodingCard` 改成读
+             *    `codeOk` 之后，本载荷里的 `ok` 应当**删掉**（它不该继续以「工具级字段」的名字
+             *    承载领域值），届时 `toolOk` 也可以直接并回 `ok`。在那之前保留同值别名，
+             *    是为了不让「载荷改名」变成「卡片显示不出来」。
+             */
+            codeOk: evaluation.ok,
+            toolOk: true,
             // ↓ 下面这些是**给卡片与轨迹图的补充字段**（契约字段原样保留在上面）
             consecutiveFailures: snapshot.consecutiveFailures,
             shouldIntervene,

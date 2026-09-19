@@ -34,6 +34,8 @@ import {
   type SettingsSnapshot,
   type SettingsUpdateRequest
 } from '../api/settings'
+// ★ 异常 → 可读中文（含「连不上 sidecar」那一类：英文的 `fetch failed` 不许直出给用户）
+import { describeClientError } from '../api/student-facing'
 
 /**
  * LLM 四项（供应商 ID / 名称 / BaseURL / APIKey / ModelID，全部可改）。
@@ -174,7 +176,7 @@ export const useSettingsStore = defineStore('settings', () => {
       fillFromSnapshot(result.data)
       notice.value = null
     } catch (error) {
-      errorText.value = `读取设置失败：${describeError(error)}`
+      errorText.value = `读取设置失败：${describeClientError(error)}`
     } finally {
       loading.value = false
     }
@@ -210,7 +212,7 @@ export const useSettingsStore = defineStore('settings', () => {
       }
       return true
     } catch (error) {
-      errorText.value = `保存失败：${describeError(error)}`
+      errorText.value = `保存失败：${describeClientError(error)}`
       return false
     } finally {
       saving.value = false
@@ -231,7 +233,7 @@ export const useSettingsStore = defineStore('settings', () => {
       const result = await lookup.bridge.probeSettings({ llm: buildLlmPayload() })
       probe.value = result.ok ? result.data : { ok: false, message: result.message }
     } catch (error) {
-      probe.value = { ok: false, message: `探测请求失败：${describeError(error)}` }
+      probe.value = { ok: false, message: `探测请求失败：${describeClientError(error)}` }
     } finally {
       probeAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
       probing.value = false
@@ -258,7 +260,7 @@ export const useSettingsStore = defineStore('settings', () => {
       }
       catalog.value = buildPresetOptions(result.data)
     } catch (error) {
-      catalogError.value = `读取供应商预设失败：${describeError(error)}`
+      catalogError.value = `读取供应商预设失败：${describeClientError(error)}`
     } finally {
       loadingCatalog.value = false
     }
@@ -314,7 +316,7 @@ export const useSettingsStore = defineStore('settings', () => {
       fetched.value = result.data
       candidatesOpen.value = true
     } catch (error) {
-      errorText.value = `拉取模型失败：${describeError(error)}`
+      errorText.value = `拉取模型失败：${describeClientError(error)}`
     } finally {
       fetching.value = false
     }
@@ -476,6 +478,3 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 })
 
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}

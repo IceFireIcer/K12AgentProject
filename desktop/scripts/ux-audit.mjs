@@ -164,6 +164,26 @@ const send = async (cdp, text) => {
 async function main() {
   const cdp = await Cdp.attach()
 
+  /**
+   * ★★ F2 的监听器**必须在这里装**（attach 之后的第一件事），不能挪回 F 段。
+   *
+   * 为什么：本文件的段落顺序是 A→B→C→D→E→G→H→**F**（F 排在最后），
+   * 而 F2 断言的是「**整个流程**没有未捕获的异常」。监听器装在 F 段（原实现）时，
+   * A–H 段（打字、滚动、忙时排队、浮层几何）期间抛的任何异常都**根本没被记录** ——
+   * 断言看着全绿，实际覆盖面是空集，而那 8 段正是最容易出异常的地方。
+   *
+   * 装在这里，覆盖范围才与 F2 的措辞（「整个流程」）一致。
+   * `window.__k12Ux` 同时兼作幂等哨兵（重复调用不会挂上第二个监听器）。
+   */
+  await cdp.evaluate(`(() => {
+    if (!window.__k12Ux) {
+      window.__k12Ux = []
+      window.addEventListener('error', (e) => window.__k12Ux.push('error: ' + e.message))
+      window.addEventListener('unhandledrejection', (e) => window.__k12Ux.push('rejection: ' + e.reason))
+    }
+    return true
+  })()`)
+
   const meta = await cdp.evaluate(`(() => ({
     w: window.innerWidth, h: window.innerHeight,
     dpr: window.devicePixelRatio,
@@ -193,8 +213,12 @@ async function main() {
   //     ① 新行是**用户敲进去**的（这里用 insertText 模拟打字产生的换行）；
   //     ② 此时按 Enter **必须不发送**（这才是 Shift+Enter 的真正契约：
   //        换行后继续编辑，而不是把半句话发出去）。
+  // ★ 用 `data-testid` 定位而**不是按文案找按钮**：文案改过一次
+  //   （「新会话」→「新对话」，因为它现在真的开一条新会话而不只是清屏），
+  //   而按文案找的写法在那次改名后**静默失效** —— 按钮没被点到，
+  //   后面的断言在一段没清干净的对话上跑，结论就不可信了。testid 是稳定的契约。
   await cdp.evaluate(`(() => {
-    const b = Array.from(document.querySelectorAll('button')).find((x) => x.innerText.trim() === '新会话')
+    const b = document.querySelector('[data-testid="new-session"]')
     if (b) b.click(); return Boolean(b)
   })()`)
   await sleep(600)
@@ -322,14 +346,45 @@ async function main() {
   console.log('\n\u001b[1mC. 触控目标与可读性\u001b[0m')
 
   const sizes = await cdp.evaluate(`(() => {
+    /**
+     * ★★ 量「**有效**可点区域」，而不是元素自己的矩形。
+     *
+     * 两条理由，各修一类真实缺陷：
+     *
+     * ① **radio 的本体只有 13×13**（那只是它画的小圆点），学生实际点的是包着它的
+     *    \`<label class="option" data-testid="quiz-option">\`。直接量 input 会**报假阳性**，
+     *    更糟的是——见 ②。
+     * ② 题卡选项**根本不在原来的集合里**：\`QuizCard.vue\` 的选项是
+     *    \`<label>\` 包 \`<input type="radio">\`、**没有 role**，
+     *    而原来的选择器只收 \`button, [role="button"], a[href]\` ——
+     *    于是「闯关题目的选项好不好点」这件事**从头到尾没被量过**。
+     *    （\`scripts/ux-pages-audit.mjs\` 已经修过同一个问题，这里搬的是那份实现。）
+     *
+     * 规则：往上找 label / role=button / el-checkbox 容器，用它当量测框。
+     */
+    const effectiveBox = (el) => {
+      let node = el
+      for (let i = 0; i < 4 && node; i += 1) {
+        const r = node.getBoundingClientRect()
+        const isLabel = node.tagName === 'LABEL'
+        const wraps = isLabel || node.getAttribute('role') === 'button' || node.classList.contains('el-checkbox')
+        if (wraps && r.width > 0 && r.height > 0) return r
+        node = node.parentElement
+      }
+      return el.getBoundingClientRect()
+    }
+    // 「可点的小东西」：按钮 + 可点角色 + **radio / checkbox**
+    //   （后两者正是题卡选项的形态；它们的量测框由 effectiveBox 往上收，见上）
     const pick = (sel) => Array.from(document.querySelectorAll(sel))
-    const measure = (els) => els.map((el) => ({
-      label: (el.innerText || el.getAttribute('aria-label') || el.title || el.tagName).trim().slice(0, 16),
-      w: Math.round(el.getBoundingClientRect().width),
-      h: Math.round(el.getBoundingClientRect().height)
-    })).filter((x) => x.w > 0 && x.h > 0)
-    // 「可点的小东西」：按钮 + 可点角色
-    const clickable = measure(pick('button, [role="button"], a[href]'))
+    const measure = (els) => els.map((el) => {
+      const r = effectiveBox(el)
+      return {
+        label: (el.innerText || el.getAttribute('aria-label') || el.title || el.getAttribute('data-testid') || el.tagName).trim().slice(0, 16),
+        w: Math.round(r.width),
+        h: Math.round(r.height)
+      }
+    }).filter((x) => x.w > 0 && x.h > 0)
+    const clickable = measure(pick('button, [role="button"], a[href], input[type="radio"], input[type="checkbox"]'))
     // 正文可读性
     const bodyEl = document.querySelector('[data-testid="assistant-text"]')
     const cs = bodyEl ? getComputedStyle(bodyEl) : null
@@ -359,7 +414,7 @@ async function main() {
   const beforeTurns = await cdp.evaluate(`document.querySelectorAll('[data-testid="chat-turn"]').length`)
   if (beforeTurns > 0) {
     await cdp.evaluate(
-      `Array.from(document.querySelectorAll('button')).find((x) => x.innerText.trim() === '新会话')?.click()`
+      `document.querySelector('[data-testid="new-session"]')?.click()`
     )
     await sleep(700)
     // ★ 确认框可能用 teleport 挂在 body 上（`.cfm` 一族），也可能带 role=dialog；
@@ -367,11 +422,15 @@ async function main() {
     const dialog = await cdp.evaluate(`(() => {
       const byRole = document.querySelector('[role="dialog"], [role="alertdialog"]')
       const byClass = document.querySelector('.cfm, [data-testid*="confirm"]')
-      const byText = document.body.innerText.includes('开始新会话')
+      // ★ 文案断言放宽成「标题里有『开始新』」：标题从「开始新会话」改成过
+      //   「开始新对话」（新实现真的开一条新会话，不只是清屏）。
+      //   钉死整句会让一次**文案打磨**触发一次假红，而这里真正要判的是
+      //   「有没有先确认」——多一个字的差别不该让这条体检失去意义。
+      const byText = /开始新(会话|对话)/.test(document.body.innerText)
       return { found: Boolean(byRole || byClass), byText }
     })()`)
-    check('D1', '「新会话」会先确认再清空（避免手滑丢掉整轮问答）', dialog.found && dialog.byText,
-      `确认框存在=${dialog.found}，文案含「开始新会话」=${dialog.byText}`,
+    check('D1', '「新对话」会先确认再切换（避免手滑丢掉整轮问答）', dialog.found && dialog.byText,
+      `确认框存在=${dialog.found}，文案含「开始新…」=${dialog.byText}`,
       '学生刚问完一长段、正要复制回答时手滑点到「新会话」，内容会立刻消失且无法恢复')
 
     // 取消掉，别真清空（保留上下文给后面的场景）
@@ -388,6 +447,114 @@ async function main() {
       '点了取消却已经清空，是最伤信任的一类 bug（学生会认定「这软件会丢东西」）')
   } else {
     console.log('\u001b[2m  [SKIP] D1 当前没有对话内容可测\u001b[0m')
+  }
+
+  /* ── D3–D5. 会话侧栏：历史对话能不能切回去 ─────────────────────
+   *
+   * 这一组对应「关掉应用再打开，上一段对话还在」那条验收的**界面一半**：
+   * 数据一直在盘上（Pi 每个会话一个 JSONL），缺的一直是「看得见 + 点得回去」。
+   * ★ 它必须真跑界面：`npm test` 里那几条断言的是源码与 store 的行为，
+   *   而「侧栏到底有没有列出来、点了之后消息区有没有变」只有真渲染出来才知道。
+   */
+  console.log('\x1b[1mD3–D5. 历史对话侧栏（切回去接着聊）\x1b[0m')
+
+  const sidebar = await cdp.evaluate(`(() => {
+    const root = document.querySelector('[data-testid="session-list"]')
+    if (!root) return { present: false }
+    const items = Array.from(root.querySelectorAll('[data-testid^="session-item-"]'))
+    return {
+      present: true,
+      count: items.length,
+      active: items.filter((el) => el.getAttribute('aria-current') === 'true').length,
+      firstId: items[0]?.getAttribute('data-testid')?.replace('session-item-', '') ?? '',
+      // 「新对话」按钮必须在侧栏里（它是这一列的主操作）
+      hasNew: Boolean(root.querySelector('[data-testid="session-new"]'))
+    }
+  })()`)
+
+  check('D3', '对话页有历史对话侧栏，且列出该学生的会话', sidebar.present && sidebar.count > 0,
+    sidebar.present ? `列出 ${sidebar.count} 条，当前高亮 ${sidebar.active} 条` : '没有找到 [data-testid="session-list"]',
+    '没有它，学生关掉应用再打开就只能看到空对话 —— 而数据其实一直在盘上（「重启后数据延续」这条验收不达标）')
+
+  check('D4', '侧栏里有「新对话」入口（新开一段，而不是删掉旧的）', Boolean(sidebar.hasNew),
+    sidebar.hasNew ? '找到 [data-testid="session-new"]' : '侧栏里没有新对话按钮',
+    '「新对话」与「删掉旧的」是两件事：旧的那条要留在列表里随时切回去')
+
+  if (sidebar.present && sidebar.count >= 2 && sidebar.firstId) {
+    // D5：点一条**不是当前的**历史对话，消息区要恢复出内容
+    const targetId = await cdp.evaluate(`(() => {
+      const items = Array.from(document.querySelectorAll('[data-testid^="session-item-"]'))
+      const other = items.find((el) => el.getAttribute('aria-current') !== 'true')
+      return other?.getAttribute('data-testid')?.replace('session-item-', '') ?? ''
+    })()`)
+    if (targetId) {
+      const beforeTurns = await cdp.evaluate(`document.querySelectorAll('[data-testid="chat-turn"]').length`)
+      await cdp.evaluate(`document.querySelector('[data-testid="session-item-' + ${JSON.stringify(targetId)} + '"]')?.click()`)
+      // 切换要 dispose 旧会话 + 装配新的（真跑一次 Pi），给足时间
+      await sleep(3500)
+      const after = await cdp.evaluate(`(() => ({
+        turns: document.querySelectorAll('[data-testid="chat-turn"]').length,
+        active: document.querySelectorAll('[data-testid^="session-item-"][aria-current="true"]').length,
+        notice: document.querySelector('[data-testid="session-notice"]')?.innerText ?? '',
+        streaming: document.querySelectorAll('[data-testid="chat-turn"][data-status="streaming"]').length
+      }))()`)
+      check('D5', '点一条历史对话能恢复出内容（不是切了个空的）', after.turns > 0,
+        `${beforeTurns} 轮 → 切过去 ${after.turns} 轮${after.notice ? `（提示：${after.notice}）` : ''}`,
+        '切换失败最常见的原因是装配失败（缺 Key / 服务没起来）—— 那时应当**保持原样并说一句人话**，而不是把屏幕清空')
+      check('D6', '切换后侧栏高亮跟着走（学生知道自己在哪一条上）', after.active === 1 && !after.streaming,
+        `高亮 ${after.active} 条，恢复出来的轮次里 streaming=${after.streaming}`,
+        '高亮不跟着走 = 学生点完不知道切没切成；恢复出来的历史消息更不该是「正在回答」状态')
+    } else {
+      console.log('[2m  [SKIP] D5 只有一条会话，没有「另一条」可切[0m')
+    }
+  } else {
+    console.log('[2m  [SKIP] D5/D6 会话少于两条，无法验证「切回去」（多聊几轮再跑）[0m')
+  }
+
+  /* ── D7–D8. 会话分叉（从这里重新问）─────────────────────────────
+   *
+   * 这一组盯住「分叉按钮到底在不在、点了会不会把原对话弄丢」。
+   * ★ 单测覆盖的是纯函数与 store 的行为；「按钮真的渲染出来了吗」只有真跑才知道
+   *   —— 这正是 P-101 的教训（功能全对，但渲染在永远进不去的分支里）。
+   */
+  console.log('\x1b[1mD7–D8. 从这里重新问（会话分叉）\x1b[0m')
+
+  const branchUi = await cdp.evaluate(`(() => {
+    const turns = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+    const btns = Array.from(document.querySelectorAll('[data-testid="branch-restart"]'))
+    // ★★ 判据是「**回答正文非空** 且已结束」的轮次：
+    //   分叉按钮挂的是**助手那条回答**（规范原文「每条 assistant 消息旁」），
+    //   而一轮里可能只有学生的一句话（那一轮失败 / 被拦下，没有回答），
+    //   那种轮次没有回答可挂。
+    //   ⚠️ 踩过两次：初版按「所有已结束轮次」数（假红）；改成「有 assistant-message
+    //      元素」仍然假红 —— 那个元素**永远在**（回答为空时它渲染的是「正在查教材…」
+    //      占位）所以恒为真。真正有信息量的判据是**正文字符数 > 0**。
+    const answerable = turns.filter(
+      (t) =>
+        t.getAttribute('data-status') !== 'streaming' &&
+        (t.querySelector('[data-testid="assistant-text"]')?.innerText ?? '').trim().length > 0
+    ).length
+    const box = btns[0]?.getBoundingClientRect()
+    return {
+      turns: turns.length,
+      answerable,
+      buttons: btns.length,
+      h: box ? Math.round(box.height) : 0,
+      // 反向对照：流式中的轮次里不该有按钮
+      inStreaming: Array.from(document.querySelectorAll('[data-testid="chat-turn"][data-status="streaming"] [data-testid="branch-restart"]')).length
+    }
+  })()`)
+
+  check('D7', '每条**已结束且有回答**的轮次旁都有「从这里重新问」', branchUi.answerable > 0 && branchUi.buttons === branchUi.answerable,
+    `${branchUi.turns} 轮（有回答且已结束 ${branchUi.answerable}）· 按钮 ${branchUi.buttons} 个`,
+    '缺按钮 = 学生没法换问法重开一条线（这是分支功能的唯一入口）')
+  check('D8', '流式输出途中不给分叉按钮（分支点不该是半句话）', branchUi.inStreaming === 0,
+    `流式轮次里的按钮数 = ${branchUi.inStreaming}`,
+    '回答还没写完就当分支点，复制出来的新会话会带着一段残缺的上下文')
+  if (branchUi.buttons > 0) {
+    check('D9', '分叉按钮的触控高度达标（≥28px）', branchUi.h >= 28,
+      `实测 ${branchUi.h}px`,
+      '它挂在每条回答下面，尺寸太小会让「换个问法」这个动作变得很难点')
   }
 
   /* ── E. 页面切换的记忆 ───────────────────────────────────────── */
@@ -543,19 +710,42 @@ async function main() {
     if (!geometry.present) {
       console.log('\u001b[2m  [SKIP] 「回到最新」没出现（内容不够长？）\u001b[0m')
     } else {
-      check('H1', '「回到最新」不压住输入框 / 发送键 / 待发送条', geometry.overlaps.length === 0,
+      /**
+       * ★★ H1/H2 的前置条件：**必须真的量到了被测对象**。
+       *
+       * 缺口（审计结论）：`targets` 是从一组**类名 / data-testid 选择器**收集来的，
+       * 而 `targets = []` 时两条断言都退化成恒真 ——
+       *   · H1：`[].length === 0` → 通过（「没有重叠」和「什么都没量到」长得一模一样）；
+       *   · H2：`Math.min(...[])` = `Infinity`，`Infinity >= 4` → 通过。
+       * 于是选择器一旦失效（`.cp__model` 改了名、输入条换成别的组件、
+       * 元素因为某个条件没渲染），这两条会**静默通过**，而它们本来是
+       * 「浮层压住输入框 17px」那次缺陷的唯一回归防线（P-082）。
+       *
+       * 所以先判「量到了几个」：找不到被测对象 = **失败**，不是「没问题」。
+       * 要求 ≥2 是因为 H2 说的是「与**下方控件们**的间距」——只量到一个时，
+       * 那句话其实没被验证过（输入框或发送键任一没量到，就已经漏了一半）。
+       */
+      const targetCount = (geometry.targets ?? []).length
+      check('H0', '量得到底部可交互元素（选择器还有效 —— 否则 H1/H2 是空断言）', targetCount >= 2,
+        `量到 ${targetCount} 个：${(geometry.targets ?? []).map((t) => t.id).join('、') || '（一个都没有）'}`,
+        'H1 的「没有重叠」与 H2 的「最小间距 Infinity」在量到 0 个时都会恒真；' +
+          '选择器失效等于这两条防线不存在，而浮层压住输入框正是实测踩到过的缺陷')
+
+      check('H1', '「回到最新」不压住输入框 / 发送键 / 待发送条',
+        targetCount >= 2 && geometry.overlaps.length === 0,
         geometry.overlaps.length
           ? `与这些元素重叠：${geometry.overlaps.join('、')}（按钮 ${geometry.button.top}–${geometry.button.bottom}）`
-          : `按钮 ${geometry.button.top}–${geometry.button.bottom}，底部元素均在下方`,
+          : `按钮 ${geometry.button.top}–${geometry.button.bottom}，${targetCount} 个底部元素均在下方`,
         '浮层压住输入框时，学生想点输入框会点到按钮，然后被滚到底部 —— 他不知道发生了什么')
 
       // ★ 补一条「有呼吸感」的检查：仅仅「不重叠」还不够 ——
       //   贴着边（间距 0~2px）在视觉上就是「粘在一起」，而且 DPI 取整后随时可能变成重叠。
-      const gap = Math.min(
-        ...geometry.targets.map((t) => t.top - geometry.button.bottom).filter((g) => g > -Infinity)
-      )
-      check('H2', '浮标与下方控件留有余量（≥4px，不贴边）', gap >= 4,
-        `最小间距 ${gap}px`,
+      //   ⚠️ 不用 `Math.min(...[])`：空数组会给出 `Infinity`（恒真），改用显式判空。
+      const gap = targetCount > 0
+        ? Math.min(...geometry.targets.map((t) => t.top - geometry.button.bottom))
+        : Number.NaN
+      check('H2', '浮标与下方控件留有余量（≥4px，不贴边）', Number.isFinite(gap) && gap >= 4,
+        Number.isFinite(gap) ? `最小间距 ${gap}px` : `量不到下方控件（${targetCount} 个）—— 无法判定`,
         '贴边在视觉上像「粘住了」，而且 DPI 取整一旦变化就会变成重叠（实测踩到过 17px 重叠）')
     }
   }
@@ -575,16 +765,17 @@ async function main() {
     horizontallyFine.offenders.length ? `溢出元素：${horizontallyFine.offenders.join(', ')}` : '无溢出元素',
     '横向滚动条是「网页错版」最直观的信号，也会让内容被裁掉')
 
+  // ★ 监听器在 main() 开头就装好了（见那里的注释）—— 这里只取累计结果，
+  //   所以它覆盖的是 A 到 H 的**全程**，而不只是 F 段自己跑的那几行。
   const errors = await cdp.evaluate(`(() => {
-    if (!window.__k12Ux) {
-      window.__k12Ux = []
-      window.addEventListener('error', (e) => window.__k12Ux.push('error: ' + e.message))
-      window.addEventListener('unhandledrejection', (e) => window.__k12Ux.push('rejection: ' + e.reason))
-    }
+    // 兜底：万一监听器没装上（例如中途重新导航过页面），这里至少别静默通过
+    if (!window.__k12Ux) return null
     return window.__k12Ux.slice(0, 5)
   })()`)
-  check('F2', '整个流程没有未捕获的异常', errors.length === 0,
-    errors.length ? errors.join(' | ') : '0 条')
+  check('F2', '整个流程没有未捕获的异常', Array.isArray(errors) && errors.length === 0,
+    errors === null ? '★ 监听器没装上（页面可能被重新导航过）—— 本次结果不可信'
+      : errors.length ? errors.join(' | ') : '0 条',
+    '异常被吞掉时，学生看到的是「点一下没反应」，而日志里什么都没有')
 
   const unresolvedText = await cdp.evaluate(`(() => {
     const text = document.body.innerText

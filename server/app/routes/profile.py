@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Collection, Literal
+from typing import Collection
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import Field, field_validator
@@ -56,7 +56,9 @@ from app.contracts import (
     GradeLevel,
     LearningActivity,
     Mastery,
+    OpeningGuidance,
     PreferenceUpdateRequest,
+    RecommendationSource,
     Student,
     StudentProfile,
 )
@@ -92,8 +94,9 @@ RECOMMEND_LIMIT = 3
 #: 同一份代码，只要 ``mastery.score`` 掉到这条线以下，推荐的第一位就换成它。
 REVIEW_MASTERY_CEILING = 0.5
 
-#: ★ 推荐的来源（回给前端做展示与断言；**取值冻结**，前端按它决定要不要提示）。
-RecommendationSource = Literal["review", "graph", "cold_start", "empty"]
+# ★ 推荐的来源（`RecommendationSource`）**定义在 `app/contracts.py`**，本文件只 import：
+#   它是「推荐」与「开场引导」两个端点共用的冻结词表，两处各写一份 `Literal` 就会漂移
+#   （漂移的表现是「推荐页说是重练、开场语说这是新起点」这类自相矛盾）。
 
 
 class LearningEventRequest(CamelModel):
@@ -438,6 +441,43 @@ def build_recommendation(
     )
 
 
+def _opening_text(source: RecommendationSource, items: list[RecommendationItem]) -> str:
+    """把推荐结论拼成一句**可直接念**的开场语（纯模板，**不调 LLM**）。
+
+    为什么用模板而不是让模型写（待实现文档给出的两个方案里选 A）：
+
+    - 零延迟：它在**新建会话**那条路径上，而学生此刻正看着空屏等界面可用；
+    - 断网 / 无 Key 可用：模型方案在没 Key 的机器上必然退回模板，那还不如只有一套；
+    - 无成本：每开一段新会话就发一次云端调用，对一个「只是换个说法」的功能不值得。
+
+    ★★ **只说第一个知识点**（不沿用 :func:`_recommendation_summary` 的「取前两条」）：
+      开场语配着一个「好啊，就从这里开始」的动作按钮，而那个按钮**只能去一个地方**
+      —— 接口回的 ``kp_id`` 就是第一条。文案里出现两个知识点时，学生点下去会落到
+      其中一个（且看不出是哪一个）。实测踩到过：界面显示
+      「从人工智能的定义、算力开始吧」，而按钮指向的是前者。
+      ⚠️ 措辞仍与推荐接口**同族**（三种来源三种说法，只是这里只念第一条）。
+
+    ★ **不编造学习历史**：`review` 那句的主语是「回头看」而 `cold_start` 是「起步」——
+      它们的依据分别是「库里真有低于阈值的掌握度行」与「图里的入度为 0 节点」，
+      都不是猜的。
+    """
+    if not items or source == "empty":
+        return ""
+    name = items[0].name.strip() or items[0].kp_id
+    if not name:
+        return ""
+    if source == "review":
+        body = f"{name}这个地方还没练熟，我们把它再过一遍。"
+    elif source == "graph":
+        body = f"你已经掌握了它的前置知识，下一步可以学{name}了。"
+    else:
+        # cold_start（以及任何未登记的来源：按「起步」说 —— 它是最保守的一种说法，
+        # 不含任何关于学生历史的主张）
+        body = f"我们从{name}开始吧，这是这条学习路线的起点。"
+    # 「你好，我是团团。」让学生知道**是谁**在开口，而不是凭空冒出一个没有主语的建议。
+    return f"你好，我是团团。{body}"
+
+
 def _recommendation_summary(source: RecommendationSource, items: list[RecommendationItem]) -> str:
     """一句可读总述（对话里可直接念；空推荐也要说清「为什么没有」而不是留白）。"""
     if not items:
@@ -605,6 +645,74 @@ def student_recommendation(
         store.close()
 
 
+@router.get(
+    "/profile/{student_id}/opening",
+    response_model=OpeningGuidance,
+    summary="新会话开场引导（主动发起对话）",
+)
+def student_opening(
+    request: Request,
+    student_id: str,
+    grade_level: str | None = Query(None, description="覆盖学段（默认用画像里的当前学段）"),
+    gradeLevel: str | None = Query(None, include_in_schema=False),
+) -> OpeningGuidance:
+    """★ 「主动发起对话引导」的**唯一出口**（需求明文要求，此前零实现）。
+
+    形态：**新会话建立后**调一次，把结果作为 AI 的第一条消息送进对话。
+    不是「每轮打招呼」—— 它只在**会话内还没有任何消息**时才有意义。
+
+    ★★ 不要重写推荐逻辑：本端点与 ``/recommendation`` 共用 :func:`build_recommendation`
+       （它再往下走 :func:`app.knowledge.deps.recommend_next`，那是依赖图推荐的唯一实现）。
+       「开场语该说什么」这件事的全部信息都在那个返回值里，本端点只做拼接。
+
+    **没有可推荐的内容时返回空串**（而不是一句放之四海皆准的寒暄）：
+    知识库缺失、学生已全部掌握、依赖图为空 —— 这三种情况都推不出该学什么，
+    此时**不发开场**才是诚实的；前端据 ``text == ""`` 直接跳过。
+
+    与 ``/recommendation`` 一样，**学生不存在时自动建立**（冷启动的第一屏就是它的用例）。
+    """
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
+
+    override = grade_level or gradeLevel
+    store = open_learning_store(data_dir, student_id)
+    try:
+        student = store.get_student(student_id)
+        if student is None:
+            student = store.upsert_student(
+                student_id, nickname="", grade_level=DEFAULT_COLD_START_GRADE
+            )
+            logger.info("冷启动：为 %s 建立学生行（学段 %s），生成开场引导", student_id, student.grade_level)
+        level = override or student.grade_level
+        if level not in ("primary_low", "primary_high", "junior", "senior"):
+            raise HTTPException(
+                status_code=422,
+                detail=f"gradeLevel 非法：{level!r}（只允许四学段之一）",
+            )
+        recommendation = build_recommendation(
+            request, store, student_id=student_id, grade_level=level
+        )
+    finally:
+        store.close()
+
+    first = recommendation.items[0] if recommendation.items else None
+    guidance = OpeningGuidance(
+        text=_opening_text(recommendation.source, recommendation.items),
+        # ★ 只在**真有推荐项**时给 kp_id：空推荐配一个 kp_id 会让前端渲染出一个
+        #   「去吧」按钮，而点下去没有任何目标。
+        kp_id=first.kp_id if first is not None else None,
+        source=recommendation.source,
+    )
+    logger.info(
+        "开场引导：学生=%s 学段=%s 来源=%s 有无开场语=%s",
+        student_id,
+        level,
+        guidance.source,
+        "有" if guidance.text else "无",
+    )
+    return guidance
+
+
 # --------------------------------------------------------------------------- #
 # 写：学习记录回流
 # --------------------------------------------------------------------------- #
@@ -649,12 +757,15 @@ def record_learning_event(
             logger.exception("学习记录写入失败：%s", student_id)
             raise HTTPException(status_code=503, detail=f"学习记录写入失败（本地数据库异常）：{exc}") from exc
 
-        # 刷新活跃时间（`student.last_active_at`）—— 「重启后学习记录仍在」这条验收要看它
-        store.upsert_student(
-            student_id,
-            nickname=student.nickname,
-            grade_level=student.grade_level,
-        )
+        # 刷新活跃时间（`student.last_active_at`）—— 「重启后学习记录仍在」这条验收要看它。
+        # ★★ 必须是**单列** UPDATE，不能再用 `upsert_student` 回写整行：本端点每轮
+        #   `agent_end` 都会发一次，而 `upsert_student` 的 `ON CONFLICT` 分支会把
+        #   上面 `get_student` 读到的 `grade_level` 快照一起写回去 —— 「读快照 → 写回」
+        #   之间学段可能已被 `app/grade/rules.py` 的规则引擎或 `POST /api/grade/override`
+        #   改掉，于是这次「刷新活跃时间」把刚生效的新学段**打回旧值**，且不留
+        #   `grade_history`、也不清 `current_chapter`：库里学段与轨迹互相矛盾（两处真相）。
+        #   `touch_last_active` 只写 `last_active_at` 一列，没有读-改-写窗口，天然免疫。
+        store.touch_last_active(student_id)
         return LearningEventAck(ok=True)
     finally:
         store.close()
@@ -873,6 +984,7 @@ __all__ = [
     "KP_ID_MAX_CHARS",
     "LearningEventAck",
     "LearningEventRequest",
+    "OpeningGuidance",
     "RECOMMEND_LIMIT",
     "REVIEW_MASTERY_CEILING",
     "RecommendationItem",
@@ -880,6 +992,7 @@ __all__ = [
     "build_recommendation",
     "read_chapter",
     "router",
+    "student_opening",
     "update_preference",
     "write_chapter",
 ]

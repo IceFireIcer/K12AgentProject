@@ -53,10 +53,12 @@ import ContextRail from '../components/ContextRail.vue'
 import MessageComposer from '../components/MessageComposer.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChapterIndicator from '../components/ChapterIndicator.vue'
+import SessionList from '../components/SessionList.vue'
 import { useChatStore } from '../stores/chat'
 import { useConfirm } from '../stores/confirm'
 import { useInsightStore } from '../stores/insight'
 import { useStudentStore } from '../stores/student'
+import { useTraceStore } from '../stores/trace'
 import { useUiStore, type PageName } from '../stores/ui'
 // ★ 来源说法（手动选中 / AI 引擎推算）只有 `labels.ts` 一处实现 ——
 //   本页与右栏各写一份映射迟早对不上，而那种不一致是「界面自相矛盾」。
@@ -68,6 +70,9 @@ const chat = useChatStore()
 const confirm = useConfirm()
 const insight = useInsightStore()
 const student = useStudentStore()
+// ★ 工具轨迹只在「新会话」时需要写（清空）；订阅与渲染都在 ContextRail 里，
+//   这里取的仍是同一个 Pinia 单例，不会出现两份状态。
+const trace = useTraceStore()
 const ui = useUiStore()
 
 /* ── 消息列表：直接读 store（6 事件折叠的结果）──────────────────────────── */
@@ -260,24 +265,118 @@ function toggleRail(): void {
   autoClosed = false
 }
 
-/* ── 新会话：清空不可撤销 → 先确认 ──────────────────────────────────────── */
+/* ── 新会话：**开一个新的会话文件**（不是删旧的）───────────────────────── */
+/**
+ * ★★ 与改造前的区别（这一条决定了这个按钮到底在做什么）：
+ *   旧实现只调 `chat.resetConversation()` —— **纯本地清屏**，Pi 那一侧的会话
+ *   一动不动。于是学生「新会话」之后继续说的每一句话，都写进**同一个** JSONL 文件，
+ *   历史列表里也只有那一条越来越长（「新会话」实际上只是个清屏按钮）。
+ *   现在它走 `chat.startNewSession()`：dispose 旧会话 → 开一个新文件 → 回传状态。
+ *
+ * ★ 旧会话**不删除**（它仍在左侧列表里，随时能切回去）。
+ * ★ 确认弹窗保留：它的意义从「清空不可撤销」变成了「你要离开当前这段了」——
+ *   但**仍然需要**：学生会以为点错就丢了，说清楚「旧的还在」比不说好。
+ */
 async function newSession(): Promise<void> {
   if (turns.value.length > 0) {
     const ok = await confirm.ask({
-      title: '开始新会话？',
+      title: '开始新对话？',
       body:
-        `当前这段对话有 ${turns.value.length} 轮，清空后界面上不再显示。` +
-        '（记录仍留在本机这一名学生自己的会话文件里，学习档案的「历史会话」可以回看。）',
-      confirmText: '清空并开始'
+        `当前这段对话有 ${turns.value.length} 轮。开始新对话后界面会空出来，` +
+        // ★ 同上：确认框是纯文本，不解析 Markdown
+        '但这一段不会丢 —— 它仍在左边的历史列表里，随时可以点回去继续聊。',
+      confirmText: '开始新对话'
     })
     if (!ok) return
   }
-  chat.resetConversation()
+  // ★ 先让主进程真的换一条会话（失败就**什么都不动** —— 界面清空了却没换会话
+  //   是最坏的失败形态：学生以为在说新话题，其实接着写进上一条会话）。
+  const result = await chat.startNewSession()
+  if (!result.ok) {
+    // ★ 走 store 的写入口（不是直接改 ref）：提示的写入只有一处，界面不持有状态
+    chat.setSessionNotice(result.message ?? '新建会话失败。')
+    return
+  }
+  chat.setSessionNotice(null)
+  // ★ 工具调用轨迹也要跟着清：右栏那一页写的是「本轮工具调用」，它由主进程推的**快照**填充。
+  //   只清对话的话，新会话里右栏仍列着上一段对话的「第 N 轮」分组 —— 学生刚点了「新会话」，
+  //   界面上却还摆着旧记录，而那一页的标题正是在说「本轮」。
+  //   ⚠️ 这里复用 `ContextRail` 已建立的同一个 store 实例（Pinia 单例），
+  //      不是新引一个 —— 新引一个只会是同一个对象，写两份才危险。
+  trace.reset()
   await nextTick()
   // 清空后回到「跟随 + 贴底」的初始状态：上一段对话留下的 stick=false 不该影响新会话
   stick.value = true
   showJump.value = false
   await scrollToBottom()
+}
+
+/* ── 会话分叉：从这里重新问 ─────────────────────────────────────────────── */
+/**
+ * 正在分叉的那条消息（`null` = 没有在分叉）。
+ *
+ * ★ 用它做两件事：禁用全部分叉按钮（第二次点击没有意义，而且会造出两条多余的
+ *   分支）、以及让学生看到「正在准备」的反馈（分叉要写文件 + 装配，秒级）。
+ */
+const branchingEntryId = ref<string | null>(null)
+
+/**
+ * ★★ 从某条消息处重新问（分叉）。
+ *
+ * 为什么**先确认**：它会让界面切到另一条会话线（当前这段不再显示在屏幕上）。
+ * 学生可能只是想看看那条回答、手滑点到 —— 而分支是真实写盘的动作
+ * （虽然原会话不动，但「屏幕上的对话忽然换了一段」本身足够让人困惑）。
+ * 确认文案里**明说原对话不会丢**，因为那正是学生最担心的事。
+ */
+async function onBranch(entryId: string): Promise<void> {
+  if (branchingEntryId.value !== null) return
+  const ok = await confirm.ask({
+    title: '从这里重新问？',
+    // ★ 确认框的正文是**纯文本**（`ConfirmDialog` 不解析 Markdown）——
+    //   这里写 `**加粗**` 会原样显示成星号（实测截图里就是「复制成**一条新的对话线**」）。
+    //   加重语气靠**措辞**而不是标记：与 P-076（模型输出里的 `**` 直接露给学生）同一条纪律。
+    body:
+      '会把你和团团聊到这里的这段内容复制成一条新的对话线，你在新线上换个问法接着问。' +
+      '现在这段对话不会丢 —— 它仍在左边的历史列表里。',
+    confirmText: '另开一条'
+  })
+  if (!ok) return
+
+  branchingEntryId.value = entryId
+  try {
+    const result = await chat.branchSession(entryId)
+    if (!result.ok) {
+      chat.setSessionNotice(result.message ?? '从这里重新问失败。')
+      return
+    }
+    chat.setSessionNotice(null)
+    // 与「新对话 / 切会话」同一套收尾：轨迹面板也要清（换了会话线，右栏不该留着上一条的）
+    trace.reset()
+    await nextTick()
+    stick.value = true
+    showJump.value = false
+    await scrollToBottom()
+  } finally {
+    branchingEntryId.value = null
+  }
+}
+
+/* ── 主动发起对话：AI 的第一句 ───────────────────────────────────────────── */
+/**
+ * 学生点「好啊，就从这里开始」：**预填**一句围绕该知识点的提问（不直接发）。
+ *
+ * ★ 预填而不是直接发（与 `chat.prepareQuestion` 同一条纪律）：
+ *   直接发会替学生消耗一次云端调用，而他可能只是想看看这句话对不对 ——
+ *   对一个教学助手来说，「学生看得见自己要问什么」比「一键自动开始」更贴合。
+ * ★ 知识点名从 `insight`（推荐接口的 `name`，服务端已解析好）取，**不自己反查**：
+ *   两处各解析一次就会出现「引导说 X、提问里写 Y」这种不一致。
+ */
+function acceptOpening(): void {
+  const kpId = chat.openingKpId
+  const name = insight.recommended?.kpId === kpId ? recommendedName.value : null
+  chat.acceptOpening()
+  if (name) fillComposer(`我想学「${name}」，请先讲一下它是什么。`)
+  else composerRef.value?.focus?.()
 }
 
 /* ── 空态：四张能力入口 + 建议问题 ─────────────────────────────────────── */
@@ -356,6 +455,9 @@ const gradeSourceSentence = computed(() => {
 
 <template>
   <div class="chat" data-testid="chat-area">
+    <!-- ── 历史对话列（切换续聊的入口）─────────────────────────────── -->
+    <SessionList />
+
     <!-- ── 主列 ─────────────────────────────────────────────────────── -->
     <div class="chat__main">
       <!-- 教材章节指示器：**这一页只放它**。
@@ -400,8 +502,52 @@ const gradeSourceSentence = computed(() => {
       <div ref="colRef" class="chat__col" data-testid="chat-log">
         <div ref="innerRef" class="chat__inner">
           <!-- ── 空态 ─────────────────────────────────────────────────── -->
+          <!-- ★★ 开场引导就住在这里（**空态**），不是消息列表里 —— 实测踩到过：
+               一开始把它放在「有消息」那个分支里（排在 `<ChatMessage>` 前面），
+               而它**只在会话为空时才有值** ⇒ 那个分支永远进不去 ⇒ 开场语发了、
+               写进会话了、界面上却一个字都看不到（P-101）。
+               位置就是它的语义：这是**还没有任何一轮对话时**助手先开的口。 -->
           <div v-if="isEmpty" class="chat__empty" data-testid="chat-empty">
-            <div class="chat__hello">
+            <!-- AI 主动开口：有开场语时用它替代那句静态问候（两句「你好」叠着是重复的）。
+                 没有开场语（无推荐依据 / 刚清空）就退回原来的静态问候。 -->
+            <div v-if="chat.showOpening" class="chat__opening" data-testid="chat-opening">
+              <!-- 标记用品牌 logo（吉祥物团团）——与空态问候同一个品牌位，**
+                   这里也不跟学段换图**（那是顶栏学段指示器的事） -->
+              <img
+                class="chat__opening-mark"
+                :src="DEFAULT_LOGO_URL"
+                :alt="''"
+                aria-hidden="true"
+                draggable="false"
+              />
+              <div class="chat__opening-body">
+                <p class="chat__opening-text">{{ chat.opening }}</p>
+                <div class="chat__opening-actions">
+                  <!-- ★ 动作按钮只在**有知识点可去**时渲染：没有目标却给一个「去吧」，
+                       学生点下去会什么都不发生。 -->
+                  <button
+                    v-if="chat.openingKpId"
+                    type="button"
+                    class="chat__opening-cta"
+                    data-testid="chat-opening-accept"
+                    @click="acceptOpening"
+                  >
+                    好啊，就从这里开始
+                  </button>
+                  <!-- 出口：学生有权跳过引导（不是「拒绝」，只是换话题 —— 所以不做成否定按钮） -->
+                  <button
+                    type="button"
+                    class="chat__opening-skip"
+                    data-testid="chat-opening-skip"
+                    @click="chat.acceptOpening()"
+                  >
+                    我想问别的
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div v-else class="chat__hello">
               <!-- 空态问候的标记：用品牌 logo（吉祥物团团）。
                    ★ 这里**不跟学段换图** —— 它是「这个应用是谁」的品牌位，
                      与「这一轮按哪个年级讲」无关（那是顶栏学段指示器的事）。
@@ -411,17 +557,21 @@ const gradeSourceSentence = computed(() => {
               <p class="chat__hello-sub">
                 我是团团。你可以直接提问，也可以让我换个方式讲 —— 我会按你的学段来回答。
               </p>
-              <div class="chat__hello-grade">
-                <span class="k12-dot chat__hello-dot" />
-                <p class="chat__hello-grade-text">
-                  当前按<strong>{{ chat.currentGradeLabel ?? '待判定' }}</strong>的讲法回答。
-                  <!-- ★ 括号里那句必须**跟着来源走**：学生手动选过之后，
-                       写死「由系统根据对话自动判定」会与顶栏的「手动选中」当场矛盾
-                       （实测截图里就是这句话自相矛盾）。来源说法只有 labels.ts 一处实现。 -->
-                  <template v-if="chat.currentGrade">{{ gradeSourceSentence }}</template>
-                  <template v-else>系统会先看几轮你的提问，再定成哪个年级。</template>
-                </p>
-              </div>
+            </div>
+
+            <!-- ★ 学段那一行**两种情况都要在**：它是「按哪个年级讲」的状态说明，
+                 与「谁在打招呼」无关 —— 有开场语时把它一起藏掉，学生就看不到
+                 当前是哪个学段在给他讲课了。 -->
+            <div class="chat__hello-grade">
+              <span class="k12-dot chat__hello-dot" />
+              <p class="chat__hello-grade-text">
+                当前按<strong>{{ chat.currentGradeLabel ?? '待判定' }}</strong>的讲法回答。
+                <!-- ★ 括号里那句必须**跟着来源走**：学生手动选过之后，
+                     写死「由系统根据对话自动判定」会与顶栏的「手动选中」当场矛盾
+                     （实测截图里就是这句话自相矛盾）。来源说法只有 labels.ts 一处实现。 -->
+                <template v-if="chat.currentGrade">{{ gradeSourceSentence }}</template>
+                <template v-else>系统会先看几轮你的提问，再定成哪个年级。</template>
+              </p>
             </div>
 
             <div class="chat__entries">
@@ -459,12 +609,15 @@ const gradeSourceSentence = computed(() => {
           </div>
 
           <!-- ── 消息列表 ─────────────────────────────────────────────── -->
+          <!-- ★ 开场引导**不在这里**（见上面空态那段注释：它只在会话为空时有值）。 -->
           <template v-else>
             <ChatMessage
               v-for="turn in turns"
               :key="turn.requestId"
               :turn="turn"
               :detail-of="chat.citationDetailOf"
+              :branching="branchingEntryId !== null"
+              @branch="onBranch"
             />
 
             <!-- 本轮专题（真实数据：教材章节 + 推荐知识点），没有就整段不出现 -->
@@ -932,6 +1085,84 @@ const gradeSourceSentence = computed(() => {
 }
 @media (hover: hover) and (pointer: fine) {
   .chat__suggest:hover {
+    border-color: var(--k12-accent-ink);
+    color: var(--k12-accent-ink);
+  }
+}
+
+/* ── 主动发起的开场引导 ───────────────────────────────────────────────────
+ * 它是**助手说的第一句话**，所以视觉上要与回答气泡同族（白纸 + 圆角），
+ * 但左侧那条强调竖条把它与「模型的回答」区分开：
+ * 这一条不是对学生提问的回应，是系统主动开口。
+ * ★ 与空态的大小不同：空态是「还没开始」的一屏，这条是**已经开始的对话的第一句**，
+ *   所以它按正文的密度排版（不是按落地页）。 */
+.chat__opening {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 15px;
+  border: 1px solid var(--k12-border);
+  border-left: 3px solid var(--k12-accent-ink);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-card);
+}
+.chat__opening-mark {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  object-fit: contain;
+  user-select: none;
+}
+.chat__opening-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+.chat__opening-text {
+  font-size: var(--k12-fs-md);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg);
+}
+.chat__opening-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* 主动作：实心 accent（这是「接受引导」—— 一次明确的承诺）
+ * ★ min-height 28px：UX 体检 C1 的触控下限（可点元素不得低于 28px）。 */
+.chat__opening-cta {
+  min-height: 30px;
+  padding: 6px 14px;
+  border: 1px solid var(--k12-accent-border);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-accent-soft);
+  color: var(--k12-accent-ink);
+  font-size: var(--k12-fs-xs);
+  font-weight: 650;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat__opening-cta:hover {
+    background: var(--k12-accent);
+    color: var(--k12-surface);
+  }
+}
+/* 次动作：描边（「我想问别的」不是拒绝，只是换话题 —— 不做成红色的否定按钮） */
+.chat__opening-skip {
+  min-height: 30px;
+  padding: 6px 14px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-pill);
+  background: transparent;
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-xs);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat__opening-skip:hover {
     border-color: var(--k12-accent-ink);
     color: var(--k12-accent-ink);
   }

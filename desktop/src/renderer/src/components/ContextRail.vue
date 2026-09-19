@@ -31,6 +31,7 @@ import { useChatStore } from '../stores/chat'
 import { useInsightStore } from '../stores/insight'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { useTraceStore } from '../stores/trace'
+import { useUiStore } from '../stores/ui'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL, gradeOriginLabel } from '../labels'
 import { useEscape } from '../composables/useEscape'
 import { useOnBackendReady } from '../composables/useOnBackendReady'
@@ -43,6 +44,7 @@ const chat = useChatStore()
 const insight = useInsightStore()
 const knowledge = useKnowledgeStore()
 const trace = useTraceStore()
+const ui = useUiStore()
 
 /*
  * 进入右栏时取一次画像 / 推荐 / 学段证据 + 知识点名索引。
@@ -227,6 +229,23 @@ function close(): void {
   emit('update:open', false)
 }
 
+/**
+ * 「去闯关检验」= **真的切到闯关页**。
+ *
+ * ★ 这里此前两处都是 `@click="$emit('update:open', true)"` —— 一个**死按钮**：
+ *   它们本来就在**已经打开**的右栏里，那个 emit 只是把右栏再设成「打开」，
+ *   点下去恒等于空操作（抽屉里那一处更糟：点完抽屉还盖在原处，像按坏了）。
+ *   落点按 `stores/ui.ts` 的页面清单走 —— 闯关页的页名是 `quiz`，
+ *   与学习档案页推荐卡用的是**同一个** `ui.go(...)`（`ReportTab.vue`）。
+ *
+ * ★ 顺手把知识点详情抽屉关掉：它 `Teleport` 到 body，而本组件挂在 `<KeepAlive>`
+ *   的对话页里 —— 不显式关掉就可能跟着盖到闯关页上（切页不等于关浮层）。
+ */
+function goQuiz(): void {
+  kpDetail.value = null
+  ui.go('quiz')
+}
+
 /** Esc 关闭详情抽屉（模态必须有键盘出口，否则键盘用户被卡在里面）。 */
 useEscape(
   () => {
@@ -341,7 +360,7 @@ watch(tab, () => {
               <p class="reco__title">建议下一步：{{ recommendedName }}</p>
               <p class="reco__desc">{{ insight.recommended.reason }}</p>
             </div>
-            <button type="button" class="reco__btn" @click="$emit('update:open', true)">去闯关检验</button>
+            <button type="button" class="reco__btn" @click="goQuiz()">去闯关检验</button>
           </div>
         </section>
 
@@ -480,7 +499,7 @@ watch(tab, () => {
             </p>
           </div>
           <footer class="kpd__foot">
-            <button type="button" class="kpd__btn kpd__btn--primary" @click="$emit('update:open', true)">
+            <button type="button" class="kpd__btn kpd__btn--primary" @click="goQuiz()">
               <GitBranch :size="14" /> 去闯关检验
             </button>
           </footer>

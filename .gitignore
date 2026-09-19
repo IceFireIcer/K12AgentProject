@@ -69,3 +69,6 @@ uv.lock.bak
 UI/node_modules/
 UI/dist/
 UI/.vite/
+
+# === 编辑器/代理工具的本地忽略文件（由工具从 .gitignore 同步生成，不是项目源文件）===
+.zcodeignore

@@ -209,6 +209,29 @@ test('G8-2 轨迹记录：turn / toolName / 参数摘要 / ok / latencyMs / degr
   assert.equal(toolResultOk({ details: { ok: true } }), true)
   assert.equal(toolResultOk(undefined), true)
 
+  /* ★★ 回归：`evaluate_code` 的**领域**字段不得被读成工具失败
+   *
+   * 这条链的真实代价：学生在编程卡片里写错一行代码（`evaluate_code` 本身完全正常）→
+   * `details.ok === false` 被上面的第 3 条读成「工具失败」→ 轨迹图（报告「设计合理性 25%」
+   * 的**核心证据**）在**最常见的教学路径**上画出一个假 `fail` 节点、标签写 `error`。
+   * 修法是把「工具级」与「领域级」两个问题分开：载荷给出 `toolOk`（显式）与 `codeOk`（领域），
+   * 本函数**以显式声明为准**，不再从 `ok` 猜。
+   */
+  const failedStudentCode = { details: { codeOk: false, toolOk: true, ok: false, feedback: '缩进不对' } }
+  assert.equal(
+    toolResultOk(failedStudentCode),
+    true,
+    '★ 学生代码没跑通 ≠ 工具失败：有 toolOk 时必须以它为准（否则轨迹图失真）'
+  )
+  assert.equal(
+    toolResultOk({ details: { codeOk: true, toolOk: false, ok: true } }),
+    false,
+    '反向对照：显式声明 toolOk=false 时，即便 `ok` 是 true 也要记成失败'
+  )
+  // 没有 toolOk 的老写法照旧（不能因为新增了一条判据就把既有的两种标记丢掉）
+  assert.equal(toolResultOk({ details: { ok: false, errorMessage: 'x' } }), false)
+  assert.equal(toolResultOk({ details: { codeOk: false, ok: false } }), false, '未声明 toolOk 时仍按老判据')
+
   // 新增：一个 Tool 自兜异常时，`get_student_profile` 的失败要能在轨迹里看见
   const fresh = new ToolTraceRecorder()
   fresh.noteTurn(1)
@@ -222,6 +245,51 @@ test('G8-2 轨迹记录：turn / toolName / 参数摘要 / ok / latencyMs / degr
   const rendered = fresh.toMermaid()
   assert.match(rendered, /get_student_profile/)
   assert.match(rendered, /error/, '自兜异常在图上要显示 error')
+})
+
+test('★ G8-2b 悬空条目会过期：上一轮的 `tool_call`（被拦下 / 本轮中止）不留在内存里', () => {
+  const recorder = new ToolTraceRecorder()
+  recorder.noteTurn(0)
+  // 第 1 轮：两次 `tool_call` 之后都没有 `tool_execution_end`
+  // （被安全阀拦下、或本轮被中止 —— 两种情形都不会再有执行事件）
+  recorder.noteToolCall({ toolCallId: 'k1', toolName: 'generate_animation', input: { kp_id: 'a' } })
+  recorder.noteToolCall({ toolCallId: 'k2', toolName: 'rag_search', input: { query: 'x' } })
+  assert.deepEqual(
+    recorder.pendingSize(),
+    { calls: 2, blocks: 2 },
+    '前置条件：这两条确实悬空了（否则这条测试什么都没在测）'
+  )
+
+  // 第 2 轮（Pi 把 turnIndex 重置回 0）→ 上一轮的悬空条目确定配不上对了
+  recorder.noteTurn(0)
+  assert.deepEqual(
+    recorder.pendingSize(),
+    { calls: 0, blocks: 0 },
+    '★ 轮次推进必须清掉上一轮的悬空条目（否则长会话里无界增长）'
+  )
+  assert.equal(recorder.size, 0, '清的是**待配对**表，不是已落的记录')
+
+  // ★ 反向对照：**同一轮之内**的正常配对不能被清掉（清早了会丢轮号、参数摘要与计时）
+  recorder.noteToolCall({ toolCallId: 'k3', toolName: 'rag_search', input: { query: 'y' } })
+  recorder.noteToolStart({ toolCallId: 'k3', toolName: 'rag_search', args: { query: 'y' } })
+  const record = recorder.noteToolEnd({ toolCallId: 'k3', toolName: 'rag_search', isError: false, result: {} })
+  assert.equal(record?.toolName, 'rag_search')
+  assert.equal(record?.argsSummary.includes('«文本 1 字»'), true, '配对成功时参数摘要仍在（清理没伤到正常路径）')
+  assert.deepEqual(recorder.pendingSize(), { calls: 0, blocks: 0 })
+})
+
+test('★ G8-2c 单轮之内悬空条目也有上限（模型在一轮里反复调用时不会无界增长）', () => {
+  const recorder = new ToolTraceRecorder()
+  recorder.noteTurn(0)
+  for (let index = 0; index < 500; index += 1) {
+    recorder.noteToolCall({ toolCallId: `x${index}`, toolName: 'rag_search', input: { query: 'q' } })
+  }
+  const size = recorder.pendingSize()
+  assert.ok(size.calls <= 64, `悬空 pending 必须有上限，实际 ${size.calls}`)
+  assert.ok(size.blocks <= 64, `悬空 blocks 必须有上限，实际 ${size.blocks}`)
+  // 丢的是最旧的：最近几条仍能正常配对（这条证明「上限」没有把功能一起砍掉）
+  const latest = recorder.noteToolEnd({ toolCallId: 'x499', toolName: 'rag_search', isError: false, result: {} })
+  assert.equal(latest?.toolName, 'rag_search')
 })
 
 /* ------------------------------------------------------------------ *

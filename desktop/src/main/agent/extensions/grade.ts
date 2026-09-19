@@ -754,6 +754,22 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     }
     const sessionId = item.sessionId
 
+    /**
+     * ★★ **手动设定的代际快照必须在任何网络 await 之前**（H-2）。
+     *
+     * 这里的判定【不是】本轮才第一次读 epoch —— 它就是这套作废机制原本的地址，
+     * 只是快照原先拍在 `submitter` 的 await 之前、`runJudge()` 的 await **之后**：
+     * `runJudge()` 要过一次 LLM（上限 `JUDGE_TIMEOUT_MS` = 8s，而这里的 8s 只是我们这一侧的
+     * 等待上限，云端通常更早返回但**绝不保证**），学生在那个窗口里点一下学段，
+     * `adoptOverride()` 会 bump epoch —— 可快照还没拍，于是比对**通过**，
+     * 按**旧学段**算出的结论照常落到 `pendingGrade`，下一轮 `applyPending()` 把学生刚选的顶回去。
+     * 学生的体感是「我明明选了初中，它又跳回小学高年级」，而且每次选都被下一次在途结论覆盖。
+     *
+     * 现在快照拍在最前面，`runJudge()` 一返回就立即比对：不一致就**整条丢弃**，
+     * 连 `proposal` 都不带上交（按旧学段算出来的提议对服务端也是过期的原料）。
+     */
+    const epochAtSubmit = epoch
+
     const decision = shouldRequestLayer2({
       turn: item.turn,
       usableTurns: countUsableTurns(buffer),
@@ -763,6 +779,17 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     let proposal: GradeProposal | null = null
     if (decision.run) {
       proposal = await runJudge()
+      // ★★ 第一道在途作废（H-2）：LLM 判定期间学生手动选了学段 → 这一轮的结论与提议全部作废。
+      //   与下面 `submitter` 之后那道**不是**重复检查：那道防的是「HTTP 往返期间」，
+      //   这道防的是「判定往返期间」，两个窗口互不覆盖（判定的 await 在提交之前）。
+      if (epochAtSubmit !== epoch) {
+        log(
+          `[grade] 第 ${item.turn} 轮的第二层判定期间学生手动切换了学段：` +
+            '本轮结论整条作废（连提议都不上交，绝不覆盖学生刚做的选择）',
+          'warn'
+        )
+        return
+      }
       layer2 = proposal ? 'used' : layer2 === 'judge_error' ? 'judge_error' : 'no_llm'
       if (proposal) windowHasProposal = true
     } else {
@@ -784,9 +811,6 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     }
 
     try {
-      // ★ 快照 epoch（在 await 之前）：这条结论是按**此刻**的学段算出来的。
-      //   手动设定会 bump epoch —— 回来时对不上就说明学生已经改过学段，这条结论已过期。
-      const epochAtSubmit = epoch
       const response = await submitter(item.studentId, {
         turns: [
           {
@@ -801,6 +825,10 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
        * ★★ 学生手动设定的在途作废（与上面那次 `isDiscarded()` 同一个套路，另一个维度）：
        *   那边防的是「A 的证据以 B 的身份上交」，这边防的是
        *   **「按旧学段算出来的结论覆盖学生刚做的手动选择」**。
+       *
+       * `epochAtSubmit` 的快照点在 `submitTurn` 的**最前面**（H-2 之后）——
+       * 覆盖的是整个 HTTP 往返 + 第二层 LLM 判定这两个 await，缺一段都会漏掉一类在途结论。
+       * 这里只负责「回来之后」的比对。
        *
        * 不复用 `pendingGrade` 的「下一轮生效」路径，因为手动选择是**立即**生效的：
        * 让学生看到「我刚选了初中，它又跳回小学高年级」，比不做手动选择更糟。
@@ -1001,8 +1029,21 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
   extension.refresh = async (): Promise<GradeLevel | null> => {
     const session = sessionProvider()
     if (!session) return null
+    // ★★ 与 `submitTurn` 同一手法（H-2）：`refresh()` 由 `runtime.ts` **fire-and-forget** 调用
+    //   （`void gradeExtension.refresh()`，故意不 await，省掉冷启动那一轮的滞后），
+    //   而它内部要发一次本机 HTTP（上限 `GRADE_TIMEOUT_MS` = 8s）。sidecar 慢的时候，
+    //   学生完全可能在这个窗口里点学段 —— 那时 GET 的回执带的是**旧的**学段值，
+    //   无检查地写 `appliedGrade` 等于把学生刚选的那个又顶回旧值（且没有任何日志解释）。
+    const epochAtRequest = epoch
     try {
       const state = await fetcher(session.studentId)
+      if (epochAtRequest !== epoch) {
+        log(
+          '[grade] 取当前学段的回执在途中被学生手动切换学段作废（已丢弃，不覆盖手动选择）',
+          'warn'
+        )
+        return null
+      }
       const grade = normalizeGradeLevel(state.grade)
       if (grade !== appliedGrade) {
         log(`[grade] 从本地数据服务取到当前学段：${appliedGrade} → ${grade}`)

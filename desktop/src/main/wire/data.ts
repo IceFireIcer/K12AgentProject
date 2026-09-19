@@ -62,6 +62,18 @@ export function recommendationPath(studentId: string): string {
   return `${profilePath(studentId)}/recommendation`
 }
 
+/**
+ * 新会话开场引导（`GET /api/profile/{id}/opening`）。
+ *
+ * ★ 与 `recommendationPath` 是**两条不同的端点**，不要合并：
+ *   推荐是「下一步学什么」（随时可查，给学生一张清单），
+ *   开场引导是「新会话的第一句话」（只在会话为空时有意义，且带一句已拼好的中文）。
+ *   合并成一条会逼着两个调用点各自判断「我现在要不要念推荐里的哪一条」。
+ */
+export function openingPath(studentId: string): string {
+  return `${profilePath(studentId)}/opening`
+}
+
 /** 学段信号（`GET /api/grade/signals/{id}`）。 */
 export function gradeSignalsPath(studentId: string): string {
   return `/api/grade/signals/${encodeURIComponent(studentId)}`
@@ -72,10 +84,16 @@ export function gradeHistoryPath(studentId: string): string {
   return `/api/grade/history/${encodeURIComponent(studentId)}`
 }
 
-/** 题库（`GET /api/quiz/bank/{kp_id}?gradeLevel=…&count=…`）。 */
+/**
+ * 题库（`GET /api/quiz/bank/{kp_id}?grade_level=…&count=…`）。
+ *
+ * ★ 参数名用**服务端声明过的那个**（`grade_level`）：`code.py` / `quiz.py` 的
+ *   `_pick_grade_level` 两个名字都收，但 camelCase 那个是 `include_in_schema=False`
+ *   的兼容别名 —— 真正进了 OpenAPI 契约的是 snake_case。这里跟随契约而不是别名。
+ */
 export function quizBankPath(kpId: string, gradeLevel: string, count: number): string {
   const base = `/api/quiz/bank/${encodeURIComponent(kpId)}`
-  return `${base}?gradeLevel=${encodeURIComponent(gradeLevel)}&count=${encodeURIComponent(String(count))}`
+  return `${base}?grade_level=${encodeURIComponent(gradeLevel)}&count=${encodeURIComponent(String(count))}`
 }
 
 /** 判分（`POST /api/quiz/grade`）。 */
@@ -88,10 +106,15 @@ export function quizProgressPath(studentId: string, kpIds?: readonly string[]): 
   return `${base}?kpIds=${encodeURIComponent(kpIds.join(','))}`
 }
 
-/** 代码脚手架（`GET /api/code/templates/{kp_id}`，可选按学段过滤）。 */
+/**
+ * 代码脚手架（`GET /api/code/templates/{kp_id}`，可选按学段过滤）。
+ *
+ * ★ 与 {@link quizBankPath} 同口径：`grade_level` 是服务端声明的主名，
+ *   `gradeLevel` 只是它留的兼容别名。
+ */
 export function codeTemplatePath(kpId: string, gradeLevel?: string): string {
   const base = `/api/code/templates/${encodeURIComponent(kpId)}`
-  return gradeLevel ? `${base}?gradeLevel=${encodeURIComponent(gradeLevel)}` : base
+  return gradeLevel ? `${base}?grade_level=${encodeURIComponent(gradeLevel)}` : base
 }
 
 /** 代码提示（`GET /api/code/hint/{kp_id}?level=N`）。 */
@@ -102,7 +125,14 @@ export function codeHintPath(kpId: string, level: number): string {
 /** 代码分析（`POST /api/code/run-hint`；**后端不执行代码**，只归一报错 + 定提示）。 */
 export const CODE_RUN_HINT_PATH = '/api/code/run-hint'
 
-/** 动画模板清单（`GET /api/animation/templates`）。 */
+/**
+ * 动画模板清单（`GET /api/animation/templates`）。
+ *
+ * ⚠️ 这里**刻意用 camelCase**（与上面两个工厂相反）：`resources.py` 的
+ *   `kpId` / `gradeLevel` 就是**声明过的主名**，没有留 snake_case 别名 ——
+ *   写成 `kp_id=` 会被 FastAPI 当成未知参数**静默忽略**（不报错、只是不过滤）。
+ *   即「参数名以服务端签名为准」，不是「全项目统一 snake_case」。
+ */
 export function animationTemplatesPath(request: AnimationTemplatesRequest = {}): string {
   const query = new URLSearchParams()
   if (request.kpId) query.set('kpId', request.kpId)
@@ -178,15 +208,43 @@ async function defaultRequest(path: string, init: WireInit, timeoutMs: number): 
   })
 }
 
-/** 从失败响应里取一句细节（后端给的是 `{"detail": "..."}`；取不到就回状态文本）。 */
+/**
+ * 从失败响应里取一句细节。
+ *
+ * ★ 失败体有三种形态，都要能用：`{"detail": "…"}`（鉴权 / 404 / 503）、
+ *   `{"detail": […]}`（**422 —— pydantic 的校验错误本来就是个数组**）、非 JSON
+ *   （中间件直接返回的纯文本）。口径与 `ipc/handlers.ts` 的同名函数一致
+ *   （那边是设置域与对话域的同一条路，别让同类回执在两条链上两种说法），
+ *   兜底链也同样取 `detail → message → 状态文本`。
+ * ★ 只认字符串形态的后果：一次本可读的校验失败会退化成英文 `Unprocessable Entity`，
+ *   学生看到的是「操作失败（HTTP 422）：Unprocessable Entity」—— 他既不知道哪个字段，
+ *   也不知道要改什么。
+ * ★ 数组分支只报**第一条**：一次也就能改一处，把十条拼成一段反而更长更难读。
+ */
 async function readDetail(response: Response): Promise<string> {
   try {
-    const body = (await response.json()) as { detail?: unknown }
-    if (typeof body?.detail === 'string' && body.detail) return body.detail
+    const body = (await response.json()) as { detail?: unknown; message?: unknown }
+    const detail = body?.detail ?? body?.message
+    if (typeof detail === 'string' && detail) return clip(detail)
+    if (Array.isArray(detail)) {
+      const first = detail[0] as { loc?: unknown; msg?: unknown } | undefined
+      // `loc` 形如 `["body", "studentId"]`：`body` 只是容器名，报给学生的字段名要剥掉它
+      const field = Array.isArray(first?.loc)
+        ? first.loc.filter((part) => part !== 'body').join('.')
+        : ''
+      const message = typeof first?.msg === 'string' ? first.msg : '校验未通过'
+      return clip(field ? `${field}：${message}` : message)
+    }
   } catch {
     // 非 JSON 响应（例如中间件直接返回的 401 纯文本）：忽略，走下面的兜底
   }
   return response.statusText || '没有更多说明'
+}
+
+/** 单行化 + 截断（失败消息要能进状态栏，不能是一条 2KB 的 JSON）。与 `ipc/handlers.ts` 同一口径。 */
+function clip(text: string): string {
+  const single = text.replace(/\s+/g, ' ').trim()
+  return single.length > 200 ? `${single.slice(0, 200)}…` : single
 }
 
 /** 异常 → 可读中文（超时单独说，因为它的处置与其它失败不同）。 */
@@ -205,13 +263,26 @@ function describeError(error: unknown): string {
 export const dataRequests = {
   profile: (studentId: string) => requestJson(profilePath(studentId)),
   recommendation: (studentId: string) => requestJson(recommendationPath(studentId)),
+  opening: (studentId: string) => requestJson(openingPath(studentId)),
   gradeSignals: (studentId: string) => requestJson(gradeSignalsPath(studentId)),
   gradeHistory: (studentId: string) => requestJson(gradeHistoryPath(studentId)),
 
   quizBank: (request: QuizBankRequest, gradeLevel: string, count: number) =>
     requestJson(quizBankPath(request.kpId, gradeLevel, count)),
-  quizGrade: (request: QuizGradeRequest) =>
-    requestJson(QUIZ_GRADE_PATH, { method: 'POST', body: request }),
+
+  /**
+   * 判分（`POST /api/quiz/grade`）。
+   *
+   * ★★ `studentId` 是**主进程内部多出来的参数**，刻意不放进 `QuizGradeRequest`
+   *   （它是渲染进程能看到的类型，加进去等于把身份变成前端可指定 —— 那就成了「读别人的画像」）。
+   *   它由调用方（`ipc/handlers-data.ts`）从主进程解析出的当前学生取。
+   * ★ 服务端 `QuizGradeRequest.student_id` 是**必填**、且 `CamelModel` 是 `extra="forbid"`：
+   *   少了它一律 422 —— 表现是「闯关页整页判分不可用」，掌握度 / 学习历史 / 进度三处**都不写**。
+   * ★ 覆盖写：即使调用方手里的 request 带着一个同名的 `studentId`（渲染进程的载荷被原样
+   *   转发的场景），被留在 body 里的也是**后写的这个**（主进程解析出的），不是它。
+   */
+  quizGrade: (request: QuizGradeRequest, studentId: string) =>
+    requestJson(QUIZ_GRADE_PATH, { method: 'POST', body: { ...request, studentId } }),
   quizProgress: (studentId: string, request: QuizProgressRequest = {}) =>
     requestJson(quizProgressPath(studentId, request.kpIds)),
 
@@ -219,8 +290,16 @@ export const dataRequests = {
     requestJson(codeTemplatePath(request.kpId, request.gradeLevel)),
   codeHint: (request: CodeHintRequest) =>
     requestJson(codeHintPath(request.kpId, request.level ?? 1)),
-  codeRunHint: (request: CodeRunHintRequest) =>
-    requestJson(CODE_RUN_HINT_PATH, { method: 'POST', body: request }),
+
+  /**
+   * 中文报错归一 + 定下一级提示（`POST /api/code/run-hint`）。
+   *
+   * ★★ 与 {@link dataRequests.quizGrade} 同一个坑：服务端 `CodeRunRequest.student_id`
+   *   同样是 **必填**，少了它「报错感知 + 分级求助」整条链路一律 422。
+   *   `studentId` 同样**只在主进程内部传**，不进 `CodeRunHintRequest`。
+   */
+  codeRunHint: (request: CodeRunHintRequest, studentId: string) =>
+    requestJson(CODE_RUN_HINT_PATH, { method: 'POST', body: { ...request, studentId } }),
 
   animationTemplates: (request: AnimationTemplatesRequest = {}) =>
     requestJson(animationTemplatesPath(request)),

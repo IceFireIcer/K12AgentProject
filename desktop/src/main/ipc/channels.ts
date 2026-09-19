@@ -114,13 +114,79 @@ export const IPC = {
   /** 渲染进程 → 主进程：某学段依赖图全览（`GET /api/graph/overview/{grade}`）。 */
   studyGraph: 'study:graph',
 
-  // ── 历史会话（只读回看；`sessions.ts` 有「只接受 id」的安全约束说明）──
+  // ── 历史会话（列表 / 回看 / 搜索 / ★ 恢复续聊）─────────────────────────
+  // `sessions.ts` 与 `handlers.ts` 的注释里有「只接受会话 id」的安全约束说明。
   /** 渲染进程 → 主进程：列出当前学生的历史会话（读 Pi 的 sessionDir）。 */
   sessionList: 'session:list',
   /** 渲染进程 → 主进程：按 id 读一条会话的正文（**绝不接受路径**）。 */
   sessionTranscript: 'session:transcript',
   /** 渲染进程 → 主进程：在历史会话里搜索（命中标题或全文，返回片段）。 */
   sessionSearch: 'session:search',
+  /**
+   * 渲染进程 → 主进程：**切换到一条历史会话继续聊**（「恢复会话」的写入口）。
+   *
+   * ★ 只接受**会话 id**（**绝不接受路径**）：主进程先用 `listSessions()` 的结果做白名单对齐，
+   *   再用 Pi 自己给的 `path` 去 `open()`。递路径等于把「读任意文件」的能力交给渲染进程。
+   * ★ 它是 `invoke`（有回执）：学生点了历史会话，必须知道「切没切成、还剩几条消息」。
+   * ★ 切换会 **dispose 当前 runtime 并按新会话重建**（否则旧 JSONL 半写）——
+   *   代际竞态由 `handlers.ts` 的 `runtimeGeneration` 接管，不要另写一套。
+   */
+  sessionOpen: 'session:open',
+  /**
+   * 渲染进程 → 主进程：**从某条消息处分叉出一条新会话**（「从这里重新问」）。
+   *
+   * ★ 语义：把「根 → 该消息」这一段复制成**新的会话文件**，原会话一个字节不动。
+   *   学生在新会话里接着问 —— 这是「重新问一遍」，不是「改写历史」。
+   * ★ 入参是 `{ sessionId, entryId }`：两个都必须是主进程认识的值 ——
+   *   `sessionId` 走会话白名单、`entryId` 必须属于**那一条**会话
+   *   （先按 id 读回它的条目再对齐，绝不拿前端给的 id 直接去问 Pi）。
+   * ★ 它是 invoke（有回执）：分叉要么成功（界面切到新会话）要么给一句可读中文。
+   */
+  sessionBranch: 'session:branch',
+  /**
+   * 渲染进程 → 主进程：**开始一条全新的会话**（「新会话」按钮的写入口）。
+   *
+   * ★ 与 `chat:send` 分开是刻意的：`sendChat` 的字段集合被守卫 G6c 钉死为 `['text']`，
+   *   把「开会话」塞进去会让「发一条消息」变成「顺带换一个会话」的副作用。
+   * ★ 它**不删除**旧会话（会话删除需要单独的确认流程，本期不做）：旧的那条仍在列表里。
+   */
+  sessionNew: 'session:new',
+  /**
+   * 渲染进程 → 主进程：读**当前会话的完整状态**（会话 id / 标题 / 恢复出来的正文 / 开场引导）。
+   *
+   * ★ 界面靠它做三件事：高亮列表里的当前项、把**恢复出来的对话**铺回消息区、
+   *   决定要不要显示开场引导。
+   * ★★ 它**会装配会话**（必要时）—— 这正是它在**冷启动**那条路上的价值：
+   *   启动时主进程已经按 `sessionSourceForBoot()` 续上了最近一条会话，
+   *   而恢复出来的正文只有主进程手里有（渲染进程的消息列表是内存里累积的，
+   *   重启后是空的）。不给它，学生看到的就是「关掉应用再打开，上一段对话没了」。
+   * ★ 副作用是「进对话页会拉起 Pi」：但那件事**本来就会发生**
+   *   （渲染进程挂载时读学段的 `grade:get` 就走 `ensureChatRuntime()`），
+   *   所以这里没有引入新的启动代价。
+   */
+  sessionState: 'session:state',
+  /**
+   * 主进程 → 渲染进程：**刚刚结束的那一轮的条目 id**（`{requestId, userEntryId, entryId}`）。
+   *
+   * ★★ 为什么必须有这条推送（实测抓到的缺陷，见 P-105）：`entryId` 原先只由
+   *   「恢复历史」那条路填（`restoreConversation` 从投影里带），于是
+   *   **实时聊出来的轮次一个 id 都没有** —— 「从这里重新问」按钮只对历史消息出现，
+   *   对刚读完的那条回答不出现。而那正是这个按钮最主要的用法。
+   *
+   * ★ 载荷按 `requestId` 精确配对（不是按顺序对齐）：一轮一条，渲染进程直接
+   *   找到那一轮填两个字段 —— 不需要任何「第几轮 ↔ 第几条消息」的换算
+   *   （那种换算正是本项目反复踩过的坑，见 `TranscriptMessage.entryId` 的注释）。
+   */
+  turnEntries: 'turn:entries',
+  /**
+   * 主进程 → 渲染进程：**当前会话变了**（切换 / 新建 / 标题生成后）。
+   *
+   * ★ 必须推送：学生会从**别处**改变当前会话（设置页的「清空对话」、标题生成完成），
+   *   渲染进程观察不到这些动作 —— 不推的话侧栏永远高亮着上一个会话。
+   * ★ 载荷是 `SessionCurrent`（与 {@link IPC.sessionCurrent} 同形）：推送与读取
+   *   必须是同一个形状，否则前端要处理两套字段。
+   */
+  sessionChanged: 'session:changed',
 
   // ── 导出 ──────────────────────────────────────────────────────────────
   /**
@@ -271,7 +337,15 @@ export const PUSH_CHANNELS: readonly IpcChannel[] = [
   IPC.chapterChanged,
   IPC.codeExecute,
   IPC.traceChanged,
-  IPC.windowMaximizedChanged
+  IPC.windowMaximizedChanged,
+  // ★ 会话变化必须推送：学生会从别处改变当前会话（列表里点开另一条、设置页清空对话、
+  //   标题在后台生成完成），渲染进程一个都观察不到 —— 不推的话侧栏永远高亮上一个会话。
+  // ⚠️ 只有它进这个清单；`sessionList` / `sessionTranscript` / `sessionSearch` /
+  //    `sessionOpen` / `sessionNew` / `sessionCurrent` 都是 **invoke**（有回执）。
+  IPC.sessionChanged,
+  // ★ 每轮结束后推送该轮的条目 id —— 没有它，「从这里重新问」只对历史消息可用
+  //   （实时聊出来的轮次没有 entryId，按钮渲染不出来）。
+  IPC.turnEntries
 ]
 
 /**
@@ -413,6 +487,99 @@ export interface StudyReportRequest {
 export interface SessionSearchRequest {
   query: string
 }
+
+/**
+ * 分叉的入参（`session:branch`）。
+ *
+ * ★★ **两个字段都要校验**，缺一不可：
+ *   - `sessionId` 走会话白名单（与 `session:open` 同一条：只认 id、不认路径）；
+ *   - `entryId` 必须属于**那一条**会话 —— 先按 id 把它的条目读回来再对齐，
+ *     **绝不**拿前端递来的 id 直接去问 Pi（那等于允许跨会话分叉）。
+ */
+export interface SessionBranchRequest {
+  /** 从哪条会话分叉（必填）。 */
+  sessionId: string
+  /** 从哪条消息分（该会话内的条目 id，必填）。 */
+  entryId: string
+}
+
+/**
+ * 分叉的回执。
+ *
+ * ★ 与 `session:open` 同形（{@link SessionStateResult}）：分叉成功之后界面要做的
+ *   事与「切换会话」一模一样（整段替换消息列表 + 决定要不要显示开场引导）。
+ *   ★ 分叉出来的会话**一定不是空的**（它带着分叉点之前的历史），
+ *     所以 `opening` 恒为空串 —— 但形状保持一致，前端不需要为它写分支。
+ */
+export type SessionBranchResult = SessionStateResult
+
+/**
+ * **当前会话**的状态（`session:current` 的回执 + `session:changed` 的推送载荷，两者同形）。
+ *
+ * ★ 一份形状被读取与推送共用是刻意的：推送与读取各写一种形状，前端就得写两套字段读取
+ *   （而「切换会话」这件事天然同时经过这两条路 —— 学生点开历史会话是读，后台切完是推）。
+ *
+ * ★ `sessionId` 是**空串**而非 `null` 表示「还没有会话」：与 `ChapterState.chapterTitle`
+ *   的空串语义同一条纪律 —— 前端只需要处理一种空值形态。
+ */
+export interface SessionCurrent {
+  /** 当前会话 id（**空串 = 还没有会话**；界面据此不高亮任何一项）。 */
+  sessionId: string
+  /** 当前会话标题（标题生成过就是它，否则是首条消息截断；空串 = 还没内容）。 */
+  title: string
+  /** 会话里的消息条数（**0 = 这是全新的一段对话** → 空态 + 可能显示开场引导）。 */
+  messageCount: number
+}
+
+/**
+ * 切换 / 新建会话的回执。
+ *
+ * ★ 除了「成没成」，还要把**恢复出来的对话**一并带回：渲染进程此刻手里那段消息列表
+ *   属于上一条会话，必须整段换掉。分两次 IPC 拿（先切换、再取转录）会有一个中间态
+ *   —— 界面已经切过去了、消息还是旧的，而流式期间学生完全可能正看着它。
+ */
+export type SessionStateResult =
+  | {
+      ok: true
+      /** 生效后的会话状态（与 `session:changed` 推的是同一个形状）。 */
+      current: SessionCurrent
+      /**
+       * ★ **恢复出来的对话**（投影后的 `{role, text, at}`，与「只读回看」同形）。
+       * 新会话时是空数组。界面把它铺成消息列表（流式卡片/引用不在里面 ——
+       * 那些是**当时**的 UI 状态，重启后不再有意义，回看也不需要）。
+       */
+      messages: Array<{
+        role: 'user' | 'assistant'
+        text: string
+        at: number
+        /**
+         * ★★ 这条消息在会话文件里的**条目 id** —— 「从这里重新问」拿它去分叉。
+         *
+         * ⚠️ 不能用「第几条消息」当分支点：编号会漂（开场引导是一条 assistant
+         *   消息但不算一轮；失败/被拦下的轮次不留条目）。条目 id 是文件里的稳定标识。
+         */
+        entryId: string
+      }>
+      /**
+       * ★ **AI 主动发起的第一条消息**（需求原文要求的「主动发起对话引导」）。
+       *
+       * 只在「这条会话建立完还是没有消息」时才有值 —— 切换历史会话、给已有会话
+       * 补开场都是错的（学生会看到一句「我们从X开始吧」插在他自己聊过的内容前面）。
+       * 空串 = 这次没有开场（没有可推荐的内容 / 会话里已经有内容了）。
+       */
+      opening: string
+      /** 开场引导指向的知识点（供「好啊，就从这里开始」这个动作定位；空串 = 没有动作）。 */
+      openingKpId: string
+    }
+  | { ok: false; message: string }
+
+/**
+ * 切换 / 新建会话的回执：**与「读当前会话」同形**（{@link SessionStateResult}）。
+ *
+ * ★ 两条路的回执必须一字不差，否则渲染进程要写两套字段读取 ——
+ *   而它们的结果在界面上的处置是同一件事（整段替换消息列表 + 显示/收起开场引导）。
+ */
+export type SessionOpenResult = SessionStateResult
 
 /**
  * 导出的入参。

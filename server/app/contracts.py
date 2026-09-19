@@ -619,6 +619,52 @@ class ChapterStateOut(CamelModel):
 
 
 # ---------------------------------------------------------------------------
+# 主动发起对话（新会话开场引导）
+# ---------------------------------------------------------------------------
+#: ★ 推荐来源的**冻结词表**（取值不再变；前端按它决定提示语方向）。
+#:
+#: 它同时被「下一步学什么」（``/recommendation``）与「开场引导」（``/opening``）使用，
+#: 所以定义放在这里、两处 import **同一个对象** —— 各写一份 ``Literal`` 会漂移，
+#: 而漂移的表现是「推荐页说是重练、开场语说这是新起点」这类自相矛盾。
+#:
+#: | 取值 | 含义 |
+#: | --- | --- |
+#: | ``review`` | 优先重练（掌握度不足且练过） |
+#: | ``graph`` | 依赖图后继（掌握某知识点后往前推） |
+#: | ``cold_start`` | 全新学生：给图里的入口知识点 |
+#: | ``empty`` | 推不出内容（知识库不可用 / 已全部掌握）—— **不发开场**，不是错误 |
+RecommendationSource = Literal["review", "graph", "cold_start", "empty"]
+
+
+class OpeningGuidance(CamelModel):
+    """``GET /api/profile/{student_id}/opening``：新会话的**开场引导**。
+
+    需求原文：「学生可主动提问对话，**智能体也能主动发起对话引导学习章节内容**。」
+    这是全项目**唯一一处「AI 先开口」**的机制 —— 其余所有交互都是「学生问 → AI 答」。
+
+    ★★ 为什么它必须是一个**契约模型**而不是一句硬编码的欢迎语：开场语的内容来自
+      「依赖图 + 掌握度 + 冷启动」的推荐结论（``routes/profile.py`` 的
+      :func:`build_recommendation`，那是推荐路径的**唯一实现**）。写死的欢迎语
+      对谁都成立，等于没有引导 —— 而「针对性引导到合适的内容」才是这项功能的价值。
+
+    ★ ``source == "empty"`` 时 ``text`` **必须是空串**：前端据此**不发**开场，
+      而不是弹一句「今天想学什么？」这种对谁都成立的废话（没有依据的开场白
+      与随机挑一个知识点没有区别）。
+
+    ★ 它**不参与 6 事件词表**：开场语不是「一轮对话的流式事件」，而是
+      「会话建立」这一步的产物 —— 主进程在新建会话时取一次，作为一条独立消息
+      推给界面（与 `trace:changed` 同一性质：独立通道，不是第 7 个事件）。
+    """
+
+    #: 可直接显示给学生看的中文开场语；**空串 = 这一轮没有开场**（不是错误）。
+    text: str = ""
+    #: 学生接受引导时要定位的知识点；``None`` = 没有可去的地方（前端**不要**渲染动作按钮）。
+    kp_id: str | None = None
+    #: 与 ``RecommendationResponse.source`` 同口径（同一个 :data:`RecommendationSource`）。
+    source: "RecommendationSource" = "empty"
+
+
+# ---------------------------------------------------------------------------
 # 检索与引用（§6.3 / §6.4 / §8.5）
 # ---------------------------------------------------------------------------
 class Citation(CamelModel):
@@ -1181,10 +1227,32 @@ class QuizQuestion(CamelModel):
 
 
 class QuizQuestionOut(CamelModel):
-    """★ **对外模型**：没有 ``answer``，发给 TS 与前端（§6.3 答案泄漏防护）。
+    """★ **对外模型**：没有 ``answer``、也**没有** ``explanation``，发给 TS 与前端。
 
     判分所需的标准答案只留在 Python 侧：``POST /api/quiz/grade`` 按 ``qid`` 查库判分，
     前端与 TS 都不需要答案。
+
+    ★★ **为什么连 ``explanation`` 也不下发**（2026-09-19 定案，它本来是契约字段）：
+      ``explanation`` 是**解析**，而它的话术经常把答案直接写进去 ——
+      实测 **295/684 道真题（约 43%）** 的解析含标准答案原文
+      （形如「选 B。因为 range 是含头不含尾的……」）。发出去就等于把题做废：
+      学生（或模型）只要读题面载荷就能白拿答案，``mastery`` 随之失去意义。
+
+      ⚠️ 这个比例**有可复现的出处**：``tests/test_quizbank_coverage.py`` 的
+      ``test_explanation_usually_contains_the_answer`` 每次运行都会打印它
+      （不是从别处抄来的数字，题库改了它会跟着变）。
+
+      而这与闯关页界面上的白纸黑字一致 —— ``views/Quiz.vue`` 写着
+      「答案与解析都不下发到界面」。此前是契约与承诺不符：界面不渲染，
+      但载荷一直带着它走完了 HTTP。
+
+    ★ **解析的教学价值一个字没丢**：它仍然在 ``feedback_for()`` 里，
+      只在**判分之后**经 ``QuizResult.feedback`` 回传给学生 ——
+      「答完再讲为什么」正是有教育意义的那一步，而「答前先看到为什么」只是送答案。
+
+    ⚠️ 不要为「前端想提前显示解析」把它加回来：那需要先答过一次，
+      也就是说要先有一条判分记录（``store.question_attempt``），
+      而那件事的完整形态是「判分后从 ``feedback`` 取」—— 不是第二条下发通道。
     """
 
     qid: str
@@ -1192,14 +1260,16 @@ class QuizQuestionOut(CamelModel):
     type: QuizQuestionType
     stem: str
     options: list[str] | None = None
-    explanation: str
 
     @classmethod
     def from_internal(cls, question: QuizQuestion) -> "QuizQuestionOut":
-        """内部题 → 对外题的**唯一**转换入口（``answer`` 在这里被丢弃）。
+        """内部题 → 对外题的**唯一**转换入口（``answer`` / ``explanation`` 在这里被丢弃）。
 
         逐字段显式列出，**不用** ``model_dump(exclude=...)``：漏一个字段会立刻被
         ``extra="forbid"`` 与类型检查打死，而不是静默泄漏。
+
+        ★ ``extra="forbid"`` 在这里还有第二层作用：**上游想多带一个字段会当场报错**，
+        不会像 ``exclude`` 那样「今天裁对了、明天加字段忘了加进名单」。
         """
         return cls(
             qid=question.qid,
@@ -1207,7 +1277,6 @@ class QuizQuestionOut(CamelModel):
             type=question.type,
             stem=question.stem,
             options=question.options,
-            explanation=question.explanation,
         )
 
 
@@ -1264,15 +1333,27 @@ class ChatRequest(CamelModel):
     Pi Agent 处理；这里冻结的是 IPC 入参形状，供票 05/06 的主进程处理器与前端共用。
     ``requestId`` 由**主进程**生成并贯穿一轮（§9.4），所以不在请求体里。
 
-    ⚠️ **没有学段字段**（AGENTS §5.1 / D-020）：学段完全由系统自动推断、自动生效，
-    请求里带学段与硬约束直接冲突。历史上这里有过 ``grade_level: GradeLevel``
-    （必填），与它自己的注释正好相反 —— 已删除，且测试钉住「不许再加回来」。
+    ★★ **只有 ``text`` 一个字段，且与 ``desktop/src/main/ipc/channels.ts`` 的
+      ``ChatSendRequest`` 逐字段同形**（守卫 G6c 把那一侧钉死为 ``['text']``）。
+      这里曾经多出 ``student_id`` / ``session_id`` —— 那是**第二形状**，也是漂移温床：
+
+      - **学生身份只能由主进程决定**（``resolveActiveStudentId()`` / ``currentAgentSession()``）。
+        契约里放一个 ``student_id``，等于给「读渲染进程递来的身份」留了一个合法入口 ——
+        而那条路一旦走通，就是读别人的画像与学习记录。身份不进对话请求。
+      - **会话同理**：Pi 会话由主进程持有，渲染进程连会话 id 都不该知道。
+
+      所以修法不是「把 TS 侧改成带上这两个字段」（那会把上面两条一起做废），
+      而是**把契约收敛到真实形状**：``{text}``。测试 ``TestChatRequestContract``
+      同时钉住字段集合恰好是这一个。
+
+    ⚠️ **没有学段/章节字段**（AGENTS §5.1 / D-037 / D-038）：学段与章节都**不由每轮对话携带**
+    —— 学段自动推断、自动生效（学生手动指定走 ``grade:set``），章节走 ``chapter:set``。
+    把它们放回请求里会让「发一条消息」变成「顺带改一次学段/章节」的副作用。
+    历史上这里有过 ``grade_level: GradeLevel``（必填），与它自己的注释正好相反 —— 已删除，
+    且测试钉住「不许再加回来」。
     """
 
-    student_id: str
     text: str
-    #: 关联 Pi 会话（省略 = 用当前会话）
-    session_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1302,6 +1383,9 @@ CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     PreferenceUpdateRequest,
     ChapterUpdateRequest,
     ChapterStateOut,
+    # 主动发起对话（需求原文要求）：新会话的开场引导。
+    # ★ 它不是 6 事件之一，也不走对话请求 —— 那是「会话建立」这一步的产物。
+    OpeningGuidance,
     # 学段轨迹（报告与汇报的叙事素材；`routes/grade.py` 与报告轨**共用这一份**）
     GradeHistoryEntry,
     # 学习档案：章节 / 依赖图全览 / 错题本 / 学习报告
@@ -1373,4 +1457,6 @@ CONTRACT_ENUMS: dict[str, object] = {
     "DepDirection": DepDirection,
     "GradeSignalType": GradeSignalType,
     "PreferenceKey": PreferenceKey,
+    # 推荐来源（`/recommendation` 与 `/opening` 共用）：前端按它决定提示语方向
+    "RecommendationSource": RecommendationSource,
 }

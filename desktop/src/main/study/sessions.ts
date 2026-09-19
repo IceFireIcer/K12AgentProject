@@ -1,14 +1,18 @@
 /**
- * 历史会话的**只读**读取（会话列表 + 单条会话正文）。
+ * 历史会话的读取与投影（会话列表 / 单条正文 / 搜索 / 历史消息投影）。
  *
  * ---------------------------------------------------------------------------
- * 为什么是「只读」，以及它为什么不能做成「打开会话继续聊」
+ * 这个模块负责什么、不负责什么
  * ---------------------------------------------------------------------------
- * Pi 的 `SessionManager` 提供 `open` / `continueRecent`，把历史会话接回对话页在能力上可行，
- * 但那是**另一件事**：切会话要 dispose 当前 runtime（否则 JSONL 半写）、
- * 要把 `SessionEntry[]` 投影成前端的 turns、还要处理「装配期间被 dispose」的代际竞态。
- * 本轮只做「**看**」：`list()` 列出来、`open()` 读出来、投影成一段可读文本。
- * 继续对话留给后续（见 `architecture/pending/03-会话保存与恢复.md`）。
+ * - **本模块**：纯投影（`SessionInfo[]` → 界面用的摘要；`SessionEntry[]` → 可显示的问答）
+ *   与两个「真的去问 Pi」的只读函数（`listStudentSessions` / `readStudentSessionEntries`）。
+ * - **不在这里**：会话的**切换 / 新建 / 恢复续聊**。那要 dispose 当前 runtime、
+ *   重装一个新 runtime、并处理「装配期间被 dispose」的代际竞态 —— 全部在
+ *   `ipc/handlers.ts`（`swapRuntime` / `openSession` / `newSession`）与
+ *   `agent/runtime.ts`（`sessionSource`）里。放在这里会让本模块持有会话单例，
+ *   而单例只能有一处（现在那处是 `handlers.ts` 的 `runtime`）。
+ * - ★ 但**投影是共用的**：`agent/runtime.ts` 恢复历史时也调这里的 `projectTranscript`
+ *   —— 与回看走同一个纯函数，「回看里看到的」与「继续聊时读到的」才不会不一致。
  *
  * ---------------------------------------------------------------------------
  * ★★ 两条安全约束（这两条不满足就是漏洞，不是「待优化」）
@@ -49,6 +53,22 @@ export interface TranscriptMessage {
   text: string
   /** Unix 毫秒（来自 entry 的 timestamp） */
   at: number
+  /**
+   * ★★ 这条消息在会话文件里的**条目 id**（Pi 的 `SessionEntry.id`）。
+   *
+   * 为什么必须带上它：**「从这里重新问」要拿它去找 Pi 的分叉点**
+   * （`createBranchedSession(entryId)` 只认条目 id）。
+   *
+   * ⚠️ 为什么不用「第几条消息」当分支点：**编号会漂**。实测过的两种漂法：
+   *   ① 开场引导是一条 assistant 消息，但它在前端是**独立卡片**（不算一轮），
+   *      学生一开口那张卡片就收起 —— 于是同一段会话里「第几轮」与「第几条消息」
+   *      差一个（取决于卡片还在不在）；② 失败 / 被拦下的轮次**不会**留下 assistant
+   *      条目，编号跟着错位。
+   *   而**条目 id 是文件里的稳定标识**，不受显示形态影响。
+   */
+  entryId: string
+  /** 项目类型（`message` / `custom_message` …）—— 只有 `message` 能当分支点。 */
+  entryType: string
 }
 
 /** 一条会话的正文（只读回看用）。 */
@@ -104,6 +124,79 @@ export function projectSessionList(infos: SessionInfo[]): SessionSummary[] {
     .sort((a, b) => b.modifiedAt - a.modifiedAt || a.id.localeCompare(b.id))
 }
 
+/**
+ * ★★ **会话树**（分支关系的投影；纯函数）。
+ *
+ * 为什么用「父会话」而不是「树」这个词：Pi 的分叉**产生一个新文件**
+ * （`createBranchedSession` → `header.parentSession = <父文件路径>`），
+ * 而不是在同一棵树里长出一条枝。所以「会话树」在**存储层**就是
+ * 「一串带 `parentSession` 指向的会话」——没有嵌套结构可画，
+ * 有的是「这条是从哪条分出来的 + 从第几条消息分的」。
+ *
+ * ★ `SessionInfo.parentSessionPath` 是 **Pi 给的**（`list()` 的字段），不是我们算的：
+ *   自己去读每个 JSONL 的头部等于把 Pi 的文件格式抄第二遍。
+ *
+ * ⚠️ **指向文件不存在时降级**（`parentId: null` 但保留 `parentTitle` 提示）：
+ *   父会话可能已被删除 / 被清理过 —— 那种情况下**不能声称它有父**，
+ *   否则界面会显示一个点不开的「来自…」。这与「悬空 to_kp_id 应报错而非静默跳过」
+ *   那条纪律不冲突：这里是展示层，诚实地说「父会话不在了」比整条不显示更有用。
+ */
+export interface SessionTreeEntry {
+  id: string
+  title: string
+  messageCount: number
+  modifiedAt: number
+  /** 从哪条会话分出来的（`null` = 独立会话，不是分支）。 */
+  parentId: string | null
+  /** 父会话的标题（父不在本列表里时仍可能有；仅用于展示）。 */
+  parentTitle: string | null
+  /** 从父会话的第几条消息分出来的（1-based；`null` = 不知道）。 */
+  branchedAtMessage: number | null
+}
+
+/** 会话树里一项的原始输入（`SessionSummary` + Pi 的父路径）。 */
+export interface SessionTreeInput {
+  id: string
+  title: string
+  messageCount: number
+  modifiedAt: number
+  /** Pi 的 `SessionInfo.parentSessionPath`（**文件路径**，只在主进程内用）。 */
+  parentPath?: string
+}
+
+/**
+ * 把会话列表投影成**带分支关系**的树（纯函数，`node --test` 可直测）。
+ *
+ * `pathToId` 是「文件路径 → 会话 id」的映射（由调用方从同一批 `SessionInfo` 建）——
+ * 我们不在这里猜路径怎么对应 id（那是 Pi 的命名规则，不该抄第二遍）。
+ *
+ * `branchedAtMessage` 目前**恒为 `null`**：要知道「从第几条消息分出来的」，
+ * 得去比对父子两个文件的共同前缀 —— 那要读**两个** JSONL，代价不小，
+ * 而它在界面上只是一句锦上添花的话。**宁可不说，也不说错的**（宁缺勿假）。
+ */
+export function projectSessionTree(
+  items: readonly SessionTreeInput[],
+  pathToId: ReadonlyMap<string, string>
+): SessionTreeEntry[] {
+  const byId = new Map(items.map((item) => [item.id, item]))
+  return items.map((item) => {
+    const parentKey = item.parentPath?.trim() ?? ''
+    const parentId = parentKey ? pathToId.get(parentKey) ?? null : null
+    const parent = parentId ? byId.get(parentId) ?? null : null
+    return {
+      id: item.id,
+      title: item.title,
+      messageCount: item.messageCount,
+      modifiedAt: item.modifiedAt,
+      // ★ 只有**父会话确实还在本列表里**时才声称有父：否则界面会给出一个
+      //   点不开的「来自…」（父已被删除时那是谎话）。
+      parentId,
+      parentTitle: parent ? parent.title : null,
+      branchedAtMessage: null
+    }
+  })
+}
+
 /** `Date` → Unix 毫秒（非法日期回 0，不抛）。 */
 export function toMs(value: Date | string | number | undefined): number {
   if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : 0
@@ -127,6 +220,8 @@ export function titleFromText(text: string, maxChars = TITLE_MAX_CHARS): string 
 /** Pi 的一条 session entry 里我们关心的字段（**结构检查**用，不 import Pi 的类型）。 */
 interface RawEntry {
   type?: unknown
+  /** ★ 条目 id：分支点（`createBranchedSession` 只认它）。 */
+  id?: unknown
   timestamp?: unknown
   message?: { role?: unknown; content?: unknown }
 }
@@ -172,7 +267,15 @@ function projectEntry(entry: unknown): TranscriptMessage | null {
   if (role !== 'user' && role !== 'assistant') return null
   const text = extractText(message.content)
   if (!text) return null
-  return { role, text, at: toMs(typeof raw.timestamp === 'string' ? raw.timestamp : undefined) }
+  return {
+    role,
+    text,
+    at: toMs(typeof raw.timestamp === 'string' ? raw.timestamp : undefined),
+    // ★ 缺 id 的条目用空串（老版本会话或手改过的文件）：空 id 会在分支时被挡住，
+    //   而不是拿一个 `undefined` 去问 Pi（那会抛 `Entry undefined not found`）。
+    entryId: typeof raw.id === 'string' ? raw.id : '',
+    entryType: raw.type
+  }
 }
 
 /** 从 message.content 里抽纯文本（字符串直取；数组只取 `type === 'text'` 的块）。 */
@@ -273,12 +376,14 @@ export async function listStudentSessions(
   userDataDir: string,
   studentId: string
 ): Promise<SessionInfo[]> {
-  const { resolveStudentPiPaths } = await import('../agent/pi-paths.ts')
+  const { piSessionCwd, resolveStudentPiPaths } = await import('../agent/pi-paths.ts')
   const { SessionManager } = await import('@earendil-works/pi-coding-agent')
   const paths = resolveStudentPiPaths(userDataDir, studentId)
-  // cwd 用学生目录：Pi 的 `list(cwd, sessionDir)` 第一个参数只用于推导默认目录，
-  // 第二个参数给了就以它为准（这里两个都指到该学生，语义上不留歧义）。
-  return await SessionManager.list(paths.studentDir, paths.sessionDir)
+  // ★★ cwd 必须与**建会话时那个**逐字相同，否则列表恒为空（见 `piSessionCwd` 的注释：
+  //    Pi 在传了自定义 sessionDir 时会**额外按 cwd 过滤**，而它不报错、不告警）。
+  //    ⚠️ 历史注释曾写「第一个参数只用于推导默认目录，第二个参数给了就以它为准」——
+  //      那句话是**错的**（实测 P-102）：cwd 从「只是推导用」变成了**过滤器**。
+  return await SessionManager.list(piSessionCwd(paths), paths.sessionDir)
 }
 
 /**

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -22,8 +23,17 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
+
 # 向量 BLOB 的 dtype：小端 float32。**两端必须一致**，改一处等于全库向量作废。
 VECTOR_DTYPE = np.dtype("<f4")
+
+# vec0 写入失败是否已经告过警。
+# 一次重建会对每个子块调用一次 insert_chunk（上千次），同一条原因逐条刷屏会把
+# 真正需要看的那一行淹掉，所以只记第一处；``clear_knowledge_tables`` 每次重建开头重置，
+# 于是「本次重建没写进向量」这件事每次都会说一遍。
+# ★ 它只影响**日志频率**，不影响任何行为（写不进去都照旧跳过）。
+_VEC_WRITE_WARNED = False
 
 
 # --------------------------------------------------------------------------- #
@@ -117,13 +127,62 @@ def clear_knowledge_tables(conn: sqlite3.Connection) -> None:
        （见 ``store/connections.py``），依赖边引用 ``kp`` —— 反过来先删 ``kp``
        会被 FK 直接拒绝，**重跑建库脚本就炸**。
 
-    ``chunk_fts`` 是外部内容表，不直接 DELETE，改用 ``'rebuild'`` 指令重建。
+    ``chunk_fts`` 是外部内容表，不直接 DELETE，改用 ``'rebuild'`` 指令重建
+    （本函数内那一句 rebuild 建出来的是**空索引**，正文由调用方随后写入，
+    调用方写完正文要再 rebuild 一次 —— ``build_kb.build`` 就是这么做的）。
+
+    ★★ ``chunk_vec`` 的失败**只告警、不抛**（详见 :func:`_clear_vec_table`）：
+    扩展加载不了时 ``DELETE FROM chunk_vec`` 会抛 ``no such module: vec0``，
+    那会让整次重建**永久失败** —— 而正文与向量 BLOB 都还好端端躺在 ``chunk`` 里、
+    检索有 numpy 兜底，学生却只看到「重建失败（OperationalError）: no such module: vec0」。
+    其余三张表照旧抛：它们是唯一真相，清不掉还继续写 = 新旧内容混在一起。
     """
+    global _VEC_WRITE_WARNED
+    _VEC_WRITE_WARNED = False  # 每次重建重新记账（只影响日志频率，见模块头）
     for table in ("chunk_vec", "chunk", "knowledge_dependencies", "kp"):
-        if table_exists(conn, table):
+        if not table_exists(conn, table):
+            continue
+        if table == "chunk_vec":
+            _clear_vec_table(conn, table)
+        else:
             conn.execute(f"DELETE FROM {table}")
     if table_exists(conn, "chunk_fts"):
         rebuild_fts(conn)
+
+
+def _clear_vec_table(conn: sqlite3.Connection, table: str) -> None:
+    """清 vec0 虚表，失败降级为告警 —— ★ **全库唯一允许这样处理的表**。
+
+    为什么只有它可容忍：``chunk_vec`` 是 ``chunk.embedding`` 的**派生索引**，
+    正文与向量 BLOB 都在 ``chunk`` 里，检索链对它的缺席本来就有兜底
+    （:func:`embeddings_by_grade` 的 numpy 暴力余弦，几千 chunk 是毫秒级）。
+    扩展加载不了时本次重建压根写不进新向量（见 :func:`insert_chunk`），
+    所以「清不掉 + 不写」留下的是一份**没有向量索引、但正文完整的库**，检索照常可用 ——
+    这比「重建永久失败」好得多，也是本项目「缺什么降什么、绝不让整条链停摆」的口径。
+
+    反过来，``chunk`` / ``knowledge_dependencies`` / ``kp`` 是**唯一真相**：
+    它们的删除失败意味着清表没做完，继续往下写就会得到「新内容混着旧内容」的库 ——
+    那种库看起来完全正常，是最危险的坏法，所以它们照旧抛。
+
+    ⚠️ **残留风险**（本文件不解决，已记录）：vec 表清不掉时旧向量行会留在库里，
+    而 ``chunk`` 清空后 rowid 会从 1 重新分配 —— 若这个库之后在**扩展可用**的环境
+    被 KNN 查询，旧向量会与新 chunk 行号错位（张冠李戴，见模块头第 1 条）。
+    现实中这条路径要求「重建时扩展不可用、之后又变可用」，且扩展不可用时检索
+    走 numpy 兜底（不读 chunk_vec）；真要彻底消除，需要在检索侧知道
+    「这份库的向量是不是本次建的」（那是另一个改动，不在本仓储的职责内）。
+    """
+    global _VEC_WRITE_WARNED
+    try:
+        conn.execute(f"DELETE FROM {table}")
+    except sqlite3.Error as exc:
+        _VEC_WRITE_WARNED = True  # 同一原因的写入失败不必再说一遍
+        logger.warning(
+            "清空 %s 失败，本次重建不写向量（检索将走 numpy 暴力余弦兜底）：%s", table, exc
+        )
+        _VEC_WRITE_WARNED = True  # 同一原因的写入失败不必再说一遍
+        logger.warning(
+            "清空 %s 失败，本次重建不写向量（检索将走 numpy 暴力余弦兜底）：%s", table, exc
+        )
 
 
 def table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -191,11 +250,37 @@ def insert_chunk(
     rowid = int(cur.lastrowid)
 
     if embedding is not None and table_exists(conn, "chunk_vec"):
+        _insert_vec_row(conn, rowid=rowid, embedding=embedding, grade_level=grade_level)
+    return rowid
+
+
+def _insert_vec_row(
+    conn: sqlite3.Connection, *, rowid: int, embedding: "np.ndarray | Sequence[float]", grade_level: str
+) -> None:
+    """写一行 ``chunk_vec``（vec0 虚表），失败降级为告警。
+
+    ★ 为什么这里可以吞掉 ``sqlite3.Error``（正文那条 INSERT 则照旧抛）：
+    vec 表是**派生索引**，不是唯一真相 —— 扩展没加载（``no such module: vec0``）
+    或 vec0 表的维度与 ``EMBEDDING_DIM`` 对不上（升级到 768 维后忘了重建索引）时，
+    正文与 ``chunk.embedding`` 都已经写好了，检索有 numpy 暴力余弦兜底。
+    这时正确的行为是「这份库暂时没有向量索引」，而不是让整次重建失败 ——
+    后者会让一次明明可用的重建报成失败，最难查的那种假失败。
+
+    ⚠️ 重试/告警只做一次：一次重建有上千个子块，逐条 warning 会把日志刷满
+    （判据是模块级 ``_VEC_WRITE_WARNED``，只影响日志频率，不影响行为）。
+    """
+    global _VEC_WRITE_WARNED
+    try:
         conn.execute(
             "INSERT INTO chunk_vec(rowid, embedding, grade_level) VALUES(?,?,?)",
             (rowid, pack_vector(embedding), grade_level),
         )
-    return rowid
+    except sqlite3.Error as exc:
+        if not _VEC_WRITE_WARNED:
+            _VEC_WRITE_WARNED = True
+            logger.warning(
+                "写 chunk_vec 失败，该库本次没有向量索引（检索将走 numpy 暴力余弦兜底）：%s", exc
+            )
 
 
 def rebuild_fts(conn: sqlite3.Connection) -> None:

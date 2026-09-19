@@ -42,11 +42,14 @@ import { buildQuizSubmissionMessage, collectQuizResults, type QuizResultView } f
 import {
   applyChatEvent,
   emptyConversation,
+  restoreConversation,
   startTurn,
   subscribeToChatEvents,
+  type ChatTurn,
   type ConversationState,
   type InlineCard
 } from '../api/events'
+import { resolveSessionBridge } from '../api/sessions'
 
 export const useChatStore = defineStore('chat', () => {
   const conversation = ref<ConversationState>(emptyConversation())
@@ -99,6 +102,96 @@ export const useChatStore = defineStore('chat', () => {
   let unsubscribe: (() => void) | null = null
   let unsubscribeGrade: (() => void) | null = null
   let unsubscribeChapter: (() => void) | null = null
+  let unsubscribeSession: (() => void) | null = null
+  let unsubscribeTurnEntries: (() => void) | null = null
+
+  /**
+   * 本轮条目 id 的**超前到达**缓冲（`requestId` → 两个 id）。
+   *
+   * ★ 为什么需要它：主进程在本轮结束时推 `turn:entries`，而渲染进程是在
+   *   `sendChat` 的**回执**里才建轮 —— 两者顺序不保证（与 6 事件的
+   *   `pending` 缓冲同一个竞态，见 `api/events.ts` 的说明）。
+   *   不缓冲的话，快的那条推送会被丢掉，表现是「这一轮永远没有分叉按钮」——
+   *   而这与「这轮本来就取不到条目」在界面上长得一模一样（最难查的那种）。
+   */
+  const pendingTurnEntries = new Map<string, { userEntryId: string; entryId: string }>()
+
+  /** 把条目 id 落到对应那一轮上（轮次还没建就缓冲）。 */
+  function applyTurnEntries(requestId: string, userEntryId: string, entryId: string): void {
+    const index = conversation.value.turns.findIndex((turn) => turn.requestId === requestId)
+    if (index === -1) {
+      // 最多留 8 条（与 6 事件的缓冲同量级）：防伪造 requestId 撑爆内存
+      if (pendingTurnEntries.size >= 8) {
+        const oldest = pendingTurnEntries.keys().next().value
+        if (oldest !== undefined) pendingTurnEntries.delete(oldest)
+      }
+      pendingTurnEntries.set(requestId, { userEntryId, entryId })
+      return
+    }
+    const turn = conversation.value.turns[index] as ChatTurn
+    if (turn.entryId === entryId && turn.userEntryId === userEntryId) return
+    const turns = [...conversation.value.turns]
+    turns[index] = {
+      ...turn,
+      entryId: entryId || null,
+      userEntryId: userEntryId || null
+    }
+    conversation.value = { ...conversation.value, turns }
+  }
+
+  /* ------------------------------------------------------------ 会话（切换/新建） */
+
+  /**
+   * 当前会话的 id（`''` = 还没有会话）。
+   *
+   * ★ 它**只由主进程给**（`getCurrentSession` / `openSession` / `session:changed`）：
+   *   渲染进程自己记一个「我刚开了个新会话」是第二处真相 —— 而会话的文件名、
+   *   标题、条数都在主进程那一侧。
+   */
+  const currentSessionId = ref('')
+  /** 当前会话标题（服务端 LLM 生成过就是它，否则是首条消息截断；空串 = 还没内容）。 */
+  const currentSessionTitle = ref('')
+  /**
+   * 当前会话的消息条数（主进程给）。
+   *
+   * ★ 它存在的唯一理由：**「历史对话」列表要跟着刷新**。新会话的第一轮跑完之后，
+   *   这条会话才在磁盘上真的存在（Pi 在第一条 assistant 消息到达前不写文件），
+   *   列表不刷新就看不见它 —— 学生会以为对话没保存。
+   *   侧栏 `watch` 这个数，从 0 变成 >0 时重取一次列表。
+   */
+  const currentSessionMessageCount = ref(0)
+  /** 切换/新建会话进行中（学生点了历史会话之后要看到「正在打开…」）。 */
+  const sessionSwitching = ref(false)
+  /** 会话通道不可用时的可读说明（缺通道不白屏，只说明原因 —— 与学段/章节同一口径）。 */
+  const sessionBridgeError = ref<string | null>(null)
+
+  /**
+   * ★★ **AI 主动发起的第一条消息**（需求原文：「智能体也能主动发起对话引导学习章节内容」）。
+   *
+   * 它是**独立于 turns 的一条状态**，理由有两条：
+   *   1. 它**不是一轮问答**（没有学生的问题、没有流式过程、没有 `requestId`）——
+   *      塞进 `turns` 会逼着所有按轮次算的逻辑（排队、滚动、卡片收集）去理解一个特例；
+   *   2. 它只在该会话**还没有任何消息**时出现，学生一开口就该消失（见 `send`）——
+   *      而 `turns` 里的东西是**只增不减**的。
+   *
+   * ★ 它**同时已经写进了 Pi 会话**（主进程 `appendOpeningMessage`），所以重启后
+   *   它会作为一条普通的助手消息出现在恢复出来的历史里 —— 两处不会重复显示，
+   *   因为「新会话」与「重启恢复」是两条互斥的路径。
+   */
+  const opening = ref('')
+  /** 开场引导指向的知识点（空串 = 没有可去的地方，界面**不渲染**动作按钮）。 */
+  const openingKpId = ref('')
+
+  /** 学生已经回应过开场引导（点过动作、或直接开口说话）→ 不再显示它。 */
+  const openingDismissed = ref(false)
+
+  /** 该不该显示开场引导：有内容、且学生还没回应过。 */
+  const showOpening = computed(() => opening.value !== '' && !openingDismissed.value)
+
+  /** 学生点「好啊，就从这里开始」：记下目标知识点并收起引导（真正的提问由组件发起）。 */
+  function acceptOpening(): void {
+    openingDismissed.value = true
+  }
 
   const turns = computed(() => conversation.value.turns)
   const streaming = computed(() => turns.value.some((turn) => turn.status === 'streaming'))
@@ -225,6 +318,7 @@ export const useChatStore = defineStore('chat', () => {
   function connect(): void {
     connectGrade()
     connectChapter()
+    connectSession()
     if (unsubscribe !== null) return
     if (typeof window === 'undefined' || typeof window.api === 'undefined') {
       bridgeReady.value = false
@@ -232,6 +326,16 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
     bridgeReady.value = true
+    // ★★ 本轮条目 id（分叉点）：独立推送，不是 6 事件之一。
+    //    ⚠️ 判据是「渲染进程手里**已经**建好这一轮」—— 事件可能早于 `sendChat` 的回执
+    //    （与 6 事件的「超前到达」同一个竞态），所以先存进 `pendingTurnEntries`，
+    //    由 {@link send} 在建轮之后补上。
+    if (typeof window.api.onTurnEntries === 'function') {
+      unsubscribeTurnEntries = window.api.onTurnEntries((payload) => {
+        applyTurnEntries(payload.requestId, payload.userEntryId, payload.entryId)
+      })
+    }
+
     unsubscribe = subscribeToChatEvents(window.api, (event) => {
       const wasStreaming = streaming.value
       conversation.value = applyChatEvent(conversation.value, event)
@@ -264,17 +368,230 @@ export const useChatStore = defineStore('chat', () => {
     unsubscribeGrade = null
     unsubscribeChapter?.()
     unsubscribeChapter = null
+    unsubscribeSession?.()
+    unsubscribeSession = null
+    unsubscribeTurnEntries?.()
+    unsubscribeTurnEntries = null
+  }
+
+  /* ------------------------------------------------------------ 会话（切换/新建） */
+
+  /**
+   * 订上「当前会话变化」的推送（幂等；缺通道时只记原因，不抛异常）。
+   *
+   * ★ 主进程推什么就显示什么 —— 渲染进程**不做第二套判定**，也不自己维护
+   *   「当前是哪一条」（那会与主进程的实际会话分叉）。
+   */
+  function connectSession(): void {
+    if (unsubscribeSession !== null) return
+    const lookup = resolveSessionBridge()
+    if (!lookup.ready) {
+      sessionBridgeError.value = lookup.message
+      return
+    }
+    sessionBridgeError.value = null
+    try {
+      unsubscribeSession = lookup.bridge.onSessionChanged((state) => {
+        currentSessionId.value = state.sessionId
+        currentSessionTitle.value = state.title
+        currentSessionMessageCount.value = state.messageCount
+      })
+    } catch (error) {
+      sessionBridgeError.value = `会话推送订阅失败：${
+        error instanceof Error ? error.message : String(error)
+      }`
+      return
+    }
+    /**
+     * ★★ **冷启动恢复**：挂载时读一次当前会话的完整状态。
+     *
+     * 这是「关掉应用再打开，上一段对话还在」这条验收的**渲染进程一半**：
+     * 主进程启动时已经按 `sessionSourceForBoot()` 续上了最近一条会话，
+     * 而恢复出来的正文只有它手里有 —— 不读这一次，学生看到的就是空对话。
+     *
+     * ⚠️ 与 `openSession` 不同，这里**不**用 `applySwitchResult`：
+     *    那个函数会清掉「与上一段对话绑定的临时状态」，而挂载时那些状态本来就是空的；
+     *    更重要的是它会把 `opening` 覆盖成本次回执的值（空串）—— 冷启动**不发**开场
+     *    （见主进程 `session:state` 的注释），所以那个覆盖在这里恰好是对的，
+     *    但**不要**把它当成「以后也这样」的理由。
+     * ⚠️ 失败**不报错**：没有 Key / 服务没起来时应用仍要能用（降级永不白屏）。
+     */
+    void lookup.bridge.getSessionState().then(
+      (result) => {
+        if (!result.ok) return
+        currentSessionId.value = result.current.sessionId
+        currentSessionTitle.value = result.current.title
+        currentSessionMessageCount.value = result.current.messageCount
+        // ★ 只在**渲染进程手里还没有任何消息**时才铺历史：
+        //   挂载与「首条消息发出」可能竞态（学生手快），那时用历史覆盖会把他刚发的那轮抹掉。
+        if (conversation.value.turns.length === 0 && result.messages.length > 0) {
+          conversation.value = restoreConversation(result.messages, null)
+        }
+        opening.value = result.opening
+        openingKpId.value = result.openingKpId
+        openingDismissed.value = false
+      },
+      () => {
+        /* 拉取失败不影响推送路径（学生仍能正常开新对话） */
+      }
+    )
   }
 
   /**
-   * 开一段新会话：**只清界面上的这一份**。
+   * ★★ **打开一条历史会话继续聊**（需求与 `architecture/pending/03` 的核心缺口）。
    *
-   * ★ 清的是什么：渲染进程手里这段对话的显示状态（轮次、卡片、引用）。
-   * ★ **不清**什么（有意为之）：学段与章节（它们是学生/系统的设定，不是这段对话的属性）、
-   *   也已经**不动 Pi 那一侧的会话**（它按 `sessionId` 落在该学生的 JSONL 里，
-   *   学习档案的「历史会话」照样能回看 —— 界面清空 ≠ 记录删除）。
-   *   「切一条新会话」要 dispose 当前 runtime 并处理代际竞态，是另一件事。
-   * ★ 调用方负责先确认（清空不可撤销，见 `views/Chat.vue` 的 `newSession`）。
+   * 三件事的顺序（每一步都有它必须在那个位置的理由）：
+   *   ① `sessionSwitching = true` —— 学生点了列表里的一条，界面必须立刻有反馈
+   *      （几秒的装配在没有任何提示时会让人以为「点了没反应」）；
+   *   ② 调主进程 `openSession(id)` —— 它会 dispose 旧会话、装配新的、并把
+   *      **恢复出来的正文 + 开场引导**一并回传；
+   *   ③ **整段替换**消息列表（`restoreConversation`）—— 不追加：手里那段属于上一条会话。
+   *
+   * ⚠️ **失败时绝不清空当前对话**：拿不到恢复内容就保持原样 + 给一句可读中文 ——
+   *    把学生的屏幕清空、又什么都没恢复出来，是最坏的一种失败。
+   * ⚠️ 与「新会话」共用同一个出口（{@link applySwitchResult}）：两条路的回执同形，
+   *    各写一份处理就会出现「切会话会清空开场语、新会话不会」这类不对称。
+   */
+  async function openSession(sessionId: string): Promise<{ ok: boolean; message?: string }> {
+    if (!sessionId) return { ok: false, message: '切换会话失败：没有指定会话。' }
+    const lookup = resolveSessionBridge()
+    if (!lookup.ready) return { ok: false, message: lookup.message }
+    return await runSwitch(() => lookup.bridge.openSession(sessionId))
+  }
+
+  /**
+   * ★ **开始一段全新的对话**（「新会话」按钮的唯一实现）。
+   *
+   * ★ 它**不动 Pi 的旧会话文件**（旧的那条仍在列表里、随时能切回去）：
+   *   新会话 = 开一个新的 JSONL 文件，不是删除。
+   */
+  async function startNewSession(): Promise<{ ok: boolean; message?: string }> {
+    const lookup = resolveSessionBridge()
+    if (!lookup.ready) return { ok: false, message: lookup.message }
+    return await runSwitch(() => lookup.bridge.startNewSession())
+  }
+
+  /**
+   * ★★ **从某条消息处重新问**（会话分支的唯一入口）。
+   *
+   * 学生在读回答时想到「这一句他讲得不对，我换个问法」—— 他要的是**保留原来那条**、
+   * 另开一条线接着问。所以这里做的是「复制历史到分叉点 + 切过去」，
+   * **原会话一个字节不动**（Pi 在分叉出来的新文件里记 `parentSession` 指回去）。
+   *
+   * ★ 与「新会话」的区别：新会话是空白开始，分叉**带着分叉点之前的全部历史** ——
+   *   它解决的是「改问法」而不是「换话题」。
+   * ★ 走的是同一个执行出口（{@link runSwitch}）：回执同形、落库同形
+   *   （整段替换消息列表）—— 两条路各写一份就会出现「分叉会清开场语、切会话不会」
+   *   这类不对称。
+   */
+  async function branchSession(entryId: string): Promise<{ ok: boolean; message?: string }> {
+    if (!entryId) return { ok: false, message: '重新问失败：没有指定要分叉的那条消息。' }
+    // ⚠️ 还没有当前会话时分叉没有意义（分叉点是「本条会话里的某条消息」）
+    if (!currentSessionId.value) {
+      return { ok: false, message: '重新问失败：当前没有进行中的对话。' }
+    }
+    const lookup = resolveSessionBridge()
+    if (!lookup.ready) return { ok: false, message: lookup.message }
+    const sessionId = currentSessionId.value
+    return await runSwitch(() => lookup.bridge.branchSession({ sessionId, entryId }))
+  }
+
+  /** 切换 / 新建 / 分叉共用的执行与落库（见 {@link openSession} 的三步说明）。 */
+  async function runSwitch(
+    call: () => Promise<
+      | {
+          ok: true
+          current: { sessionId: string; title: string; messageCount: number }
+          messages: Array<{
+            role: 'user' | 'assistant'
+            text: string
+            at: number
+            entryId?: string
+          }>
+          opening: string
+          openingKpId: string
+        }
+      | { ok: false; message: string }
+    >
+  ): Promise<{ ok: boolean; message?: string }> {
+    sessionSwitching.value = true
+    try {
+      const result = await call()
+      if (!result.ok) return { ok: false, message: result.message }
+      applySwitchResult(result)
+      return { ok: true }
+    } catch (error) {
+      // IPC 崩了也要出可读中文（绝不把异常抛给组件，那会渲染成一段堆栈文本）
+      return {
+        ok: false,
+        message: `切换会话失败：${error instanceof Error ? error.message : String(error)}`
+      }
+    } finally {
+      sessionSwitching.value = false
+    }
+  }
+
+  /**
+   * ★ 会话切换失败时说一句人话（**唯一写入口**）。
+   *
+   * 为什么不复用 `localNotice`：那是**对话通道**的提示（发送被拒 / 桥缺失），
+   * 而这是**会话切换**的失败。两者的处置不同（一个重发、一个重试切换），
+   * 混在一条里会让「切换失败」的提示在下一次发送时被顺手清掉 —— 学生还没读完。
+   */
+  const sessionNotice = ref<string | null>(null)
+
+  function setSessionNotice(message: string | null): void {
+    sessionNotice.value = message
+  }
+
+  /** 把一次切换/新建的结果落进状态（**唯一的落点**，见 {@link openSession} 的说明）。 */
+  function applySwitchResult(result: {
+    current: { sessionId: string; title: string; messageCount: number }
+    messages: Array<{
+      role: 'user' | 'assistant'
+      text: string
+      at: number
+      /** ★ 条目 id（「从这里重新问」拿它分叉；缺了那条消息就不给按钮）。 */
+      entryId?: string
+    }>
+    opening: string
+    openingKpId: string
+  }): void {
+    currentSessionId.value = result.current.sessionId
+    currentSessionTitle.value = result.current.title
+    currentSessionMessageCount.value = result.current.messageCount
+    // ★ 打上「这一轮回答时系统判出的学段」：历史消息的学段是**当时**的，不是现在的 ——
+    //   但我们手里没有「当时」这个值（它没进 JSONL），所以按当前学段标注。
+    //   标错比不标更坏，所以历史消息**一律不标**（传 null）。
+    conversation.value = restoreConversation(result.messages, null)
+    // 清掉与「上一段对话」绑定的临时状态（与新会话同一套清理，见 resetConversation）
+    localNotice.value = null
+    queuedText.value = null
+    queueNotice.value = null
+    gradeNotice.value = null
+    chapterNotice.value = null
+    // ★★ 开场引导：**只在主进程真的给了内容时**才设置。
+    //   切换一条已有内容的会话时它是空串 —— 那一侧不显示引导（学生会看到一句
+    //   「我们从X开始吧」插在他自己聊过的内容前面，那是明显的错位）。
+    opening.value = result.opening
+    openingKpId.value = result.openingKpId
+    openingDismissed.value = false
+    // ★ 清掉超前缓冲：那些条目 id 属于**上一条会话** —— 留着它们会在新会话里
+    //   命中同一个 requestId（理论上不会，但那是一个不该存在的巧合依赖）。
+    pendingTurnEntries.clear()
+  }
+
+  /**
+   * 清空界面上这段对话（**纯本地**：不动 Pi 的会话文件）。
+   *
+   * ★ 它与 `startNewSession()` 是**两件事**，不要混：
+   *   - 本函数只清渲染进程手里的显示状态，主进程的会话文件一个字节都不动；
+   *   - `startNewSession()` 会 dispose 旧会话、开一个新文件（并回传新会话的状态）。
+   *
+   * ★ 保留它的理由：状态清理（`applySwitchResult` 与它做同一套事）需要有一个
+   *   不依赖 IPC 的纯本地落点 —— 否则「切会话失败」时连界面都清不干净。
+   * ★ 清的是什么：轮次、卡片、引用、待发内容、一次性提示、**开场引导**。
+   * ★ **不清**什么（有意为之）：学段与章节（它们是学生/系统的设定，不是这段对话的属性）。
    */
   function resetConversation(): void {
     conversation.value = emptyConversation()
@@ -284,6 +601,11 @@ export const useChatStore = defineStore('chat', () => {
     // 排队的那条一并清掉：新会话是「从头开始」，把上一段对话的待发内容带过来会很怪
     queuedText.value = null
     queueNotice.value = null
+    // ★ 开场引导也要清：留着它的话，切到一条空会话时上一条的开场语会继续挂着 ——
+    //   而它说的那个知识点可能已经不是现在这条会话要学的了。
+    opening.value = ''
+    openingKpId.value = ''
+    openingDismissed.value = false
   }
 
   /**
@@ -553,6 +875,11 @@ export const useChatStore = defineStore('chat', () => {
     gradeNotice.value = null
     // ★ 章节的「被清空」提示与学段提示同一口径：**下一个问题发出时清掉**（一次性）。
     chapterNotice.value = null
+    // ★★ 学生开口了 → 主动发起的开场引导**立刻收起**（见 `opening` 的说明）：
+    //   他是用「回一句」回应它的，收起就是「这条引导已经被接住了」。
+    //   收起（而不是删除）是刻意的：那段文本已经写进 Pi 会话，删掉本地这一份会让
+    //   界面与历史记录不一致（重启后它又冒出来）。
+    openingDismissed.value = true
     if (typeof window === 'undefined' || typeof window.api === 'undefined') {
       bridgeReady.value = false
       localNotice.value = '预加载脚本未生效（window.api 缺失），无法发送。'
@@ -573,6 +900,12 @@ export const useChatStore = defineStore('chat', () => {
         return
       }
       conversation.value = startTurn(conversation.value, result.requestId, text, gradeAtSend)
+      // ★ 补上可能超前到达的条目 id（见 `pendingTurnEntries`）
+      const buffered = pendingTurnEntries.get(result.requestId)
+      if (buffered) {
+        pendingTurnEntries.delete(result.requestId)
+        applyTurnEntries(result.requestId, buffered.userEntryId, buffered.entryId)
+      }
     } catch (error) {
       localNotice.value = `发送失败：${error instanceof Error ? error.message : String(error)}`
     }
@@ -610,6 +943,36 @@ export const useChatStore = defineStore('chat', () => {
     conversation,
     turns,
     streaming,
+    /* ── 会话（切换 / 新建）────────────────────────────────────────────── */
+    /** 当前会话 id（`''` = 还没有会话；列表据此高亮）。 */
+    currentSessionId,
+    /** 当前会话标题（主进程给；空串 = 还没内容）。 */
+    currentSessionTitle,
+    /** 当前会话的消息条数（侧栏据此决定要不要重取列表）。 */
+    currentSessionMessageCount,
+    /** 切换/新建进行中（界面据此显示「正在打开…」并禁用列表）。 */
+    sessionSwitching,
+    /** 会话通道不可用时的可读说明。 */
+    sessionBridgeError,
+    /** 切换/新建失败的提示（与 `localNotice` 分开，见 {@link setSessionNotice}）。 */
+    sessionNotice,
+    /** 写会话切换的提示（`null` = 清掉）。 */
+    setSessionNotice,
+    /** ★ 打开一条历史会话继续聊（只接受会话 id）。 */
+    openSession,
+    /** ★ 开始一段全新的对话（旧会话仍在列表里）。 */
+    startNewSession,
+    /** ★★ 从某条消息处重新问（分叉出新会话，原会话不动）。 */
+    branchSession,
+    /* ── 主动发起对话（开场引导）───────────────────────────────────────── */
+    /** AI 主动说的第一句（空串 = 这次没有引导）。 */
+    opening,
+    /** 引导指向的知识点（空串 = 界面不渲染动作按钮）。 */
+    openingKpId,
+    /** 该不该显示它（有内容且学生还没回应过）。 */
+    showOpening,
+    /** 学生接受了引导（收起它；真正的提问由组件发起）。 */
+    acceptOpening,
     /** 回答还在生成时学生又发的那一条（`null` = 没有排队）。 */
     queuedText,
     /** 排队相关的可读说明（连按两次发送时的「已被替换」提示；一次性）。 */

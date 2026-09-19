@@ -11,8 +11,10 @@
  */
 
 import assert from 'node:assert/strict'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   LINE_BUFFER_MAX_BYTES,
   LineBuffer,
@@ -405,4 +407,67 @@ test('describeStartupFailure：带日志路径时把路径写进文案（让用�
   const logPath = 'C:\\Users\\tester\\AppData\\Roaming\\k12-agent-desktop\\logs\\sidecar.log'
   const text = describeStartupFailure({ kind: 'timeout', timeoutMs: 30_000, port: null }, { logPath })
   assert.ok(text.includes(logPath), `文案里应当带上日志路径，实际为：${text}`)
+})
+
+// ── 崩溃自愈窗口（源码级接线守卫）────────────────────────────────────────
+//
+// ⚠️ `SidecarManager` **没法在本文件里实例化**：它 import `electron`（`app.isPackaged` /
+//    `app.getAppPath()`），而 `node --test` 里 electron 只是个指向二进制的路径字符串
+//    （连 `handlers.ts` 都因为 `@shared/*` 别名而根本 import 不进来）。
+//    所以这一组写成**源码级正向断言** —— 与本仓库既有的接线守卫（`safety-review.test.ts`
+//    的 S7 组、`architecture-guards.test.ts`）同一手法：断言那行调用真的在生产路径上。
+//
+// 被守卫的缺陷：`clearSidecarEndpoint()` 原本只在「不重启」分支被调用，重启分支要等
+// 500ms 后 `start()` 开头才清。那 500ms 里进程已经死了、端点却还指着它的旧端口与旧 token，
+// 学生发消息或右栏取数就会打到死端口 → `ECONNREFUSED` → 英文 `fetch failed`。
+
+/**
+ * 去掉注释，只留**可执行代码**。
+ *
+ * 为什么必须去：`manager.ts` 里那段说明**逐字引用了** `clearSidecarEndpoint()` 这个名字，
+ * 拿原文做 `includes` 的话，把调用删掉、只留注释也照样绿 —— 守卫当场变成装饰。
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/.*$/gm, '$1')
+}
+
+const DESKTOP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
+function managerCode(): string {
+  return stripComments(
+    readFileSync(join(DESKTOP_ROOT, 'src', 'main', 'sidecar', 'manager.ts'), 'utf8')
+  )
+}
+
+test('★ 接线守卫：崩溃自愈的 500ms 窗口内端点必须已清（不能等 start() 再清）', () => {
+  const source = managerCode()
+  // 窗口 = 「不重启」分支的开头 → 重启分支的 setState（`restarts: … + 1`）。
+  // 只看这个窗口：`stop()` / `abandon()` / `start()` 里那几处 `clearSidecarEndpoint()`
+  // 都在窗口之外，用「文件里最后一次出现」这种松判据会**误判成已修**（第一版就是这么写的，
+  // 变异验证时把重启分支那行删掉仍然全绿 —— 那条守卫是假的）。
+  const windowStart = source.indexOf('if (!decision.restart)')
+  const windowEnd = source.indexOf('restarts: this.state.restarts + 1')
+  assert.ok(windowStart > 0, '找不到「不重启」分支 —— 守卫需要跟着实现更新')
+  assert.ok(windowEnd > windowStart, '找不到重启分支的 setState（restarts+1）')
+
+  const window = source.slice(windowStart, windowEnd)
+  const clears = window.match(/clearSidecarEndpoint\(\)/g) ?? []
+  assert.equal(
+    clears.length,
+    2,
+    '★ 崩溃决策的**两条分支**各要清一次端点：不重启那条（原本就有）+ 重启那条（不能等 start()）。' +
+      `实际只找到 ${clears.length} 次 —— 少的那次就是那 500ms 窗口里打到死端口的来源。`
+  )
+
+  // ★ 顺序：重启分支的这次清理必须在 `setState` 之前（先让端点不成立，再改状态/安排重启）
+  const lastClearAt = window.lastIndexOf('clearSidecarEndpoint()')
+  assert.ok(
+    lastClearAt > window.indexOf('this.fail('),
+    '重启分支的清端点必须在「不重启」分支的 `this.fail(...)` **之后**（两条分支各一次）'
+  )
+  // 正常启动路径的清端点不能被这次改动顶掉（`start()` 开头那一次，与新铸 token 相邻）
+  assert.ok(
+    source.includes("const token = randomBytes(32).toString('hex')"),
+    '每轮启动铸新 token 的那行还在'
+  )
 })

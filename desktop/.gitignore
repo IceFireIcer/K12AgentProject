@@ -1,3 +1,9 @@
 node_modules/
 out/
 dist/
+
+# TypeScript 增量构建缓存（`tsc --noEmit` / `vue-tsc` 的副产物）。
+# ★ 它不是源码：内容随每次编译变化（含时间戳与文件哈希），提交它等于每次跑
+#   typecheck 都制造一次无意义的 diff。`tsconfig.node.tsbuildinfo` 曾被误提交过一次，
+#   本次一并从索引里移除（`git rm --cached`，文件仍在磁盘上）。
+*.tsbuildinfo

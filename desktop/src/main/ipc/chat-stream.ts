@@ -195,8 +195,19 @@ export function withRequestId(event: TurnEvent, requestId: string): IpcEvent {
   switch (event.name) {
     case 'delta':
       return { name: 'delta', data: { requestId, delta: event.data.delta } }
-    case 'citation':
-      return { name: 'citation', data: { requestId, citations: event.data.citations } }
+    case 'citation': {
+      // ★ `details` / `degraded` 必须跟着走：右栏「四级降级链」与回答里的「教材原文」抽屉
+      //   **只认这两个字段**（渲染侧归约见 `renderer/src/api/events.ts`）。上一版在这里只搬了
+      //   `citations`，那两个消费方于是恒显示「本轮没有查教材」—— 降级链是关卡 C 的核心演示证据，
+      //   实际却是死的。上游（`agent/events.ts`）已经按「有内容才挂」产出它们，这里照同样的约定透传。
+      // ★ 省略（而不是发 `details: []` / `degraded: null`）= 「没有这项信息」，与「空数组」不是一回事：
+      //   多发一个空值会让「本轮没检索」与「检索了但没降级信息」在链路上变得无法区分。
+      const { citations, details, degraded } = event.data
+      const data: CitationEvent = { requestId, citations }
+      if (details !== undefined && details.length > 0) data.details = details
+      if (degraded !== undefined && degraded !== null) data.degraded = degraded
+      return { name: 'citation', data }
+    }
     case 'payload':
       return { name: 'payload', data: { requestId, kind: event.data.kind, payload: event.data.payload } }
     case 'blocked':

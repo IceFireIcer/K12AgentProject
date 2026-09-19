@@ -99,11 +99,44 @@ function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/.*$/gm, '$1')
 }
 
-/** 抽出 `export interface NAME { ... }` 的主体（文件里这些接口的右花括号都顶格）。 */
+/**
+ * 抽出 `export interface NAME { ... }` 的主体。
+ *
+ * ★ 用**花括号配平**定位结尾，而不是「找第一个顶格 `\n}`」：接口一旦被写成单行
+ *   （`export interface X { a: string }`），后者会一路吞到文件里**下一处**顶格 `}`，
+ *   提取器于是去看另一个接口的成员 —— 守卫照样通过，却什么都没守（实测复现过）。
+ * ★ 先 `stripComments`：文档注释里的 `{@link x}` / `{ok,data}` 会让配平算歪。
+ * ★ 单行接口直接判违规：字段/方法提取器都是**按行**读声明的，单行写法整块漏得掉，
+ *   所以这里宁可响亮失败，也不给它静默漏过的机会。
+ */
 function interfaceBody(source: string, name: string, file: string): string {
-  const matched = new RegExp(`export\\s+interface\\s+${name}\\s*\\{([\\s\\S]*?)\\n\\}`).exec(source)
-  assert.ok(matched, `${show(file)} 里找不到 interface ${name}`)
-  return matched[1]
+  const code = stripComments(source)
+  const head = new RegExp(`export\\s+interface\\s+${name}\\s*\\{`).exec(code)
+  assert.ok(head, `${show(file)} 里找不到 interface ${name}`)
+
+  const open = code.indexOf('{', head.index)
+  let depth = 0
+  let close = -1
+  for (let index = open; index < code.length; index += 1) {
+    const char = code[index]
+    if (char === '{') depth += 1
+    if (char === '}') {
+      depth -= 1
+      if (depth === 0) {
+        close = index
+        break
+      }
+    }
+  }
+  assert.ok(close > open, `${show(file)} 的 interface ${name} 花括号不配平（提取不出主体）`)
+
+  const body = code.slice(open + 1, close)
+  assert.ok(
+    body.includes('\n'),
+    `${show(file)} 的 interface ${name} 被写成了单行 —— 字段/方法提取器按行读声明，` +
+      '单行接口会被整块漏掉（守卫静默失守）。请把每个成员写在自己的一行上。'
+  )
+  return body
 }
 
 /** 抽出 `export const NAME = { ... } as const` 里的键值对（值必须是字符串字面量）。 */
@@ -118,24 +151,110 @@ function stringLiteralRecord(source: string, name: string, file: string): Record
   return record
 }
 
-/** 接口主体里的属性名（逐行看声明，避免把注释里的词误判成字段）。 */
-function declaredFields(body: string): string[] {
+/**
+ * 把接口主体切成一个个成员声明。
+ *
+ * ★ 切分符必须同时含 `;`：TypeScript 允许同一行写两个成员
+ *   （`text: string; gradeLevel?: GradeLevel`）—— 只按 `\n` 切时**第二个成员整块看不见**，
+ *   提取器于是报出一个「干净」的字段集合（实测复现：G6c 照样通过）。
+ */
+function splitMembers(body: string): string[] {
   return body
-    .split('\n')
-    .map((line) => line.trim())
-    .map((line) => /^(readonly\s+)?([A-Za-z_$][\w$]*)\??\s*:/.exec(line))
-    .filter((match): match is RegExpExecArray => match !== null)
-    .map((match) => match[2])
+    .split(/[\n;]/)
+    .map((member) => member.trim())
+    .filter((member) => member.length > 0)
 }
 
-/** 接口主体里的方法名（`name(args): ret`）。 */
-function declaredMethods(body: string): string[] {
-  return body
-    .split('\n')
-    .map((line) => line.trim())
-    .map((line) => /^([A-Za-z_$][\w$]*)\s*\(/.exec(line))
+/** 接口主体里的属性名（逐行看声明，避免把注释里的词误判成字段）。 */
+function declaredFields(body: string): string[] {
+  return splitMembers(body)
+    .map((member) => /^(?:readonly\s+)?([A-Za-z_$][\w$]*)\??\s*:/.exec(member))
     .filter((match): match is RegExpExecArray => match !== null)
     .map((match) => match[1])
+}
+
+/**
+ * 接口主体里的方法名。**两种写法都要认**：
+ *   - 签名式：`getName(args): ret`
+ *   - 属性式（箭头属性）：`getName: (args) => ret` / `getName: (...) => ret`
+ *
+ * ★ 属性式那一支不能漏：`contextBridge.exposeInMainWorld('api', api)` 暴露的是**对象字面量**，
+ *   属性式写法在运行期与签名式完全等价（真的会被暴露给渲染进程），
+ *   而只认 `name(` 的正则把它整块漏掉 —— G9 的白名单断言照样通过（实测复现过）。
+ */
+function declaredMethods(body: string): string[] {
+  return splitMembers(body)
+    .map((member) => /^(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*(?:\(|\??\s*:\s*\()/.exec(member))
+    .filter((match): match is RegExpExecArray => match !== null)
+    .map((match) => match[1])
+}
+
+/**
+ * 抽出 `const NAME: T = { ... }` 对象字面量在**深度 0**处的键。
+ *
+ * ★ 为什么 G9 不能只信 `K12Api` 接口：`node --test` 只做类型擦除、**不做类型检查**，
+ *   所以「接口声明了但字面量里没有」「字面量里多出一个属性式方法」这类不一致，
+ *   在测试进程里既不报错也看不出（`const api: K12Api = {...}` 的赋值检查是 tsc 的事，
+ *   `npm test` 根本不跑 tsc）。而 `contextBridge` 暴露的正是这个字面量 ——
+ *   **它的键集合才是真实的暴露面**。
+ * ★ 不能逐行正则：字面量里嵌着箭头函数体（`onChatEvent` 里还有第二层箭头），
+ *   行首匹配会把函数体里的语句也当成键。这里按「花括号/圆括号深度 + 跳过字符串」扫描，
+ *   只在所有深度都是 0 的顶层取「标识符 + 冒号」。
+ */
+function objectLiteralKeys(source: string, name: string, file: string): string[] {
+  const code = stripComments(source)
+  const decl = new RegExp(`\\bconst\\s+${name}\\s*:[^=\\n]*=\\s*\\{`).exec(code)
+  assert.ok(decl, `${show(file)} 里找不到 ${name} 的对象字面量（应当写成 \`const ${name}: T = { ... }\`）`)
+
+  const body = code.slice(decl.index + decl[0].length)
+  const keys: string[] = []
+  let braces = 0
+  let parens = 0
+  let quote: string | null = null
+
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index] as string
+
+    if (quote !== null) {
+      // 字符串内部的一切都不算结构（`'chat:event'` 里的冒号不是键分隔符）
+      if (char === '\\') index += 1
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char
+      continue
+    }
+    if (char === '{') {
+      braces += 1
+      continue
+    }
+    if (char === '}') {
+      if (braces === 0) break // 字面量结束
+      braces -= 1
+      continue
+    }
+    if (char === '(') {
+      parens += 1
+      continue
+    }
+    if (char === ')') {
+      parens -= 1
+      continue
+    }
+
+    if (braces !== 0 || parens !== 0) continue
+    if (!/[A-Za-z_$]/.test(char)) continue
+    if (index > 0 && /[\w$]/.test(body[index - 1] as string)) continue
+
+    const matched = /^([A-Za-z_$][\w$]*)\s*:/.exec(body.slice(index))
+    if (!matched) continue
+    keys.push(matched[1] as string)
+    index += matched[0].length - 1
+  }
+
+  assert.ok(keys.length > 0, `${show(file)} 的 ${name} 里没解析出任何键`)
+  return keys
 }
 
 // ── G1 原生数据库模块 ───────────────────────────────────────────────────
@@ -512,11 +631,28 @@ const EXPECTED_API_METHODS = [
   'readStudyMistakes',
   'readStudyChapters',
   'readStudyGraph',
-  // 历史会话（**只读回看**）：`readSessionTranscript` 只接受会话 id，
+  // 历史会话：`readSessionTranscript` 与 `openSession` 都**只接受会话 id**，
   // 主进程先用 Pi 列出的会话做白名单对齐 —— 渲染进程无法指定路径。
   'listSessions',
   'readSessionTranscript',
   'searchSessions',
+  // ★ 会话切换 / 新建 / 当前状态（三条 invoke）+ 变化推送（一条 push）。
+  //   ★ `startNewSession` 与 `chat:send` **分开**是刻意的：`ChatSendRequest` 的字段集合
+  //     被 G6c 钉死为 `['text']`，把「开会话」塞进去会让「发一条消息」变成
+  //     「顺带换一个会话」的副作用（与学段/章节不走对话请求同一条纪律）。
+  //   ★ `onSessionChanged` 是**推送**：学生会在别处改变当前会话（列表里点开另一条、
+  //     标题在后台生成完成），渲染进程观察不到那些动作 —— 不推的话侧栏永远高亮旧会话。
+  'getSessionState',
+  'openSession',
+  'startNewSession',
+  // ★★ 会话分叉（「从这里重新问」）：把「根 → 该消息」复制成新会话，原会话不动。
+  //   两个入参都只当字符串 id 用 —— `sessionId` 走会话白名单、`entryId` 由主进程
+  //   核对该会话的条目清单（渲染进程指不了别的会话）。
+  'branchSession',
+  'onSessionChanged',
+  // ★ 本轮条目 id（`turn:entries` 推送）：「从这里重新问」的分叉点靠它 ——
+  //   没有它，那个按钮只对**历史消息**出现，对刚聊出来的回答不出现（实测 P-105）。
+  'onTurnEntries',
   // 导出：回执**只有文件名**（完整路径不进渲染进程）
   'exportMarkdown',
   // 工具调用轨迹（**推送**；快照语义）。★ 它不是 6 事件之一：
@@ -581,7 +717,22 @@ test('G9: preload 只暴露白名单方法，不暴露通用 ipcRenderer 转发'
       `渲染进程只能看到这些显式方法（新增能力要在这里加一个方法，而不是放开一个通用口子）。`
   )
 
-  const generic = methods.filter((method) => GENERIC_BRIDGE_METHODS.includes(method))
+  // ★ 第二条判据：接口声明只是**类型**，真正被 `contextBridge.exposeInMainWorld` 交出去的是
+  //   那个 `const api: K12Api = { ... }` 字面量 —— 它的键才是暴露面。
+  //   两条都必须与白名单相等：字面量里多一个属性式方法（接口没写、或写成别的类型）
+  //   在 `node --test`（只擦类型、不检查）里是隐形的，只有数键才看得见。
+  const exposedKeys = [...new Set(objectLiteralKeys(source, 'api', preloadIndexFile))].sort()
+  assert.deepEqual(
+    exposedKeys,
+    [...EXPECTED_API_METHODS].sort(),
+    `${show(preloadIndexFile)} 的 \`api\` 对象字面量键集合与白名单不一致：\n` +
+      `  实际：${exposedKeys.join(', ')}\n  期望：${EXPECTED_API_METHODS.join(', ')}\n` +
+      `暴露面由这个字面量决定（不是接口声明），多一个键就是多一项渲染进程能力。`
+  )
+
+  const generic = [...new Set([...methods, ...exposedKeys])].filter((method) =>
+    GENERIC_BRIDGE_METHODS.includes(method)
+  )
   assert.deepEqual(generic, [], `preload 里出现通用转发方法：${generic.join(', ')}`)
 
   // 只暴露一个对象，名字固定为 api（没有第二个桥）

@@ -153,15 +153,43 @@ async function defaultRequest(
   })
 }
 
-/** 从失败响应里取一句细节（后端给的是 `{"detail": "..."}`；取不到就回状态文本）。 */
+/**
+ * 从失败响应里取一句细节。
+ *
+ * ★ 失败体有三种形态，都要能用：`{"detail": "…"}`（鉴权 / 404 / 503）、
+ *   `{"detail": […]}`（**422 —— pydantic 的校验错误本来就是个数组**）、非 JSON
+ *   （中间件直接返回的纯文本）。口径与 `wire/data.ts` 的同名函数**逐字一致**
+ *   （两条链的同类回执不该有两种说法），也与 `ipc/handlers.ts` 的版本同一口径，
+ *   兜底链也同样取 `detail → message → 状态文本`。
+ * ★ 只认字符串形态的后果：一次本可读的校验失败会退化成英文 `Unprocessable Entity`，
+ *   学生看到的是「保存失败（HTTP 422）：Unprocessable Entity」—— 他既不知道哪个字段，
+ *   也不知道要改什么。
+ * ★ 数组分支只报**第一条**：一次也就能改一处，把十条拼成一段反而更长更难读。
+ */
 async function readDetail(response: Response): Promise<string> {
   try {
-    const body = (await response.json()) as { detail?: unknown }
-    if (typeof body?.detail === 'string' && body.detail) return body.detail
+    const body = (await response.json()) as { detail?: unknown; message?: unknown }
+    const detail = body?.detail ?? body?.message
+    if (typeof detail === 'string' && detail) return clip(detail)
+    if (Array.isArray(detail)) {
+      const first = detail[0] as { loc?: unknown; msg?: unknown } | undefined
+      // `loc` 形如 `["body", "chapterTitle"]`：`body` 只是容器名，报给学生的字段名要剥掉它
+      const field = Array.isArray(first?.loc)
+        ? first.loc.filter((part) => part !== 'body').join('.')
+        : ''
+      const message = typeof first?.msg === 'string' ? first.msg : '校验未通过'
+      return clip(field ? `${field}：${message}` : message)
+    }
   } catch {
     // 非 JSON 响应（例如中间件直接返回的 401 纯文本）：忽略，走下面的兜底
   }
   return response.statusText || '没有更多说明'
+}
+
+/** 单行化 + 截断（失败消息要能进状态栏，不能是一条 2KB 的 JSON）。与 `ipc/handlers.ts` 同一口径。 */
+function clip(text: string): string {
+  const single = text.replace(/\s+/g, ' ').trim()
+  return single.length > 200 ? `${single.slice(0, 200)}…` : single
 }
 
 /** 异常 → 可读中文（超时单独说，因为它的处置与其它失败不同）。 */

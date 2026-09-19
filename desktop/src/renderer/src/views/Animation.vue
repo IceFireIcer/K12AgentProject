@@ -491,8 +491,8 @@ const paramNote = computed(() => {
     </p>
 
     <!-- ══ 底部横向胶片条：舞台在上、模板条在下 ═════════════════════════────
-         条高固定（项高 108px）、项宽固定 220px、横向滚动不换行 ——
-         于是条的高度不随模板数量长高，永远不会反过来挤压舞台。 -->
+         项宽固定 220px、项高**下限** 108px（随内容长高），横向滚动不换行 ——
+         条的高度不随模板数量长高，也不会反过来挤压舞台。 -->
     <section class="anim__strip" aria-label="动画模板">
       <header class="strip__head">
         <Library :size="14" class="strip__ico" />
@@ -782,8 +782,9 @@ const paramNote = computed(() => {
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
-/* 横向排开：项宽固定 220px、项高固定 108px → 条高可预测。
- * 窄屏靠横向滚动兜住，不换行挤压舞台。 */
+/* 横向排开：项宽固定 220px、项高**下限** 108px（可随内容长高，见 .tpl）。
+ * `align-items: stretch` 让同一条里的卡片**长得一样高**，所以条高仍然可预测
+ * （就是最高的那张卡），不会出现参差不齐的锯齿。窄屏靠横向滚动兜住，不换行。 */
 .strip__track {
   display: flex;
   align-items: stretch;
@@ -798,11 +799,23 @@ const paramNote = computed(() => {
   color: var(--k12-muted);
   padding: 12px 2px;
 }
+/* ★★ 高度是**下限**而不是定值（实测缺陷）：四学段全适配的模板（如
+ * 「机器学本事：数据 → 训练 → 预测」）内容合计约 147px，而这里是 `height: 108px`
+ * + `overflow: hidden` —— 「… · 时长 8.0s」整行与学段标签第二行被**静默切掉**，
+ * 没有省略号也滚不动，读起来像「这个模板没有时长」。卡片高度必须由内容决定。
+ *
+ * 取舍：**信息完整 > 条高绝对固定**。条高仍可预测（`.strip__track` 是 stretch，
+ * 同一条里的卡等高 = 最高的那张），代价是四学段的长标题模板会让整条高一档
+ * （约 147px）；换来的是每张卡上的概念名与时长都真的看得见。
+ * 若反过来选「收成首个 + `+N` 角标」，省下的是这 39px，丢的是学生一眼看出
+ * 「这份模板适配哪几档学段」——本页的模板选择恰恰是按学段适配挑的，所以不选它。
+ *
+ * ⚠️ 不要改回固定 `height`，也不要靠 `overflow: hidden` 兜 —— 高度已经随内容，
+ *    `hidden` 就只剩「把下一次溢出变成看不见」这一个作用。 */
 .tpl {
   flex: none;
   width: 220px;
-  height: 108px;
-  overflow: hidden;
+  min-height: 108px;
 
   display: flex;
   flex-direction: column;
@@ -847,7 +860,9 @@ const paramNote = computed(() => {
   font-weight: 620;
   line-height: var(--k12-lh-snug);
   color: var(--k12-fg);
-  /* 最多两行：项高固定，长标题截断而不是把条目撑高（撑高会挤压舞台） */
+  /* 最多两行：标题收到两行内，一张卡的标题不该把**整条**（含其它卡）拉高。
+   * ⚠️ 这条与 `.tpl` 的 min-height 是配套的：卡高随内容长了，但长的是
+   *    学段标签那一段（信息，必须完整），不是标题这一段（可截断，两行足够辨认）。 */
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -868,8 +883,11 @@ const paramNote = computed(() => {
    * 原来是 `nowrap` + `overflow: hidden` —— 第 4 个标签被**从中间裁断**
    * （「初中」只剩上半截，看着像「初十」），而且**没有省略号、也没法滚**，
    * 学生完全不知道自己漏看了一档学段。
-   * `nowrap` 在这里没有收益（卡片高度本来就随内容撑），换行是唯一正确的表达。 */
+   * `nowrap` 在这里没有收益（卡片高度本来就随内容撑 —— `.tpl` 是 `min-height`
+   * 而不是固定高，两处必须一起看），换行是唯一正确的表达。 */
   flex-wrap: wrap;
+  /* 换行后的第二行标签也要和概念行拉开，否则像挤在一起的一团（gap 只管行内间距） */
+  row-gap: 4px;
   margin-top: auto;
 }
 .tpl__grade {

@@ -42,6 +42,11 @@ import {
   type QuizBankRequest,
   type QuizGradeRequest,
   type QuizProgressRequest,
+  type SessionBranchRequest,
+  type SessionBranchResult,
+  type SessionCurrent,
+  type SessionOpenResult,
+  type SessionStateResult,
   type SessionSearchRequest,
   type SettingsCallResult,
   type SettingsSnapshot,
@@ -53,6 +58,21 @@ import {
 import type { SidecarState } from '../main/sidecar/protocol'
 import type { GradeLevel, TraceSnapshot } from '../shared/ipc-events'
 import { IPC_EVENT_NAMES, type IpcEvent } from '../shared/ipc-events'
+
+/**
+ * 「本轮条目 id」的载荷（`turn:entries`）。
+ *
+ * ★ 空串 = 那一侧没有条目（本轮失败 / 取不到）：界面据此**不给**对应的分叉按钮，
+ *   而不是拿一个 `undefined` 去问 Pi。
+ */
+export interface TurnEntries {
+  /** 本轮的请求号（与 `chat:send` 的回执配对）。 */
+  requestId: string
+  /** 学生那句话的条目 id（空串 = 无）。 */
+  userEntryId: string
+  /** 助手那条回答的条目 id（空串 = 无）。 */
+  entryId: string
+}
 
 export interface K12Api {
   /** 读当前 sidecar 状态（不含 token）。 */
@@ -135,6 +155,53 @@ export interface K12Api {
   readSessionTranscript(sessionId: string): Promise<StudyCallResult>
   /** 在历史会话里搜索（命中标题或全文，返回片段）。 */
   searchSessions(payload: SessionSearchRequest): Promise<StudyCallResult>
+  /**
+   * ★★ 读**当前会话的完整状态**（含**恢复出来的正文**与开场引导）。
+   *
+   * 这是**冷启动恢复**那条路：主进程启动时已经续上了最近一条会话，
+   * 而恢复出来的对话只有它手里有 —— 不调这个方法，学生看到的就是
+   * 「关掉应用再打开，上一段对话从界面上消失了」。
+   *
+   * ★ 它会（必要时）装配会话：那是这条路的代价，也是它的全部意义。
+   * ★ 装配失败回 `{ok:false, message}`（没有 Key / 服务没起来时应用仍要能用）。
+   */
+  getSessionState(): Promise<SessionStateResult>
+  /**
+   * ★★ **切换到一条历史会话继续聊**（恢复会话的唯一入口）。
+   *
+   * ★ 只接受**会话 id**：主进程先用 Pi 列出的会话做白名单对齐，再用 Pi 给的 path 打开。
+   * ★ 回执里带着**恢复出来的对话**（`messages`）与**开场引导**（`opening`）——
+   *   渲染进程要整段换掉手里的消息列表，分两次拿会留下「界面已切、消息还是旧的」的中间态。
+   */
+  openSession(sessionId: string): Promise<SessionOpenResult>
+  /**
+   * ★ 开始一条**全新的会话**（旧的那条仍在列表里，随时能切回去）。
+   * ★ 回执形状与 {@link openSession} 一致：两条路都返回「切换后的完整状态」。
+   */
+  startNewSession(): Promise<SessionOpenResult>
+  /**
+   * ★★ **从某条消息处重新问**（分叉出一条新会话）。
+   *
+   * 语义：把「根 → 该消息」这一段复制成新会话，**原会话一个字节不动** ——
+   * 这是「重新问一遍」而不是「改写历史」，两条线都能找回。
+   *
+   * ★ 两个入参都只当**字符串 id** 用：`sessionId` 走会话白名单、
+   *   `entryId` 由主进程核对该会话的条目清单（渲染进程指不了别的会话）。
+   */
+  branchSession(request: SessionBranchRequest): Promise<SessionBranchResult>
+  /**
+   * 订阅**本轮条目 id**（`{requestId, userEntryId, entryId}`），返回取消订阅函数。
+   *
+   * ★ 「从这里重新问」的分叉点靠它 —— 没有它，那个按钮只对**历史消息**出现，
+   *   对刚聊出来的回答不出现（而那正是它最主要的用法）。
+   */
+  onTurnEntries(listener: (payload: TurnEntries) => void): () => void
+  /**
+   * 订阅**当前会话变化**，返回取消订阅函数。
+   * ★ 必须推送：会话会在别处被改变（列表里点开另一条、标题在后台生成完成），
+   *   渲染进程看不到那些动作 —— 不推的话侧栏永远高亮着上一段对话。
+   */
+  onSessionChanged(listener: (state: SessionCurrent) => void): () => void
   /**
    * 把一段 Markdown 存成文件（报告 / 错题本导出）。
    * ★ **回执只有文件名**（完整路径不进渲染进程）；文件名由主进程清理。
@@ -363,6 +430,57 @@ const api: K12Api = {
   searchSessions: (payload): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.sessionSearch, payload) as Promise<StudyCallResult>,
 
+  // ── 会话切换 / 新建（★ 恢复续聊的写入口）────────────────────────────────
+  // ★ 只把**会话 id** 递过去（主进程做白名单对齐），字符串以外的一律过滤掉。
+  // ★ 回执是判别联合（失败也带一句可读中文），与本项目其它 invoke 同一条纪律。
+  getSessionState: (): Promise<SessionStateResult> =>
+    ipcRenderer.invoke(IPC.sessionState) as Promise<SessionStateResult>,
+
+  openSession: (sessionId): Promise<SessionOpenResult> =>
+    ipcRenderer.invoke(IPC.sessionOpen, sessionId) as Promise<SessionOpenResult>,
+
+  startNewSession: (): Promise<SessionOpenResult> =>
+    ipcRenderer.invoke(IPC.sessionNew) as Promise<SessionOpenResult>,
+
+  branchSession: (request): Promise<SessionBranchResult> =>
+    ipcRenderer.invoke(IPC.sessionBranch, {
+      // ★ 逐字段重建：只递两个字符串，渲染进程多塞的字段进不来
+      sessionId: typeof request?.sessionId === 'string' ? request.sessionId : '',
+      entryId: typeof request?.entryId === 'string' ? request.entryId : ''
+    }) as Promise<SessionBranchResult>,
+
+  onTurnEntries: (listener): (() => void) => {
+    const handler = (_event: IpcRendererEvent, payload: unknown): void => {
+      // 边界处过滤：三个字段都必须是字符串（半截对象直接丢掉，
+      // 别让某一轮挂上 `undefined` 当分叉点）
+      const record = payload as { requestId?: unknown; userEntryId?: unknown; entryId?: unknown } | null
+      if (!record || typeof record !== 'object') return
+      if (typeof record.requestId !== 'string' || record.requestId === '') return
+      listener({
+        requestId: record.requestId,
+        userEntryId: typeof record.userEntryId === 'string' ? record.userEntryId : '',
+        entryId: typeof record.entryId === 'string' ? record.entryId : ''
+      })
+    }
+    ipcRenderer.on(IPC.turnEntries, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.turnEntries, handler)
+    }
+  },
+
+  onSessionChanged: (listener): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: unknown): void => {
+      // 边界处过滤：`sessionId` 必须是字符串（半截对象直接丢掉，
+      // 别让侧栏去渲染一个 undefined 的会话 id）
+      if (!isSessionCurrent(state)) return
+      listener(state)
+    }
+    ipcRenderer.on(IPC.sessionChanged, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.sessionChanged, handler)
+    }
+  },
+
   exportMarkdown: (payload): Promise<FileExportResult> =>
     ipcRenderer.invoke(IPC.fileExport, payload) as Promise<FileExportResult>,
 
@@ -492,6 +610,23 @@ function isChapterState(value: unknown): value is ChapterState {
   )
 }
 
+/**
+ * 当前会话状态的最小形状检查（`sessionId` 必须是字符串 —— **空串合法**）。
+ *
+ * ★ 空串是合法值（= 还没有会话），所以判据是「是不是字符串」而不是「真值」：
+ *   写成 `if (!record.sessionId) return false` 会把「新建应用、还没有会话」这条
+ *   完全正常的推送整条丢掉，侧栏于是永远停在上一状态。
+ */
+function isSessionCurrent(value: unknown): value is SessionCurrent {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as { sessionId?: unknown; title?: unknown; messageCount?: unknown }
+  return (
+    typeof record.sessionId === 'string' &&
+    typeof record.title === 'string' &&
+    typeof record.messageCount === 'number'
+  )
+}
+
 /** 下发执行请求的最小形状检查（缺 `requestId`/`code` 的直接丢掉，别让渲染侧拿到半截对象）。 */
 function isCodeExecuteRequest(value: unknown): value is CodeExecuteRequest {
   if (typeof value !== 'object' || value === null) return false
@@ -545,10 +680,17 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.studyMistakes,
   IPC.studyChapters,
   IPC.studyGraph,
-  // 历史会话（invoke；只读回看；**只接受 id，不接受路径**）
+  // 历史会话（invoke；**只接受 id，不接受路径**）
   IPC.sessionList,
   IPC.sessionTranscript,
   IPC.sessionSearch,
+  // 会话切换 / 新建 / 当前状态（三条 invoke）+ 变化推送（一条 push）
+  IPC.sessionOpen,
+  IPC.sessionNew,
+  IPC.sessionBranch,
+  IPC.sessionState,
+  IPC.sessionChanged,
+  IPC.turnEntries,
   // 导出（invoke；回执只有文件名）
   IPC.fileExport,
   // 工具调用轨迹（**推送**：主进程每记录一条就推一次全量快照）

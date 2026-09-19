@@ -51,7 +51,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, NamedTuple, Sequence
 
 from app.contracts import MASTERY_DELTA_LIMIT
 from app.store.connections import connect
@@ -67,6 +67,12 @@ logger = logging.getLogger(__name__)
 
 #: 变式题仓库的迁移组名（``migrations.py`` 预留的并行通道，见模块头）。
 QUIZ_MIGRATION_SET = "quiz"
+
+#: :meth:`LearningStore.question_attempt` 单次扫描的学习记录行数上限。
+#: ★ 为什么是「有界扫描 + 内存比对 qid」而不是加索引 / 加列：见那个方法的 docstring
+#:   （``qid`` 在 ``detail`` 的 JSON 字符串里，按它查在现有表结构下无索引可用；
+#:   加索引/加列都要动 ``migrations.py`` 的已发布迁移，超出「零迁移」的边界）。
+_ATTEMPT_SCAN_LIMIT = 200
 
 #: ``generated_question`` 表：LLM 生成的变式题（**含标准答案**，见模块头第 2 条）。
 _QUIZ_V1 = """
@@ -214,6 +220,27 @@ class GeneratedQuestionRecord:
     created_at: int | None
 
 
+class AttemptRecord(NamedTuple):
+    """某道题**最近一次**作答（:meth:`LearningStore.question_attempt` 的返回）。
+
+    ★ 用 ``NamedTuple`` 而不是本文件其它记录那种 ``frozen dataclass``：它是判分
+      热路径上的一个**小返回值**（每次提交都要取一次），只需要「不可变 + 按名字读」，
+      没有默认值 / 校验的需求；NamedTuple 还顺带能按位置取值与元组解包。
+
+    ★ 它**不是** :class:`MistakeRecord` 那样按知识点聚合的结果：后者回答
+      「这个知识点错了几次」，本记录回答「**这道题**答过没有、上次对没对」——
+      聚合粒度不同，不能拿错题本代替判分幂等（错题本只含答错的行，
+      「上次答对了」的那一次在那里根本不存在）。
+    """
+
+    qid: str
+    #: 该次作答落在哪个知识点（``detail`` 里只有 qid，kp_id 取自行本身）
+    kp_id: str
+    #: 那次作答的对错；``None`` = 该行没有对错概念（列可空，如实透传）
+    is_correct: bool | None
+    #: 那次作答的时间（**Unix 秒**，与 ``add_history`` / ``last_active_at`` 同尺度）
+    ts: int
+
 
 class LearningStore:
     """一个学生的 ``learning.db`` 读写入口。"""
@@ -257,6 +284,37 @@ class LearningStore:
             last_active_at=int(row["last_active_at"] or 0),
             current_chapter=str(row["current_chapter"] or ""),
         )
+
+    def touch_last_active(self, student_id: str) -> None:
+        """刷新 ``student.last_active_at``（**只写这一列**的单条 UPDATE）。
+
+        列名与单位**以 DDL 为准**：``migrations.py`` 的 ``_LEARNING_V1`` 里是
+        ``last_active_at INTEGER``，写 ``int(time.time())``（**Unix 秒**，
+        与 ``upsert_student`` / ``add_history`` 同一尺度；路由层用 ``to_contract_ms``
+        换算成毫秒给出参）。
+
+        ★★ **为什么不能用 ``upsert_student()`` 来刷活跃时间**（这条方法存在的全部理由）：
+          那个方法做的是**整行 upsert** —— ``ON CONFLICT`` 分支会把 ``nickname``
+          与 **``grade_level``** 按调用方手里的值一起写回去。而刷新活跃时间的调用方
+          只能先 ``get_student()`` 读一份快照、在请求收尾时再写回，**这一读一写之间
+          学段可能已经被别处改掉**（``app/grade/rules.py`` 的自动规则引擎、
+          ``POST /api/grade/override`` 的手动选择）。于是这次「刷新活跃时间」
+          会把刚生效的新学段**打回旧值**，而且**不留 ``grade_history``** ——
+          库里的学段与轨迹互相矛盾，现象是「学生明明被切到初中了，几轮后又变回小学」，
+          属最难查的那类故障。单列 UPDATE 里没有「读取 → 改 → 写回」的窗口，天然免疫。
+
+        ★ 同理**不碰** ``current_chapter`` / ``created_at`` / 任何其它列：
+          这个方法的名字就是它的全部职责（与 D-038 的「学段变更才清章节」分得干干净净）。
+
+        ★ 学生行不存在时**什么都不写**（``UPDATE`` 影响 0 行，不静默建行）——
+          与 :meth:`set_current_chapter` 同一口径：建行要一并决定学段与昵称，
+          那是路由层冷启动的事（``upsert_student``），存储层不替它决定。
+        """
+        self.conn.execute(
+            "UPDATE student SET last_active_at = ? WHERE student_id = ?",
+            (int(time.time()), student_id),
+        )
+        self.conn.commit()
 
     # ------------------------------------------------------- 当前教材章节 --
     # ★ 这一对方法是 ``student.current_chapter`` 这一列**唯一的读写实现**：
@@ -564,8 +622,8 @@ class LearningStore:
         self.conn.commit()
 
     # ------------------------------------------------------------ 学习记录读 --
-    # ★ 三个读原语（学习档案：错题本 / 学习报告）与 :meth:`add_history` 构成
-    #   ``learning_history`` 这一张表唯一的读写对 —— 路由层不再自己拼 SQL，
+    # ★ 四个读原语（判分幂等 / 学习档案：错题本 / 学习报告）与 :meth:`add_history`
+    #   构成 ``learning_history`` 这一张表唯一的读写对 —— 路由层不再自己拼 SQL，
     #   两处各写一份 ``SELECT`` 迟早会在「要不要过滤 activity」这类地方分叉。
     #
     # ⚠️ 这里刻意**没有**「读全部学习记录」的原语（``history_rows``）：写过一版，
@@ -573,7 +631,62 @@ class LearningStore:
     #   没有任何调用方需要原始行 —— 零引用的读原语就是零测试覆盖的死代码
     #   （实测：给它注入「``is_correct`` 的 NULL 与 False 混为一谈」这种回归，
     #   全部测试依然绿，因为根本没走到）。要加就等真的有调用方时再加。
-    def mistakes(self, *, limit: int = 50) -> list[MistakeRecord]:
+    def question_attempt(self, qid: str) -> AttemptRecord | None:
+        """**这道题答过没有**：返回 ``detail.qid == qid`` 的最近一次作答，没有则 ``None``。
+
+        用途是**判分幂等**：同一题被重复提交时（前端双击、模型并发调两次
+        ``submit_quiz``）要能认出「这一题已经有记录」，而不是再记一次掌握度。
+
+        - **只认 ``activity == 'quiz'`` 的行**（与 :meth:`mistakes` 的过滤口径一致）：
+          ``qa`` / ``coding`` / ``animation`` 轨的记录里没有题目概念，
+          它们的 ``detail`` 里就算凑巧有 qid 也不能算「做过这道题」。
+        - 判据是 ``detail`` 里的 qid，取自 :func:`_qid_from_detail`
+          —— ``detail`` 是 ``routes/quiz.py`` 的 ``_record_attempt`` 写的 JSON 串，
+          **不另写一份 JSON 解析**（两处解析迟早对「格式坏了怎么办」给出不同答案）。
+        - 「最近一条」按 ``ts DESC, id DESC``：与 :meth:`mistakes` /
+          :meth:`grade_history` 的既有取法一致；同一秒内的多条靠自增 ``id`` 分先后
+          （``ts`` 是**秒**，同一秒里的两次提交光看时间分不出来）。
+
+        ★★ **为什么先按 ``learning_history`` 取最近 N 行、再在内存里比对 qid**
+          （而不是 ``WHERE detail LIKE '%qid%'`` 或加索引）：
+
+          1. ``qid`` **不是一个列**，它藏在 ``detail`` 的 JSON 字符串里 ——
+             现有表结构下按它过滤**无索引可用**，SQL 层做不了等值查询；
+             ``LIKE '%...%'`` 既走不了索引又会被子串误命中
+             （``q-1`` 会匹配到 ``q-12``），而且要依赖 JSON 的书写格式。
+          2. 加真实的索引 / 把 ``qid`` 提成列都要动 ``migrations.py`` 的**已发布迁移**
+             —— 那是本模块明令的边界（见表头「不动 migrations.py」的口径），
+             代价远大于收益：学生规模是「一台机器上的几个孩子」，
+             ``learning_history`` 是每人的小表，**有界扫描（``_ATTEMPT_SCAN_LIMIT`` 行）
+             完全够用**，且这条路径只走一次 PK 顺序扫描 + 若干次 JSON 解析。
+          3. ``ORDER BY ts DESC, id DESC LIMIT N`` 拿到的**就是最近的那批行**，
+             所以「最近一次作答」只要它落在窗口内就一定能找到（同一题的两次提交
+             在时间上相邻）；即使窗口被更近的其它题占满而失手，退回 ``None``
+             也只是「按没答过处理」，不会给出**错误的**结论。
+
+          ⚠️ 调用方通常还知道 ``kp_id``（判分时手上就有），但本方法**不加 kp_id 参数**：
+             ``detail`` 里只有 qid、没有 kp_id，让调用方多传一个只用于「顺手缩窄扫描」
+             的参数会把「这道题答过没」的定义绑到调用方传参的正确性上。
+             ``idx_history_kp`` 因此在本查询上帮不上忙 —— **不为此新增迁移**。
+        """
+        rows = self.conn.execute(
+            "SELECT kp_id, ts, is_correct, detail FROM learning_history "
+            "WHERE activity = 'quiz' ORDER BY ts DESC, id DESC LIMIT ?",
+            (int(_ATTEMPT_SCAN_LIMIT),),
+        ).fetchall()
+        for row in rows:
+            if _qid_from_detail(str(row["detail"] or "")) != qid:
+                continue
+            correct = row["is_correct"]
+            return AttemptRecord(
+                qid=str(qid),
+                kp_id=str(row["kp_id"] or ""),
+                is_correct=None if correct is None else bool(int(correct)),
+                ts=int(row["ts"] or 0),
+            )
+        return None
+
+    def mistakes(self, *, limit: int | None = 50) -> list[MistakeRecord]:
         """**错题聚合**：``is_correct = 0`` 的记录按 ``kp_id`` 分组。
 
         ★ 只取 ``is_correct = 0``：``is_correct IS NULL`` 的行是「没有对错概念」的活动
@@ -583,6 +696,14 @@ class LearningStore:
           却会把一条「带答案的表」接进对外响应 —— 收益小、风险大（§6.3 答案泄漏防护）。
         ★ ``blank_count`` 显式统计「答错了但没有题干」的次数（qa / coding 轨），
           调用方据此提示「还有 N 次答错没有题目记录」，而不是让学生觉得记录少了。
+
+        ★ ``limit=None`` → **全量返回**（不做切片）：错题本里的「累计答错 N 次」
+          是**求和**得出的，在**截断之后**求和只会偏小 —— 学生练过头 50 个知识点
+          以后，界面上那个数字就不再涨了。默认仍是 50（既有调用方行为逐字不变），
+          要统计全量的调用方显式传 ``None``。
+
+        ★ 边界语义**保持不变**：``limit=0`` / 负数仍走 ``max(1, ...)`` → 至少 1 条
+          （这是个历史口径，不是笔误 —— 顺手改成「0 就返回空」会静默改变既有调用方的行为）。
         """
         rows = self.conn.execute(
             "SELECT kp_id, activity, question, ts, detail FROM learning_history "
@@ -629,6 +750,12 @@ class LearningStore:
         # ★ 排序显式钉死（错得多的在前，平局按 kp_id）：依赖 SQL 行序的话，
         #   「同错 2 次」的两个知识点顺序会随插入顺序漂 —— 前端列表会莫名跳动。
         records.sort(key=lambda item: (-item.wrong_count, item.kp_id))
+        if limit is None:
+            # 全量：**不切片**（统计口径要的是「一共错了多少次」，截断会让和偏小）。
+            # ⚠️ 这里不能沿用 `records[: max(1, limit)]` —— 那个写法对 None 会抛
+            # ``TypeError: '>' not supported between instances of 'int' and 'NoneType'``
+            # （``max(1, None)`` 直接比较就炸），所以先分流再切。
+            return records
         return records[: max(1, int(limit))]
 
     def daily_activity(self, *, since: int, tz_offset_seconds: int = 0) -> list[DayActivity]:
@@ -770,6 +897,7 @@ def _generated_from_row(row: sqlite3.Row) -> GeneratedQuestionRecord:
 
 
 __all__ = [
+    "AttemptRecord",
     "GeneratedQuestionRecord",
     "LearningStore",
     "MASTERY_DELTA_LIMIT",

@@ -13,10 +13,10 @@
  *
  * ★★ 头号红线：**答案不出后端**（执行文档 §6.3 的答案泄漏防护）。
  *
- *   - 题库返回的是 `QuizQuestionOut`（结构上没有 `answer`）；
+ *   - 题库返回的是 `QuizQuestionOut`（结构上没有 `answer`、也**没有 `explanation`**）；
  *   - 本文件对所有**外部来源**的题目一律走 {@link projectQuestion} 的**白名单投影**：
- *     只挑 `qid/kpId/type/stem/options/explanation` 六个字段，
- *     LLM 生成的题即使多带了 `answer`/`solution`/`hint` 也**进不了**下发给前端的载荷；
+ *     只挑 `qid/kpId/type/stem/options` 五个字段，
+ *     LLM 生成的题即使多带了 `answer`/`solution`/`hint`/`explanation` 也**进不了**下发给前端的载荷；
  *   - {@link prepareVariants} 里**故意**保留 `answer`（后端判分要它），
  *     但那是**登记给后端**用的：它经 `POST /api/quiz/variants` 直接进 Python，
  *     在投影后的 `payload` 里一个字段都不留。
@@ -53,14 +53,13 @@ import {
 export const QUIZ_QUESTION_TYPES = ['choice', 'blank', 'code_blank'] as const
 export type QuizQuestionType = (typeof QUIZ_QUESTION_TYPES)[number]
 
-/** **对外**题目形态（`QuizQuestionOut`）：**没有 `answer`**。 */
+/** **对外**题目形态（`QuizQuestionOut`）：**没有 `answer`、也没有 `explanation`**。 */
 export interface QuizQuestionOutShape {
   qid: string
   kpId: string
   type: QuizQuestionType
   stem: string
   options: string[] | null
-  explanation: string
 }
 
 /** 出题载荷（`QuizPayload`）。`source` 区分题库与生成（§11.4）。 */
@@ -299,6 +298,13 @@ function readQuestionType(value: unknown): QuizQuestionType | null {
  * 这是「答案不出后端」在编排层的落点：**白名单**挑字段，而不是黑名单删 `answer`。
  * 黑名单会被 `answerText` / `solution` / `correctOption` 这类变体绕过；白名单不会。
  * 认不准的题返回 `null`，由调用方丢掉（宁可少一道题，也不要一道有问题的题）。
+ *
+ * ★★ `explanation` **不在白名单里**（2026-09-19 起，与契约 `QuizQuestionOut` 对齐）：
+ *   解析的措辞经常把答案直接写进去（实测真题里 41% 如此），发到前端就等于送答案。
+ *   它的教学价值在**判分之后** —— `QuizResult.feedback` 里带着它回来，那才是学生
+ *   该看到「为什么」的时刻。所以这里丢掉它在设计上是对的，不是"少带了个字段"。
+ *   ⚠️ 注意 `explanation` 在**登记给后端的那一份**里仍然保留（见 {@link prepareVariants}）：
+ *   后端要它来生成判分后的反馈，而那一份从头到尾不出后端。
  */
 export function projectQuestion(raw: unknown): QuizQuestionOutShape | null {
   if (!raw || typeof raw !== 'object') return null
@@ -324,8 +330,7 @@ export function projectQuestion(raw: unknown): QuizQuestionOutShape | null {
     kpId: readNonEmptyString(record.kpId ?? record.kp_id) ?? '',
     type,
     stem,
-    options,
-    explanation: readNonEmptyString(record.explanation) ?? ''
+    options
   }
 }
 
@@ -419,6 +424,13 @@ export interface GenerateQuestionsRequest {
  *
  * ★ 题型限定在契约的三种；`rubric` 非空即主观题（判分走 LLM）。
  *   **学段写进 Prompt**（票 15 要求），并且服务端登记时还会按术语文表复查超纲。
+ *
+ * ★ 为什么仍然要模型给 `explanation`（2026-09-19 起它已不下发给前端）：
+ *   它是**判分后反馈**的原料 —— Python 的 `feedback_for()` 用它拼出「答对了！…」/
+ *   「这次还差一点，先看看思路：…」，学生在**提交之后**才看到。
+ *   所以要它、但只把它登记进后端（`prepareVariants` 的登记那一份），
+ *   **不进下发给前端的载荷**（`projectQuestion` 的白名单里没有它）。
+ *   ⚠️ 也别让它写成「他答对了吗」式的总结 —— 反馈是给答过题的人看的讲解。
  */
 export function buildVariantPrompt(input: {
   kpId: string
@@ -441,7 +453,7 @@ export function buildVariantPrompt(input: {
     '',
     '每道题必须给出：',
     '- qid：唯一短标识（英文+数字，例如 loop-v1）',
-    '- type / stem / options（选择题才要）/ answer（**标准答案**）/ explanation（给老师看的讲解）',
+    '- type / stem / options（选择题才要）/ answer（**标准答案**）/ explanation（给老师看的讲解，学生答完后会看到）',
     '- 开放题额外给 rubric（该答出哪些要点，一到三句话）',
     '',
     ...(input.previousError ? [`上一次尝试不合格（${input.previousError}），请修正后重新生成。`, ''] : []),
@@ -855,7 +867,11 @@ export function prepareVariants(
 
     const stem = projected.stem
     const rubric = readNonEmptyString(source.rubric) ?? null
-    const explanation = projected.explanation
+    // ★ 解析取自**原始条目**（`projectQuestion` 的白名单里已经没有它了，见那个函数）：
+    //   登记给后端的那一份要带上它 —— 判分后的 `QuizResult.feedback` 正是由它拼出来的。
+    //   这一份从头到尾不出后端（`registerVariants` 只把它发进 Python），
+    //   所以"契约不下发解析"与"后端要有解析"两件事并不冲突。
+    const explanation = readNonEmptyString(source.explanation) ?? ''
     const options = projected.options
 
     toRegister.push({

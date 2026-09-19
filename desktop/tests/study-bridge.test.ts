@@ -21,6 +21,7 @@ import { test } from 'node:test'
 import {
   DEFAULT_EXPORT_NAME,
   MAX_FILE_NAME_CHARS,
+  RESERVED_NAME_PREFIX,
   normalizeExportContent,
   sanitizeFileName
 } from '../src/main/study/export-naming.ts'
@@ -99,10 +100,65 @@ test('文件名清理：超长名字被按字符截断（不按字节）', () =>
 })
 
 test('★ 文件名清理是幂等的：清理过的名字再清理一次不变', () => {
-  for (const raw of ['../../../x.exe', '报告.md', '..\\a b*c.md', '']) {
+  for (const raw of ['../../../x.exe', '报告.md', '..\\a b*c.md', '', 'CON', 'nul.txt', 'COM1', 'LPT9']) {
     const once = sanitizeFileName(raw)
     assert.equal(sanitizeFileName(once), once, `不幂等：${raw} → ${once} → ${sanitizeFileName(once)}`)
   }
+})
+
+/* ── ★ Windows 保留设备名 ──────────────────────────────────────────────
+ *
+ * Win32 至今仍把 `CON` / `NUL` / `COM1` … 当成**设备**而不是文件，且**只看第一个点之前的部分**
+ * —— 所以 `nul.txt`、`CON.md` 同样命中。当前唯一调用点的入参受 `[A-Za-z0-9_-]{1,64}` 约束，
+ * **打不出来**；但本函数自称是「渲染进程字符串 → 文件名」的安全边界，
+ * 将来接上别的输入就直接命中，而症状是「保存成功但文件不见了」这类最难排查的形态。
+ */
+
+test('★ 文件名清理：Windows 保留设备名被加前缀（裸名 / 带扩展名 / 大小写混合 / 带空格）', () => {
+  // 裸设备名
+  for (const device of ['CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM9', 'LPT1', 'LPT9']) {
+    assert.equal(
+      sanitizeFileName(device),
+      `${RESERVED_NAME_PREFIX}${device}.md`,
+      `${device} 是 Win32 设备名，必须加前缀`
+    )
+  }
+  // ★ 带扩展名：设备名的判定只看**第一个点之前**的部分，所以 `nul.txt` 仍是设备
+  assert.equal(sanitizeFileName('nul.txt'), `${RESERVED_NAME_PREFIX}nul.md`)
+  assert.equal(sanitizeFileName('CON.md'), `${RESERVED_NAME_PREFIX}CON.md`)
+  // `.log` 不在「伪后缀」名单里（见 `sanitizeFileName` 第 ⑤ 步），所以它会被保留成
+  // `_COM1.log.md` —— 安全属性看的是**第一个点之前**那一段（`_COM1`，不是设备），
+  // 而不是后缀叫什么。这条断言就该这么写，别把「后缀被换成 .md」当成安全判据。
+  const dotted = sanitizeFileName('COM1.log')
+  assert.ok(dotted.endsWith('.md'), `仍必须以 .md 结尾：${dotted}`)
+  assert.equal(dotted.split('.')[0].toLowerCase() === 'com1', false, `基本名仍是设备名：${dotted}`)
+  // 大小写混合（Win32 不区分大小写）
+  assert.equal(sanitizeFileName('CoN'), `${RESERVED_NAME_PREFIX}CoN.md`)
+  assert.equal(sanitizeFileName('nUl.tXt'), `${RESERVED_NAME_PREFIX}nUl.md`)
+  // 带空格（清理会先压空白，再判设备名 —— 顺序错了就会漏掉 'NUL '）
+  assert.equal(sanitizeFileName('NUL '), `${RESERVED_NAME_PREFIX}NUL.md`)
+  assert.equal(sanitizeFileName(' COM1 '), `${RESERVED_NAME_PREFIX}COM1.md`)
+  // ★ 决定性判据（比逐条比对字符串更贴近 Win32 的真实规则）：结果的**基本名**
+  //   （第一个点之前的部分）绝不等于任何设备名。逐条断言可能被「换个写法也碰巧安全」蒙混，
+  //   这一条直接问「Win32 会不会把它当设备」。
+  const DEVICE = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i
+  for (const device of ['CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM9', 'LPT1', 'LPT9', 'nul.txt', 'CON.md']) {
+    const safe = sanitizeFileName(device)
+    const basicName = safe.split('.')[0]
+    assert.equal(DEVICE.test(basicName), false, `${device} → ${safe}：基本名 ${basicName} 仍是设备名`)
+  }
+})
+
+test('★ 文件名清理：普通名字**不**被误伤（设备名的判据必须锚定在开头）', () => {
+  // 设备名只认「基本名**就是**设备名」这一种；名字里含 CON/COM1 的普通标题照常保留
+  assert.equal(sanitizeFileName('我的CON笔记'), '我的CON笔记.md')
+  assert.equal(sanitizeFileName('第1章-COM1练习'), '第1章-COM1练习.md')
+  // `COM10` **不是**保留名（Windows 只保留 COM1–COM9）—— 加前缀会平白给学生一个怪名字
+  assert.equal(sanitizeFileName('COM10'), 'COM10.md')
+  assert.equal(sanitizeFileName('LPT10'), 'LPT10.md')
+  // 正常的中文档案名一个都不能变（回归：这一条是改造前的既有行为）
+  assert.equal(sanitizeFileName('学习报告'), '学习报告.md')
+  assert.equal(sanitizeFileName('第4章 学习报告'), '第4章 学习报告.md')
 })
 
 // ── 导出内容规范化 ─────────────────────────────────────────────────────

@@ -7,7 +7,11 @@
  *
  * ★★ 两条贯穿全文件的纪律：
  *   ① **学生身份由主进程决定**：所有需要 `studentId` 的通道都调 `resolveActiveStudentId()`，
- *      **绝不读渲染进程递进来的 id** —— 那等于允许读别人的画像与学习记录；
+ *      **绝不读渲染进程递进来的 id** —— 那等于允许读别人的画像与学习记录。
+ *      ⚠️ 有两条通道的 id 不是拼进 URL 而是**塞进 POST body**（`quiz:grade` / `code:run-hint`）：
+ *      服务端那两处的 `student_id` 是必填，所以必须**显式注入**，否则整条链路 422 全哑。
+ *      它们的 id 是 `wire/data.ts` 包装函数的**内部参数**（`req.quizGrade(request, studentId)`），
+ *      刻意不进 `channels.ts` 的请求类型 —— 那类型渲染进程看得见，加进去就等于把身份交回给它。
  *   ② **绝不抛异常**：回执统一是 `{ok:true,data} | {ok:false,message}`。
  *      抛出去会变成渲染进程侧的一坨堆栈文本，而不是界面上一句可读中文。
  */
@@ -101,6 +105,8 @@ export function registerDataHandlers(options: {
   /** 数据层请求注入点（测试用；生产恒为默认出口）。 */
   requests?: typeof dataRequests
 }): void {
+  // ★ 本文件里**所有**要用到学生身份的地方都只经这一个取数口（拼 URL 的与塞 body 的都算）：
+  //   散开写就会出现「某一条通道忘了注入」——而它的表现是整条链路 422 全哑，不是一句报错。
   const studentId = (): string => options.resolveStudentId()
   const req = options.requests ?? dataRequests
 
@@ -172,13 +178,21 @@ export function registerDataHandlers(options: {
     const answer = typeof request.answer === 'string' ? request.answer.trim() : ''
     if (answer.length === 0) return { ok: false, message: '提交失败：还没有作答。' }
     if (answer.length > 2000) return { ok: false, message: '提交失败：作答内容过长。' }
-    return await req.quizGrade({
-      qid,
-      answer,
-      ...(typeof request.sessionId === 'string' && request.sessionId
-        ? { sessionId: request.sessionId }
-        : {})
-    })
+    // ★★ 学生身份由**主进程**决定（`studentId()`），并作为**内部参数**传进取数层 ——
+    //   它刻意不在 `QuizGradeRequest` 里（那是渲染进程能看到的类型）。
+    //   服务端 `QuizGradeRequest.student_id` 是必填：不注入就是整个闯关页判分 422
+    //   （掌握度 / 学习历史 / 进度三处全都不写），且渲染进程手里那个 `studentId`
+    //   哪怕真被转发进来也只是个被**覆盖**的多余字段，指不动别人的记录。
+    return await req.quizGrade(
+      {
+        qid,
+        answer,
+        ...(typeof request.sessionId === 'string' && request.sessionId
+          ? { sessionId: request.sessionId }
+          : {})
+      },
+      studentId()
+    )
   })
 
   ipcMain.handle(IPC.quizProgress, async (_event, payload: unknown): Promise<StudyCallResult> => {
@@ -227,14 +241,21 @@ export function registerDataHandlers(options: {
     if (code.length > 20_000) return { ok: false, message: '分析失败：代码过长（上限 20000 字符）。' }
     const attempt = readInt(request.attempt, 1, 1000, 1)
     if (attempt === null) return { ok: false, message: '分析失败：尝试次数不合法。' }
-    return await req.codeRunHint({
-      kpId,
-      code,
-      language: typeof request.language === 'string' && request.language ? request.language : 'python',
-      stdout: typeof request.stdout === 'string' ? request.stdout.slice(0, 20_000) : '',
-      stderr: typeof request.stderr === 'string' ? request.stderr.slice(0, 20_000) : '',
-      attempt
-    })
+    // ★★ 与 `quizGrade` 同一个注入点：服务端 `CodeRunRequest.student_id` 同样是**必填**
+    //   （它要用学生自己的库查生成题 / 写学习记录），少了它这条通道一律 422 ——
+    //   表现就是「报错感知 + 分级求助」整条链路点了没反应。
+    //   身份仍旧只取主进程解析出来的那个（见 `studentId()` 的定义处）。
+    return await req.codeRunHint(
+      {
+        kpId,
+        code,
+        language: typeof request.language === 'string' && request.language ? request.language : 'python',
+        stdout: typeof request.stdout === 'string' ? request.stdout.slice(0, 20_000) : '',
+        stderr: typeof request.stderr === 'string' ? request.stderr.slice(0, 20_000) : '',
+        attempt
+      },
+      studentId()
+    )
   })
 
   /* ---------------------------------------------------------------- *

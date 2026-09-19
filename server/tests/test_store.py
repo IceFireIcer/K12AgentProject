@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -51,6 +52,34 @@ from app.store.migrations import (  # noqa: E402
     ensure_vec_table,
 )
 from app.store.learning import LearningStore  # noqa: E402
+
+#: ``app/store/learning.py`` 的源码（只用于「刷活跃时间必须是单列 UPDATE」那条结构断言）。
+LEARNING_SOURCE = (ROOT / "app" / "store" / "learning.py").read_text(encoding="utf-8")
+
+
+def method_source(name: str) -> str:
+    """取出 ``LearningStore`` 里某个方法的源码文本（到下一个 ``def`` 为止）。"""
+    return LEARNING_SOURCE.split(f"def {name}(", 1)[1].split("\n    def ", 1)[0]
+
+
+def method_code(name: str) -> str:
+    """``method_source`` 去掉 docstring 与注释后的**可执行代码**。
+
+    ★ 结构断言只能对着代码看：文档字符串里**必然会**用文字讨论被禁止的写法
+      （本方法的 docstring 就在解释「为什么不能用 ``upsert_student``」），
+      拿整段源码去 ``assertNotIn`` 会把「解释禁令」误判成「违反禁令」。
+    """
+    body = method_source(name)
+    parts = body.split('"""')
+    # 偶数段（0, 2, 4…）在 docstring 之外；把 docstring 段整段丢掉
+    outside = "".join(parts[::2])
+    lines = [
+        line
+        for line in (line.split("#", 1)[0] for line in outside.splitlines())
+        if line.strip()
+    ]
+    return "\n".join(lines)
+
 
 # --------------------------------------------------------------------------- #
 # 夹具
@@ -563,6 +592,303 @@ class TestMasteryStore(SqliteCase):
         # 空库上的新知识点：负数不会让分数掉到 0 以下
         self.assertAlmostEqual(store.apply_mastery("kp-empty", -5.0, correct=False), 0.0, places=6)
         self.assertEqual(store.mastery("kp-empty"), (0.0, 1, 0))
+
+
+# --------------------------------------------------------------------------- #
+# 学习记录读原语：判分幂等 / 活跃时间单列刷新 / 错题本全量
+# --------------------------------------------------------------------------- #
+class TestLearningHistoryReads(SqliteCase):
+    """三个读原语的边界（**纯新增**，不改既有方法的行为）。
+
+    每条都对应一个「错了也不报错、只是结果悄悄变错」的点：
+
+    1. ``question_attempt`` 把**没做过的题**说成做过（判分幂等会吃掉学生的一次得分机会），
+       或者把做过说成没做过（同一道题重复记两次掌握度）；
+    2. ``touch_last_active`` 用整行 upsert 刷活跃时间，把**并发期间刚改掉的学段打回旧值**；
+    3. ``mistakes()`` 在**截断之后**求和，让「累计答错 N 次」永远停在 50。
+    """
+
+    def open_store(self) -> LearningStore:
+        store = LearningStore(self.tmp / "learning.db")
+        self.addCleanup(store.close)
+        return store
+
+    def seed_student(self, store: LearningStore, *, grade: str = "primary_low") -> str:
+        """建一个学生行（``upsert_student`` 是冷启动口径，这里用它把行铺出来）。"""
+        student_id = "stu-reads"
+        store.upsert_student(student_id, nickname="团团", grade_level=grade)
+        return student_id
+
+    def grade_of(self, store: LearningStore, student_id: str) -> str:
+        """读回学段（``get_student`` 的返回值可空，测试里少写两行 None 检查）。"""
+        record = store.get_student(student_id)
+        self.assertIsNotNone(record, f"{student_id} 的行不见了")
+        assert record is not None
+        return record.grade_level
+
+    # ------------------------------------------------- question_attempt --
+    def test_question_attempt_is_none_before_any_attempt(self) -> None:
+        """没做过就是 ``None``（不能凭空造一条「做过」出来）。"""
+        store = self.open_store()
+        store.add_history(kp_id="kp-a", activity="quiz", question="别的题", is_correct=True)
+        self.assertIsNone(store.question_attempt("q-never-seen"))
+
+    def test_question_attempt_returns_the_latest_of_two_attempts(self) -> None:
+        """同一题答两次 → 返回**最近那次**。
+
+        第一次答错、第二次答对：返回的必须是第二次（``is_correct=True``）。
+        ``add_history`` 的 ``ts`` 是**秒**，两次提交几乎必然落在同一秒里，
+        所以这里真正考的是 ``ORDER BY ts DESC, id DESC`` 的**第二顺位**
+        （光按 ts 排的话，同一秒的两行顺序随 SQLite 心情，会随机返回第一次）。
+        """
+        store = self.open_store()
+        store.add_history(
+            kp_id="kp-a",
+            activity="quiz",
+            question="循环至少执行几次？",
+            is_correct=False,
+            detail=json.dumps({"qid": "q-1", "type": "choice"}, ensure_ascii=False),
+        )
+        store.add_history(
+            kp_id="kp-a",
+            activity="quiz",
+            question="循环至少执行几次？",
+            is_correct=True,
+            detail=json.dumps({"qid": "q-1", "type": "choice"}, ensure_ascii=False),
+        )
+
+        attempt = store.question_attempt("q-1")
+        self.assertIsNotNone(attempt)
+        assert attempt is not None  # 给 type checker 看（unittest 断言不缩窄类型）
+        self.assertEqual(attempt.qid, "q-1")
+        self.assertEqual(attempt.kp_id, "kp-a")
+        self.assertIs(attempt.is_correct, True, "必须是**第二次**的结果")
+        self.assertGreater(attempt.ts, 0, "ts 是 Unix 秒")
+
+    def test_question_attempt_prefers_newer_ts_over_newer_id(self) -> None:
+        """``ts`` 是**第一顺位**：后插入但更早发生的行不算「最近一次」。
+
+        用裸 SQL 造出「ts 与 id 反向」的两行 —— 只有按 ``ts`` 优先排序才会选对：
+          id=1 ts=5000（新）、id=2 ts=1000（旧，但插入更晚）。
+        修复前为什么可能是红的：只按 ``id DESC`` 取（或不做排序，直接读第一行命中的），
+        返回的是那条 ``is_correct=0`` 的旧记录 —— 判分幂等据此认为「上次答错了」。
+        """
+        store = self.open_store()
+        rows = [
+            (5000, "kp-a", "quiz", "题干", 1, '{"qid": "q-ts"}'),
+            (1000, "kp-a", "quiz", "题干", 0, '{"qid": "q-ts"}'),
+        ]
+        for ts, kp_id, activity, question, correct, detail in rows:
+            store.conn.execute(
+                "INSERT INTO learning_history(ts, session_id, kp_id, activity, question, is_correct, detail) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (ts, "", kp_id, activity, question, correct, detail),
+            )
+        store.conn.commit()
+
+        attempt = store.question_attempt("q-ts")
+        self.assertIsNotNone(attempt)
+        assert attempt is not None
+        self.assertEqual(attempt.ts, 5000, "ts 大的那条才是最近一次")
+        self.assertIs(attempt.is_correct, True)
+
+    def test_question_attempt_keeps_qids_apart(self) -> None:
+        """不同 qid 互不干扰；答过 A 不代表答过 B。"""
+        store = self.open_store()
+        store.add_history(
+            kp_id="kp-a", activity="quiz", is_correct=True, detail='{"qid": "q-a"}'
+        )
+        store.add_history(
+            kp_id="kp-b", activity="quiz", is_correct=False, detail='{"qid": "q-b"}'
+        )
+
+        attempt_a = store.question_attempt("q-a")
+        attempt_b = store.question_attempt("q-b")
+        self.assertIsNotNone(attempt_a)
+        self.assertIsNotNone(attempt_b)
+        assert attempt_a is not None and attempt_b is not None
+        self.assertEqual((attempt_a.kp_id, attempt_a.is_correct), ("kp-a", True))
+        self.assertEqual((attempt_b.kp_id, attempt_b.is_correct), ("kp-b", False))
+        self.assertIsNone(store.question_attempt("q-c"))
+        # ★ 子串也不许命中（``LIKE '%qid%'`` / ``in`` 的典型误报），**两个方向都要**：
+        #   库里只有 q-a-2 时，问 q-a 不能命中；库里只有 q-a 时，问 q-a-2 也不能命中。
+        self.assertIsNone(store.question_attempt("q-a-2"))
+        store.add_history(kp_id="kp-c", activity="quiz", is_correct=False, detail='{"qid": "q-a-2"}')
+        attempt_short = store.question_attempt("q-a")
+        self.assertIsNotNone(attempt_short)
+        assert attempt_short is not None
+        self.assertEqual(attempt_short.kp_id, "kp-a", "q-a 只能命中 q-a 那一行，不是 q-a-2")
+
+    def test_question_attempt_ignores_non_quiz_activities(self) -> None:
+        """非 ``quiz`` 的行**不算作答**（与 ``mistakes`` 的过滤口径一致）。
+
+        ``detail`` 里凑巧带上 qid 的 qa / coding / animation 记录必须被跳过 ——
+        否则「学生在对话里提到过这道题」会被判成「他已经做过了」。
+        顺带钉住 ``_qid_from_detail`` 的**宽松解析**：坏 JSON 不该让判分 500。
+        """
+        store = self.open_store()
+        for activity in ("qa", "coding", "animation"):
+            store.add_history(
+                kp_id="kp-a",
+                activity=activity,
+                is_correct=True,
+                detail=json.dumps({"qid": "q-1"}, ensure_ascii=False),
+            )
+        self.assertIsNone(store.question_attempt("q-1"), "只有 activity='quiz' 才算作答")
+
+        store.add_history(kp_id="kp-a", activity="quiz", is_correct=True, detail="这不是 JSON")
+        self.assertIsNone(
+            store.question_attempt("这不是 JSON"), "坏 detail 只该让这一行匹配不上，不该抛"
+        )
+
+    # -------------------------------------------------- touch_last_active --
+    def test_touch_last_active_updates_only_that_column(self) -> None:
+        """★ 刷活跃时间**只能动 ``last_active_at``**（这条方法存在的全部理由）。
+
+        学段与章节必须**一字未动**：整行 upsert 的写法会把握在调用方手里的
+        ``grade_level`` 快照写回去，把并发期间刚生效的学段打回旧值 —— 而且
+        **不留 ``grade_history``**，库里的学段与轨迹从此互相矛盾。
+
+        ``last_active_at`` 先被压成一个很久以前的哨兵值，否则「刷没刷到」
+        在同秒内根本观察不出来（``int(time.time())`` 的粒度是秒）。
+        """
+        store = self.open_store()
+        student_id = self.seed_student(store, grade="primary_low")
+        store.set_current_chapter(student_id, "第2章 认识循环")
+        store.conn.execute(
+            "UPDATE student SET last_active_at = 12345 WHERE student_id = ?", (student_id,)
+        )
+        store.conn.commit()
+        before = store.get_student(student_id)
+        assert before is not None
+
+        started = int(time.time())
+        store.touch_last_active(student_id)
+        after = store.get_student(student_id)
+        assert after is not None
+
+        self.assertGreater(after.last_active_at, 12345, "活跃时间必须真的被刷新")
+        self.assertGreaterEqual(after.last_active_at, started)
+        self.assertLessEqual(after.last_active_at, int(time.time()))
+        # ★ 逐列对照：只有 last_active_at 允许变
+        self.assertEqual(after.grade_level, before.grade_level)
+        self.assertEqual(after.current_chapter, before.current_chapter)
+        self.assertEqual(after.nickname, before.nickname)
+        self.assertEqual(after.created_at, before.created_at)
+
+    def test_touch_last_active_does_not_revert_a_concurrently_changed_grade(self) -> None:
+        """★ 并发场景的正面用例：学段在「读快照」之后被改掉，刷活跃时间**不许**把它改回去。
+
+        时序刻意复现生产路径：``get_student()`` 读一份快照 → （别处把学段改成 junior，
+        例如 ``app/grade/rules.py`` 的自动判定或 ``POST /api/grade/override``）→
+        收尾时刷活跃时间。走 ``upsert_student`` 的老写法在这一步会把学段**写回
+        ``primary_low``**（对照断言就在下面几条），单列 UPDATE 则不会。
+        """
+        store = self.open_store()
+        student_id = self.seed_student(store, grade="primary_low")
+        snapshot = store.get_student(student_id)
+        assert snapshot is not None
+
+        # 别处改学段（学的与 rules.py 的 _apply() 同一列）
+        store.conn.execute(
+            "UPDATE student SET grade_level = 'junior' WHERE student_id = ?", (student_id,)
+        )
+        store.conn.commit()
+
+        store.touch_last_active(student_id)
+        self.assertEqual(
+            self.grade_of(store, student_id),
+            "junior",
+            "刷活跃时间把并发期间刚生效的学段打回去了",
+        )
+
+        # 对照：老写法（用陈旧快照整行 upsert）**确实**会把学段打回去 ——
+        # 这条对照说明本方法不是「多此一举」，而是唯一正确的写法。
+        store.upsert_student(
+            student_id, nickname=snapshot.nickname, grade_level=snapshot.grade_level
+        )
+        self.assertEqual(
+            self.grade_of(store, student_id),
+            "primary_low",
+            "前提变了：upsert_student 不再覆盖 grade_level，本用例需要重新论证",
+        )
+
+    def test_touch_last_active_is_a_single_column_update_in_source(self) -> None:
+        """★ 结构断言：实现里必须是一条**只写 ``last_active_at`` 的 UPDATE**。
+
+        上面那两条行为断言只覆盖「结果」—— 而「先读一行、再写回两列」这种写法
+        在**单线程测试里结果完全一样**：它读到的就是当前值。真正的故障只在
+        「读与写之间别的请求改了学段」那条时序上发生（生产路径见
+        ``routes/profile.py`` 那条 ``upsert_student(... grade_level=student.grade_level)``），
+        单测造不出那条时序。所以这里对**实现形态**再做一次正向断言：
+        走 ``upsert_student`` / 自己写 ``grade_level`` 的等价写法必须当场变红。
+        """
+        body = method_code("touch_last_active")
+        self.assertIn("UPDATE student SET last_active_at", body, "必须是单列 UPDATE")
+        self.assertNotIn("upsert_student", body, "整行 upsert 会把并发期间改掉的学段打回旧值")
+        for column in ("grade_level", "current_chapter", "nickname", "created_at"):
+            self.assertNotIn(
+                column, body, f"刷活跃时间不许碰 {column}（哪怕只是写回它读到的值）"
+            )
+
+    def test_touch_last_active_does_not_create_a_student_row(self) -> None:
+        """学生行不存在时**什么都不写**（不静默建行）。
+
+        建行要一并决定学段与昵称（那是路由层冷启动的事，见 ``upsert_student``），
+        存储层替它决定 = 凭空冒出一个 grade_level 空串的学生。
+        """
+        store = self.open_store()
+        store.touch_last_active("stu-ghost")
+        self.assertIsNone(store.get_student("stu-ghost"))
+
+    # ---------------------------------------------------------- mistakes --
+    def test_mistakes_default_limit_is_unchanged(self) -> None:
+        """★ 不传参 = 从前的行为（``limit=50``），既有调用方 ``routes/study.py`` 逐字不变。
+
+        造 55 个各错 1 次的知识点：默认只回 50 条 —— 这就是「界面上的累计答错次数
+        永远停在 50」那个偏小的来源。
+        """
+        store = self.open_store()
+        self._seed_mistakes(store, 55)
+
+        records = store.mistakes()
+        self.assertEqual(len(records), 50, "默认上限仍是 50")
+        self.assertEqual(sum(r.wrong_count for r in records), 50, "截断之后求和 = 偏小")
+        self.assertEqual(len(store.mistakes(limit=3)), 3)
+        # ★ 边界口径**照旧**：limit=0 / 负数走 max(1, ...) → 至少 1 条（不是「返回空」）
+        self.assertEqual(len(store.mistakes(limit=0)), 1)
+        self.assertEqual(len(store.mistakes(limit=-5)), 1)
+
+    def test_mistakes_limit_none_returns_everything(self) -> None:
+        """``limit=None`` → 全量（错题本求和要的就是这个口径）。"""
+        store = self.open_store()
+        self._seed_mistakes(store, 55)
+
+        everything = store.mistakes(limit=None)
+        self.assertEqual(len(everything), 55)
+        self.assertEqual(sum(r.wrong_count for r in everything), 55)
+        # 默认那 50 条必须是全量的前缀（排序键一样，切的是尾巴而不是别的东西）
+        self.assertEqual(everything[:50], store.mistakes())
+        # 同一个 kp 错多次也照样累加（全量不等于「每个 kp 一条」）
+        store.add_history(kp_id="kp-000", activity="quiz", question="再错一次", is_correct=False)
+        refreshed = store.mistakes(limit=None)
+        self.assertEqual(len(refreshed), 55)
+        self.assertEqual(
+            next(r for r in refreshed if r.kp_id == "kp-000").wrong_count,
+            2,
+            "同一个知识点的多次答错必须在 wrong_count 里累加",
+        )
+
+    def _seed_mistakes(self, store: LearningStore, count: int) -> None:
+        """造 ``count`` 个各错 1 次的知识点（每个 kp 一条记录 → 记录数 = 次数）。"""
+        for index in range(count):
+            store.add_history(
+                kp_id=f"kp-{index:03d}",
+                activity="quiz",
+                question=f"第 {index} 题：下面哪个说法对？",
+                is_correct=False,
+                detail=json.dumps({"qid": f"q-{index:03d}"}, ensure_ascii=False),
+            )
 
 
 # --------------------------------------------------------------------------- #

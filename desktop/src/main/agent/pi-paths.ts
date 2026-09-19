@@ -36,6 +36,33 @@ export const STUDENTS_DIR_NAME = 'students'
 export const LEARNING_DB_NAME = 'learning.db'
 
 /**
+ * ★★ **建会话与列会话必须用同一个 `cwd`**（唯一拼装点；不要在两处各写一个）。
+ *
+ * 为什么需要这个函数（实测踩到的 P0，`pitfalls.md` 的 P-102）：
+ * Pi 的 `SessionManager.list(cwd, sessionDir)` 在**传了自定义 `sessionDir` 时**
+ * 会**额外按 `cwd` 过滤** —— 源码（0.85.1 `session-manager.js`）：
+ *
+ * ```js
+ * const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd)
+ * const sessions = (await listSessionsFromDir(dir)).filter(
+ *   (session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd)
+ * )
+ * ```
+ *
+ * 于是「建会话时用 A 当 cwd、列会话时用 B 当 cwd」的结果是**列表恒为空** ——
+ * 不报错、不告警，只是历史会话一条都看不见（而文件全都在盘上）。
+ * 实测就是这么踩的：建会话用 `paths.root`（`<studentDir>/pi-agent`），
+ * 列表却用 `paths.studentDir`（`<studentDir>`）。
+ *
+ * ★ 语义：它是「这个应用的 Pi 会话在哪个目录里运行」，取 `paths.root`
+ *   （`<userData>/students/<id>/pi-agent`）—— 与学生目录刻意区分开：
+ *   学生目录同时装着 `learning.db` 与动画缓存，Pi 的项目级资源发现范围不该那么宽。
+ */
+export function piSessionCwd(paths: PiPaths): string {
+  return paths.root
+}
+
+/**
  * ★ 跨学生隔离违规。**单独一个错误类型**，便于上层「要么放行、要么明确报错」而不吞掉它。
  */
 export class SessionIsolationError extends Error {

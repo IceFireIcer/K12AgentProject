@@ -33,6 +33,7 @@
     "check:server": "node scripts/build-server.mjs --check dist",
     "check:server:packaged": "node scripts/build-server.mjs --check packaged",
     "check:docs": "node scripts/doc-facts.mjs",
+    "check:docs:tests": "node scripts/doc-facts.mjs --tests",
     "build": "npm run build:server && npm run typecheck && electron-vite build",
     "build:unpack": "npm run build && electron-builder --dir && npm run check:server:packaged",
     "build:win": "npm run build && electron-builder --win && npm run check:server:packaged",

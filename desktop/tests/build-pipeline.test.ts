@@ -187,6 +187,67 @@ test('G20-6 逃生舱必须响亮警告，不得静默跳过', () => {
   assert.match(branch, /旧后端|stale|跳过/, '警告要讲清后果（包里可能是旧后端）')
 })
 
+/**
+ * ★★ G20-6b：逃生舱**只能**作用于「构建」这条路径，绝不能吞掉 `--check`。
+ *
+ * 缺口（审计结论）：上面那条 G20-6 只验了「会警告」，没验「它在什么条件下生效」。
+ * 实现里那个 `if (!target)` 是**唯一**把逃生舱挡在 `--check` 之外的守卫：
+ *
+ *     if (process.env.K12_SKIP_SERVER_BUILD === '1') {
+ *       if (!target) { 警告; return }        // ← 删掉这一行会怎样？
+ *     }
+ *
+ * 删掉 `if (!target)` 之后，`K12_SKIP_SERVER_BUILD=1 npm run build:win` 会**静默跳过**
+ * 「包里那份后端是不是当前源码打的」这道校验（`build:win` 的最后一步），
+ * 而 G20-6 照样全绿 —— 于是又能打出一个「跑的是旧后端」的包，
+ * 也就是 P-072 当初要根治的那件事原样回来。
+ *
+ * 这里改成**正向断言那个条件本身**：跳过分支必须被 `!target` 包住。
+ * （不写成「禁止 `return`」那类反向断言 —— 本项目一贯要求正向判据。）
+ */
+test('★★ G20-6b 逃生舱必须只在「构建」路径生效：跳过分支被 `!target` 包住，不得吞掉 --check', () => {
+  const hatchIdx = buildServerScript.indexOf('K12_SKIP_SERVER_BUILD === ')
+  assert.ok(hatchIdx > 0, '必须真的判断这个环境变量')
+
+  // 逃生舱那一段代码（到 `--check` 分支开始之前）
+  const hatchEnd = buildServerScript.indexOf("if (target === 'dist')", hatchIdx)
+  assert.ok(hatchEnd > hatchIdx, '`--check dist` 分支必须排在逃生舱之后（顺序即语义）')
+  const hatch = buildServerScript.slice(hatchIdx, hatchEnd)
+
+  assert.match(
+    hatch,
+    /if\s*\(\s*!target\s*\)/,
+    '★ 跳过分支必须被 `!target` 包住 —— 少了它就是「逃生舱连 --check 一起跳过」，' +
+      'build:win / build:unpack 的最后一道闸会在设置了该变量时静默失效'
+  )
+  // ★ 逃生舱块里**只该有一个** `return`：就是 `!target` 分支里那个。
+  //   数 `return` 而不是手工扫括号 —— 第一版按 `indexOf('}')` 找块尾，
+  //   结果被 `${yellow('⚠')}` 里的那个 `}` 提前截断了（模板字符串里的花括号是字面量），
+  //   于是把「块内那个 return」误判成了「块外的第二个 return」。
+  //   计数法对这两个方向都够用：少了 `!target` → 上面的正则先红；
+  //   多出「某一类 target 也提前返回」→ 这里红。
+  const returns = hatch.match(/\breturn\b/g) ?? []
+  assert.equal(
+    returns.length,
+    1,
+    `逃生舱块里有 ${returns.length} 处 return（应当只有 \`!target\` 分支里的那一处）——` +
+      '多出来的那处意味着某一类 target 也会被静默跳过'
+  )
+
+  // 另一条正向判据：`target` 一旦取值，就必须走到真正的校验（checkStamp）
+  const afterHatchAll = buildServerScript.slice(hatchEnd)
+  assert.match(
+    afterHatchAll,
+    /checkStamp\(\s*SERVER_DIST/,
+    '`--check dist` 必须真的去比对指纹（不是打个日志就返回）'
+  )
+  assert.match(
+    afterHatchAll,
+    /checkStamp\(\s*PACKAGED_DIST/,
+    '`--check packaged` 必须真的去比对**包里**那一份的指纹'
+  )
+})
+
 test('G20-7 校验失败必须带**可执行的修法**（不许只丢一句「过期」）', () => {
   const idx = buildServerScript.indexOf('function checkStamp')
   assert.ok(idx > 0, 'build-server.mjs 必须有 checkStamp')

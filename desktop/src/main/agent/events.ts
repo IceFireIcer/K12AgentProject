@@ -128,7 +128,14 @@ export interface TurnMapperState {
   retrying: boolean
   /** 最近一次供应商错误原文（重试也失败时用它兜底成可读文案）。 */
   lastErrorMessage?: string
-  /** 忽略掉的 Pi 事件数（诊断用：证明「未知事件被忽略而不是抛异常」）。 */
+  /**
+   * 没有变成任何契约事件的 Pi 事件数。
+   *
+   * 诊断用，两个用途：① 证明「未知事件被忽略而不是抛异常」；② ★ 暴露**静默丢弃** ——
+   * 一条 `tool_execution_end` 走到这里却没有产出，说明要么是设计上不发 `payload` 的 Tool，
+   * 要么是**新增 Tool 忘了登记 `ipc/tool-kinds.ts`**（后者在界面上只表现为「少一张卡片」，
+   * 不计这个数就完全没有痕迹）。
+   */
   ignoredEvents: number
 }
 
@@ -139,6 +146,17 @@ export function createTurnMapperState(): TurnMapperState {
 export interface TurnMapContext {
   /** 本轮请求号：只用于兜底生成 `done.messageId`（Pi 没给 `responseId` 时）。 */
   requestId: string
+  /**
+   * 当前生效的 API Key（可选）：**只用来把供应商原文里的这一把抹掉**（见
+   * {@link describeProviderError} 的 `secret`）。
+   *
+   * 为什么放在这里而不是给 `bindTurnStream` 再加一个参数：映射层唯一需要它的地方就是
+   * 「把上游原文翻成面向学生的文案」那三处，而这三处都已经拿到了 `context` ——
+   * 加参数会让签名变成五个位置参数，而实际语义完全属于「本轮映射的上下文」。
+   *
+   * ⚠️ **绝不写进日志、绝不进任何事件载荷**：它只被传给 `sanitizeProviderText` 做替换。
+   */
+  secret?: string
 }
 
 /* ------------------------------------------------------------------ *
@@ -161,7 +179,7 @@ export function mapPiEvent(
 
   switch (event.type) {
     case 'message_update':
-      return mapMessageUpdate(event, state)
+      return mapMessageUpdate(event, state, context)
 
     case 'tool_execution_end':
       return mapToolExecutionEnd(event, state)
@@ -185,7 +203,7 @@ export function mapPiEvent(
       if (event.success !== false) return []
       // 重试彻底失败：这才是本轮真正的终态
       const message = event.finalError ?? state.lastErrorMessage
-      return terminalError(state, describeProviderError(message))
+      return terminalError(state, describeProviderError(message, context.secret))
     }
 
     case 'session_shutdown':
@@ -200,7 +218,11 @@ export function mapPiEvent(
 }
 
 /** `message_update`：文本增量与供应商错误。 */
-function mapMessageUpdate(event: PiNativeEvent, state: TurnMapperState): TurnEvent[] {
+function mapMessageUpdate(
+  event: PiNativeEvent,
+  state: TurnMapperState,
+  context: TurnMapContext
+): TurnEvent[] {
   const update = event.assistantMessageEvent
   if (!update || typeof update !== 'object') {
     state.ignoredEvents += 1
@@ -222,7 +244,7 @@ function mapMessageUpdate(event: PiNativeEvent, state: TurnMapperState): TurnEve
     if (state.retrying) return []
     if (state.errorEmitted) return []
     const raw = update.error?.errorMessage ?? update.reason
-    return terminalError(state, describeProviderError(raw))
+    return terminalError(state, describeProviderError(raw, context.secret))
   }
 
   // text_start / text_end / thinking_* / toolcall_* / done / start：不直接上 UI
@@ -257,7 +279,14 @@ function mapToolExecutionEnd(event: PiNativeEvent, state: TurnMapperState): Turn
   if (toolName === RAG_SEARCH_TOOL) {
     const citations = readCitations(event.result)
     // 检索无结果时**不发** citation（空来源列表对 UI 没有意义，前端也会忽略）
-    if (citations.length === 0) return []
+    // ★ 但要**计数**：`ignoredEvents` 的口径是「没有变成任何契约事件的 Pi 事件数」，
+    //   「检索空了」与「命中没解析出来」在这个计数上确实分不开 —— 所以它只用来回答
+    //   「有没有东西被丢掉」，不回答「为什么丢掉」（后者看 `rag_search` 自己的日志）。
+    //   不留痕的话，「引用块一直不出现」在排查时完全没有入口。
+    if (citations.length === 0) {
+      state.ignoredEvents += 1
+      return []
+    }
     const details = readCitationDetails(event.result, citations)
     // ★ 降级档位**原样透传 Python 的判定**（`details.degraded`），TS 侧不重新推理 ——
     //   四级降级链必须一次调用内在 Python 走完（混合后端硬边界）。认不出就整块省略，
@@ -272,7 +301,18 @@ function mapToolExecutionEnd(event: PiNativeEvent, state: TurnMapperState): Turn
 
   // ★ 表只有一份（`ipc/tool-kinds.ts`）；不在表内的 Tool 不发 payload，绝不猜 kind
   const kind = kindForTool(toolName)
-  if (kind === null) return []
+  if (kind === null) {
+    // ★★ 计数不是装饰：这条路径的两种成因**看起来完全不一样**，界面上却是同一个现象 ——
+    //   「少一张卡片」。
+    //     ① 正常的：`get_student_profile` / `remember_preference` 这类**设计上就不发**
+    //        `payload` 的 Tool（它们只影响 Prompt / 只写库，见 §6.4 表）；
+    //     ② 缺陷：**新增了 Tool 但忘了登记进 `ipc/tool-kinds.ts`**。
+    //   不计的话，②在界面上只是「卡片没出来」，日志里一个字都没有 —— 只能靠人肉比对。
+    //   有了它，`ignoredEvents` 与已登记的调用数一对照就能看出「有东西被丢掉了」。
+    //   （具体是哪个 Tool：`kindForTool` 只有一份表，加一行登记即可，不在事件层猜。）
+    state.ignoredEvents += 1
+    return []
+  }
 
   return [{ name: 'payload', data: { kind, payload: readPayload(event.result, toolName, kind) } }]
 }
@@ -291,7 +331,7 @@ function mapAgentEnd(
   //   若这里发 done，UI 会先进入「已完成」并**丢弃随后到达的 error**（error 对 UI 是终态）
   //   —— 实测踩到过：探针模式下事件顺序成了 done → error，界面显示"回答完了"却没有任何内容。
   const failure = readAssistantFailure(event.messages)
-  if (failure !== null) return terminalError(state, describeProviderError(failure))
+  if (failure !== null) return terminalError(state, describeProviderError(failure, context.secret))
 
   state.doneEmitted = true
   return [{ name: 'done', data: { messageId: messageIdFrom(event.messages, context.requestId) } }]
@@ -650,6 +690,57 @@ export function readContentText(result: unknown): string | null {
 }
 
 /**
+ * 密钥脱敏（**唯一的字符串实现处**；`runtime.ts` 只是把它再导出一次）。
+ *
+ * 为什么实现放在**本文件**而不是 `runtime.ts`（那里原本有一个同名的）：
+ *   `describeProviderError` 需要它，而 `runtime.ts` **已经 import 本文件**
+ *   （`describeProviderError` / `bindTurnStream` / …）—— 反过来 import 就是一条
+ *   运行时循环边，谁先求值取决于 import 顺序，顺序一变就是启动期 TDZ 崩溃。
+ *   本函数是纯字符串函数、不依赖任何其它模块，放在这里两边都能用且**只有一份实现**。
+ *
+ * ⚠️ `secret.length < 6` 时**原样返回**：太短的「密钥」在正文里到处都是（`a`、`12`），
+ *    逐字替换会把正常文本打成马赛克。真实 Key（`sk-…` / 64 位 hex）都远长于此。
+ */
+export function redactSecret(text: string, secret: string | undefined): string {
+  if (!secret || secret.length < 6) return text
+  return text.split(secret).join('***')
+}
+
+/**
+ * 凭据**形态**的兜底脱敏（不依赖「我们手里有没有那把 Key」）。
+ *
+ * ★ 与 {@link redactSecret} 的分工：那个抹的是**已知的那一个**密钥；
+ *   这个抹的是**看起来像凭据的东西** —— 上游回显的请求头 / URL 查询串里的凭据，
+ *   我们不掌握它的原文（可能是网关自己铸的 token、或用户填在查询串里的 `?key=`）。
+ *
+ * 为什么必须有这一道（而不是「只要调用方记得传 secret 就行」）：
+ *   `secret` 是**可选参数**，漏传的表现是**静默泄漏**（文案照常生成，只是里面带着凭据）。
+ *   安全属性不该建立在「每个调用点都记得传」上 —— 所以形状匹配作为**兜底**常驻，
+ *   与 `safety/review.ts` 的 `redactHeadersLocally`（sidecar 不可用时的本地名单）同一思路。
+ */
+export function redactCredentialShapes(text: string): string {
+  return (
+    text
+      // `sk-` / `sk_` 形态的供应商 Key（DeepSeek / OpenAI 系列都是这个前缀）
+      .replace(/\b(sk[-_])[A-Za-z0-9_-]{8,}/gi, '$1***')
+      // `Authorization: Bearer <token>` / 裸 `Bearer <token>`
+      .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 ***')
+      // 查询串 / 表单里的凭据参数（**项目支持校内网关，惯例就是把凭据放查询串**）
+      .replace(
+        /([?&]|[?&]amp;)?((?:api[-_]?key|apikey|access[-_]?token|token|key|secret|password|passwd|signature|sign))=([^&\s"'\\]{4,})/gi,
+        '$2=***'
+      )
+      // URL 里的 `user:pass@host`（网关常用形态）
+      .replace(/(\/\/[^/\s:@]+):[^/\s:@]+@/g, '$1:***@')
+  )
+}
+
+/** 两个脱敏一起过（**唯一出口**：凡是要把上游原文写进面向学生的文案，都从这里走）。 */
+export function sanitizeProviderText(text: string, secret?: string): string {
+  return redactCredentialShapes(redactSecret(text, secret))
+}
+
+/**
  * 供应商错误 → 面向学生的一句话。
  *
  * ★ 只做「可读化」，**不吞掉关键信息**：401/额度/断网三类必须能被一眼区分，
@@ -664,9 +755,19 @@ export function readContentText(result: unknown): string | null {
  *        `terminated` / `econnaborted` 这些**实测会出现**的形态（大小写不敏感）；
  *     ② 兜底分支对**纯英文**（无中日韩字符）的原文，给中文前缀 + 原文括注，
  *        保证读到的永远是一句中文，同时不丢掉排查线索。
+ *
+ * ★★ 出参必须**已脱敏**（本轮修正）：兜底分支会把**供应商原文**拼进这句面向学生的文案，
+ *   而这段文字会出现在**学生的对话里**。部分网关的 401 正文就是「回显请求头 / 完整 URL」
+ *   —— 不脱敏时学生的屏幕上会出现 `Authorization: Bearer sk-…` 或
+ *   `https://gw.school.edu/v1/chat?key=…`（后者是校内自建网关的常见形态）。
+ *   两道脱敏在 {@link sanitizeProviderText} 里合成一次，调用方给不给 `secret` 都安全。
+ *
+ * @param secret 当前生效的 API Key（**可选**：给了就连这一把一起抹掉；不给只剩形态兜底）。
  */
-export function describeProviderError(raw: string | undefined): string {
-  const text = typeof raw === 'string' ? raw.trim() : ''
+export function describeProviderError(raw: string | undefined, secret?: string): string {
+  // ★ 先脱敏再判定：判定看的是关键字，脱敏只动值，二者互不影响（顺序不能反 ——
+  //   反了的话「回显 Key 的错误正文」会在被抹掉之前先进判定，多绕一步没有意义）
+  const text = typeof raw === 'string' ? sanitizeProviderText(raw.trim(), secret) : ''
   const lower = text.toLowerCase()
 
   if (text.length === 0) return `${PROVIDER_ERROR_PREFIX}：本轮没有收到任何回复。`
@@ -737,13 +838,23 @@ function containsCjk(text: string): boolean {
  *   实测（断网跑真实 Pi）抛出的原文是纯英文的 `Connection error.`，
  *   旧名单认不出它 → 学生看到英文原文，且这一轮被记成 `exception`（「内部异常」），
  *   与「云端连不上」的处置动作完全相反。
+ *
+ * ★★ 与 `describeProviderError` 同一条纪律：**两条分支的返回值都必须已经脱敏**。
+ *   `exception` 分支同样把原文拼进面向学生的文案（`这一轮回答没有完成（内部异常）：…`），
+ *   而抛出来的异常文本里完全可能有网关回显的 URL / 请求头 —— 「内部异常」不该成为
+ *   绕过脱敏的那条路。
+ *
+ * @param secret 当前生效的 API Key（可选；见 `describeProviderError`）。
  */
-export function describeTurnException(error: unknown): {
+export function describeTurnException(
+  error: unknown,
+  secret?: string
+): {
   message: string
   status: 'missing-key' | 'provider-error' | 'exception'
 } {
   const raw = error instanceof Error ? error.message : String(error)
-  const text = raw.trim()
+  const text = sanitizeProviderText(raw.trim(), secret)
   const lower = text.toLowerCase()
 
   if (looksLikeMissingKey(lower)) return { message: MISSING_KEY_MESSAGE, status: 'missing-key' }
@@ -757,6 +868,7 @@ export function describeTurnException(error: unknown): {
     lower.includes('rate limit') ||
     lower.includes('provider')
   ) {
+    // `text` 在上面已经过脱敏，这里传 `undefined` 不会再改变结论（脱敏是幂等的）
     return { message: describeProviderError(text), status: 'provider-error' }
   }
   return {

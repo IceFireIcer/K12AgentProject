@@ -1,10 +1,18 @@
 /**
  * 逐页 UX 体检抓到的缺陷 → 回归守卫（`scripts/ux-pages-audit.mjs` 的配套）。
  *
- * 覆盖三处（都在真机上先复现、再修、再验）：
+ * 覆盖（都在真机上先复现、再修、再验）：
  *   ① 编程页把**后端排障文案**原样摆给学生看（HTTP 404 + 内部 kp_id + 服务器路径）；
  *   ② 一批可点元素低于 28px 触控下限（散布在五六个页面，靠设计 token 层统一抬）；
- *   ③ 「回到最新」浮标压住输入框 17px（魔数定位导致）。
+ *   ③ 「回到最新」浮标压住输入框 17px（魔数定位导致）；
+ *   ④ 教材换代后 `learning.db` 里的**已删除知识点**残留行被渲染成裸 kp_id；
+ *   ⑤ 层级：浮层压住别的东西（学段气泡 / 检查器 / 表格列宽）；
+ *   ⑥ 下拉关不掉（Esc 与点外部都没有）；
+ *   ⑦ 动画模板卡把内容**静默切掉**（固定高 + overflow）；
+ *   ⑧ 依赖图谱取数失败后**不可重试**；
+ *   ⑨ 右栏两个「去闯关检验」是**死按钮**（emit 只控制右栏显隐）；
+ *   ⑩ 两个模态只有 Esc、**没有焦点契约**；
+ *   ⑪ 给用户看的纯文本里残留 Markdown 星号。
  *
  * 这些都是**源码/结构级**断言 —— 它们钉住「改法」，真机效果由 `ux-pages-audit.mjs` 量。
  * 跑法：`npm test`。
@@ -366,4 +374,185 @@ test('★★ 动画模板卡的学段标签必须换行（实测第 4 档被从�
     '不得用 overflow:hidden 吞掉放不下的标签（那会从中间裁断且无法察觉）'
   )
   assert.doesNotMatch(gradeCode, /flex-wrap:\s*nowrap/, '不得改回 nowrap')
+})
+
+/* ================================================================== *
+ * ⑦ 动画模板卡不得把内容裁掉（固定高 + overflow = 静默切掉一行）
+ * ================================================================== */
+
+/**
+ * 取一条 CSS 规则的**规则体**（选择器 → 它自己的闭合花括号），并剥掉注释。
+ *
+ * ⚠️ 两个坑（本文件里都踩过，所以固定成这两步）：
+ *   ① 规则体里常**故意**引用坏写法（「原来写的是 `height: 108px`」），
+ *      不剥注释的话 `doesNotMatch` 会被注释里的字面量绊倒；
+ *   ② 终点不能写成「另一个选择器的位置」—— 文件里的先后顺序不保证。
+ */
+function cssRule(source: string, selector: string): string {
+  const start = source.indexOf(`\n${selector} {`)
+  assert.ok(start > 0, `找不到规则 ${selector}`)
+  const end = source.indexOf('\n}', start)
+  assert.ok(end > start, `规则 ${selector} 没有正常闭合`)
+  return source.slice(start, end).replace(/\/\*[\s\S]*?\*\//g, '')
+}
+
+test('★★ 动画模板卡的项高必须是**下限**而不是定值（实测「时长」整行被静默切掉）', () => {
+  const anim = read('src', 'renderer', 'src', 'views', 'Animation.vue')
+  const rule = cssRule(anim, '.tpl')
+
+  // 缺陷现场：`.tpl` 是 `height: 108px` + `overflow: hidden`，而一张「四学段全适配」的
+  // 模板（如「机器学本事：数据 → 训练 → 预测」，标题 18 字）内容合计约 147px ——
+  // 「… · 时长 8.0s」整行与学段标签第二行被切掉，没有省略号也不能滚，
+  // 读起来像「这个模板没有时长」。
+  assert.match(rule, /min-height:\s*\d+px/, '高度必须是**下限**（内容长时卡片要能长高）')
+  assert.doesNotMatch(
+    rule,
+    /[^-]height:\s*\d+px/,
+    '不得再用固定 height —— 多出来的内容会被静默切掉（配合 overflow 更看不出来）'
+  )
+  assert.doesNotMatch(
+    rule,
+    /overflow/,
+    '不得靠 overflow 兜住溢出 —— 那正是「切掉一半且没有任何提示」的成因'
+  )
+
+  // 代价那一侧的兑现：条高仍可预测（同一条里的卡等高 = 最高的那张，不会参差不齐）
+  const track = cssRule(anim, '.strip__track')
+  assert.match(
+    track,
+    /align-items:\s*stretch/,
+    '同一条里的卡要等高，否则长标题的长卡会与其它卡参差不齐'
+  )
+})
+
+/* ================================================================== * 
+ * ⑧ 依赖图谱取数失败后必须能重试（学段不变就再也不会发请求）
+ * ================================================================== */
+
+/**
+ * 取一个函数的**函数体**（`function NAME(` → 它自己的闭合花括号）。
+ *
+ * ⚠️ 不能写成「从函数名往后找 N 个字符里有没有那句话」—— 实测踩到：
+ *    `goQuiz` 下面紧跟一个 `useEscape(() => { kpDetail.value = null })`，
+ *    「抽屉要关掉」的断言于是被**另一个函数**喂饱，把 `goQuiz` 里的那行删掉也照样绿。
+ */
+function fnBody(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`)
+  assert.ok(start > 0, `找不到函数 ${name}`)
+  const end = source.indexOf('\n}', start)
+  assert.ok(end > start, `函数 ${name} 没有正常闭合`)
+  return source.slice(start, end)
+}
+
+test('★★ 依赖图谱的错误态必须带**重试**入口（否则这一页只能靠重启应用）', () => {
+  const dep = read('src', 'renderer', 'src', 'views', 'Dependency.vue')
+
+  // 缺陷形态：取数只由 `watch(() => chat.currentGrade, …, { immediate: true })` 触发 ——
+  // 学段不变就**永远不会再发一次**；本页又挂在 `<KeepAlive>` 里、也不走
+  // `useOnBackendReady`，切走再切回来组件不重挂。于是「冷启动头几秒（sidecar 还在起）
+  // 就点进来」得到的是一个**没有任何按钮能救**的红框。
+  const errStart = dep.indexOf('study.errors.graph')
+  assert.ok(errStart > 0, '找不到依赖图的错误态分支')
+  const errBlock = dep.slice(errStart, errStart + 700)
+  assert.match(errBlock, /@click="retryGraph\(\)"/, '错误态里必须有一个真的重发请求的按钮')
+  assert.match(errBlock, /重试/, '按钮文案与闯关 / 知识库 / 动画三页一致：写「重试」')
+
+  // 重试必须是**再发一次图请求**，不是把错误文案清掉（清文案只会得到一张空画布）
+  assert.match(
+    fnBody(dep, 'retryGraph'),
+    /study\.loadGraph\(chat\.currentGrade\)/,
+    '重试要重调 study.loadGraph（它每次都真发请求，不需要额外的强制刷新参数）'
+  )
+})
+
+/* ================================================================== *
+ * ⑨ 右栏的「去闯关检验」必须是真导航（它此前 emit 的只是右栏显隐）
+ * ================================================================== */
+
+test('★★ 右栏两个「去闯关检验」必须真的切到闯关页（实测是死按钮）', () => {
+  const rail = read('src', 'renderer', 'src', 'components', 'ContextRail.vue')
+  // 剥注释：文件里**故意**引用了坏写法（`@click="$emit('update:open', true)"`）
+  const code = rail.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '')
+
+  // 缺陷形态：两处都是 `@click="$emit('update:open', true)"` —— 它们本来就在**已经打开**的
+  // 右栏里，这个 emit 只是把右栏再设成「打开」，点下去恒等于空操作；
+  // 知识点详情抽屉里那一处更糟：点完抽屉还盖在原处，像按钮坏了。
+  assert.doesNotMatch(
+    code,
+    /\$emit\(\s*'update:open'\s*,\s*true\s*\)/,
+    '不得再拿 update:open 当"跳转"（那个 emit 只控制右栏显隐）'
+  )
+  const buttons = (code.match(/去闯关检验/g) ?? []).length
+  const wired = (code.match(/@click="goQuiz\(\)"/g) ?? []).length
+  assert.equal(buttons, 2, `右栏有两处「去闯关检验」（实测 ${buttons} 处）`)
+  assert.equal(wired, buttons, '每一处都必须接到 goQuiz（漏一处就还是死按钮）')
+
+  // 落点按页面清单走：闯关页的页名是 `quiz`（与学习档案页推荐卡同一个 `ui.go`）
+  assert.match(code, /useUiStore\(\)/, '要拿到 ui store')
+  const body = fnBody(code, 'goQuiz')
+  assert.match(body, /ui\.go\('quiz'\)/, '落点是「闯关练习」页')
+  // 抽屉 Teleport 到 body：不显式关掉会跟着盖到闯关页上（切页不等于关浮层）
+  assert.match(body, /kpDetail\.value = null/, '跳转前要收起知识点详情抽屉')
+})
+
+/* ================================================================== *
+ * ⑩ 模态的焦点契约：打开移入 → Tab 层内循环 → 关闭归还
+ * ================================================================== */
+
+test('★★ 确认对话框与原文抽屉都必须有焦点管理（此前只有 Esc 这一个键盘出口）', () => {
+  const confirm = read('src', 'renderer', 'src', 'components', 'ConfirmDialog.vue')
+  const chat = read('src', 'renderer', 'src', 'components', 'ChatMessage.vue')
+  // 剥注释：两处注释里都**引用**了缺的那件事（「没有 useFocusReturn」），
+  // 不剥的话断言会被注释本身喂饱（变异测试要能真的变红）。
+  const confirmCode = confirm.replace(/\/\*[\s\S]*?\*\//g, '')
+  const chatCode = chat.replace(/\/\*[\s\S]*?\*\//g, '')
+
+  // ① 确认对话框：文件头写着「危险操作默认聚焦在**取消**上」，此前**一行代码都没有** ——
+  //    对话框一开，焦点还停在背后的页面上，一路按回车就是「连点两下确认」。
+  assert.match(confirmCode, /useFocusReturn\(/, '确认对话框必须挂焦点契约')
+  assert.match(confirmCode, /ref="panelRef"/, '面板根元素要绑 ref（composable 靠它判范围）')
+  assert.match(
+    confirmCode,
+    /initial:\s*\(\)\s*=>[\s\S]{0,160}?cd__btn--cancel/,
+    '初始焦点必须是**取消**键 —— 不能靠「DOM 里它恰好是第一个」（改一行模板顺序就会落到确认键上）'
+  )
+  assert.match(
+    confirmCode,
+    /class="cd__btn cd__btn--cancel"/,
+    '取消键要有自己的类名（否则初始焦点只能靠选择器猜）'
+  )
+
+  // ② 教材原文抽屉：`role="dialog" aria-modal="true"` 早就有，只差焦点 ——
+  //    此前 Tab 会跑到遮罩**后面**的按钮上，关掉之后还得从头 Tab 回去。
+  assert.match(chatCode, /useFocusReturn\(drawerRef/, '原文抽屉必须挂焦点契约')
+  const drawerStart = chatCode.indexOf('data-testid="source-drawer"')
+  assert.ok(drawerStart > 0, '找不到原文抽屉根元素')
+  const drawer = chatCode.slice(Math.max(0, drawerStart - 300), drawerStart)
+  assert.match(drawer, /ref="drawerRef"/, '抽屉根元素要绑 drawerRef')
+  assert.match(drawer, /aria-modal="true"/, '抽屉的模态语义不能丢（焦点收束的前提）')
+})
+
+/* ================================================================== *
+ * ⑪ 给学生看的纯文本里不得残留 Markdown 标记
+ * ================================================================== */
+
+test('★ 判分小结的说明是**纯文本插值**，里面不能写星号（会原样渲染给学生）', () => {
+  const quiz = read('src', 'renderer', 'src', 'views', 'Quiz.vue')
+  const noteStart = quiz.indexOf('<p class="hw__note">')
+  assert.ok(noteStart > 0, '找不到判分小结的说明段')
+  const noteEnd = quiz.indexOf('</p>', noteStart)
+  assert.ok(noteEnd > noteStart, '说明段没有正常闭合')
+  const note = quiz.slice(noteStart, noteEnd)
+
+  // 缺陷现场：这一句用的是 `{{ }}` 风格的插值（**不走** `markdown.ts` 的解析），
+  // 于是 `**本轮**` 的星号原样摆到学生面前，看起来像排版坏了。
+  assert.doesNotMatch(
+    note,
+    /\*\*/,
+    '纯文本插值里不得出现 `**` —— 它不会被解析，只会原样显示'
+  )
+  assert.match(note, /<strong>本轮<\/strong>/, '强调改用 <strong>（星号只留给模型输出那条通路）')
+  // 顺带钉住这句**仍然准确**的话：另一批改动已把 `explanation` 从下发改成不下发，
+  // 所以「答案与解析都不下发到界面」现在是真的 —— 别顺手删掉它。
+  assert.match(note, /答案与解析都不下发到界面/, '这句现在是准确的口径说明，保留')
 })

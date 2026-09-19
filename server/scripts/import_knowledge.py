@@ -435,6 +435,47 @@ def _grade_index(grade: str) -> int:
     return order.index(grade) if grade in order else -1
 
 
+#: 本脚本写进 ``terminology.json`` 的 ``notes`` 的**那一句**的两个锚点。
+#: ★ 为什么要留锚点：wiki 的 notes 里有人工写的内容（表的用途、判超纲的规则），
+#:   而脚本追加的下限说明是**每次运行都可能变的派生信息**（下调/新增条数）。
+#:   原实现直接 ``notes_before + 新句``，于是每跑一次 ``--write`` 就多一句 ——
+#:   实测跑两次后文件里同一句出现 **2 次**，而且每次都声称「下调 N 条」，
+#:   读的人无法判断哪一句才是当前状态。**幂等要求把它改成「先删旧句、再写新句」。**
+TERMINOLOGY_NOTE_MARKER = " ★ 2026-09-19 接入 K12KnowledgeBase 后按**正文实际位置**重建下限："
+TERMINOLOGY_NOTE_SUFFIX = "推导规则见 scripts/import_knowledge.py 的 build_terminology()。"
+
+
+def _strip_generated_note(notes: str) -> str:
+    """剔除**上一次由本脚本追加**的那一句，返回只剩人工内容的部分。
+
+    只认「标记 → 该句结尾」这一对锚点，notes 里人工写的其它内容一个字都不动；
+    找不到标记就原样返回。
+
+    用 ``while`` 而不是 ``if``：历史文件里可能已经攒了多句（本次修复前跑过几次就有几句），
+    只删一句等于把「幂等」降级成「恰好一次时幂等」—— 那正是这次的缺陷形态。
+    """
+    text = notes
+    while True:
+        start = text.find(TERMINOLOGY_NOTE_MARKER)
+        if start < 0:
+            return text
+        end = text.find(TERMINOLOGY_NOTE_SUFFIX, start)
+        if end < 0:
+            # 残缺的旧句（有人手工改坏了）：从标记处截断即可，不要留着半句
+            return text[:start]
+        text = text[:start] + text[end + len(TERMINOLOGY_NOTE_SUFFIX) :]
+
+
+def _generated_note_counts(data: dict) -> str:
+    """从写好的 ``terminology.json`` 里抠出「下调 N 条、新增 M 条」这一句（只为人读日志）。"""
+    note = str(data.get("notes") or "")
+    start = note.rfind(TERMINOLOGY_NOTE_MARKER)
+    if start < 0:
+        return "未写入说明句"
+    segment = note[start + len(TERMINOLOGY_NOTE_MARKER) :]
+    return segment.split("推导规则")[0].strip().rstrip("。")
+
+
 def build_terminology() -> dict:
     """按**正文实际位置**重建术语文表的下限。
 
@@ -446,11 +487,17 @@ def build_terminology() -> dict:
     3. 表里没有、正文里出现的新词，按同样规则补进去（补了才有守卫意义）。
 
     这样「下限」永远与内容一致，而**未来的回归仍会被拦住**。
+
+    ★ **幂等**：本函数（含它写的 ``notes``）连跑两次必须得到**逐字节相同**的文件。
+    教材正文与 manifest 本来就是「清空重写」所以天然幂等，notes 这条曾是唯一的例外 ——
+    见 :func:`_strip_generated_note`。这样「同一份源库重跑一次」不会在 git 里留下
+    只有一句话长度变化的 diff，也才能说清「重跑是安全的」。
     """
     path = TARGET / "terminology.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     existing = {entry["term"]: entry for entry in data.get("terms", [])}
-    notes_before = data.get("notes") or ""
+    # 先把上一次追加的那句摘掉，后面再按本次结果追加一次（这一对操作就是幂等的全部）
+    notes_before = _strip_generated_note(data.get("notes") or "")
 
     candidates = set(existing) | {term for term, _ in TERM_ADDITIONS} - set(TERM_DENYLIST)
     earliest: dict[str, str] = {}
@@ -486,11 +533,14 @@ def build_terminology() -> dict:
         added.append(term)
 
     data["terms"] = [existing[key] for key in sorted(existing)]
+    # ★ 追加前已由 `_strip_generated_note` 摘掉旧句，所以这一句在文件里**永远只有一份**。
+    #   句子本身（时间戳/条数）刻意保持原样：条数会随每次运行的结果变化，
+    #   但幂等的判据是「同一份输入跑两次 → 同样输出」，不是「这句永远不变」。
     data["notes"] = (
         notes_before
-        + f" ★ 2026-09-19 接入 K12KnowledgeBase 后按**正文实际位置**重建下限："
-        f"下调 {len(lowered)} 条、新增 {len(added)} 条。"
-        "推导规则见 scripts/import_knowledge.py 的 build_terminology()。"
+        + TERMINOLOGY_NOTE_MARKER
+        + f"下调 {len(lowered)} 条、新增 {len(added)} 条。"
+        + TERMINOLOGY_NOTE_SUFFIX
     )
     return data
 
@@ -556,10 +606,14 @@ def main() -> int:
     print(f"[import] manifest.json：{len(manifest['dependencies'])} 条依赖边")
 
     if not args.keep_terminology:
+        terminology = build_terminology()
         (TARGET / "terminology.json").write_text(
-            json.dumps(build_terminology(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            json.dumps(terminology, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
-        print("[import] terminology.json 已同步（7 条下调 + 24 条新增）")
+        # 回显**本次真正写进去的**条数。写死「7 条下调 + 24 条新增」是旧实现的残留：
+        # 那个数字只对第一次导入成立，之后每次重跑结果都是 0 条 —— 日志与文件内容互相矛盾，
+        # 而这条日志正是排障时唯一能看到的「terminology 到底动没动」。
+        print(f"[import] terminology.json 已同步（{_generated_note_counts(terminology)}）")
 
     print("\n[import] 完成。下一步：uv run python scripts/build_kb.py")
     return 0
