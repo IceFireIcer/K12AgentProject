@@ -41,6 +41,7 @@
  */
 import { computed, ref } from 'vue'
 import { GRADE_LEVELS } from '../api/grade'
+import { useDismissable } from '../composables/useDismissable'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL, gradeOriginLabel } from '../labels'
 import { useChatStore } from '../stores/chat'
 import type { GradeLevel } from '@shared/ipc-events'
@@ -61,6 +62,24 @@ const originLabel = computed(() => gradeOriginLabel(chat.gradeOrigin))
 const triggerLabel = computed(() => (props.compact ? '自己指定' : '自己指定学段'))
 
 const pickerOpen = ref(false)
+/** 面板与触发键：Esc / 点外部要用它们判断「点在不在里面」。 */
+const panelRef = ref<HTMLElement | null>(null)
+const triggerRef = ref<HTMLElement | null>(null)
+
+/**
+ * ★ 下拉必须能**主动收起来**（Esc + 点别处）。
+ *   实测缺陷：这两个下拉此前一条都没有 —— 学生点开、不想选、点别处，
+ *   **它不收**；唯一出路是再点一次触发器，或者被迫选一个。
+ *   不选的面板会一直悬在内容上（截图里能看到它叠在「新会话」那一行）。
+ */
+useDismissable({
+  panel: panelRef,
+  trigger: triggerRef,
+  open: () => pickerOpen.value,
+  close: () => {
+    pickerOpen.value = false
+  }
+})
 /** 请求在飞：防连点（连点会重复写库，且第二次的回执会覆盖第一次的提示）。 */
 const busy = ref(false)
 const errorText = ref<string | null>(null)
@@ -113,6 +132,7 @@ async function choose(level: GradeLevel): Promise<void> {
 
       <button
         type="button"
+        ref="triggerRef"
         class="grade__set"
         data-testid="grade-set"
         :disabled="chat.streaming"
@@ -125,7 +145,7 @@ async function choose(level: GradeLevel): Promise<void> {
     <!-- 选项默认收起：点上面的按钮才展开（四个学段，当前生效的那个标出来）。
          失败文案放在面板**内部**：它在「面板还开着」时才可能出现（选成功就收起），
          放进面板里就不必再为它单独安排一个绝对定位的位置。 -->
-    <div v-if="pickerOpen" class="grade__picker" data-testid="grade-options">
+    <div v-if="pickerOpen" ref="panelRef" class="grade__picker" data-testid="grade-options">
       <ul class="grade__list">
         <li v-for="level in GRADE_LEVELS" :key="level">
           <button

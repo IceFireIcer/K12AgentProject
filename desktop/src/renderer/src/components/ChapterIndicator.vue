@@ -30,6 +30,7 @@
  * 选章**不会改变学段**（两件事各自独立）——设置页那条入口把这句话写在界面上。
  */
 import { computed, ref, watch } from 'vue'
+import { useDismissable } from '../composables/useDismissable'
 import { chapterLineLabel } from '../labels'
 import { useChatStore } from '../stores/chat'
 import { useStudyStore } from '../stores/study'
@@ -38,6 +39,19 @@ const chat = useChatStore()
 const study = useStudyStore()
 
 const pickerOpen = ref(false)
+/** 面板与触发键：Esc / 点外部要用它们判断「点在不在里面」。 */
+const panelRef = ref<HTMLElement | null>(null)
+const triggerRef = ref<HTMLElement | null>(null)
+
+/** ★ 与学段下拉同一条纪律：Esc + 点外部都能收起（见 useDismissable 的说明）。 */
+useDismissable({
+  panel: panelRef,
+  trigger: triggerRef,
+  open: () => pickerOpen.value,
+  close: () => {
+    pickerOpen.value = false
+  }
+})
 /** 请求在飞：防连点（连点会重复写库，且第二次的回执会覆盖第一次的提示）。 */
 const busy = ref(false)
 const errorText = ref<string | null>(null)
@@ -89,6 +103,7 @@ async function choose(title: string): Promise<void> {
       <span class="chapter__badge" data-testid="chapter-current-label">{{ line }}</span>
       <button
         type="button"
+        ref="triggerRef"
         class="chapter__set"
         data-testid="chapter-set"
         :disabled="chat.streaming"
@@ -99,7 +114,7 @@ async function choose(title: string): Promise<void> {
     </p>
 
     <!-- 选项默认收起：点上面的按钮才展开（当前学段的章 + 不限章节） -->
-    <div v-if="pickerOpen" class="chapter__picker" data-testid="chapter-options">
+    <div v-if="pickerOpen" ref="panelRef" class="chapter__picker" data-testid="chapter-options">
       <p v-if="unavailable" class="chapter__note" data-testid="chapter-no-grade">
         还没有判定出你的学段：教材章节按学段分，判定出来之后就能从这里选。
       </p>

@@ -262,3 +262,54 @@ test('★ 知识库表格的列宽要按**内容**定（实测两列被裁出省
   assert.match(kb, /prop="gradeLevel"[\s\S]{0,80}?width="120"/, '学段列要放得下「小学高年级」标签')
   assert.match(kb, /prop="name"[\s\S]{0,80}?min-width="180"/, '知识点列要放得下最长的那条知识点名')
 })
+
+/* ================================================================== *
+ * ⑥ 下拉必须能「主动收起来」（Esc + 点外部）—— 实测两个都没有
+ * ================================================================== */
+
+test('★★ 学段 / 章节两个下拉都必须能 Esc 与点外部关闭', () => {
+  // 缺陷形态：学生点开下拉、看了一眼不想选、点别处希望它收起来 —— **它不收**。
+  // 唯一出路是再点一次触发器，或者被迫选一个；面板会一直悬在内容上方
+  // （截图里能看到它叠在「新会话」那一行上）。
+  const grade = read('src', 'renderer', 'src', 'components', 'GradeIndicator.vue')
+  const chapter = read('src', 'renderer', 'src', 'components', 'ChapterIndicator.vue')
+
+  for (const [name, src] of [['GradeIndicator', grade], ['ChapterIndicator', chapter]]) {
+    assert.match(src, /useDismissable\(/, `${name} 必须用 useDismissable（Esc + 点外部）`)
+    assert.match(src, /panel:\s*panelRef/, `${name} 要把面板 ref 交给它（否则判不出「点在不在里面」）`)
+    assert.match(src, /trigger:\s*triggerRef/, `${name} 要把触发器 ref 交给它（否则点触发器会被当成「点外部」）`)
+    // 模板里两处 ref 必须真的绑上
+    assert.match(src, /ref="panelRef"/, `${name} 面板要绑 panelRef`)
+    assert.match(src, /ref="triggerRef"/, `${name} 触发器要绑 triggerRef`)
+  }
+})
+
+test('★ 可关闭浮层只允许有一份实现（Esc 与点外部不能各写一处）', () => {
+  const dismiss = read('src', 'renderer', 'src', 'composables', 'useDismissable.ts')
+  // 两条能力必须都在同一个 composable 里 —— 拆开必然出现「一个有了另一个忘了」
+  // ⚠️ 断言「**真的挂上了**监听」，不是「文件里出现过这个词」——
+  //    只查 /pointerdown/ 的话，把 `addEventListener('pointerdown', …)` 删掉、
+  //    而留着事件名出现在别处（类型注解、注释）就能骗过守卫（变异测试暴露过）。
+  assert.match(dismiss, /addEventListener\('keydown', onKeydown\)/, 'Esc 监听要真的挂上')
+  assert.match(
+    dismiss,
+    /document\.addEventListener\('pointerdown', onPointerDown, true\)/,
+    '点外部监听要真的挂上（capture 阶段，避免被中途 stopPropagation 吃掉）'
+  )
+  assert.match(
+    dismiss,
+    /removeEventListener\('keydown', onKeydown\)/,
+    'Esc 监听要真的摘掉（否则面板关了还响应 Esc）'
+  )
+  assert.match(
+    dismiss,
+    /removeEventListener\('pointerdown', onPointerDown, true\)/,
+    '点外部监听要真的摘掉'
+  )
+  // 只在开着时挂监听（面板不开时不该响应 Esc，避免与输入框快捷键打架）
+  assert.match(dismiss, /watch\(/, '要按 open 状态挂/摘监听')
+  assert.match(dismiss, /onBeforeUnmount/, '卸载时要摘掉监听（否则泄漏）')
+  // 面板内与触发器上的点击必须放过
+  assert.match(dismiss, /panel\.value\?\.contains\(target\)/, '面板内的点击要放过（选完由面板自己关）')
+  assert.match(dismiss, /triggerRef\.value\?\.contains\(target\)/, '触发器上的点击要放过（交给它 toggle）')
+})
