@@ -2228,3 +2228,73 @@ const sessions = (await listSessionsFromDir(dir, onProgress))
 两条都是「**断言写的是手段而不是目的**」：P-100 检查「调了哪个函数」，
 这条检查「有几条消息」。两次都是**换个问法**（「会话真的换了吗」「这是一轮对话吗」）
 之后缺陷才现形。
+
+---
+
+## P-107 · CI 首跑连爆四处：三处「中文遇上西文 locale」+ 一处「管理员权限才复现的符号链接」
+
+**现象**：CI/CD 写好后全部推上云端执行，**四次红**。每一处都是
+「本机永远绿、云端必红」—— 也就是**本地开发结构上不可能发现**的缺陷。
+
+### ① 中文输出遇上非 UTF-8 stdio（**三处，同一类**）
+
+| # | 位置 | 报错 |
+| --- | --- | --- |
+| 1 | `scripts/build_server.py` 的 `sys.exit("[FATAL] …互斥…")` | 中文被转义成 `\u4e92\u65a5` |
+| 2 | `tests/test_build_info.py` 的 4 处 `subprocess.run(text=True)` | `TypeError: can only concatenate str (not "NoneType")` |
+| 3 | `packaging/k12-agent-server.spec` 的 `print("[spec] 项目根目录 = …")` | `UnicodeEncodeError: 'charmap' codec can't encode` |
+
+**根因（三个各不相同，但同一个根源）**：输出端与解码端对编码的约定不一致，
+而**本机是中文 Windows（默认 cp936/utf-8），正好把它掩盖了**：
+
+- ① 缺 `install_utf8_stdio()` —— 三个兄弟脚本都装了，只有它漏了；
+- ② 子进程输出 UTF-8（因为它装了 ①），父进程却按 `locale.getpreferredencoding()` 解码
+  —— 英文 runner 上是 cp1252，中文的某个字节（实测 `0x8d`）在 cp1252 里**未定义**，
+  reader 线程抛异常、`stderr` **静默变成 `None`**。★ 报出来的错
+  （`can only concatenate str`）与真正的原因（编码）**毫无关系** —— 这是最贵的部分；
+- ③ spec 被 PyInstaller **exec**，继承的是 PyInstaller 进程的 stdout（runner 上是 cp1252），
+  一行中文 `print` 就让**整个打包中止**。
+
+**解决**：① 与 ③ 补 `install_utf8_stdio()`（且必须在**任何中文输出之前**）；
+② 给 `subprocess.run` 显式 `encoding="utf-8"` ——
+★ **修消费端**而不是让子进程别输出 UTF-8：后者的 UTF-8 输出是**刻意的**
+（`app/console.py` 的约束），父进程按 locale 猜才是错的。
+
+### ② HF 缓存的符号链接让 7-Zip 中止（**只有管理员权限才复现**）
+
+```
+WARNING: The directory name is invalid.
+.\…\snapshots\46fbe…\config.json\ : The directory name is invalid.
+⨯ 7za.exe process failed 1
+```
+
+**根因**：HuggingFace 缓存默认用**符号链接**指向 `blobs/`，而能否建链接**取决于权限**：
+
+| 环境 | 能建链接 | HF 落盘 | 打包 |
+| --- | --- | --- | --- |
+| 开发机（非管理员）| ❌ | 实体文件 | ✅ |
+| GitHub runner（管理员）| ✅ | **符号链接** | ❌ |
+
+实测确认：本机 `blobs/` **空的**、`snapshots/` 里 5 个都是实体文件；
+连 `New-Item -ItemType SymbolicLink` 都报「此操作需要管理员权限」。
+
+★ **一次误判值得记下来**：我最初判断是「Windows 260 字符路径上限」，
+因为报错是「目录名无效」。**量了一下才发现 CI 的路径比本机还短 1 个字符** ——
+假设当场被数据推翻，才转向符号链接。**先量再改**。
+★ 报错里路径**末尾那个反斜杠**（`config.json\`）是 7-Zip 把链接当成目录的指纹。
+
+**解决**：`materialize_symlinks()` 把链接读出来写成实体文件再删链接（幂等、无损），
+在 **spec 里**（打包必经之路，无论模型从哪来）实体化 + 再查残留，有残留就**中止打包**；
+`fetch_embedding_model.py` 的下载后**与幂等短路分支**都调它（CI 缓存命中走的正是后者）。
+
+### ★ 这一组的共同教训
+
+四条都不是「CI 配错了」，而是**真实的可移植性缺陷**被云端环境照出来了。
+它们的共同形态是：**某个隐含假设在本机成立、在云端不成立** ——
+「locale 是中文」「有权限建链接」。而这类缺陷**不可能靠本地反复跑发现**，
+只能在**交付环境**里跑一次。
+
+**报告用法**：这是「为什么要 CI」这个问题最好的一份答案 ——
+不是「省得手动跑测试」，而是**换一个环境跑同一段代码**。
+四次红里有四次都是本机永远绿的那种；把它们并排列出来，
+比任何一句「我们重视工程质量」都有说服力。

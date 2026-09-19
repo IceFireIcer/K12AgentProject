@@ -543,6 +543,24 @@ npm run check:server:packaged     # 查**已装进安装包**的那一份
 >
 > 守卫：`desktop/tests/build-pipeline.test.ts`（G20-1…G20-8）+ `server/tests/test_build_info.py`（25 条）。
 
+### ★ CI / CD（`.github/workflows/`，2026-09-19 起）
+
+| 文件 | 触发 | 干什么 | 多久 |
+| --- | --- | --- | --- |
+| `ci.yml` | push master / PR / 手动 | 后端测试 + 桌面 typecheck/测试/三项自检 + 令牌漂移 | ~3 min |
+| `nightly.yml` | 每天 UTC 18:00 / 手动 | **真打包**：取模型 → 建带向量 kb → 双端全量测试 → PyInstaller → electron-builder（nsis/zip/portable）→ 校验包内后端新鲜度 → 上传 artifact（保留 14 天） | ~15 min |
+
+**四条纪律（都是云端首跑踩出来的，见 P-107）**：
+1. **中文输出必须自己保证 stdio 是 UTF-8**：任何会打印中文的入口（含被 PyInstaller
+   `exec` 的 spec）都要先 `install_utf8_stdio()`。**本地是中文 Windows，永远不会暴露**。
+2. **跑自家脚本的 subprocess 要显式 `encoding="utf-8"`**：子进程输出 UTF-8 是刻意的，
+   父进程按 locale 猜的话在西文环境会静默拿到 `stderr=None`（报错还完全不相干）。
+3. **`resources/models/` 里不许留符号链接**：HF 缓存默认建链接，
+   而**能不能建取决于权限**（本机不能 → 实体；runner 能 → 链接 → 7-Zip 中止打包）。
+   `spec` 与 `fetch_embedding_model.py` 都会 `materialize_symlinks()` 并断言残留为 0。
+4. **不要在 artifact 里列不会产出的文件**：`latest.yml` 只在开了 publish provider 时才有，
+   列了它会让 `upload-artifact` 整步失败。
+
 **纪律**：关卡不过不进下一阶段；每天结束做一次 git 提交（写清「票号 + 产出」）；
 每完成一步跑一次 `npm run typecheck`（契约漂移的第一道防线，不要攒到最后修）；
 **每加一个原生/数据依赖就重打一次包验证**（票 03 就是这个纪律的第一道关口）。
