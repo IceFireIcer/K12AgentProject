@@ -1,0 +1,105 @@
+# CI —— 每次 push / PR 的**门禁**（快、稳、不联网下模型）。
+#
+# 分工（两条 workflow 的区别，别混）：
+#   - **本文件（CI）**：跑测试与三项自检。**不下载 90MB 嵌入模型**，
+#     也不打安装包 —— 它要在几分钟内给出「这次改动能不能合」的答案。
+#   - `nightly.yml`：**真的把程序构建出来**（NSIS 安装版 + 绿色版压缩包）。
+#     那是分钟级的重活，按天跑。
+#
+# ★ 为什么都在 windows-latest：本项目**只交付 Windows .exe**，而测试夹具里有
+#   真正的 Windows 路径字面量（`C:\Users\...`、`C:\Windows`）—— 放到
+#   ubuntu 上跑，`node:path` 会按 POSIX 语义解析它们，那是**换了被测语义**，
+#   不是「换个地方跑同样的测试」。门禁要在交付平台上跑才有意义。
+#
+# ★ 后端测试**不需要嵌入模型**：知识库能用 `--no-vectors` 从 `server/knowledge/`
+#   的 Markdown 建出来（模型缺失时 token 计数自动退回估算，见
+#   `app/rag/chunker.py` 的 `resolve_token_counter`）。所以 CI 里依赖图的
+#   228 知识点 / 483 条边、章节、推荐、判分那些断言**照常跑**。
+#   只有「向量检索质量」这类断言会因缺模型而 skip —— 那部分归 nightly 验。
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # 允许手动触发（排查时不必推一个空提交）
+  workflow_dispatch:
+
+# 同一分支的新推送取消上一轮未跑完的 CI（省额度，也让结果更快收敛）
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 只读仓库内容：CI 不写回任何东西
+permissions:
+  contents: read
+
+jobs:
+  # ── 后端：Python sidecar（数据 / RAG / 判分 / 学习记录）────────────────
+  backend:
+    name: 后端测试（Python 3.12）
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          # 与 `server/.python-version` 保持一致（uv 会读它，这里显式钉一次便于报错时看）
+          python-version: '3.12'
+          enable-cache: true
+          cache-dependency-glob: server/uv.lock
+
+      - name: 同步依赖（uv.lock 锁定）
+        run: uv sync --frozen
+
+      # ★ 先建库再跑测试：没有 kb 时依赖图 / 章节 / 推荐 / 开场引导那些用例会 skip，
+      #   而它们正是本轮改动最密的地方 —— 「跳过」在这里等于「没验」。
+      #   `--no-vectors` 是因为 CI 不下载嵌入模型（见文件头的说明）。
+      - name: 建知识库（无向量；228 知识点 / 483 条依赖边）
+        run: uv run python scripts/build_kb.py --no-vectors
+
+      - name: 跑后端测试
+        run: uv run python -m unittest discover -s tests -v
+
+  # ── 桌面：Electron + Vue（编排 / LLM / Prompt / Tool / 6 事件）──────────
+  desktop:
+    name: 桌面测试与自检（Node 22）
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22：Pi 的 `engines` 要求 >= 22.19.0，而 Electron 44 内置 Node 24。
+      # CI 这里跑的是**构建工具链**（electron-vite / vue-tsc / node --test），
+      # 不是 Electron 运行时，所以用 22 的 LTS 即可。
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: 安装依赖（npm ci，锁定 package-lock.json）
+        run: npm ci
+
+      - name: 类型检查（契约漂移的第一道防线）
+        run: npm run typecheck
+
+      # `npm test` 内部已经串了四件事（见 package.json）：
+      #   node --test "tests/**/*.test.ts"  +  check:api  +  check:tool-schema  +  check:docs
+      # 所以**不要**在这里再单独跑那三条 —— 重复跑只会让日志更长。
+      - name: 测试与三项自检
+        run: npm test
+
+      # 设计令牌是从 tokens.source.json 生成的，改色必须重跑生成器。
+      # 放在 CI 里是让它成为**门禁**而不是「记得跑」（与 check:api 同一条纪律）。
+      - name: 设计令牌无漂移（改色必须重跑 gen:tokens）
+        run: |
+          npm run gen:tokens
+          git diff --exit-code -- src/renderer/src/assets/tokens.generated.css

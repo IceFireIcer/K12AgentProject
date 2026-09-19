@@ -1,0 +1,174 @@
+# Nightly —— **真的把程序构建出来**（安装版 + 绿色压缩包），产物上传为 artifact。
+#
+# 与 `ci.yml` 的分工（两条 workflow 别混）：
+#   - `ci.yml`      每次 push/PR 跑的**门禁**：测试 + 自检，几分钟，不下载模型、不出包。
+#   - **本文件**     按天的**重活**：下载嵌入模型 → 建带向量的知识库 →
+#                    PyInstaller 打 sidecar → electron-builder 出 NSIS 安装版与绿色压缩包。
+#
+# 跑法：① 每天 UTC 18:00（北京 02:00）自动；② 也可以在 Actions 页面手动触发。
+#
+# ★★ 三件事决定了它只能在这里做、不能在 CI 做：
+#   1. **嵌入模型（约 90MB）不在 git 里**（`**/resources/models/` 是 ignore 的），
+#      要联网经 `scripts/fetch_embedding_model.py` 取 —— 见文件末尾的缓存步；
+#   2. **PyInstaller 打包是分钟级**（onedir + collect-all sqlite_vec/fastembed）；
+#   3. **安装包要 electron-builder 真跑一遍**，Windows 上还得有 NSIS。
+#
+# ★ 交付物是三个文件，**别弄混它们**：
+#   | 产物 | 形态 | 给谁用 |
+#   | --- | --- | --- |
+#   | `*-setup.exe` | NSIS 安装程序 | 学生机装一次 |
+#   | `*-win-x64.zip` | 解压即用（免安装，含完整目录树） | 演示现场 / U 盘 |
+#   | `*-portable.exe` | 单文件自解压 | 只想拷一个 exe 走 |
+#   后两者都是「免安装」，区别是**解压由谁做**：zip 由人解，portable 是自解的。
+name: Nightly Build
+
+on:
+  schedule:
+    # UTC 18:00 = 北京 02:00（避开白天用机高峰；GitHub 的 cron 高峰可能延迟数分钟到数十分钟）
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+# 手动触发与定时任务不并发（同时打包会互相踩 dist/ 目录）
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Windows 安装版 + 绿色版
+    runs-on: windows-latest
+    # 打包链比 CI 长得多，给足时间（默认 360 分钟，这里收紧到 90 以免卡死时白占额度）
+    timeout-minutes: 90
+
+    env:
+      # PyInstaller / Pyodide 之类的构建输出在 CI 里不需要彩色转义
+      NO_COLOR: '1'
+      PYTHONUNBUFFERED: '1'
+      # ★ 告诉构建链「这是 CI」：`build-server.mjs` 的逃生舱我们**不用**
+      #   （它的存在意义是「刚单独打过、确实知道自己在干什么」，而这里正是
+      #    要从零打一份全新的，跳过它等于发出一个装旧后端的不安装包 —— P-072）。
+      K12_CI: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          enable-cache: true
+          cache-dependency-glob: server/uv.lock
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: 同步后端依赖
+        working-directory: server
+        run: uv sync --frozen
+
+      # ── 嵌入模型（约 90MB，不在 git 里）────────────────────────────────
+      # ★ 缓存键**不含时间**：模型是固定的 `BAAI/bge-small-zh-v1.5`，
+      #   换模型必须同步改 `server/app/config.py` 的 EMBEDDING_DIM 并重建索引
+      #   —— 那是一次**代码改动**，会连带让指纹变化，所以缓存键带上 config.py 的哈希。
+      - name: 缓存嵌入模型
+        uses: actions/cache@v4
+        id: model-cache
+        with:
+          path: server/resources/models/fastembed
+          key: embedding-model-${{ hashFiles('server/app/config.py') }}
+
+      - name: 获取嵌入模型（缓存未命中时联网下载）
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        working-directory: server
+        run: uv run python scripts/fetch_embedding_model.py
+
+      # ★ 缓存命中时**也要验一次**：缓存可能是半截的（下载中途失败也会落盘），
+      #   而「模型在但维度不对」的后果是整个向量索引都算错且**不报任何错**。
+      #   这个脚本自带维度断言（512），是唯一能挡住那种情况的检查。
+      - name: 校验嵌入模型（幂等；装了就直接过）
+        working-directory: server
+        run: uv run python scripts/fetch_embedding_model.py
+
+      # ── 全量测试（这一轮带向量，比 CI 覆盖得更全）──────────────────────
+      - name: 建知识库（带向量，228 知识点 / 483 条依赖边）
+        working-directory: server
+        run: uv run python scripts/build_kb.py
+
+      - name: 后端测试（全量，含依赖向量的用例）
+        working-directory: server
+        run: uv run python -m unittest discover -s tests
+
+      - name: 安装前端依赖
+        working-directory: desktop
+        run: npm ci
+
+      - name: 前端测试与自检
+        working-directory: desktop
+        run: npm run typecheck && npm test
+
+      # ── 打包 ───────────────────────────────────────────────────────────
+      # `electron-builder` 之前必须先编好：`npm run build` 会
+      #   ① 经 `build-server.mjs` 重打 sidecar（PyInstaller，含带向量的 kb 自检）
+      #   ② typecheck  ③ electron-vite build（主/渲染进程）
+      # 少任何一步都会打出一个「能装但跑不起/跑旧后端」的包。
+      - name: 构建前端 + 后端 sidecar
+        working-directory: desktop
+        run: npm run build
+
+      # 目标在命令行显式给（不改 electron-builder.yml 的本地默认）：
+      #   nsis    → 安装版（用户要求用 NSIS；Inno Setup 未采用，见下方说明）
+      #   zip     → 绿色压缩包（解压即用）
+      #   portable→ 单文件免安装（仓库原有目标，演示现场最省事）
+      - name: 打安装版与绿色版
+        working-directory: desktop
+        run: npx electron-builder --win nsis zip portable
+
+      # ★★ 这条是整个 nightly 最关键的断言：**校验装进包里的后端是最新的**。
+      #   它是 P-072 的机器判据 —— 「改了 server/ 但包里的 exe 是旧的」这件事
+      #   不报任何错，只会让新端点 404。失败会非零退出，于是不会发出坏包。
+      - name: 校验包里的后端是最新的源码打的
+        working-directory: desktop
+        run: npm run check:server:packaged
+
+      # ── 产物 ───────────────────────────────────────────────────────────
+      - name: 列出产物（排查用；顺带证明三个目标都真的产出了文件）
+        working-directory: desktop/dist
+        run: |
+          Get-ChildItem -File | Where-Object { $_.Extension -in '.exe', '.zip' } |
+            Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}} | Format-Table -AutoSize
+
+      - name: 上传安装版与绿色版
+        uses: actions/upload-artifact@v4
+        with:
+          name: k12-agent-windows-${{ github.run_number }}
+          # ★ 只收**发布用**的那几个文件：`win-unpacked/` 有几万个文件，
+          #   上传它既慢又没用（zip 里已经是它的全部内容）。
+          # ⚠️ 不要在这里列 `latest.yml` —— 那是**自动更新**用的清单，
+          #    本项目没开 publish provider，electron-builder 根本不会生成它。
+          #    列了它会让 `upload-artifact` 因为「路径不匹配」而**整个步骤失败**
+          #    （实测：本地打三个目标只产出 5 个文件，latest.yml 一个都没有）。
+          path: |
+            desktop/dist/*-setup.exe
+            desktop/dist/*-win-x64.zip
+            desktop/dist/*-portable.exe
+            desktop/dist/*.blockmap
+          # 保留 14 天：nightly 产物是「验证这一天的代码能构建」，不是长期分发
+          retention-days: 14
+          if-no-files-found: error
+
+# ─────────────────────────────────────────────────────────────────────────
+# 为什么用 NSIS 而不是 Inno Setup
+# ─────────────────────────────────────────────────────────────────────────
+# electron-builder **内置** NSIS 目标（`win.target: nsis`），仓库里已经配好并在用；
+# 换 Inno Setup 意味着：把 electron-builder 的打包结果再用第二个安装器包一次，
+# 或者放弃 electron-builder 的安装器支持另写一套 `.iss` —— 两条路都引入
+# 一个新的外部工具依赖（Inno 的编译器）与一份重复的安装脚本，
+# 而收益只是「换一个安装器品牌」。NSIS 已经满足全部需求：
+# 桌面快捷方式、卸载项、`frame: false` 无边框应用照常安装、静默安装参数可用。

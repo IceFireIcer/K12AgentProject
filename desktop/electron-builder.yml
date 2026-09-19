@@ -71,6 +71,13 @@ win:
   #   （裁透明边 + 多尺寸 .ico）。改了 logo 就重跑那个脚本，不要手工导出。
   icon: build/icon.ico
   executableName: k12-agent-desktop
+  # ★★ 绿色版压缩包的**文件名模式必须显式给**（这里只影响 zip 那种「归档」目标，
+  #    nsis / portable 各有自己的 artifactName，会覆盖这一层）。
+  #    不给的话 electron-builder 的默认模式是 `${productName}-${version}-${os}.${ext}`
+  #    —— productName 是中文「智团团」，于是会产出 `智团团-0.1.0-win.zip`：
+  #    ① CI 产物名与下载 URL 里带中文（跨平台解压/上传容易出编码问题）；
+  #    ② 名字里**没有架构**，将来真出 arm64 时两份包会重名。
+  artifactName: ${name}-${version}-win-${arch}.${ext}
   target:
     - nsis
     # ★ 便携（绿色）版：单个 exe，解压到临时目录运行，数据落 exe 同级 data/。
