@@ -371,6 +371,27 @@ def get_kp(conn: sqlite3.Connection, kp_id: str) -> KpRecord | None:
     return _kp_from_row(row) if row else None
 
 
+def all_kp_ids(conn: sqlite3.Connection) -> set[str]:
+    """当前教材里**全部**知识点 id。
+
+    ★★ 存在的理由：``learning.db`` 按学生长期保留，而**教材会换代**
+      （2026-09-19 接入 K12KnowledgeBase 时整库换过一次）。
+      换代之后老学生的库里还留着一批**指向已删除知识点**的掌握度 / 进度行 ——
+      它们一旦被当作正常数据渲染，界面上就会出现 **裸 kp_id**
+      （``ph-data-train-predict`` 这种），因为查不到对应的中文名，
+      各处的兜底逻辑就退化成「显示 id 原文」。实测两处中招：
+      顶栏「建议接着练」与学习档案的「继续学习」。
+
+      正确处理是**这些行不出现在界面上**（而不是显示成 id），
+      同时**不删库里的行** —— 学生万一回到旧教材，那些记录还在，
+      而且「读的时候顺手删数据」是另一类危险的副作用。
+
+    ⚠️ 读不到（kb 缺失/损坏/表不存在）时**调用方应当退化为不过滤**，
+      而不是当成空集：空集会把「库读不到」伪装成「这个学生没有学习记录」。
+    """
+    return {str(row["kp_id"]) for row in conn.execute("SELECT kp_id FROM kp")}
+
+
 def kp_names(conn: sqlite3.Connection, kp_ids: Iterable[str]) -> dict[str, str]:
     ids = [k for k in kp_ids if k]
     if not ids:

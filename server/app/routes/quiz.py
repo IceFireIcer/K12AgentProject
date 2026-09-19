@@ -39,7 +39,7 @@ import secrets
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Collection, Iterable, Sequence
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import Field, field_validator
@@ -927,11 +927,55 @@ def apply_level_progress(
     )
 
 
+
+def _known_kp_ids(request: Request) -> set[str] | None:
+    """当前教材里**全部**知识点的 id（读不到 kb 时返回 ``None`` = 不过滤）。
+
+    ★ 为什么要缓存：这个集合在一次请求里只读一次，但进度端点是**高频**的
+      （每答一题都会回读），每次都全表扫一遍 `kp` 没必要。
+      按 (kb 路径, mtime) 缓存 —— 教材重建后 mtime 变了会自动重读，
+      不需要重启进程（与 `RagService` 的 mtime 自动重开连接同一手法）。
+
+    ⚠️ 读不到（kb 缺失/损坏）返回 ``None`` 而**不是空集**：
+      空集会让进度端点返回空的关卡列表，把「库读不到」伪装成「你没有进度」——
+      那是比不显示更坏的错。不过滤时旧行为原样保留。
+    """
+    from app.rag.retriever import default_kb_path
+    from app.store.connections import connect
+
+    kb_path = default_kb_path(request.app.state.config.data_dir)
+    try:
+        stat = kb_path.stat()
+    except OSError:
+        return None
+    key = (str(kb_path), int(stat.st_mtime_ns))
+    cached = _KNOWN_KP_CACHE.get("value")
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        conn = connect(kb_path, readonly=True)
+    except Exception:  # noqa: BLE001 - 读不到就当没有白名单（保留旧行为）
+        return None
+    try:
+        ids = {str(row["kp_id"]) for row in conn.execute("SELECT kp_id FROM kp")}
+    except Exception:  # noqa: BLE001 - 表不存在等异常一律退化为不过滤
+        return None
+    finally:
+        conn.close()
+    _KNOWN_KP_CACHE["value"] = (key, ids)
+    return ids
+
+
+#: `_known_kp_ids` 的单槽缓存：``{"value": (key, ids)}``。
+#: 单槽足够 —— 同一进程只会服务一个 data-dir（多学生共用同一份 kb）。
+_KNOWN_KP_CACHE: dict[str, object] = {}
+
 def progress_snapshot(
     store: LearningStore,
     *,
     kp_ids: Sequence[str] | None = None,
     order: Sequence[str] | None = None,
+    known_kp_ids: Collection[str] | None = None,
 ) -> list[dict[str, object]]:
     """给前端/事件载荷用的进度快照（纯数据，**不含答案**）。
 
@@ -944,12 +988,30 @@ def progress_snapshot(
       ``kp_id`` 字典序**，于是「变量」可能排在「循环」后面 —— 进度条会显示成
       「下一关已经解锁、上一关还没做」的怪样子（这正是票 15 说的
       「关卡顺序由依赖图拓扑序决定」，不是按 id 排）。
+    - ★★ ``known_kp_ids`` 给了就**只保留教材里真的存在的那几关**
+      （``None`` = 不过滤，保留原行为）。
+
+      **为什么必须有这个过滤**：``learning.db`` 是**按学生长期保留**的，
+      而教材会换代（2026-09-19 接入 K12KnowledgeBase 时整库换过一次）。
+      换代之后老学生的库里还剩着一批**指向已删除知识点**的进度行 ——
+      进度条于是渲染出一串教材里根本不存在的关卡（实测：某学生的路径 55 关，
+      其中 15 关是旧 kp），而关卡名只能退化成显示 **kp_id 原文**
+      （``ph-data-train-predict`` 这种），因为查不到对应的中文名。
+
+      这类行的正确处理是**不出现在界面上**（而不是显示成裸 id），
+      同时**不删库里的行** —— 学生万一哪天回到旧教材，那些记录还在；
+      而且「读的时候顺手删数据」是另一类危险的副作用。
     """
     mastery = store.mastery_map()
     wanted = set(kp_ids) if kp_ids is not None else None
     rank = {kp_id: index for index, kp_id in enumerate(order or ())}
     fallback = len(rank)
-    rows = [row for row in store.progress_rows() if wanted is None or row.kp_id in wanted]
+    rows = [
+        row
+        for row in store.progress_rows()
+        if (wanted is None or row.kp_id in wanted)
+        and (known_kp_ids is None or row.kp_id in known_kp_ids)
+    ]
     rows.sort(key=lambda row: (rank.get(row.kp_id, fallback), row.kp_id))
     return [
         {
@@ -1463,7 +1525,18 @@ def read_progress(
         )
         # ★ 按依赖图拓扑序输出（不是 kp_id 字典序）：见 `progress_snapshot` 的注释。
         order = _default_level_order(request, grade_level=student.grade_level)
-        rows = progress_snapshot(store, kp_ids=wanted, order=order)
+        # ★★ 只回教材里真实存在的关卡：老学生的库里可能还留着**指向已删除知识点**的
+        #    进度行（教材换代过 —— 2026-09-19 接入 K12KnowledgeBase 时就整库换过），
+        #    不过滤就会渲染成一串查不到中文名的裸 kp_id（实测某学生 55 关里 15 关是旧 kp）。
+        #    ⚠️ 白名单用**全库 kp**（不限学段），不是 `order`：
+        #      `order` 只是本学段的关卡路径，而学生可能合法地持有更低学段的练习记录
+        #      （取题允许向上兼容），拿 `order` 当白名单会把那些**真实存在的**记录也藏掉。
+        rows = progress_snapshot(
+            store,
+            kp_ids=wanted,
+            order=order,
+            known_kp_ids=_known_kp_ids(request),
+        )
     finally:
         store.close()
 

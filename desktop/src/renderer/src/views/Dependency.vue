@@ -699,6 +699,10 @@ function exportCsv() {
  * `position: relative` 是给检查器定位用的。高度由画布自己撑（见 .dg__canvas）。 */
 .dg__stage {
   position: relative;
+  /* ★ 检查器宽度**只有一个来源**：下面 `.dg__stage > .insp` 用它定宽，
+   *   而 `:has(.insp)` 那条用它算「节点要避让多少」。
+   *   两处各写一个 264px 的话，改一处忘一处就会重新压住节点。 */
+  --insp-w: 264px;
 }
 
 .dg__canvas {
@@ -787,6 +791,19 @@ function exportCsv() {
   /* 同层节点之间也要留出走线空间 */
   gap: 24px;
 }
+
+/* ★★ 检查器**是浮层**（不占画布宽度），但节点**不能流到它底下** ——
+ * 这是实测截图抓到的层级错误：右上角那一列节点被检查器盖住，
+ * 卡片只露出一半，kp_id 被裁成「algor…」，看着像画布坏了。
+ *
+ * 修法：检查器在时，给节点行留出等宽的右内边距，让它提前换行。
+ * 用 `:has()` 而不是给模板加类 —— 「节点要不要避让」完全由「检查器在不在」决定，
+ * 两件事写在两处就会不同步。`:has()` 在本机 Electron（Chromium 152）可用；
+ * ⚠️ 万一失效，退回的是**原样覆盖**（不是更坏的状态）。
+ * `--k12-sp-4` 是检查器自己的右偏移，再加一份做间隔。 */
+.dg__stage:has(> .insp) .layer__nodes {
+  padding-right: calc(var(--insp-w) + var(--k12-sp-4) * 2);
+}
 .node {
   background: var(--k12-surface);
   border: 1px solid var(--k12-border);
@@ -870,7 +887,7 @@ function exportCsv() {
   top: var(--k12-sp-4);
   right: var(--k12-sp-4);
   z-index: 3;
-  width: 264px;
+  width: var(--insp-w);
   max-height: calc(100% - var(--k12-sp-7));
   display: flex;
   flex-direction: column;

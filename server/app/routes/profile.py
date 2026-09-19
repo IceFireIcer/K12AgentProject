@@ -310,13 +310,27 @@ def build_recommendation(
     """
     mastery_map = store.mastery_map()
 
+    conn = _load_kb_connection(request)
+
+    # ★★ 丢掉**已删除知识点**的掌握度行（教材换代后的历史残留）。
+    #    不过滤的后果实测过：旧掌握度 ``ph-data-train-predict`` 被当成「待重练」推荐出去，
+    #    而它在当前教材里查不到中文名 → 界面上直接显示 **裸 kp_id**，
+    #    顶栏「建议接着练」与学习档案的「继续学习」两处都是这个表现。
+    #    ⚠️ kb 读不到时**不过滤**（保留旧行为）—— 不能让「库没打开」看起来像「没有学习记录」。
+    if conn is not None:
+        try:
+            from app.store import kb as kb_repo  # noqa: PLC0415
+
+            live = kb_repo.all_kp_ids(conn)
+            mastery_map = {k: v for k, v in mastery_map.items() if k in live}
+        except sqlite3.Error:  # pragma: no cover - 坏库
+            pass
+
     # ① 待重练：练过、但掌握度不够（含答错扣下来的）
     review_candidates = [
         (kp_id, score) for kp_id, score in mastery_map.items() if score < REVIEW_MASTERY_CEILING
     ]
     review_candidates.sort(key=lambda item: (item[1], item[0]))
-
-    conn = _load_kb_connection(request)
     try:
         items: list[RecommendationItem] = []
         # ★ 去重集合：同一个知识点只能出现一次。**必须跨两段共享** ——
@@ -494,6 +508,21 @@ def student_profile(request: Request, student_id: str) -> StudentProfile:
                 "SELECT kp_id, score, attempts, correct, last_seen_at FROM mastery "
                 "ORDER BY score DESC, kp_id"
             ).fetchall()
+            # ★★ 丢掉**已删除知识点**的掌握度行（教材换代后的历史残留，见
+            #    `build_recommendation` 里同一处过滤的说明）。画像页的「掌握度」
+            #    列表不过滤就会逐条显示裸 kp_id —— 学生看到一列机器码。
+            #    ⚠️ kb 读不到时**不过滤**：不能让「库没打开」看起来像「没有学习记录」。
+            _conn = _load_kb_connection(request)
+            if _conn is not None:
+                try:
+                    from app.store import kb as kb_repo  # noqa: PLC0415
+
+                    _live = kb_repo.all_kp_ids(_conn)
+                    mastery_rows = [r for r in mastery_rows if str(r["kp_id"]) in _live]
+                except sqlite3.Error:  # pragma: no cover - 坏库
+                    pass
+                finally:
+                    _conn.close()
             # ★ 偏好的读**只有一处实现**（`LearningStore.preferences()`），与写入
             #   （`set_preference()`）构成这张表唯一的一对读写 —— 本文件不再自己拼 SQL。
             preferences = store.preferences()

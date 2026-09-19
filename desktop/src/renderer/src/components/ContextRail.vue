@@ -493,7 +493,13 @@ watch(tab, () => {
 <style scoped>
 .rail {
   flex: none;
-  width: 288px;
+  /* ★ 宽度**只认设计令牌**（`base.css` 的 `--k12-w-rail`，300px）。
+   * 此前这里硬写 288px，而令牌是 300px —— 两处真相，差 12px。
+   * 后果不只是「数字不一致」：顶栏里那个**浮在对话栏上方的学段气泡**
+   * 要靠这个宽度算自己的右边界（见 `GradeIndicator.vue` 的 `.grade__extras`），
+   * 拿 300 去算 288 的实际盒宽，气泡就会越进右栏被裁掉一角。
+   * 现在两侧同源，改一处即可。 */
+  width: var(--k12-w-rail);
   min-height: 0;
   position: relative;
 }

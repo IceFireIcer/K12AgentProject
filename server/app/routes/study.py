@@ -225,6 +225,30 @@ def learning_report(
                 "SELECT kp_id, score, attempts, correct, last_seen_at FROM mastery "
                 "ORDER BY score DESC, kp_id"
             ).fetchall()
+            # ★★ 丢掉**已删除知识点**的掌握度行（教材换代后的历史残留）。
+            #    与 `routes/profile.py` 同一处口径：不过滤的话，
+            #    「掌握度明细」会列出一堆当前教材里查不到中文名的知识点
+            #    （界面只能退化成显示裸 kp_id），而「平均掌握度」也会被
+            #    一批**已不存在的内容**拉低/拉高 —— 那是个假数字。
+            #    ⚠️ kb 读不到时**不过滤**（保留旧行为）：不能让「库没打开」
+            #       看起来像「这个学生没有学习记录」。
+            try:
+                from app.store import kb as kb_repo  # noqa: PLC0415
+                from app.rag.retriever import default_kb_path  # noqa: PLC0415
+                from app.store.connections import connect  # noqa: PLC0415
+
+                kb_path = default_kb_path(request.app.state.config.data_dir)
+                kb_conn = connect(kb_path, readonly=True)
+                try:
+                    live = kb_repo.all_kp_ids(kb_conn)
+                finally:
+                    kb_conn.close()
+                # ⚠️ 只在**真的读到 kp** 时才过滤：空集会让「库没建好 / 表为空」
+                #    伪装成「这个学生什么都没学」—— 那是比显示裸 id 更坏的错。
+                if live:
+                    mastery_rows = [row for row in mastery_rows if str(row["kp_id"]) in live]
+            except Exception:  # noqa: BLE001 - 读不到 kb 就不过滤（见上）
+                pass
             progress_rows = store.progress_rows()
             badges = store.badges()
             grade_rows = store.grade_history()

@@ -368,9 +368,22 @@ async function choose(level: GradeLevel): Promise<void> {
  * ⚠️ 选择器用 `.grade__extras >` 限定：`grade-set-error` 也是 `.grade__warn`，
  *    但它住在选项面板里，不该被染成顶栏的纸条（下面单独给它一条间距）。 */
 .grade--compact .grade__extras {
-  position: absolute;
-  top: calc(50% + var(--k12-h-topbar) / 2 + 6px);
-  right: 0;
+  /* ★★ 浮层用**视口定位**，右边界让开右栏 —— 这是修一个实测到的层级错位。
+   *
+   * 缺陷形态：气泡原先 `position: absolute; right: 0`，包含块是顶栏（`.tb`），
+   * 而顶栏比对话栏**宽出一截**（它右边还有外壳级动作那一列）。于是气泡的右缘
+   * 落在 x=1179，而右栏「检索降级链」从 **x=1152** 就开始铺 ——
+   * 气泡右边**被右栏盖住**，墙上看到的是一个缺了一角的绿纸片
+   * （文字恰好完整，所以只读文字不会发现；只有量矩形才看得出来）。
+   * 更隐蔽的是它**随窗口宽度与动作列宽度变化**，靠调 `right: <N>px` 改不干净。
+   *
+   * 现在：`fixed` + `right: var(--k12-w-rail) + 间距` —— 直接对齐**对话栏的右缘**，
+   * 与顶栏多宽、动作列多窄都无关。
+   * ⚠️ `fixed` 的包含块是视口，所以 `top` 也要按视口算（原来是「顶栏一半 + 顶栏高一半」，
+   *    数值上恰好等于「顶栏高 + 6px」，这里直接写后者，少一层绕。 */
+  position: fixed;
+  top: calc(var(--k12-h-topbar) + 6px);
+  right: calc(var(--k12-w-rail) + 10px);
   z-index: 3;
   display: flex;
   flex-direction: column;
@@ -382,6 +395,16 @@ async function choose(level: GradeLevel): Promise<void> {
   text-align: right;
   /* 纸条是**通知**、不是控件：它浮在内容上方，不该把底下的点击吃掉 */
   pointer-events: none;
+}
+
+/* 右栏收起 → 对话栏占满整宽，气泡要贴回右边（否则平白留住 310px 的空档，
+ * 看起来像「飘在半空中」）。用 `:has()` 读右栏的收起类 —— 气泡在顶栏、
+ * 右栏在内容区，两者是**兄弟子树**，普通选择器够不着。
+ * Chromium 105+ 支持 `:has()`（本机 Electron 44 = Chromium 152）。
+ * ⚠️ 万一 `:has()` 失效，退回的是上面那条 —— 气泡仍**不会与任何东西重叠**，
+ *    只是离右边远一点。失败方向是安全的。 */
+.shell__main:has(.rail--closed) .grade--compact .grade__extras {
+  right: 10px;
 }
 
 .grade--compact .grade__extras > .grade__notice {

@@ -335,8 +335,18 @@ onMounted(() => {
             <code class="mono">{{ row.kpId }}</code>
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="知识点" min-width="150" />
-        <el-table-column prop="gradeLevel" label="学段" width="96">
+        <!-- min-width 按**最长知识点名**定：新库里最长的一条是
+             「教学短板（难自动分层适配）」，实测需要 ~222px（含 .cell 内边距）。
+             原来 150px 会让它被裁成「教学短板（难自动分层适…」——
+             知识点名是这一列的全部意义，裁掉就等于没显示。 -->
+        <el-table-column prop="name" label="知识点" min-width="180" />
+        <!-- ★ 宽度按**内容**定，不是按「大概够」定（实测踩到过）：
+             学段标签最长「小学高年级」（标签本身 75px）+ `.cell` 左右内边距 8×2 +
+             标签的 border/padding，实际需要 **111px**；原来写 96px，
+             Element Plus 于是把它裁成「小学低年级 …」—— 多出来的那个省略号
+             既不是数据的一部分，也不是任何一列的标题，看着像界面坏了。
+             ⚠️ 改窄了会再触发一次（列宽改小是**静默**的：只多一个省略号，不报错）。 -->
+        <el-table-column prop="gradeLevel" label="学段" width="120">
           <template #default="{ row }">
             <el-tag size="small" effect="plain" :type="GRADE_TAG[row.gradeLevel as GradeLevel] ?? 'info'">
               {{ GRADE_LABELS[row.gradeLevel as GradeLevel] ?? row.gradeLevel }}
