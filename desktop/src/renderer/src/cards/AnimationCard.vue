@@ -76,6 +76,21 @@ const statusText = computed(() => {
 /** 进度百分比（整数，避免尾数抖动）。 */
 const progressPercent = computed(() => `${Math.round(progress.value * 100)}%`)
 
+/**
+ * 是否走**托管地址**（票 16 的一次性 nonce 路径）。
+ *
+ * ★★ 为什么需要这个开关（实测发现的真实缺陷）：
+ *   托管地址带的是**一次性 nonce，TTL 只有 120 秒**（`app/routes/resources.py`）。
+ *   一旦 iframe 重新加载它（应用重启后回看历史、组件被重建），后端会拒收
+ *   （日志里 `动画资源被拒 … 原因=used / expired`），而**载荷里明明还躺着完整的内联 HTML**。
+ *   旧实现把这种失败直接当终态 → 学生看到「动画没能加载，已用文字讲解」，
+ *   动画白做了一次。现在改成：托管路径失败**先回退内联 HTML 再试一次**，
+ *   只有连内联都没有时才是真降级。
+ */
+const useHosted = ref<boolean>(view.resourceUrl !== null && view.html.trim().length > 0)
+/** 已经回退过一次内联：再失败就是真失败（防来回重试）。 */
+const fellBackToInline = ref(false)
+
 function goDegraded(reason: string): void {
   if (degraded.value) return
   degraded.value = true
@@ -86,10 +101,31 @@ function goDegraded(reason: string): void {
   host.value?.dispose()
 }
 
+/**
+ * 加载失败的处理：**先回退，再降级**。
+ *
+ * 回退是「换一份数据源，同一个载荷」，不是重试同一个坏地址 ——
+ * 托管资源失败（nonce 用过 / 过期 / 文件被清）与「动画本身有问题」是两件事，
+ * 前者用内联 HTML 完全能救回来。若回退后仍失败（超时 / 沙箱自报错），
+ * 那时才是真的播不了，走降级视图（**绝不白屏**）。
+ */
+function handleFailure(reason: string): void {
+  if (useHosted.value && !fellBackToInline.value && view.html.trim().length > 0) {
+    fellBackToInline.value = true
+    useHosted.value = false
+    degradeReason.value = `托管资源不可用（${reason}），已改用内联 HTML 重试`
+    host.value?.dispose()
+    host.value = buildHost()
+    // iframe 元素会因 `:key` 变化被重建，attach 由 iframeEl 的 watch 接上
+    return
+  }
+  goDegraded(reason)
+}
+
 function buildHost(): AnimationSandboxHost {
   const instance = new AnimationSandboxHost({
     payloadId: payloadId.value,
-    resourceUrl: view.resourceUrl ?? undefined,
+    resourceUrl: useHosted.value ? (view.resourceUrl ?? undefined) : undefined,
     srcdoc: view.html || undefined,
     onReady: () => {
       phase.value = 'ready'
@@ -99,10 +135,10 @@ function buildHost(): AnimationSandboxHost {
     },
     onTimeout: (id) => {
       // ★ 5s 没 ready：发过 timeout 之后走降级视图（**绝不白屏**）
-      goDegraded(`沙箱在 5 秒内没有就绪（payloadId=${id}）`)
+      handleFailure(`沙箱在 5 秒内没有就绪（payloadId=${id}）`)
     },
     onError: (message) => {
-      goDegraded(`沙箱自报错误：${message || '(无说明)'}`)
+      handleFailure(`沙箱自报错误：${message || '(无说明)'}`)
     }
   })
   return instance
@@ -202,17 +238,21 @@ watch(iframeEl, (element) => {
 
     <!-- ── 可播放的沙箱 ─────────────────────────────────────────── -->
     <div v-if="mountIframe" class="anim__stage">
+      <!-- ★ `:key` 让「托管 → 内联」的回退**真的换一个 iframe 元素**：
+           只改同一个元素的 `src`/`srcdoc` 属性在某些情况下不会重新导航
+           （把 src 摘掉换成 srcdoc 尤甚），换 key 是最直白可靠的语义。 -->
       <iframe
+        :key="useHosted ? 'hosted' : 'inline'"
         ref="iframeEl"
         class="anim__frame"
         :sandbox="iframeAttrs.sandbox"
         :referrerpolicy="iframeAttrs.referrerpolicy"
-        :src="view.resourceUrl ?? undefined"
-        :srcdoc="view.resourceUrl ? undefined : view.html"
+        :src="useHosted ? (view.resourceUrl ?? undefined) : undefined"
+        :srcdoc="useHosted ? undefined : view.html"
         title="动画演示"
         data-testid="animation-frame"
         :data-sandbox="SANDBOX_ATTRIBUTE"
-        :data-resource="view.resourceUrl ? 'hosted' : 'inline'"
+        :data-resource="useHosted ? 'hosted' : 'inline'"
         @load="onIframeLoad"
       />
 

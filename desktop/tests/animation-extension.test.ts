@@ -780,6 +780,60 @@ test('降级判定：html 为空不建 iframe（少一次必然失败的加载�
   assert.equal(shouldMountIframe(null), false)
 })
 
+test('★★ 托管路径失败必须**先回退内联 HTML**，不能直接降级（实测缺陷的回归）', () => {
+  // ── 缺陷是什么 ────────────────────────────────────────────────────
+  // 托管地址带的是**一次性 nonce，TTL 120 秒**（`app/routes/resources.py`）。一旦 iframe
+  // 重新加载它（应用重启后回看历史 / 组件被重建），后端就拒收 —— 实测日志：
+  //     WARNING app.routes.resources: 动画资源被拒 … 原因=used
+  //     WARNING app.routes.resources: 动画资源被拒 … 原因=expired
+  // 而**载荷里明明躺着完整的内联 HTML**（`html` 字段）。旧实现却直接进降级视图，
+  // 学生看到「动画没能加载，已用文字讲解」—— 一个本该放出来的动画白白没了。
+  //
+  // ── 为什么这条断言写在源码级 ───────────────────────────────────────
+  // 卡片是 `.vue` 组件，`node --test` 里没有 Vue 运行时；而这条纪律的关键
+  // 恰恰是「失败处理里有没有那个回退分支」，源码级断言能直接钉住它 ——
+  // 且改动这个分支必须显式改测试（这正是我们想要的摩擦）。
+  // ★ 先归一化换行：本仓库的 .vue 在 Windows 工作区里是 CRLF，
+  //   而下面按 `\n` 写的切片锚点在 CRLF 文本里匹配不到（实测踩到：errorBody 一路切到文件尾，
+  //   于是「不得出现 goDegraded」的断言去扫了整份源码，测试**假红**）。
+  const source = readFileSync(
+    join(DESKTOP_ROOT, 'src', 'renderer', 'src', 'cards', 'AnimationCard.vue'),
+    'utf8'
+  ).replace(/\r\n/g, '\n')
+
+  assert.match(source, /function handleFailure\(/, '超时与沙箱自报错误必须走统一的失败处理')
+  const handler = source.slice(
+    source.indexOf('function handleFailure('),
+    source.indexOf('function buildHost(')
+  )
+  assert.match(handler, /useHosted\.value = false/, '失败处理里必须把数据源切回内联')
+  assert.match(handler, /fellBackToInline\.value = true/, '必须记录已回退（防止来回重试）')
+  assert.match(handler, /host\.value = buildHost\(\)/, '回退后要真的用新数据源重建宿主')
+  assert.match(handler, /goDegraded\(reason\)/, '回退之后仍失败才降级 —— 降级仍是终态，绝不白屏')
+  assert.match(handler, /view\.html\.trim\(\)\.length > 0/, '没有内联 HTML 时不进回退分支（别绕圈）')
+
+  // 两个失败入口都必须走 handleFailure（不能有人漏掉回退）
+  // ★ 断言要**贴着回调体**取，不能给一个宽松的字符窗口 —— 实测：写成
+  //   `onTimeout:[\s\S]{0,220}?handleFailure\(` 时，把回调体改回 `goDegraded(...)`
+  //   仍然能匹配上（窗口一路吃到下面 `onError` 里的 handleFailure），测试**假绿**。
+  const timeoutBody = source.slice(source.indexOf('onTimeout:'), source.indexOf('onError:'))
+  assert.match(timeoutBody, /handleFailure\(/, '超时入口的回调体里必须调 handleFailure（不是 goDegraded）')
+  assert.doesNotMatch(timeoutBody, /goDegraded\(/, '超时入口不得直接 goDegraded（那会跳过内联回退）')
+
+  // `onError` 的回调体到 `buildHost` 里那段 options 对象结束为止
+  const errorBody = source.slice(source.indexOf('onError:'), source.indexOf('\n  })\n  return instance'))
+  assert.match(errorBody, /handleFailure\(/, '沙箱自报错误的回调体里必须调 handleFailure')
+  assert.doesNotMatch(errorBody, /goDegraded\(/, '沙箱自报错误不得直接 goDegraded')
+
+  // iframe 必须按数据源换 key：只改同一个元素的 src/srcdoc 不保证重新导航
+  assert.match(source, /:key="useHosted \? 'hosted' : 'inline'"/, '换数据源要换 iframe 元素')
+  assert.match(
+    source,
+    /:data-resource="useHosted \? 'hosted' : 'inline'"/,
+    'data-resource 要如实反映当前数据源（CDP 脚本据此断言走了哪条路）'
+  )
+})
+
 /* ================================================================== *
  * 9. 静态纪律：模板零外部引用 + 凭据不进产物
  * ================================================================== */
