@@ -53,6 +53,17 @@ sys.path.insert(0, str(HERE))
 import build_info  # noqa: E402  （同一目录；实现只有这一份，JS 侧也调它）
 import smoke_api  # noqa: E402  （复用同一套断言，避免两份实现各改一边）
 
+# ★★ UTF-8 stdio 必须**在任何输出之前**装（`app/console.py`）。
+#   不装的后果在 CI 上才暴露（实测）：runner 的默认代码页不是 936 而是西文，
+#   于是本脚本的 `sys.exit("[FATAL] --verify 与 --if-stale 互斥：…")` 里的中文
+#   被 Python 转义成 `与` 字面量 —— 测试断言「输出里有『互斥』」于是失败，
+#   而**本机（中文 Windows）跑同一段代码是通过的**。
+#   三个兄弟脚本（check_env / build_kb / fetch_embedding_model）早就装了，
+#   只有本文件漏了 —— 典型「少的那个恰好是没被非中文环境跑过的」。
+from app.console import install_utf8_stdio  # noqa: E402
+
+install_utf8_stdio()
+
 ROOT = HERE.parent
 SPEC = ROOT / "packaging" / "k12-agent-server.spec"
 DIST_DIR = ROOT / "dist" / "k12-agent-server"

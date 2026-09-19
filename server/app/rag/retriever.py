@@ -659,7 +659,18 @@ def get_service(
     可以让路由跑在夹具嵌入器上，不必加载真实模型。
     """
     path = Path(kb_path) if kb_path else default_kb_path(data_dir)
-    key = str(path).lower()
+    # ★★ 缓存键必须**归一化**（`resolve()`），不能用 `str(path).lower()`。
+    #
+    # 实测踩到（只在 CI 上暴露，本机一直绿）：同一个文件有**两种字符串形态** ——
+    # Windows 的短名（8.3）与长名、以及 `resolve()` 前后不同的字面量。CI runner 的
+    # TEMP 路径恰好同时出现了短名与长名两种写法，于是：
+    #   ① 测试先按自己那条路径 `get_service(...)` 播下**夹具嵌入器**的服务；
+    #   ② 路由按 `config.data_dir`（已被 `resolve_data_dir` 归一）**又建了一个**服务；
+    #   ③ 第二个服务没拿到夹具嵌入器 → `LocalEmbedder(available=False)` →
+    #      检索降级成 `fts`，而断言期望 `vector`。
+    # 后果不止「测试红」：**同一份 kb 会被加载两份**（各自持连接与向量索引），
+    # 内存与文件句柄都翻倍 —— 归一化是**唯一**能同时解决这两件事的做法。
+    key = str(path.resolve()).lower()
     with _SERVICE_LOCK:
         service = _SERVICES.get(key)
         if service is None or force_new:
