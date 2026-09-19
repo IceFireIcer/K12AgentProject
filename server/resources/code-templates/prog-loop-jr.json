@@ -1,0 +1,23 @@
+{
+  "kp_id": "prog-loop-jr",
+  "grade_level": "junior",
+  "title": "冒泡排序：把一串分数从小到大排好",
+  "expected_behavior": "把 TODO 1-3 填好以后，程序能把 [88, 92, 75, 60, 99] 从小到大排成 60 75 88 92 99 并打印出来（不许用 sorted）。",
+  "scaffold": "# 目标：把 result 从小到大排好（不许用 sorted），最后打印\nscores = [88, 92, 75, 60, 99]\nresult = list(scores)\nn = len(result)\n\n# TODO 1：一共要比 n-1 轮，把下面的循环次数补上（提示：用 n）\nfor i in range(____):\n    # TODO 2：每一轮从前往后比相邻两个数；末尾已经排好的 i 个数不用再比\n    for j in range(____):\n        # TODO 3：如果 result[j] 比它右边那个大，就交换这两个数\n        if ____:\n            ____\n\nprint(\" \".join(str(s) for s in result))\n",
+  "expected_output": "60 75 88 92 99\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "先在纸上把 88、92、75 这三个数手动排一遍，把你每一次「比较了哪两个、什么时候交换」记下来。循环要重复的，就是你手上刚刚做的这件事。"
+    },
+    {
+      "level": 2,
+      "hint": "排 n 个数最多需要比 n-1 轮；每一轮里，从最前面开始让相邻两个数比一遍，大的往后挪，一轮走完最大的那个就沉到末尾了。所以外层循环决定「比几轮」，内层循环决定「这一轮比到哪儿为止」——第二轮开始，末尾那些已经排好的就不用再看了。"
+    },
+    {
+      "level": 3,
+      "hint": "两个 range 的形状是 `range(n - 1)` 和 `range(n - 1 - i)`；交换两个变量 Python 可以一次写完：`result[j], result[j+1] = ...`。剩下那个比较条件（哪个比哪个大才交换）你自己定——先想清「从小到大」意味着大的往哪边跑。"
+    }
+  ],
+  "solution": "scores = [88, 92, 75, 60, 99]\nresult = list(scores)\nn = len(result)\n\nfor i in range(n - 1):\n    for j in range(n - 1 - i):\n        if result[j] > result[j + 1]:\n            result[j], result[j + 1] = result[j + 1], result[j]\n\nprint(\" \".join(str(s) for s in result))\n"
+}

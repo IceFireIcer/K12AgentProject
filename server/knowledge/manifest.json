@@ -1,59 +1,2910 @@
 {
-  "version": 2,
-  "notes": "四学段教材依赖关系（33 个知识点）。★ 语义全项目一致：from 是前置，to 是后继。票 23 按 §10.5 知识主线补齐：小学低 8 / 小学高 9 / 初中 8 / 高中 8；每条主线都接进已有主干链，不留孤立点（除唯一的根 pl-ai-around-me）。依赖边 46 条，经 build_kb 的 DFS 环检测与悬空引用校验。",
-  "grade_levels": ["primary_low", "primary_high", "junior", "senior"],
+  "version": 3,
+  "notes": "K12KnowledgeBase 导入版：57 个概念 × 4 学段 = 228 个知识点。★ 语义全项目一致：from 是前置，to 是后继。边由 scripts/import_knowledge.py 生成，规则见该文件的 build_manifest 说明 —— 每条边都严格增大 (概念序号, 学段序号)，因此**结构上无环**；概念内是 pl→ph→jr→sr 的加深链，概念间按源库 related 连同学段。",
+  "grade_levels": [
+    "primary_low",
+    "primary_high",
+    "junior",
+    "senior"
+  ],
   "dependencies": [
-    { "from": "pl-ai-around-me", "to": "pl-ai-learns", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "pl-ai-around-me", "to": "pl-machine-sees", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "pl-ai-around-me", "to": "pl-ai-manners", "relation": "prerequisite", "weight": 0.8 },
-    { "from": "pl-ai-around-me", "to": "pl-ai-talk", "relation": "prerequisite", "weight": 0.9 },
-    { "from": "pl-ai-around-me", "to": "pl-ai-draws", "relation": "prerequisite", "weight": 0.7 },
-    { "from": "pl-ai-learns", "to": "pl-machine-sees", "relation": "prerequisite", "weight": 0.9 },
-    { "from": "pl-ai-learns", "to": "pl-machine-acts", "relation": "prerequisite", "weight": 0.9 },
-    { "from": "pl-machine-sees", "to": "pl-machine-hears", "relation": "related", "weight": 0.6 },
-    { "from": "pl-ai-talk", "to": "pl-ai-manners", "relation": "related", "weight": 0.5 },
-
-    { "from": "pl-ai-around-me", "to": "ph-data-train-predict", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "pl-machine-sees", "to": "ph-image-classification", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "pl-ai-manners", "to": "ph-ai-ethics-safety", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "pl-ai-learns", "to": "ph-train-evaluate", "relation": "prerequisite", "weight": 0.9 },
-    { "from": "pl-ai-talk", "to": "ph-ai-learning-helper", "relation": "prerequisite", "weight": 0.8 },
-
-    { "from": "pl-ai-around-me", "to": "ph-ai-everyday", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-ai-everyday", "to": "ph-data-train-predict", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-data-train-predict", "to": "ph-image-classification", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-data-train-predict", "to": "ph-speech-recognition", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-data-train-predict", "to": "ph-data-quality", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-data-train-predict", "to": "ph-pattern-rule", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-image-classification", "to": "ph-speech-recognition", "relation": "related", "weight": 0.5 },
-    { "from": "ph-data-quality", "to": "ph-train-evaluate", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-pattern-rule", "to": "ph-train-evaluate", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-ai-ethics-safety", "to": "ph-ai-learning-helper", "relation": "prerequisite", "weight": 0.9 },
-
-    { "from": "ph-image-classification", "to": "jr-data-features", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-data-train-predict", "to": "jr-decision-tree", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "ph-train-evaluate", "to": "jr-model-train-eval", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "jr-data-features", "to": "jr-decision-tree", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "jr-data-features", "to": "jr-py-variable", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "jr-data-features", "to": "jr-task-types", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "jr-py-variable", "to": "jr-py-loop", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "jr-py-loop", "to": "jr-py-list-dict", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "jr-task-types", "to": "jr-model-train-eval", "relation": "prerequisite", "weight": 1.0 },
-
-    { "from": "jr-decision-tree", "to": "jr-neural-basics", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "jr-neural-basics", "to": "jr-model-train-eval", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "jr-neural-basics", "to": "sr-ml-pipeline", "relation": "prerequisite", "weight": 1.0 },
-
-    { "from": "jr-model-train-eval", "to": "sr-ml-pipeline", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "sr-ml-pipeline", "to": "sr-loss-gradient", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "sr-ml-pipeline", "to": "sr-numpy-practice", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "sr-loss-gradient", "to": "sr-linear-regression", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "sr-loss-gradient", "to": "sr-linear-classification", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "sr-linear-regression", "to": "sr-overfit-depth", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "sr-linear-classification", "to": "sr-overfit-depth", "relation": "prerequisite", "weight": 0.9 },
-    { "from": "sr-numpy-practice", "to": "sr-knn", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "sr-numpy-practice", "to": "sr-digit-project", "relation": "prerequisite", "weight": 1.0 },
-    { "from": "sr-knn", "to": "sr-digit-project", "relation": "prerequisite", "weight": 0.9 },
-    { "from": "sr-overfit-depth", "to": "sr-digit-project", "relation": "prerequisite", "weight": 1.0 }
+    {
+      "from": "ai-definition-pl",
+      "to": "ai-definition-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ai-definition-ph",
+      "to": "ai-definition-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ai-definition-jr",
+      "to": "ai-definition-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ai-three-values-pl",
+      "to": "ai-three-values-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ai-three-values-ph",
+      "to": "ai-three-values-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ai-three-values-jr",
+      "to": "ai-three-values-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "narrow-ai-pl",
+      "to": "narrow-ai-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "narrow-ai-ph",
+      "to": "narrow-ai-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "narrow-ai-jr",
+      "to": "narrow-ai-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "strong-ai-agi-pl",
+      "to": "strong-ai-agi-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "strong-ai-agi-ph",
+      "to": "strong-ai-agi-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "strong-ai-agi-jr",
+      "to": "strong-ai-agi-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ai-hierarchy-pl",
+      "to": "ai-hierarchy-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ai-hierarchy-ph",
+      "to": "ai-hierarchy-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ai-hierarchy-jr",
+      "to": "ai-hierarchy-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "genai-pl",
+      "to": "genai-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "genai-ph",
+      "to": "genai-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "genai-jr",
+      "to": "genai-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "computing-power-pl",
+      "to": "computing-power-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "computing-power-ph",
+      "to": "computing-power-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "computing-power-jr",
+      "to": "computing-power-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "training-inference-pl",
+      "to": "training-inference-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "training-inference-ph",
+      "to": "training-inference-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "training-inference-jr",
+      "to": "training-inference-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "hardware-accelerator-pl",
+      "to": "hardware-accelerator-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "hardware-accelerator-ph",
+      "to": "hardware-accelerator-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "hardware-accelerator-jr",
+      "to": "hardware-accelerator-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "data-pl",
+      "to": "data-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "data-ph",
+      "to": "data-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "data-jr",
+      "to": "data-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "data-processing-pl",
+      "to": "data-processing-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "data-processing-ph",
+      "to": "data-processing-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "data-processing-jr",
+      "to": "data-processing-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "algorithm-pl",
+      "to": "algorithm-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "algorithm-ph",
+      "to": "algorithm-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "algorithm-jr",
+      "to": "algorithm-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "machine-learning-pl",
+      "to": "machine-learning-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "machine-learning-ph",
+      "to": "machine-learning-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "machine-learning-jr",
+      "to": "machine-learning-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "supervised-learning-pl",
+      "to": "supervised-learning-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "supervised-learning-ph",
+      "to": "supervised-learning-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "supervised-learning-jr",
+      "to": "supervised-learning-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "unsupervised-learning-pl",
+      "to": "unsupervised-learning-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "unsupervised-learning-ph",
+      "to": "unsupervised-learning-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "unsupervised-learning-jr",
+      "to": "unsupervised-learning-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "reinforcement-learning-pl",
+      "to": "reinforcement-learning-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "reinforcement-learning-ph",
+      "to": "reinforcement-learning-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "reinforcement-learning-jr",
+      "to": "reinforcement-learning-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "deep-learning-pl",
+      "to": "deep-learning-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "deep-learning-ph",
+      "to": "deep-learning-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "deep-learning-jr",
+      "to": "deep-learning-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "artificial-neuron-pl",
+      "to": "artificial-neuron-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "artificial-neuron-ph",
+      "to": "artificial-neuron-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "artificial-neuron-jr",
+      "to": "artificial-neuron-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "neural-network-pl",
+      "to": "neural-network-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "neural-network-ph",
+      "to": "neural-network-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "neural-network-jr",
+      "to": "neural-network-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "transformer-pl",
+      "to": "transformer-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "transformer-ph",
+      "to": "transformer-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "transformer-jr",
+      "to": "transformer-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "token-pl",
+      "to": "token-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "token-ph",
+      "to": "token-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "token-jr",
+      "to": "token-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "nlp-pl",
+      "to": "nlp-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "nlp-ph",
+      "to": "nlp-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "nlp-jr",
+      "to": "nlp-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "computer-vision-pl",
+      "to": "computer-vision-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "computer-vision-ph",
+      "to": "computer-vision-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "computer-vision-jr",
+      "to": "computer-vision-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "speech-recognition-pl",
+      "to": "speech-recognition-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "speech-recognition-ph",
+      "to": "speech-recognition-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "speech-recognition-jr",
+      "to": "speech-recognition-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "speech-synthesis-pl",
+      "to": "speech-synthesis-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "speech-synthesis-ph",
+      "to": "speech-synthesis-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "speech-synthesis-jr",
+      "to": "speech-synthesis-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "llm-pl",
+      "to": "llm-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "llm-ph",
+      "to": "llm-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "llm-jr",
+      "to": "llm-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "rag-pl",
+      "to": "rag-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "rag-ph",
+      "to": "rag-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "rag-jr",
+      "to": "rag-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "short-term-memory-pl",
+      "to": "short-term-memory-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "short-term-memory-ph",
+      "to": "short-term-memory-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "short-term-memory-jr",
+      "to": "short-term-memory-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "long-term-memory-pl",
+      "to": "long-term-memory-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "long-term-memory-ph",
+      "to": "long-term-memory-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "long-term-memory-jr",
+      "to": "long-term-memory-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-perception-pl",
+      "to": "agent-perception-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-perception-ph",
+      "to": "agent-perception-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-perception-jr",
+      "to": "agent-perception-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-planning-pl",
+      "to": "agent-planning-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-planning-ph",
+      "to": "agent-planning-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-planning-jr",
+      "to": "agent-planning-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-tool-use-pl",
+      "to": "agent-tool-use-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-tool-use-ph",
+      "to": "agent-tool-use-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-tool-use-jr",
+      "to": "agent-tool-use-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-action-pl",
+      "to": "agent-action-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-action-ph",
+      "to": "agent-action-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-action-jr",
+      "to": "agent-action-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-reflection-pl",
+      "to": "agent-reflection-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-reflection-ph",
+      "to": "agent-reflection-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "agent-reflection-jr",
+      "to": "agent-reflection-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prompt-pl",
+      "to": "prompt-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prompt-ph",
+      "to": "prompt-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prompt-jr",
+      "to": "prompt-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-agent-pl",
+      "to": "edu-agent-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-agent-ph",
+      "to": "edu-agent-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-agent-jr",
+      "to": "edu-agent-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-qa-pl",
+      "to": "edu-qa-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-qa-ph",
+      "to": "edu-qa-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-qa-jr",
+      "to": "edu-qa-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-mistake-review-pl",
+      "to": "edu-mistake-review-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-mistake-review-ph",
+      "to": "edu-mistake-review-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-mistake-review-jr",
+      "to": "edu-mistake-review-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-preview-review-pl",
+      "to": "edu-preview-review-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-preview-review-ph",
+      "to": "edu-preview-review-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-preview-review-jr",
+      "to": "edu-preview-review-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-notes-mindmap-pl",
+      "to": "edu-notes-mindmap-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-notes-mindmap-ph",
+      "to": "edu-notes-mindmap-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "edu-notes-mindmap-jr",
+      "to": "edu-notes-mindmap-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "aigc-media-pl",
+      "to": "aigc-media-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "aigc-media-ph",
+      "to": "aigc-media-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "aigc-media-jr",
+      "to": "aigc-media-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "voice-assistant-pl",
+      "to": "voice-assistant-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "voice-assistant-ph",
+      "to": "voice-assistant-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "voice-assistant-jr",
+      "to": "voice-assistant-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "autonomous-driving-pl",
+      "to": "autonomous-driving-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "autonomous-driving-ph",
+      "to": "autonomous-driving-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "autonomous-driving-jr",
+      "to": "autonomous-driving-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "industrial-inspection-pl",
+      "to": "industrial-inspection-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "industrial-inspection-ph",
+      "to": "industrial-inspection-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "industrial-inspection-jr",
+      "to": "industrial-inspection-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "medical-imaging-pl",
+      "to": "medical-imaging-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "medical-imaging-ph",
+      "to": "medical-imaging-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "medical-imaging-jr",
+      "to": "medical-imaging-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-hallucination-pl",
+      "to": "limit-hallucination-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-hallucination-ph",
+      "to": "limit-hallucination-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-hallucination-jr",
+      "to": "limit-hallucination-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-knowledge-cutoff-pl",
+      "to": "limit-knowledge-cutoff-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-knowledge-cutoff-ph",
+      "to": "limit-knowledge-cutoff-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-knowledge-cutoff-jr",
+      "to": "limit-knowledge-cutoff-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-understanding-pl",
+      "to": "limit-understanding-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-understanding-ph",
+      "to": "limit-understanding-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-understanding-jr",
+      "to": "limit-understanding-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-interaction-pl",
+      "to": "limit-interaction-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-interaction-ph",
+      "to": "limit-interaction-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-interaction-jr",
+      "to": "limit-interaction-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-teaching-pl",
+      "to": "limit-teaching-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-teaching-ph",
+      "to": "limit-teaching-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "limit-teaching-jr",
+      "to": "limit-teaching-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-information-pl",
+      "to": "ethics-information-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-information-ph",
+      "to": "ethics-information-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-information-jr",
+      "to": "ethics-information-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-privacy-pl",
+      "to": "ethics-privacy-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-privacy-ph",
+      "to": "ethics-privacy-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-privacy-jr",
+      "to": "ethics-privacy-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-anti-misuse-pl",
+      "to": "ethics-anti-misuse-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-anti-misuse-ph",
+      "to": "ethics-anti-misuse-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-anti-misuse-jr",
+      "to": "ethics-anti-misuse-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-fairness-pl",
+      "to": "ethics-fairness-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-fairness-ph",
+      "to": "ethics-fairness-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ethics-fairness-jr",
+      "to": "ethics-fairness-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prog-variable-pl",
+      "to": "prog-variable-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prog-variable-ph",
+      "to": "prog-variable-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prog-variable-jr",
+      "to": "prog-variable-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prog-loop-pl",
+      "to": "prog-loop-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prog-loop-ph",
+      "to": "prog-loop-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prog-loop-jr",
+      "to": "prog-loop-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prog-list-pl",
+      "to": "prog-list-ph",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prog-list-ph",
+      "to": "prog-list-jr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "prog-list-jr",
+      "to": "prog-list-sr",
+      "relation": "prerequisite",
+      "weight": 1.0
+    },
+    {
+      "from": "ai-definition-pl",
+      "to": "ai-three-values-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-definition-ph",
+      "to": "ai-three-values-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-definition-jr",
+      "to": "ai-three-values-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-definition-sr",
+      "to": "ai-three-values-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-definition-pl",
+      "to": "ai-hierarchy-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-definition-ph",
+      "to": "ai-hierarchy-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-definition-jr",
+      "to": "ai-hierarchy-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-definition-sr",
+      "to": "ai-hierarchy-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "narrow-ai-pl",
+      "to": "strong-ai-agi-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "narrow-ai-ph",
+      "to": "strong-ai-agi-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "narrow-ai-jr",
+      "to": "strong-ai-agi-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "narrow-ai-sr",
+      "to": "strong-ai-agi-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "narrow-ai-pl",
+      "to": "llm-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "narrow-ai-ph",
+      "to": "llm-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "narrow-ai-jr",
+      "to": "llm-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "narrow-ai-sr",
+      "to": "llm-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-pl",
+      "to": "machine-learning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-ph",
+      "to": "machine-learning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-jr",
+      "to": "machine-learning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-sr",
+      "to": "machine-learning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-pl",
+      "to": "deep-learning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-ph",
+      "to": "deep-learning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-jr",
+      "to": "deep-learning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-sr",
+      "to": "deep-learning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-pl",
+      "to": "genai-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-ph",
+      "to": "genai-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-jr",
+      "to": "genai-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ai-hierarchy-sr",
+      "to": "genai-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-pl",
+      "to": "nlp-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-ph",
+      "to": "nlp-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-jr",
+      "to": "nlp-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-sr",
+      "to": "nlp-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-pl",
+      "to": "llm-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-ph",
+      "to": "llm-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-jr",
+      "to": "llm-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-sr",
+      "to": "llm-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-pl",
+      "to": "training-inference-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-ph",
+      "to": "training-inference-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-jr",
+      "to": "training-inference-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-sr",
+      "to": "training-inference-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-pl",
+      "to": "hardware-accelerator-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-ph",
+      "to": "hardware-accelerator-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-jr",
+      "to": "hardware-accelerator-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-sr",
+      "to": "hardware-accelerator-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-pl",
+      "to": "data-processing-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-ph",
+      "to": "data-processing-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-jr",
+      "to": "data-processing-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-sr",
+      "to": "data-processing-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-processing-pl",
+      "to": "limit-hallucination-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-processing-ph",
+      "to": "limit-hallucination-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-processing-jr",
+      "to": "limit-hallucination-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-processing-sr",
+      "to": "limit-hallucination-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-pl",
+      "to": "algorithm-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-ph",
+      "to": "algorithm-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-jr",
+      "to": "algorithm-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computing-power-sr",
+      "to": "algorithm-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-pl",
+      "to": "algorithm-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-ph",
+      "to": "algorithm-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-jr",
+      "to": "algorithm-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-sr",
+      "to": "algorithm-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "algorithm-pl",
+      "to": "machine-learning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "algorithm-ph",
+      "to": "machine-learning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "algorithm-jr",
+      "to": "machine-learning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "algorithm-sr",
+      "to": "machine-learning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-pl",
+      "to": "supervised-learning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-ph",
+      "to": "supervised-learning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-jr",
+      "to": "supervised-learning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-sr",
+      "to": "supervised-learning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-pl",
+      "to": "unsupervised-learning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-ph",
+      "to": "unsupervised-learning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-jr",
+      "to": "unsupervised-learning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-sr",
+      "to": "unsupervised-learning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-pl",
+      "to": "reinforcement-learning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-ph",
+      "to": "reinforcement-learning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-jr",
+      "to": "reinforcement-learning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-sr",
+      "to": "reinforcement-learning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-pl",
+      "to": "deep-learning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-ph",
+      "to": "deep-learning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-jr",
+      "to": "deep-learning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "machine-learning-sr",
+      "to": "deep-learning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "supervised-learning-pl",
+      "to": "unsupervised-learning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "supervised-learning-ph",
+      "to": "unsupervised-learning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "supervised-learning-jr",
+      "to": "unsupervised-learning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "supervised-learning-sr",
+      "to": "unsupervised-learning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "supervised-learning-pl",
+      "to": "reinforcement-learning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "supervised-learning-ph",
+      "to": "reinforcement-learning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "supervised-learning-jr",
+      "to": "reinforcement-learning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "supervised-learning-sr",
+      "to": "reinforcement-learning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "reinforcement-learning-pl",
+      "to": "agent-reflection-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "reinforcement-learning-ph",
+      "to": "agent-reflection-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "reinforcement-learning-jr",
+      "to": "agent-reflection-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "reinforcement-learning-sr",
+      "to": "agent-reflection-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "deep-learning-pl",
+      "to": "artificial-neuron-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "deep-learning-ph",
+      "to": "artificial-neuron-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "deep-learning-jr",
+      "to": "artificial-neuron-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "deep-learning-sr",
+      "to": "artificial-neuron-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "deep-learning-pl",
+      "to": "neural-network-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "deep-learning-ph",
+      "to": "neural-network-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "deep-learning-jr",
+      "to": "neural-network-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "deep-learning-sr",
+      "to": "neural-network-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "artificial-neuron-pl",
+      "to": "neural-network-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "artificial-neuron-ph",
+      "to": "neural-network-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "artificial-neuron-jr",
+      "to": "neural-network-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "artificial-neuron-sr",
+      "to": "neural-network-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "neural-network-pl",
+      "to": "transformer-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "neural-network-ph",
+      "to": "transformer-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "neural-network-jr",
+      "to": "transformer-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "neural-network-sr",
+      "to": "transformer-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "transformer-pl",
+      "to": "token-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "transformer-ph",
+      "to": "token-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "transformer-jr",
+      "to": "token-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "transformer-sr",
+      "to": "token-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "transformer-pl",
+      "to": "llm-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "transformer-ph",
+      "to": "llm-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "transformer-jr",
+      "to": "llm-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "transformer-sr",
+      "to": "llm-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "token-pl",
+      "to": "llm-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "token-ph",
+      "to": "llm-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "token-jr",
+      "to": "llm-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "token-sr",
+      "to": "llm-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "nlp-pl",
+      "to": "computer-vision-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "nlp-ph",
+      "to": "computer-vision-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "nlp-jr",
+      "to": "computer-vision-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "nlp-sr",
+      "to": "computer-vision-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "nlp-pl",
+      "to": "llm-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "nlp-ph",
+      "to": "llm-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "nlp-jr",
+      "to": "llm-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "nlp-sr",
+      "to": "llm-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-pl",
+      "to": "industrial-inspection-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-ph",
+      "to": "industrial-inspection-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-jr",
+      "to": "industrial-inspection-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-sr",
+      "to": "industrial-inspection-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-pl",
+      "to": "medical-imaging-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-ph",
+      "to": "medical-imaging-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-jr",
+      "to": "medical-imaging-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-sr",
+      "to": "medical-imaging-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-pl",
+      "to": "speech-synthesis-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-ph",
+      "to": "speech-synthesis-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-jr",
+      "to": "speech-synthesis-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-sr",
+      "to": "speech-synthesis-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-pl",
+      "to": "voice-assistant-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-ph",
+      "to": "voice-assistant-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-jr",
+      "to": "voice-assistant-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-sr",
+      "to": "voice-assistant-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-synthesis-pl",
+      "to": "voice-assistant-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-synthesis-ph",
+      "to": "voice-assistant-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-synthesis-jr",
+      "to": "voice-assistant-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-synthesis-sr",
+      "to": "voice-assistant-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-pl",
+      "to": "rag-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-ph",
+      "to": "rag-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-jr",
+      "to": "rag-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-sr",
+      "to": "rag-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-pl",
+      "to": "limit-hallucination-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-ph",
+      "to": "limit-hallucination-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-jr",
+      "to": "limit-hallucination-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-sr",
+      "to": "limit-hallucination-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-pl",
+      "to": "agent-tool-use-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-ph",
+      "to": "agent-tool-use-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-jr",
+      "to": "agent-tool-use-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-sr",
+      "to": "agent-tool-use-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-pl",
+      "to": "limit-hallucination-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-ph",
+      "to": "limit-hallucination-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-jr",
+      "to": "limit-hallucination-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-sr",
+      "to": "limit-hallucination-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-pl",
+      "to": "limit-knowledge-cutoff-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-ph",
+      "to": "limit-knowledge-cutoff-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-jr",
+      "to": "limit-knowledge-cutoff-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "rag-sr",
+      "to": "limit-knowledge-cutoff-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "short-term-memory-pl",
+      "to": "long-term-memory-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "short-term-memory-ph",
+      "to": "long-term-memory-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "short-term-memory-jr",
+      "to": "long-term-memory-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "short-term-memory-sr",
+      "to": "long-term-memory-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "short-term-memory-pl",
+      "to": "limit-interaction-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "short-term-memory-ph",
+      "to": "limit-interaction-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "short-term-memory-jr",
+      "to": "limit-interaction-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "short-term-memory-sr",
+      "to": "limit-interaction-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-pl",
+      "to": "edu-agent-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-ph",
+      "to": "edu-agent-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-jr",
+      "to": "edu-agent-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-sr",
+      "to": "edu-agent-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-pl",
+      "to": "agent-perception-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-ph",
+      "to": "agent-perception-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-jr",
+      "to": "agent-perception-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-sr",
+      "to": "agent-perception-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-pl",
+      "to": "agent-perception-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-ph",
+      "to": "agent-perception-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-jr",
+      "to": "agent-perception-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "speech-recognition-sr",
+      "to": "agent-perception-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-perception-pl",
+      "to": "agent-planning-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-perception-ph",
+      "to": "agent-planning-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-perception-jr",
+      "to": "agent-planning-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-perception-sr",
+      "to": "agent-planning-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-planning-pl",
+      "to": "agent-tool-use-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-planning-ph",
+      "to": "agent-tool-use-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-planning-jr",
+      "to": "agent-tool-use-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-planning-sr",
+      "to": "agent-tool-use-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-planning-pl",
+      "to": "agent-reflection-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-planning-ph",
+      "to": "agent-reflection-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-planning-jr",
+      "to": "agent-reflection-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-planning-sr",
+      "to": "agent-reflection-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-tool-use-pl",
+      "to": "agent-action-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-tool-use-ph",
+      "to": "agent-action-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-tool-use-jr",
+      "to": "agent-action-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-tool-use-sr",
+      "to": "agent-action-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-action-pl",
+      "to": "edu-notes-mindmap-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-action-ph",
+      "to": "edu-notes-mindmap-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-action-jr",
+      "to": "edu-notes-mindmap-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-action-sr",
+      "to": "edu-notes-mindmap-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-reflection-pl",
+      "to": "limit-hallucination-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-reflection-ph",
+      "to": "limit-hallucination-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-reflection-jr",
+      "to": "limit-hallucination-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "agent-reflection-sr",
+      "to": "limit-hallucination-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-pl",
+      "to": "prompt-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-ph",
+      "to": "prompt-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-jr",
+      "to": "prompt-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-sr",
+      "to": "prompt-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prompt-pl",
+      "to": "limit-teaching-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prompt-ph",
+      "to": "limit-teaching-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prompt-jr",
+      "to": "limit-teaching-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prompt-sr",
+      "to": "limit-teaching-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prompt-pl",
+      "to": "ethics-fairness-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prompt-ph",
+      "to": "ethics-fairness-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prompt-jr",
+      "to": "ethics-fairness-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prompt-sr",
+      "to": "ethics-fairness-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-pl",
+      "to": "edu-agent-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-ph",
+      "to": "edu-agent-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-jr",
+      "to": "edu-agent-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "llm-sr",
+      "to": "edu-agent-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-agent-pl",
+      "to": "edu-qa-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-agent-ph",
+      "to": "edu-qa-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-agent-jr",
+      "to": "edu-qa-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-agent-sr",
+      "to": "edu-qa-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-qa-pl",
+      "to": "edu-mistake-review-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-qa-ph",
+      "to": "edu-mistake-review-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-qa-jr",
+      "to": "edu-mistake-review-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-qa-sr",
+      "to": "edu-mistake-review-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-qa-pl",
+      "to": "ethics-anti-misuse-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-qa-ph",
+      "to": "ethics-anti-misuse-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-qa-jr",
+      "to": "ethics-anti-misuse-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-qa-sr",
+      "to": "ethics-anti-misuse-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-pl",
+      "to": "edu-mistake-review-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-ph",
+      "to": "edu-mistake-review-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-jr",
+      "to": "edu-mistake-review-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-sr",
+      "to": "edu-mistake-review-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-preview-review-pl",
+      "to": "edu-notes-mindmap-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-preview-review-ph",
+      "to": "edu-notes-mindmap-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-preview-review-jr",
+      "to": "edu-notes-mindmap-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-preview-review-sr",
+      "to": "edu-notes-mindmap-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-pl",
+      "to": "edu-preview-review-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-ph",
+      "to": "edu-preview-review-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-jr",
+      "to": "edu-preview-review-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "long-term-memory-sr",
+      "to": "edu-preview-review-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-pl",
+      "to": "aigc-media-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-ph",
+      "to": "aigc-media-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-jr",
+      "to": "aigc-media-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "genai-sr",
+      "to": "aigc-media-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-pl",
+      "to": "autonomous-driving-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-ph",
+      "to": "autonomous-driving-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-jr",
+      "to": "autonomous-driving-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "computer-vision-sr",
+      "to": "autonomous-driving-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "training-inference-pl",
+      "to": "autonomous-driving-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "training-inference-ph",
+      "to": "autonomous-driving-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "training-inference-jr",
+      "to": "autonomous-driving-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "training-inference-sr",
+      "to": "autonomous-driving-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "medical-imaging-pl",
+      "to": "ethics-information-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "medical-imaging-ph",
+      "to": "ethics-information-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "medical-imaging-jr",
+      "to": "ethics-information-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "medical-imaging-sr",
+      "to": "ethics-information-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-pl",
+      "to": "ethics-information-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-ph",
+      "to": "ethics-information-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-jr",
+      "to": "ethics-information-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-sr",
+      "to": "ethics-information-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-pl",
+      "to": "limit-knowledge-cutoff-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-ph",
+      "to": "limit-knowledge-cutoff-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-jr",
+      "to": "limit-knowledge-cutoff-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-sr",
+      "to": "limit-knowledge-cutoff-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-pl",
+      "to": "limit-understanding-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-ph",
+      "to": "limit-understanding-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-jr",
+      "to": "limit-understanding-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-hallucination-sr",
+      "to": "limit-understanding-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-understanding-pl",
+      "to": "limit-interaction-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-understanding-ph",
+      "to": "limit-interaction-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-understanding-jr",
+      "to": "limit-interaction-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-understanding-sr",
+      "to": "limit-interaction-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-teaching-pl",
+      "to": "ethics-fairness-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-teaching-ph",
+      "to": "ethics-fairness-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-teaching-jr",
+      "to": "ethics-fairness-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "limit-teaching-sr",
+      "to": "ethics-fairness-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-agent-pl",
+      "to": "ethics-privacy-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-agent-ph",
+      "to": "ethics-privacy-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-agent-jr",
+      "to": "ethics-privacy-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "edu-agent-sr",
+      "to": "ethics-privacy-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ethics-privacy-pl",
+      "to": "ethics-fairness-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ethics-privacy-ph",
+      "to": "ethics-fairness-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ethics-privacy-jr",
+      "to": "ethics-fairness-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "ethics-privacy-sr",
+      "to": "ethics-fairness-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prog-variable-pl",
+      "to": "prog-loop-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prog-variable-ph",
+      "to": "prog-loop-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prog-variable-jr",
+      "to": "prog-loop-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prog-variable-sr",
+      "to": "prog-loop-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-pl",
+      "to": "prog-variable-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-ph",
+      "to": "prog-variable-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-jr",
+      "to": "prog-variable-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-sr",
+      "to": "prog-variable-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prog-loop-pl",
+      "to": "prog-list-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prog-loop-ph",
+      "to": "prog-list-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prog-loop-jr",
+      "to": "prog-list-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "prog-loop-sr",
+      "to": "prog-list-sr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-pl",
+      "to": "prog-list-pl",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-ph",
+      "to": "prog-list-ph",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-jr",
+      "to": "prog-list-jr",
+      "relation": "related",
+      "weight": 0.6
+    },
+    {
+      "from": "data-sr",
+      "to": "prog-list-sr",
+      "relation": "related",
+      "weight": 0.6
+    }
   ]
 }
