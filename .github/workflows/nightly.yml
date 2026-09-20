@@ -1,11 +1,14 @@
-# Nightly —— **真的把程序构建出来**（安装版 + 绿色压缩包），产物上传为 artifact。
+# Nightly —— **真的把程序构建出来**（安装版 + 绿色压缩包 + 便携版），
+# 产物**发到 GitHub Releases**（同时留一份 artifact）。
 #
 # 与 `ci.yml` 的分工（两条 workflow 别混）：
 #   - `ci.yml`      每次 push/PR 跑的**门禁**：测试 + 自检，几分钟，不下载模型、不出包。
 #   - **本文件**     按天的**重活**：下载嵌入模型 → 建带向量的知识库 →
-#                    PyInstaller 打 sidecar → electron-builder 出 NSIS 安装版与绿色压缩包。
+#                    PyInstaller 打 sidecar → electron-builder 出三个目标 → 发布 Release。
 #
 # 跑法：① 每天 UTC 18:00（北京 02:00）自动；② 也可以在 Actions 页面手动触发。
+# ★ 发布说明是**最近 20 条提交的标题**（`git log -20 --pretty=%s`）——
+#   见「生成发布说明」那一步；⚠️ 它依赖 checkout 的 `fetch-depth`（默认只取 1 条）。
 #
 # ★★ 三件事决定了它只能在这里做、不能在 CI 做：
 #   1. **嵌入模型（约 90MB）不在 git 里**（`**/resources/models/` 是 ignore 的），
@@ -33,8 +36,11 @@ concurrency:
   group: nightly
   cancel-in-progress: false
 
+# ★★ 与 CI 的关键差别：这里要**写**（发 Release）。
+#    只读的话 `gh release create` 会被 403 挡下，而报错在最后一步才出现
+#    —— 前面十几分钟的构建全白跑。
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
@@ -53,7 +59,13 @@ jobs:
       K12_CI: '1'
 
     steps:
+      # ★★ `fetch-depth` 必须显式加深：`actions/checkout` 默认只取 **1 条**提交，
+      #    而发布说明要读**最近 20 条**标题。默认值下 `git log -20` 会只输出一条，
+      #    而且**不报错**（照常生成一份只有一条的说明）—— 典型的「静默降级」。
+      #    取 30 给点余量（万一中间有 merge 提交）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 30
 
       - name: 安装 uv
         uses: astral-sh/setup-uv@v5
@@ -162,6 +174,96 @@ jobs:
           # 保留 14 天：nightly 产物是「验证这一天的代码能构建」，不是长期分发
           retention-days: 14
           if-no-files-found: error
+
+      # ── 发布到 GitHub Releases ─────────────────────────────────────────
+      # ★ 为什么既发 Release 又留 artifact：两者的用途不同 ——
+      #   artifact 挂在**这次 run** 上（排查时从 Actions 页直接下，14 天后自动过期）；
+      #   Release 给的是**稳定的下载页与直链**（发给别人、写进文档、贴进报告）。
+      - name: 生成发布说明（最近 20 条提交标题）
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## 智团团 · Nightly 构建"
+            echo ""
+            echo "自动构建的 Windows 安装包与免安装版本。"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| 构建时间 | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo "| 提交 | \`${GITHUB_SHA:0:7}\` |"
+            echo "| 触发 | ${GITHUB_EVENT_NAME} |"
+            echo ""
+            echo "### 本次构建包含的改动（最近 20 条提交）"
+            echo ""
+            git log -20 --pretty=format:'- %s'
+            echo ""
+            echo ""
+            echo "---"
+            echo ""
+            echo "**下载哪个？**"
+            echo ""
+            echo "| 文件 | 说明 |"
+            echo "| --- | --- |"
+            echo "| \`*-setup.exe\` | **安装版（NSIS）**：装一次，有桌面快捷方式与卸载项 |"
+            echo "| \`*-win-x64.zip\` | **绿色压缩包**：解压即用，数据落在解压目录 |"
+            echo "| \`*-portable.exe\` | **便携版**：单个 exe，数据落在 exe 同级 \`data/\` |"
+            echo ""
+            echo "> 三个都是**同一份代码**打出来的，只是「装不装」与「解压由谁做」不同。"
+          } > release-notes.md
+
+          # ★ 自检：条目数够不够。
+          #   浅克隆（fetch-depth 默认 1）会让这里**静默**只剩一条 ——
+          #   不检查的话，发布说明看起来「正常」，只是内容少得可疑。
+          COUNT=$(grep -c '^- ' release-notes.md || true)
+          echo "发布说明里的提交条数：$COUNT"
+          if [ "$COUNT" -lt 2 ]; then
+            echo "::warning::发布说明只列出 $COUNT 条提交 —— 检查 checkout 的 fetch-depth"
+          fi
+          echo "---- 发布说明 ----"
+          cat release-notes.md
+
+      - name: 发布到 Releases
+        shell: bash
+        env:
+          # `gh` 从环境变量读令牌（不要写进命令行参数 —— 那会进进程列表）
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # ★ 标签按**日期**：nightly 的语义是「一天一份」。
+          #   同一天重复触发（手动 + 定时撞车）时**更新那一份**而不是报错 ——
+          #   见下面的 `gh release view` 分支。
+          TAG="nightly-$(date -u +%Y%m%d)"
+          TITLE="Nightly $(date -u +%Y-%m-%d)"
+
+          # ⚠️ 用 nullglob：没有匹配时 bash 会把 `*-setup.exe` 原样当成一个文件名，
+          #    于是 `[ -f ]` 判假、FILES 里留下一个不存在的路径 ——
+          #    最后报的是「文件找不到」而不是「没构建出产物」。
+          shopt -s nullglob
+          FILES=(desktop/dist/*-setup.exe desktop/dist/*-win-x64.zip desktop/dist/*-portable.exe)
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "::error::没有任何可发布的产物（desktop/dist 下找不到 setup/zip/portable）"
+            exit 1
+          fi
+          echo "将发布 ${#FILES[@]} 个文件："
+          printf '  %s\n' "${FILES[@]}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "标签 $TAG 已存在 → 更新它（同一天重复触发）"
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file release-notes.md
+          else
+            echo "创建新 Release：$TAG"
+            # ★ `--prerelease`：nightly 不该抢「Latest」——
+            #   正式交付版本要留给人手动发的那个 release（演示/答辩用的是它）。
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --notes-file release-notes.md \
+              --prerelease \
+              "${FILES[@]}"
+          fi
+
+          echo "发布完成：$(gh release view "$TAG" --json url -q .url)"
 
 # ─────────────────────────────────────────────────────────────────────────
 # 为什么用 NSIS 而不是 Inno Setup
