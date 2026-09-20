@@ -27,7 +27,7 @@
  *   与左导航栏同一档断点 —— 1440×900 是设计基准，1120 是最小宽度。
  */
 import { computed, onMounted, ref, watch } from 'vue'
-import { GitBranch, MessageSquarePlus, Plus } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight, GitBranch, MessageSquarePlus, Plus } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useStudyStore, type SessionSummaryShape } from '../stores/study'
 
@@ -63,14 +63,158 @@ watch(
 )
 
 /**
- * 列表：**最近修改的排最前**（服务端已排好，这里不再排一次 ——
- * `projectSessionList` 的排序是「最后修改时间倒序 + id 兜底」，
- * 渲染进程再排一遍只会让两处的平局规则不一致）。
+ * ★★ **当前会话变了就刷新列表**（分叉 / 切换 / 新建之后）。
+ *
+ * 为什么单靠 `messageCount` 不够：**分叉出来的新会话带着历史消息**，
+ * 它的条数一开始就 > 0，于是「0 → N」那个边沿根本不发生 ——
+ * 学生点了「从这里重新问」，切过去了，而左侧列表里**找不到刚分叉出来的那条**。
+ * （实测：分叉成功后列表不刷新，要手动点「刷新」才出现。）
+ *
+ * ★ 同时**展开新会话的祖先**：分叉出来的会话一定挂在某个父下面，
+ *   若那个父正好被收起过，新会话会被`collapsed` 挡住 ——
+ *   表现与「没刷新」一模一样（都是「点了没出现」）。
  */
-const items = computed<SessionSummaryShape[]>(() => study.sessions)
+watch(
+  () => chat.currentSessionId,
+  (now, before) => {
+    if (before === undefined || now === before || now === '') return
+    // ★ 先把祖先展开再取列表：取回来时它才是可见的（否则白取一次）
+    const byId = new Map(allItems.value.map((item) => [item.id, item]))
+    const chain: string[] = []
+    let cursor = byId.get(now)?.parentId ?? null
+    for (let guard = 0; cursor !== null && guard < 64; guard += 1) {
+      chain.push(cursor)
+      cursor = byId.get(cursor)?.parentId ?? null
+    }
+    if (chain.some((id) => collapsed.value.has(id))) {
+      const next = new Set(collapsed.value)
+      for (const id of chain) next.delete(id)
+      collapsed.value = next
+    }
+    void study.loadSessions()
+  }
+)
+
+/**
+ * 列表：**已经是树形展开后的顺序**（主进程排好），这里只做折叠过滤。
+ *
+ * ★ 不再在渲染进程排序：`projectSessionTree` 的排序规则是
+ * 「**家族**最新活动倒序 + id 兜底」（见那个函数的说明 —— 从旧会话分叉出来的
+ * 新会话不会因为父文件 mtime 不变而沉底）。**两处各排一遍必然不一致**，
+ * 而那种不一致表现为「列表顺序偶尔跳一下」，最难查。
+ */
+const allItems = computed<SessionSummaryShape[]>(() => study.sessions)
+
+/**
+ * ★★ **被折叠起来的祖先**（`Set<sessionId>`）。
+ *
+ * 收起一个节点 = 把它**整棵子树**从列表里藏掉（不是只藏直接子级）——
+ * 所以判据是「任一祖先在集合里」，而不是「父在集合里」。
+ * 树形列表的通行做法，也让「收起一个根」的行为符合直觉（整枝消失）。
+ */
+const collapsed = ref<Set<string>>(new Set())
+
+/** 某个 id 的祖先链（含它自己？不含 —— 只要祖先）。 */
+function ancestorsOf(id: string): string[] {
+  const byId = new Map(allItems.value.map((item) => [item.id, item]))
+  const chain: string[] = []
+  let cursor = byId.get(id)?.parentId ?? null
+  // 上限防坏数据造成死循环（主进程那边已经断过环，这里是第二道）
+  for (let guard = 0; cursor !== null && guard < 64; guard += 1) {
+    chain.push(cursor)
+    cursor = byId.get(cursor)?.parentId ?? null
+  }
+  return chain
+}
+
+/**
+ * 可见项 = 祖先都没被收起；★ 并且**在这里就把可选字段归一化**。
+ *
+ * ★ 为什么归一化放在 computed 里而不是散在模板里：模板里每个 `item.depth`
+ *   都要写成 `item.depth ?? 0`，漏一处就是渲染期的 `undefined`；
+ *   而归一化只写一次，模板拿到的就是**确定的**形状。
+ */
+interface TreeRow {
+  id: string
+  title: string
+  modifiedAt: number
+  snippet: string
+  messageCount: number | null
+  parentId: string | null
+  parentTitle: string | null
+  depth: number
+  childCount: number
+  isLast: boolean
+  guides: boolean[]
+}
+
+const items = computed<TreeRow[]>(() =>
+  allItems.value
+    .filter((item) => !ancestorsOf(item.id).some((id) => collapsed.value.has(id)))
+    .map((item) => ({
+      id: item.id,
+      title: item.title,
+      modifiedAt: item.modifiedAt,
+      snippet: item.preview,
+      messageCount: item.messageCount,
+      parentId: item.parentId ?? null,
+      parentTitle: item.parentTitle ?? null,
+      depth: depthOf(item),
+      childCount: childCountOf(item),
+      isLast: item.isLast !== false,
+      guides: guidesOf(item)
+    }))
+)
+
+/**
+ * 缩进层级。
+ *
+ * ★ 对**没有树信息**的响应降级成 0（平铺）而不是 `undefined` ——
+ * 「拿不到树」应当表现为「就是一份普通列表」，不该渲染成一堆 `undefined`。
+ */
+function depthOf(item: SessionSummaryShape): number {
+  const depth = item.depth
+  return typeof depth === 'number' && Number.isFinite(depth) && depth > 0 ? depth : 0
+}
+
+/** 祖先竖线（长度应当 == depth；对不上时补 `false`，宁可少画线也不要错位）。 */
+function guidesOf(item: SessionSummaryShape): boolean[] {
+  const depth = depthOf(item)
+  const guides = Array.isArray(item.guides) ? item.guides : []
+  return Array.from({ length: depth }, (_unused, index) => guides[index] === true)
+}
+
+/** 有没有子分支（> 0 才给箭头）。 */
+function childCountOf(item: SessionSummaryShape): number {
+  const count = item.childCount
+  return typeof count === 'number' && Number.isFinite(count) && count > 0 ? count : 0
+}
+
+function toggleCollapse(id: string): void {
+  const next = new Set(collapsed.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  collapsed.value = next
+}
+
+/**
+ * 行的 hover 提示（`title`）。
+ *
+ * ★ 把「关系 + 规模」都说全：树形缩进在窄栏里可能不明显，
+ *   而 hover 是学生确认「这条到底挂在哪」的兜底。
+ * ★ 没有分支时就是标题本身 —— 不要给一条平铺的行加一句「0 条分支」的噪音。
+ */
+function treeTitle(item: TreeRow): string {
+  const parts = [item.title]
+  if (item.parentId) parts.push(`从「${item.parentTitle ?? '另一条对话'}」分出来的`)
+  if (item.childCount > 0) parts.push(`下面有 ${item.childCount} 条分支`)
+  return parts.join(' · ')
+}
+
+
 
 /** 这一条是不是当前会话（主进程说了算）。 */
-function isCurrent(session: SessionSummaryShape): boolean {
+function isCurrent(session: { id: string }): boolean {
   return chat.currentSessionId !== '' && session.id === chat.currentSessionId
 }
 
@@ -80,7 +224,7 @@ function isCurrent(session: SessionSummaryShape): boolean {
  * ★ 重复切换同一会话会 dispose + 重装一次（几秒的装配），而学生的意图
  *   「我要看这一段」在它已经在屏幕上时就已经满足了 —— 白等几秒是纯粹的损失。
  */
-async function open(session: SessionSummaryShape): Promise<void> {
+async function open(session: { id: string }): Promise<void> {
   if (isCurrent(session) || switchingId.value !== '') return
   notice.value = null
   switchingId.value = session.id
@@ -161,25 +305,67 @@ function relativeTime(ms: number): string {
       还没有历史对话 —— 问第一个问题就会出现在这里。
     </p>
 
-    <ul v-else class="sl__list">
-      <li v-for="item in items" :key="item.id">
+    <ul v-else class="sl__list" data-testid="session-tree">
+      <li
+        v-for="item in items"
+        :key="item.id"
+        class="sl__row"
+        :data-depth="item.depth"
+        :data-testid="`session-row-${item.id}`"
+      >
+        <!-- ★★ 树形连接线：**深度优先列表 + 每条自己画自己的前导**
+             ★ 为什么不用嵌套 `<ul>`：那要在 Vue 里写自引用组件，而列表本身
+               是主进程**扁平展开**好的（见 `projectSessionTree`）——
+               前导由 `depth` / `guides` / `isLast` 三个数算出来就够。
+             ★ `aria-hidden`：这些线是**视觉**结构，屏幕阅读器读到的应该是
+               「层级 2」这种语义（由下面的 aria-level 给），不是一堆方格字符。 -->
+        <span
+          v-if="item.depth > 0"
+          class="sl__tree"
+          aria-hidden="true"
+          data-testid="session-tree-guide"
+        >
+          <span
+            v-for="(hasMore, level) in item.guides"
+            :key="level"
+            class="sl__tree-seg"
+            :class="{ 'sl__tree-seg--more': hasMore }"
+          />
+          <span class="sl__tree-elbow" :class="{ 'sl__tree-elbow--last': item.isLast }" />
+        </span>
+
+        <!-- ★ 折叠箭头：只给**有子分支**的节点（没有子分支还给箭头 = 点了没反应）。 -->
+        <button
+          v-if="item.childCount > 0"
+          type="button"
+          class="sl__fold"
+          data-testid="session-fold"
+          :aria-expanded="!collapsed.has(item.id)"
+          :title="collapsed.has(item.id) ? '展开这条的分支' : '收起这条的分支'"
+          @click.stop="toggleCollapse(item.id)"
+        >
+          <component :is="collapsed.has(item.id) ? ChevronRight : ChevronDown" :size="12" />
+        </button>
+        <!-- 占位：没有箭头的行也要与有箭头的行**左缘对齐**（否则整列文字参差） -->
+        <span v-else class="sl__fold sl__fold--ghost" aria-hidden="true" />
+
         <button
           type="button"
           class="sl__item"
           :class="{ 'sl__item--active': isCurrent(item) }"
           :data-testid="`session-item-${item.id}`"
           :aria-current="isCurrent(item) ? 'true' : undefined"
+          :aria-level="item.depth + 1"
           :disabled="switchingId !== ''"
-          :title="item.title"
+          :title="treeTitle(item)"
           @click="open(item)"
         >
           <MessageSquarePlus :size="14" class="sl__ico" />
           <span class="sl__item-text">
             <span class="sl__item-title">{{ item.title }}</span>
-            <!-- ★★ 分支标记：这条是从哪条会话分出来的。
-                 ★ 只在**父会话确实还在列表里**时显示（`parentId` 非空 ——
-                   主进程那边已经核过）：父被删掉之后仍显示「来自…」等于给一个
-                   点不开的入口，那是谎话。 -->
+            <!-- ★★ 两个元信息各管一件事，**不要合并**：
+                 - 「来自〈父〉」= **关系**（谁从谁分出来的）——学生靠它认人
+                 - 「N 条分支」= **规模**（这条下面还有多少）——学生靠它决定收不收 -->
             <span
               v-if="item.parentId"
               class="sl__item-branch"
@@ -189,11 +375,18 @@ function relativeTime(ms: number): string {
               <GitBranch :size="10" />
               <span>来自「{{ item.parentTitle ?? '另一条对话' }}」</span>
             </span>
+            <span
+              v-if="item.childCount > 0"
+              class="sl__item-kids"
+              data-testid="session-kids-mark"
+            >
+              {{ item.childCount }} 条分支
+            </span>
             <span class="sl__item-meta">
               <template v-if="switchingId === item.id">正在打开…</template>
               <template v-else>
                 {{ relativeTime(item.modifiedAt) }}
-                <template v-if="item.messageCount > 0"> · {{ item.messageCount }} 条</template>
+                <template v-if="(item.messageCount ?? 0) > 0"> · {{ item.messageCount }} 条</template>
               </template>
             </span>
           </span>
@@ -337,6 +530,108 @@ function relativeTime(ms: number): string {
   white-space: nowrap;
 }
 
+/* ── 树形行 ─────────────────────────────────────────────────────────────
+ * 一行 = [树形前导] [折叠箭头] [会话条目（可点）]。
+ * ★ 前导与箭头都放在**按钮外面**：点箭头是「收起这一枝」，点条目才切会话 ——
+ *   两者语义不同，混在一个按钮里会让「想展开却切了会话」变成常态（事故）。 */
+.sl__row {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+/* 树形前导：宽度由 depth 决定（每层一段 12px）。
+ * ★ 每段是**一个 span**（不是 CSS 背景图）：这样「哪一层还有兄弟」由
+ *   `guides[i]` 逐个决定，画出来的线与真实结构一致 ——
+ *   背景图做不到「按层判断」。 */
+.sl__tree {
+  display: flex;
+  flex: none;
+  align-items: stretch;
+}
+.sl__tree-seg {
+  width: 12px;
+  flex: none;
+  position: relative;
+}
+/* 祖先竖线：只在「那条祖先后面还有兄弟」时画（否则线会连到空处） */
+.sl__tree-seg--more::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid color-mix(in srgb, var(--k12-border) 85%, transparent);
+}
+/* 本层的拐角：先竖到中间、再横到右边（`└` / `├` 两种） */
+.sl__tree-elbow {
+  width: 12px;
+  flex: none;
+  position: relative;
+}
+.sl__tree-elbow::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  /* 不是最后一个 → 竖线贯通（`├`）；是最后一个 → 只竖到中间（`└`） */
+  bottom: 0;
+  border-left: 1px solid color-mix(in srgb, var(--k12-border) 85%, transparent);
+}
+.sl__tree-elbow--last::before {
+  bottom: 50%;
+}
+.sl__tree-elbow::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 50%;
+  border-top: 1px solid color-mix(in srgb, var(--k12-border) 85%, transparent);
+}
+
+/* 折叠箭头：只给有子分支的行。
+ * ★ 28px 见方：UX 体检 C1 的触控下限（它是**会常点**的控件）。 */
+.sl__fold {
+  flex: none;
+  width: 28px;
+  min-height: 28px;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--k12-r-control);
+  background: transparent;
+  color: var(--k12-muted);
+  cursor: pointer;
+  padding: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .sl__fold:hover:not(.sl__fold--ghost) {
+    background: var(--k12-surface-2);
+    color: var(--k12-fg-2);
+  }
+}
+/* 占位：没有箭头的行也占同样的宽度，保证整列文字左缘对齐
+ * （不占位的话，有子分支的行会被箭头推右 28px，一列参差不齐） */
+.sl__fold--ghost {
+  cursor: default;
+}
+
+.sl__item {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 「N 条分支」：**规模**信息（与「来自…」那个关系标记分工不同）。
+ * 用 muted 色而不是 accent：它是计数，不是关系 —— 关系才值得强调。 */
+.sl__item-kids {
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
+}
+
 .sl__item-meta {
   font-size: var(--k12-fs-xs);
   line-height: var(--k12-lh-ui);
@@ -403,6 +698,13 @@ function relativeTime(ms: number): string {
   .sl__item {
     justify-content: center;
     padding: 8px 0;
+  }
+  /* ★ 窄栏（60px）里缩进会吃掉本来就不够的文字空间 ——
+   *   整列已经只剩一个图标，缩进看不出任何结构。
+   *   ⚠️ 用 `display: none` 而不是 `width: 0`：后者会让连接线在半像素上残缺。 */
+  .sl__tree,
+  .sl__fold {
+    display: none;
   }
   .sl__ico {
     margin-top: 0;

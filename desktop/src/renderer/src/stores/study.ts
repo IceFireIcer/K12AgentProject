@@ -86,12 +86,26 @@ export interface SessionSummaryShape {
    * ★★ 从哪条会话分出来的（`null` = 独立会话，不是分支）。
    *
    * 它是**分支关系**（Pi 在新会话文件头里记的 `parentSession`）——
-   * 侧栏据此把分支显示成「来自〈父会话标题〉」，学生一眼能认出
-   * 「这是我刚才重新问过的那条」。
+   * 侧栏据此把会话画成一棵树。
    */
   parentId?: string | null
   /** 父会话的标题（父不在本列表里时为 `null`；仅用于展示）。 */
   parentTitle?: string | null
+  /**
+   * ★★ **树里的层级**（0 = 根）—— 侧栏按它缩进。
+   *
+   * ⚠️ 这三个字段是**可选**的：`session:list` 与它同源，但历史数据 / 旧响应里
+   * 可能没有（本轮之前主进程回的是扁平列表）。组件对缺失值有降级（见
+   * `SessionList.vue` 的 `depthOf()`）——「没有树信息」应当表现为**平铺**，
+   * 而不是渲染出一堆 `undefined`。
+   */
+  depth?: number
+  /** 直接子分支数（> 0 才给展开/收起箭头）。 */
+  childCount?: number
+  /** 是不是同层最后一个（决定画 `└` 还是 `├`）。 */
+  isLast?: boolean
+  /** 每个祖先层要不要画竖线（长度 = `depth`）。 */
+  guides?: boolean[]
 }
 
 export interface SessionTranscriptShape {

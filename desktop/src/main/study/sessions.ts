@@ -152,6 +152,26 @@ export interface SessionTreeEntry {
   parentTitle: string | null
   /** 从父会话的第几条消息分出来的（1-based；`null` = 不知道）。 */
   branchedAtMessage: number | null
+  /**
+   * ★★ **树里的层级**（0 = 根）。
+   *
+   * 为什么是「深度优先展开后的扁平数组 + depth」而不是嵌套的 `children`：
+   * 界面用 `v-for` 渲染一个列表最省事，而嵌套结构要让组件递归（Vue 里得再写一个
+   * 自引用组件）。**扁平 + depth 是树形列表的标准做法** —— 缩进由 depth 算出来。
+   */
+  depth: number
+  /** 直接子分支数（界面据此决定给不给展开/收起箭头）。 */
+  childCount: number
+  /** 是不是同层里的最后一个（决定画 `└` 还是 `├`）。 */
+  isLast: boolean
+  /**
+   * ★ 每个祖先层要不要画竖线（长度 = `depth`）。
+   *
+   * `guides[i] === true` 表示「深度 i 那个祖先**后面还有兄弟**」，所以那条竖线
+   * 必须一直连下去。这是画树形连接线的标准做法 —— 没有它就只能画缩进，
+   * 而缩进看不出「谁挂在谁下面」。
+   */
+  guides: boolean[]
 }
 
 /** 会话树里一项的原始输入（`SessionSummary` + Pi 的父路径）。 */
@@ -179,22 +199,108 @@ export function projectSessionTree(
   pathToId: ReadonlyMap<string, string>
 ): SessionTreeEntry[] {
   const byId = new Map(items.map((item) => [item.id, item]))
-  return items.map((item) => {
-    const parentKey = item.parentPath?.trim() ?? ''
-    const parentId = parentKey ? pathToId.get(parentKey) ?? null : null
-    const parent = parentId ? byId.get(parentId) ?? null : null
-    return {
+
+  // ① 解析父：**只认本列表里真实存在、且不是自己的**父 ——
+  //    父已被删除时不能声称有父（否则界面给出一个点不开的「来自…」，那是谎话）。
+  const parentOf = new Map<string, string | null>()
+  for (const item of items) {
+    const key = item.parentPath?.trim() ?? ''
+    const candidate = key ? pathToId.get(key) ?? null : null
+    parentOf.set(
+      item.id,
+      candidate !== null && candidate !== item.id && byId.has(candidate) ? candidate : null
+    )
+  }
+
+  // ② ★ 断环：`parentSession` 是我们**读来的**字段，手改过的会话文件完全可能
+  //    造出 A→B→A。不断的话下面的递归会**栈溢出**（而不是给一句可读错误）——
+  //    一个坏文件把整个列表打不开，代价完全不成比例。
+  for (const id of byId.keys()) {
+    const seen = new Set<string>([id])
+    let cursor = parentOf.get(id) ?? null
+    while (cursor !== null) {
+      if (seen.has(cursor)) {
+        parentOf.set(id, null)
+        break
+      }
+      seen.add(cursor)
+      cursor = parentOf.get(cursor) ?? null
+    }
+  }
+
+  // ③ children 索引（顺序在 ④ 里统一排）
+  const childrenOf = new Map<string, string[]>()
+  for (const id of byId.keys()) {
+    const parentId = parentOf.get(id) ?? null
+    if (parentId === null) continue
+    const bucket = childrenOf.get(parentId)
+    if (bucket) bucket.push(id)
+    else childrenOf.set(parentId, [id])
+  }
+
+  /**
+   * ④ 子树里的**最新活动时间**（后序一次算完，供排序用）。
+   *
+   * ★★ 为什么排序要用这个而不是每条会话自己的 `modifiedAt`：
+   * 从一条**很旧**的会话分叉出新会话时，父文件的 mtime **不会变** ——
+   * 若按各自的 mtime 排根节点，那个家族会一直沉在列表底部，
+   * 而学生刚刚才在里面聊过（B 是最新的，却排在最后）。
+   * 取「家族最新」当排序键，任何一条被用过都会把整个家族顶上去 ——
+   * 这也是文件树/IDE 的通行做法。
+   *
+   * ★ 一条重要的性质：**没有分支时它退化成 `modifiedAt` 本身** ——
+   * 所以「从没分叉过的学生」看到的顺序与改造前**一模一样**（不是重新洗牌）。
+   */
+  const activity = new Map<string, number>()
+  const visitActivity = (id: string): number => {
+    const cached = activity.get(id)
+    if (cached !== undefined) return cached
+    let best = byId.get(id)?.modifiedAt ?? 0
+    for (const childId of childrenOf.get(id) ?? []) {
+      best = Math.max(best, visitActivity(childId))
+    }
+    activity.set(id, best)
+    return best
+  }
+  for (const id of byId.keys()) visitActivity(id)
+
+  /** 同层排序：家族最新活动倒序；平局按 id 兜底（否则同毫秒的两条会随 Pi 的返回顺序漂）。 */
+  const sortSiblings = (ids: string[]): string[] =>
+    [...ids].sort((a, b) => {
+      const diff = (activity.get(b) ?? 0) - (activity.get(a) ?? 0)
+      return diff !== 0 ? diff : a.localeCompare(b)
+    })
+
+  // ⑤ 深度优先展开成扁平数组（界面按 depth 缩进、按 guides 画连接线）
+  const roots = sortSiblings([...byId.keys()].filter((id) => (parentOf.get(id) ?? null) === null))
+  const out: SessionTreeEntry[] = []
+  const walk = (id: string, depth: number, guides: boolean[], isLast: boolean): void => {
+    const item = byId.get(id)
+    if (!item) return
+    const parentId = parentOf.get(id) ?? null
+    const kids = sortSiblings(childrenOf.get(id) ?? [])
+    out.push({
       id: item.id,
       title: item.title,
       messageCount: item.messageCount,
       modifiedAt: item.modifiedAt,
-      // ★ 只有**父会话确实还在本列表里**时才声称有父：否则界面会给出一个
-      //   点不开的「来自…」（父已被删除时那是谎话）。
       parentId,
-      parentTitle: parent ? parent.title : null,
-      branchedAtMessage: null
-    }
-  })
+      parentTitle: parentId ? byId.get(parentId)?.title ?? null : null,
+      // 要知道「从第几条消息分的」得比对父子两个文件的共同前缀 —— 那要读**两个** JSONL，
+      // 而它在界面上只是一句锦上添花的话。**宁可不说，也不说错的**。
+      branchedAtMessage: null,
+      depth,
+      childCount: kids.length,
+      isLast,
+      guides: [...guides]
+    })
+    kids.forEach((childId, index) => {
+      // 下一层的 guides = 本层 guides + 「我自己后面还有兄弟吗」
+      walk(childId, depth + 1, [...guides, !isLast], index === kids.length - 1)
+    })
+  }
+  roots.forEach((id, index) => walk(id, 0, [], index === roots.length - 1))
+  return out
 }
 
 /** `Date` → Unix 毫秒（非法日期回 0，不抛）。 */

@@ -557,6 +557,100 @@ async function main() {
       '它挂在每条回答下面，尺寸太小会让「换个问法」这个动作变得很难点')
   }
 
+  /* ── D10–D12. 会话树（分支关系的展示）───────────────────────────
+   *
+   * 这一组盯住**几何**：缩进真的递增吗、连接线跟着层级走吗、收起来的是不是整枝。
+   * ★ 纯函数测的是「投影给出的 depth/guides 对不对」（`session-tree.test.ts`），
+   *   而「这些数有没有变成屏幕上的缩进」只有真量为准 —— 这正是 P-101 的教训。
+   */
+  console.log('\n\u001b[1mD10\u2013D12. 会话树（缩进 / 连接线 / 折叠）\u001b[0m')
+
+  const treeUi = await cdp.evaluate(`(() => {
+    const rows = Array.from(document.querySelectorAll('[data-testid^="session-row-"]'))
+    const pick = (r, sel) => r.querySelector(sel)
+    const tree = document.querySelector('[data-testid="session-tree"]')
+    // 每行量：depth、条目左缘、前导宽度
+    const measured = rows.map((r) => {
+      const item = pick(r, 'button[data-testid^="session-item-"]')
+      const guide = pick(r, '[data-testid="session-tree-guide"]')
+      return {
+        depth: Number(r.getAttribute('data-depth')),
+        left: item ? Math.round(item.getBoundingClientRect().left) : -1,
+        guideW: guide ? Math.round(guide.getBoundingClientRect().width) : 0,
+        isLast: r.querySelector('.sl__tree-elbow--last') !== null
+      }
+    })
+    const nested = measured.filter((m) => m.depth > 0)
+    // ★ 判据：同一 depth 的左缘一致（对齐），且 depth 越大左缘越大（真的缩进）
+    const byDepth = new Map()
+    for (const m of measured) {
+      if (!byDepth.has(m.depth)) byDepth.set(m.depth, [])
+      byDepth.get(m.depth).push(m.left)
+    }
+    const depthAligned = [...byDepth.values()].every((lefts) => new Set(lefts).size === 1)
+    const depths = [...byDepth.keys()].sort((a, b) => a - b)
+    const increasing = depths.every((d, i) => i === 0 || byDepth.get(d)[0] > byDepth.get(depths[i - 1])[0])
+    return {
+      treePresent: Boolean(tree),
+      rows: rows.length,
+      nestedRows: nested.length,
+      maxDepth: depths.length ? Math.max(...depths) : 0,
+      depthAligned,
+      increasing,
+      // 前导宽度 = (depth + 1) × 12（见下方 D11 的说明）。
+      guideMatchesDepth: nested.every((m) => m.guideW === (m.depth + 1) * 12),
+      folds: document.querySelectorAll('[data-testid="session-fold"]').length,
+      kidMarks: document.querySelectorAll('[data-testid="session-kids-mark"]').length
+    }
+  })()`)
+
+  check('D10', '会话列表里真有树（有嵌套行）时，缩进逐层递增且同层对齐',
+    treeUi.treePresent && (treeUi.nestedRows === 0 || (treeUi.depthAligned && treeUi.increasing)),
+    `共 ${treeUi.rows} 行，嵌套 ${treeUi.nestedRows} 行，最深 ${treeUi.maxDepth} 层；同层对齐=${treeUi.depthAligned} 递增=${treeUi.increasing}`,
+    '缩进不递增 = 看不出谁挂在谁下面；同层不对齐 = 一列参差（都是「错位」观感的来源）')
+
+  if (treeUi.nestedRows > 0) {
+    // ★★ 判据是 **(depth + 1) × 12**，不是 depth × 12：一层前导 = `depth` 段
+    //    **祖先竖线** + **1 个本层拐角**（`├`/`└`）——
+    //    depth=1 → [竖线][拐角] = 24px；depth=2 → [竖线][竖线][拐角] = 36px。
+    //    ⚠️ 初版按 depth×12 写，于是这条**假红**（代码是对的、判据错了）——
+    //    与 AGENTS §7「量法本身也会有 bug，先怀疑量法」同一条纪律。
+    check('D11', '连接线宽度与层级成比例（(depth+1)×12，含本层拐角）',
+      treeUi.guideMatchesDepth,
+      `嵌套行的前导宽度与 (depth+1)×12 一致=${treeUi.guideMatchesDepth}`,
+      '线宽与缩进不一致时，连接线会落在错误的列上（看起来「挂在错误的父下面」）')
+
+    // D12：折叠「有子分支」的那一行，它的**整枝**都要消失
+    const collapse = await cdp.evaluate(`(() => {
+      const fold = document.querySelector('[data-testid="session-fold"]')
+      if (!fold) return { skipped: true }
+      const before = document.querySelectorAll('[data-testid^="session-row-"]').length
+      fold.click()
+      return { skipped: false, before }
+    })()`)
+    if (!collapse.skipped) {
+      await sleep(500)
+      const after = await cdp.evaluate(`(() => {
+        const rows = Array.from(document.querySelectorAll('[data-testid^="session-row-"]'))
+        return {
+          count: rows.length,
+          // ★ 只有**最深的那些**该消失；判据用「还有没有比被收起点更深的行」
+          deeperLeft: rows.some((r) => Number(r.getAttribute('data-depth')) > 0),
+          expanded: document.querySelector('[data-testid="session-fold"]')?.getAttribute('aria-expanded')
+        }
+      })()`)
+      check('D12', '收起一个节点会把**整枝**藏掉（不是只藏直接子级）',
+        after.count < collapse.before && !after.deeperLeft && after.expanded === 'false',
+        `${collapse.before} 行 → 收起后 ${after.count} 行；仍有更深行=${after.deeperLeft}；aria-expanded=${after.expanded}`,
+        '只藏直接子级的话，展开根节点下面的孙辈会**孤零零露出来**（学生看到一条没有父的行）')
+      // 收回去，别让后续检查跑在一个被折叠的列表上
+      await cdp.evaluate(`document.querySelector('[data-testid="session-fold"]')?.click()`)
+      await sleep(400)
+    }
+  } else {
+    console.log('\u001b[2m  [SKIP] D11/D12 当前没有分支会话（先点两次「从这里重新问」再跑）\u001b[0m')
+  }
+
   /* ── E. 页面切换的记忆 ───────────────────────────────────────── */
   console.log('\n\u001b[1mE. 页面切换后的连续性\u001b[0m')
 
