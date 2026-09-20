@@ -19,17 +19,41 @@
  * 3. **失败也要可读**：提交只是一个动作（走对话），失败由 6 事件里的 `error` 呈现，
  *    本组件不额外造一套错误形态。
  */
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { QUIZ_TYPE_LABELS, SCORED_BY_LABELS, formatMasteryDelta } from '../labels'
 import { useChatStore } from '../stores/chat'
+import { useKnowledgeStore } from '../stores/knowledge'
+import { useViewModeStore } from '../stores/viewMode'
 import type { InlineCard } from '../api/events'
+import { kpLabel } from '../study/kp-label'
 import ProgressCard from './ProgressCard.vue'
 import { isBlankAnswer, optionLetter, readQuizCard, type QuizQuestionView } from './quiz'
 
 const props = defineProps<{ card: InlineCard }>()
 const chat = useChatStore()
+const knowledge = useKnowledgeStore()
+const viewMode = useViewModeStore()
 
 const view = computed(() => readQuizCard(props.card.payload))
+
+/**
+ * 卡片头那个知识点 chip 的文字（**教材里的中文名**，不是 slug）。
+ *
+ * ★ 与 `CodingCard.vue` / 学习档案 / 闯关同一条口径（`study/kp-label.ts`）：
+ *   取不到名字时**整个 chip 不出现**，绝不回落成 `ai-definition-jr`。
+ *   原始 id 仍在头的 `data-*` / `title` 上（排障用），但不作为文字渲染。
+ */
+const kpName = computed(() => {
+  const id = view.value.kind === 'questions' ? view.value.kpId : ''
+  if (id === '') return ''
+  const name = kpLabel(id, null, knowledge.kpNameOf)
+  return name === '未命名知识点' ? '' : name
+})
+
+onMounted(() => {
+  // 名字表可能还没到（异步）；失败不阻断卡片，取不到就不显示那个 chip
+  void knowledge.ensureNames().catch(() => {})
+})
 
 /** 学生已填的作答（三类题型共用一张表，键是 qid）。 */
 const answers = reactive<Record<string, string>>({})
@@ -55,13 +79,39 @@ const items = computed(() =>
 
 const sourceLabel = computed(() => {
   if (view.value.kind !== 'questions') return ''
-  if (view.value.source === 'bank') return '本地题库'
-  if (view.value.source === 'generated') return '模型生成'
+  // ★ 说人话：`本地题库` 是实现细节（学生不知道什么叫"题库"，也不该关心它在哪）。
+  //   对学生的意义是「这题是教材配套的、断网也能做」，那句话才是他需要的。
+  if (view.value.source === 'bank') return '教材配套题'
+  if (view.value.source === 'generated') return '团团出的题'
   return ''
 })
 
 /** 本轮回复还没结束：提交按钮先禁用（主进程也有并发守卫）。 */
 const submitting = computed(() => chat.streaming)
+
+/**
+ * 提交键的文案与状态（**一题一个终态**）。
+ *
+ * ★★ 修的是什么（评审发现的真实缺陷）：旧文案是
+ *   `submitting ? '老师正在回应…' : item.result ? '再提交一次' : '提交这题'` ——
+ *   **答对之后按钮还在请学生「再提交一次」**，于是他会再点一次，而后端的反馈里
+ *   写着"这次不计入"。一个邀请学生做无用功、而且做了之后被系统告诉"不算"的按钮。
+ *
+ * 判据只读**后端判分结果**里的 `correct`（`cards/quiz.ts` 的 `QuizResultView`，
+ * 那一个布尔是唯一权威）：答对 → `已完成` 且**禁用**；答错 → 仍然可点，文案是
+ * 「再试一次」（那是这个按钮真正在邀请他做的事）。
+ * ★ 不发 `data-*` 之外的任何东西，也不在前端"顺便判个对错"。
+ */
+function submitLabel(result: { correct: boolean } | null): string {
+  if (submitting.value) return '老师正在回应…'
+  if (result === null) return '提交这题'
+  return result.correct ? '已完成' : '再试一次'
+}
+
+/** 提交键是否禁用：正在回答，或**这道题已经答对**（终态，再点没有意义）。 */
+function submitDisabled(result: { correct: boolean } | null): boolean {
+  return submitting.value || result?.correct === true
+}
 
 /**
  * 载荷里是否带了闯关进度（票 15）。
@@ -113,7 +163,11 @@ function submit(question: QuizQuestionView): void {
       <span class="title">随堂练习</span>
       <span class="chip chip--accent" data-testid="quiz-count">{{ questions.length }} 道题</span>
       <span v-if="sourceLabel" class="chip" data-testid="quiz-source">{{ sourceLabel }}</span>
-      <span v-if="view.kpId" class="chip tool">{{ view.kpId }}</span>
+      <!-- ★★ 原来这里是 `{{ view.kpId }}`（`ai-definition-jr` 这种内部主键）。
+           卡片长在**对话正文里**，那是学生看得最多的地方 —— 走查那条
+           「立刻隐藏所有 ID，只展示知识点的中文标题」正指这里。
+           改成中文名，取不到就整个不显示（原始 id 只进 `title`）。 -->
+      <span v-if="kpName" class="chip tool" data-testid="quiz-kp" :title="view.kpId">{{ kpName }}</span>
     </header>
 
     <ol class="quiz__list">
@@ -190,20 +244,23 @@ function submit(question: QuizQuestionView): void {
 
         <div class="item__foot">
           <button
-            class="btn btn--primary"
+            class="btn btn--primary k12-cta"
             type="button"
             data-testid="quiz-submit"
             :data-qid="item.question.qid"
-            :disabled="submitting"
+            :disabled="submitDisabled(item.result)"
             @click="submit(item.question)"
           >
-            {{ submitting ? '老师正在回应…' : item.result ? '再提交一次' : '提交这题' }}
+            {{ submitLabel(item.result) }}
           </button>
         </div>
       </li>
     </ol>
 
-    <p class="quiz__foot">判分由本地题库完成（答案不下发到界面）。批改结果与掌握度变化会显示在题目下面。</p>
+    <!-- ★ 脚注只讲**对学生有意义**的两件事：答案不摆在界面上（这是功能上的承诺，
+         学生知道自己不会被"抄答案"这条路带偏），结果会出现在题目下面（他知道去哪找）。
+         旧文案里那句「判分由本地题库完成」是实现细节，已去。 -->
+    <p class="quiz__foot">答案不会摆在界面上，这样你才是在自己练。批改结果与掌握度变化会显示在题目下面。</p>
     <p v-if="localHint" class="quiz__hint" data-testid="quiz-hint">{{ localHint }}</p>
 
     <!-- ★ 闯关进度（票 15）：`submit_quiz` 的载荷带 `levels` 时显示进度条 + 徽章。
@@ -227,7 +284,15 @@ function submit(question: QuizQuestionView): void {
       </span>
       <span class="chip" data-testid="quiz-mastery">{{ formatMasteryDelta(view.masteryDelta) }}</span>
       <span v-if="view.scoredBy" class="chip tool">{{ SCORED_BY_LABELS[view.scoredBy] }}</span>
-      <span class="chip tool">{{ view.qid }}</span>
+      <!-- ★★ 这一格原来直接印 `{{ view.qid }}` —— 而 qid 的真实形状是
+           `gen-ai-definition-jr-45238405-1`：**里面嵌着一个知识点 slug**。
+           它出现在学生自己的批改结果卡上，等于把内部主键再印一遍。
+           学生不需要它（他知道自己刚答了哪题），排障需要 —— 所以**只在教师视角显示**。
+           ⚠️ 不用 `<TeacherGate>`：那会渲染一个 `<section>`，塞进这个横向排版的
+              `<header>` 里会破坏 flex 布局（与 `SessionList.vue` 同一处取舍）。
+           ★ 学生那半边**不给替代文字**：编一个「第 N 题」需要结果载荷里根本没有的序号，
+             猜一个等于在界面上写假话。 -->
+      <span v-if="viewMode.isTeacher" class="chip tool" data-testid="quiz-qid-mark">{{ view.qid }}</span>
     </header>
     <p class="item__stem" data-testid="quiz-feedback-text">{{ view.feedback }}</p>
 
@@ -237,19 +302,29 @@ function submit(question: QuizQuestionView): void {
     <ProgressCard v-if="hasProgress" class="quiz__progress" :payload="card.payload" />
   </article>
 
-  <!-- 认不出的载荷：一句说明，绝不猜 -->
+  <!-- 认不出的载荷：不猜内容，但**不说系统内部的话** ──────────────────────────
+       ★ 旧文案「练习卡片的内容格式不对，老师重新出一遍就好」里的"内容格式不对"
+         是写给开发者看的判断，学生只该知道"这次没出出来 + 我能做什么"。
+         （与 `cards/CodingCard.vue` 的未知分支同一口径。主进程
+         `agent/extensions/quiz.ts` 里有一句注释引用了旧串，那句注释会跟着过期。） -->
   <article
     v-else
     class="quiz quiz--unknown"
     data-quiz="unknown"
     :data-tool="card.tool ?? ''"
+    :data-detail="view.text || null"
     data-testid="quiz-card-unknown"
   >
     <header class="quiz__head">
       <span class="title">随堂练习</span>
-      <span class="chip chip--warn">这张卡片没能显示出来</span>
+      <span class="chip chip--warn">这次的题目没能出出来</span>
     </header>
-    <p class="item__stem">{{ view.text || '练习卡片的内容格式不对，老师重新出一遍就好。' }}</p>
+    <!-- ★ 主进程有时会带一句**本来就是写给学生看的**说明（例如主观题缺模型时的
+         `SUBJECTIVE_UNAVAILABLE_TEXT`）—— 那种情况下以它为准，它比泛泛的兜底有用；
+         没有才用兜底那句（旧实现把兜底写成「内容格式不对」，那是开发者视角）。 -->
+    <p class="item__stem" data-testid="quiz-unknown-notice">
+      {{ view.text || '题库这次没把题目准备好。跟团团说一句「再出两道题练一练」就能重新来一遍。' }}
+    </p>
   </article>
 </template>
 
@@ -455,17 +530,34 @@ function submit(question: QuizQuestionView): void {
   }
 }
 
-.btn:disabled {
+/* 禁用态：`.k12-cta`（主提交键）自带一套**实心灰底**的禁用样式 —— base.css 里明确
+ * 要求「不要用低透明度，那会让文字掉到不可读」。所以低透明度这一支只留给我们自己的
+ * 普通按钮；提交键的禁用观感由 `.k12-cta:disabled` 负责（禁用 ≠ 看不清）。 */
+.btn:disabled:not(.k12-cta) {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
 /* 提交键是这一块的主要动作 → 填充用 accent-ink（文字色那一支），
- * 白字压在 accent-ink 上才够对比度；accent 是画得好看的浅色，配白字读不清。 */
+ * 白字压在 accent-ink 上才够对比度；accent 是画得好看的浅色，配白字读不清。
+ * ★ 与共享的 `.k12-cta` 同配方（同一个值），保留这一条是为了卡片在没有 .k12-cta 时也不塌。 */
 .btn--primary {
   border-color: var(--k12-accent-ink);
   background: var(--k12-accent-ink);
   color: var(--k12-surface);
+}
+
+/* ★★ 「已答对 / 正在回答」的禁用观感必须由**卡片自己**保证：
+ *   `.k12-cta` 是全局工具类，与本文件的 `.btn--primary` 是**同权重**的单类选择器 ——
+ *   谁生效取决于样式表顺序，而那是构建产物说了算的。所以这里用
+ *   `.btn--primary:disabled`（多一个伪类 = 一定更靠前生效）把禁用态钉在自己家里：
+ *   实心灰底 + 灰字（与 base.css 的 `.k12-cta:disabled` 同一套语义色），
+ *   **不用低透明度** —— 那会让「已完成」这三个字掉到看不清。 */
+.btn--primary:disabled {
+  border-color: var(--k12-border-strong);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
+  cursor: not-allowed;
 }
 
 .ans {

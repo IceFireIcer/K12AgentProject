@@ -9,13 +9,22 @@
  *
  * 四条纪律（本文件是它们的落点，改动前先读）：
  *
- * 1. **认不出的载荷不许猜**：返回 `{ kind: 'unknown', text }`，卡片退化成一句说明。
+ * 1. **认不出的载荷不许猜**：返回 `{ kind: 'unknown', text, kpId, task }`，卡片退化成一句说明。
  *    绝不因为"看起来像"就当成模板或结果 —— 猜错会渲染出一张骗人的卡片。
+ *    （`kpId` / `task` 只是**白名单读出的两个已知契约字段**，用来让降级卡片还能显示
+ *     "这题要做什么"并给出重取入口；不是对残缺载荷的自由解读。）
  * 2. **原始 traceback 与中文反馈分开存**：界面上展示中文 `feedback`，
  *    原文只进折叠区。两者混在一起就会"一屏红字吓退学生"。
  * 3. **前端不许指定提示级别**：{@link buildHintRequestMessage} 只说"我卡住了"，
  *    级别由主进程的状态表推进（那里才记得住"已经给到第几级"）。
  * 4. **不给答案**：本文件不生成任何提示文本，只搬运后端给的 `hint` 原文。
+ * 5. ★★ **发给模型的文本 ≠ 给学生看的文本**（本次修复的核心）：
+ *    两条请求消息里都写着"写给模型的指令"（`请用 get_coding_hint…不要直接给我完整答案`），
+ *    它们只能进 wire，**绝不能原样落进学生气泡**。所以每条请求都有**一对**导出：
+ *    `buildXxxRequestMessage`（wire）+ `hintRequestDisplayText` / `runRequestDisplayText`（显示），
+ *    由 `stores/chat.ts` 的 `send(wireText 位置参数)` 分别承载（第一个参数是显示文本）；
+ *    回看历史再用 {@link codingUserTextDisplay} 把 JSONL 里的原文翻译回来。
+ *    **两边必须成对使用**：只改一处就等于让某一侧说假话。
  */
 
 /** 一条分级提示（契约 `CodingHint`；载荷里还会带 `kpId` 用于卡片归属）。 */
@@ -60,6 +69,19 @@ export interface CodingUnknownView {
   kind: 'unknown'
   /** 主进程在失败形态里带的兜底文本，可能为空。 */
   text: string
+  /** 载荷里还能读出来的知识点 id（空串 = 读不出）。
+   *
+   * ★ 有它的唯一目的：让「让团团再出一遍」这个按钮**知道要重取哪个知识点**；
+   *   读不出时按钮不渲染（点了也不知道要干嘛 = 假按钮）。 */
+  kpId: string
+  /**
+   * ★ 载荷里还能读出来的**题目要求**（契约 `CodeTemplate.expectedBehavior`）。
+   *
+   * 为什么值得单独留一栏：载荷残缺时（例如 `scaffold` 缺了但题目说明还在），
+   * 旧实现直接把整张卡片扔成一句「内容格式不对」—— 学生连这题要做什么都看不到。
+   * 白名单读一个契约里本来就有的字段，不是"猜结构"。
+   */
+  task: string
 }
 
 export type CodingCardView = CodingTemplateView | CodingResultView | CodingUnknownView
@@ -88,7 +110,9 @@ function readNumberOr(value: unknown, fallback: number): number {
  *   让学生看到 1→2→3 逐级加深的过程。判据是"有 level 与 hint、但没有 scaffold/feedback"。
  */
 export function readCodingCard(payload: unknown): CodingCardView {
-  if (typeof payload !== 'object' || payload === null) return { kind: 'unknown', text: '' }
+  if (typeof payload !== 'object' || payload === null) {
+    return { kind: 'unknown', text: '', kpId: '', task: '' }
+  }
   const record = payload as Record<string, unknown>
 
   // 1) 评估结果（`evaluate_code`）：用**两个**字段一起判，降低误判概率
@@ -126,7 +150,16 @@ export function readCodingCard(payload: unknown): CodingCardView {
   }
 
   // 3) 认不出
-  return { kind: 'unknown', text: readText(record.text) ?? '' }
+  //
+  // ★ 但**能读到的部分要尽量留给学生**：题目要求（`expectedBehavior`）与知识点 id
+  //   是契约里本来就有的字段，认得出就带上 —— 卡片据此把「这题要做什么」显示出来，
+  //   而不是只留一句「没能显示出来」（残余载荷也是学习材料，见卡片模板）。
+  return {
+    kind: 'unknown',
+    text: readText(record.text) ?? '',
+    kpId: readText(record.kpId) ?? '',
+    task: readText(record.expectedBehavior) ?? ''
+  }
 }
 
 /** 错误投影（字段不齐就当作"没有错误"，而不是渲染半个对象）。 */
@@ -217,11 +250,15 @@ function codePreview(code: string): string {
 }
 
 /**
- * 学生点「求助」时发给主 Agent 的那条消息。
+ * 学生点「求助」时**发给主 Agent** 的那条消息（= wire 文本）。
  *
  * ★ **不指定级别**：只说"我卡住了 + 我现在的代码"。级别由主进程的状态表推进
  *   （那里才记得住"已经给到第几级"）—— 前端一旦能指定级别，
  *   就会出现"直接要第 3 级"绕开引导的路子（陷阱：直接给答案）。
+ * ★★ **这段文本不是给学生看的**：`（请用 get_coding_hint…不要直接给我完整答案…）`
+ *   是**写给模型的指令**。它一旦原样落进学生自己的气泡，等于把底牌亮给学生
+ *   （评审原话）。所以调用方必须同时给出 {@link hintRequestDisplayText} 作为显示文本
+ *   —— 两者由 `stores/chat.ts` 的 `send(显示文本, wire 文本)` 分开承载。
  */
 export function buildHintRequestMessage(kpId: string, code: string): string {
   const preview = codePreview(code)
@@ -232,8 +269,28 @@ export function buildHintRequestMessage(kpId: string, code: string): string {
   )
 }
 
+/** 求助消息的固定开头（回看历史时靠它认出"这是本应用生成的求助"）。 */
+export const HINT_REQUEST_PREFIX = '【编程求助】'
+/** 运行消息的固定开头（同上）。 */
+export const RUN_REQUEST_PREFIX = '【编程练习】'
+
 /**
- * 学生点「运行」时发给主 Agent 的那条消息。
+ * 求助时**学生气泡里**显示的那一句（不含任何写给模型的指令、也不含代码）。
+ *
+ * ★ 与 {@link buildHintRequestMessage} 是**一对**：wire 给模型、display 给学生。
+ *   代码不再重复贴进气泡：它就在卡片上（Monaco 里正开着），再贴一遍既重复又占屏。
+ * ★ **刻意不带 kpId**：那是个内部 id（`prog-loop-jr`），学生读它没有任何意义 ——
+ *   气泡里出现内部标识与"亮底牌"是同一类"开发者视角"的问题。
+ *   代价（明说）：同一段时间里两张卡片都发过求助时，两句气泡看起来一样；
+ *   但每一次发送本就在卡片旁边，学生自己知道刚点的是哪一张。
+ */
+export function hintRequestDisplayText(): string {
+  return '团团，这道题我卡住了，给我一点提示吧。'
+}
+
+/**
+ * 学生点「运行」时**发给主 Agent** 的那条消息（= wire 文本；同 {@link buildHintRequestMessage}，
+ * 括号里那句同样是写给模型的指令，不是给学生看的）。
  *
  * ★ 分工：**卡片已经在 Worker 里跑过一次**（真实输出立刻显示在界面上），
  *   这条消息是请模型**讲一讲**这份代码 —— 模型的 `evaluate_code` 会给出
@@ -247,6 +304,59 @@ export function buildRunRequestMessage(kpId: string, code: string): string {
     `\`\`\`python\n${preview}\n\`\`\`\n` +
     '（运行结果以真实执行为准；请简短引导，不要直接给正确代码。）'
   )
+}
+
+/** 运行后请模型看一看时，学生气泡里显示的那一句（与上面成对，理由见 {@link hintRequestDisplayText}）。 */
+export function runRequestDisplayText(): string {
+  return '团团，我写完代码了，帮我看看对不对。'
+}
+
+/** 卡片没画出来时「再出一遍」的固定开头（回看历史时靠它认出这一类）。
+ *
+ * ★ 刻意与 {@link RUN_REQUEST_PREFIX} **不共用**：两者的学生话不一样
+ *   （一个是"我写完了帮我看看"，一个是"卡片没显示出来，重取一次"），
+ *   共用前缀会让回看时把重取翻译成运行请求（说错话）。 */
+export const RETRY_REQUEST_PREFIX = '【编程练习·重取】'
+
+/** 「再出一遍」时**发给模型**的文本（wire；同一条纪律：括号里是写给模型的指令）。 */
+export function retryRequestWireText(kpId: string): string {
+  return (
+    `${RETRY_REQUEST_PREFIX}「${kpId}」的编程卡片没能渲染出来，请重新取一次代码模板。\n` +
+    '（请用 get_code_template 重取，模板要与之前同一道题。）'
+  )
+}
+
+/** 「再出一遍」时**学生气泡里**显示的那一句（与 {@link retryRequestWireText} 成对）。 */
+export function retryCardDisplayText(): string {
+  return '团团，刚才那张编程卡片没显示出来，请再取一次模板吧。'
+}
+
+/** 从「…「kp-id」…」里抠出知识点 id（认不出回空串）。 */
+function kpIdFromRequest(text: string): string {
+  const match = text.match(/「([^」\n]{1,80})」/)
+  return match ? match[1].trim() : ''
+}
+
+/**
+ * ★★ **回看历史**时把"卡片写给模型的内部指令"还原成学生语言（其余文本原样返回）。
+ *
+ * 为什么必须在这里做：Pi 的会话 JSONL 里存的是**发给模型的那段原文** —— 那是对的
+ * （模型续聊时要看到完整上下文），但学生重启应用回看自己的气泡时，会再一次读到
+ * 「请用 get_coding_hint…不要直接给我完整答案」：与实时路径上被修掉的是**同一个缺陷**，
+ * 只是换了条路回来。渲染进程显示历史前过一遍翻译就把它关掉。
+ *
+ * ★ 保守到只认本应用自己生成的三个前缀，且必须能从正文里读出 kpId：
+ *   认不出一律**原样返回** —— 宁可显示原文，也绝不改写学生自己打的字
+ *   （万一哪个学生真的手打了「【编程求助】…」，那也只是没被翻译，不会被篡改）。
+ * ★ 只改**显示**，不改 JSONL：磁盘上的原文一个字不动。
+ */
+export function codingUserTextDisplay(text: string): string {
+  if (kpIdFromRequest(text) === '') return text
+  const head = text.trimStart()
+  if (head.startsWith(HINT_REQUEST_PREFIX)) return hintRequestDisplayText()
+  if (head.startsWith(RETRY_REQUEST_PREFIX)) return retryCardDisplayText()
+  if (head.startsWith(RUN_REQUEST_PREFIX)) return runRequestDisplayText()
+  return text
 }
 
 /**

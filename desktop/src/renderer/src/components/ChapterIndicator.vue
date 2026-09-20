@@ -25,11 +25,15 @@
  *   - 还没判定出学段（`chat.currentGrade === null`）：给一句可读提示，**不列空列表**
  *     （章节按学段分，学段未知列不出任何东西）；
  *   - 清单读取中 / 读失败：各说各的（复用档案页那套 `loading.chapters` / `errors.chapters`）；
- *   - 正常：当前学段的章节按钮 + 「不限章节（自由问答）」。
+ *   - 正常：**目录式**的一列章节（章号在左、标题在右、当前那一章带勾）
+ *     + 与目录分开的「不限章节（自由问答）」。
+ *     ★ 「目录」这一版是走查改出来的：原先是几十个平铺的胶囊按钮，看不出这是一本教材的目录。
+ *       样式是纯投影（`chapterRows`），**没有编造章节简介** —— 契约里没有这个字段。
  *
  * 选章**不会改变学段**（两件事各自独立）——设置页那条入口把这句话写在界面上。
  */
 import { computed, ref, watch } from 'vue'
+import { Check } from 'lucide-vue-next'
 import { useDismissable } from '../composables/useDismissable'
 import { chapterLineLabel } from '../labels'
 import { useChatStore } from '../stores/chat'
@@ -57,9 +61,45 @@ const busy = ref(false)
 const errorText = ref<string | null>(null)
 
 const line = computed(() => chapterLineLabel(chat.currentChapter))
-const chapters = computed(() => study.chapters?.chapters ?? [])
 const determined = computed(() => chat.currentGrade !== null)
 const unavailable = computed(() => !determined.value)
+
+/**
+ * 把「第4章 大模型与AI智能体Agent」拆成**序号 + 标题**两件东西。
+ *
+ * ★ 为什么拆：走查结论原话是「一堆平铺的按钮，看不出这是一本教材的目录」。
+ *   目录的样子应该是「左边一列章号、右边标题」——章号对齐之后，学生扫一眼
+ *   就知道自己在第几章、旁边还有几章，而不是在一行文字里找「第几章」。
+ * ★ 只认阿拉伯数字（与 `kb.py` 的 `_CHAPTER_NUMBER_RE` 同口径）：中文序号
+ *   （「第一章」）由导入脚本 `normalize_chapter()` 统一转换过，运行时不该再出现；
+ *   万一出现也不猜 —— 整串当标题，序号徽标不渲染（比编一个「第?章」诚实）。
+ */
+function chapterParts(title: string): { num: string; text: string } {
+  const match = /^第\s*(\d+)\s*章\s*(.*)$/.exec(title.trim())
+  if (match === null) return { num: '', text: title.trim() }
+  return { num: `第${match[1]}章`, text: match[2].trim() }
+}
+
+/**
+ * 目录行 = 契约字段的**纯投影**（序号 / 标题 / 一行说明）。
+ *
+ * ★ 一行说明只用契约里真有的字段（`kpCount` / `masteredCount`）——
+ *   `ChapterInfo` 里**没有**「章节简介」这种字段，所以这里不许编一句「本章介绍…」：
+ *   编出来的说明与教材实际内容无关，学生按它选章会选错。
+ * ★ 「已掌握」只在大于 0 时出现：一串「0/5」会让目录看起来像一张成绩单。
+ */
+const chapterRows = computed(() =>
+  (study.chapters?.chapters ?? []).map((chapter) => {
+    const parts = chapterParts(chapter.chapterTitle)
+    const base = `${chapter.kpCount} 个知识点`
+    return {
+      title: chapter.chapterTitle,
+      num: parts.num,
+      name: parts.text,
+      meta: chapter.masteredCount > 0 ? `${base} · 已掌握 ${chapter.masteredCount}` : base
+    }
+  })
+)
 
 function togglePicker(): void {
   pickerOpen.value = !pickerOpen.value
@@ -113,7 +153,10 @@ async function choose(title: string): Promise<void> {
       </button>
     </p>
 
-    <!-- 选项默认收起：点上面的按钮才展开（当前学段的章 + 不限章节） -->
+    <!-- 选项默认收起：点上面的按钮才展开。
+         ★ 展开后是**一本教材的目录**（不是一堆平铺的按钮）：一行一章、
+           左边章号、右边标题与知识点数，当前生效的那一行带勾。
+           这样「这是第几章、总共几章、我在哪一章」一眼可读。 -->
     <div v-if="pickerOpen" ref="panelRef" class="chapter__picker" data-testid="chapter-options">
       <p v-if="unavailable" class="chapter__note" data-testid="chapter-no-grade">
         还没有判定出你的学段：教材章节按学段分，判定出来之后就能从这里选。
@@ -126,18 +169,26 @@ async function choose(title: string): Promise<void> {
           {{ study.errors.chapters }}
         </p>
 
-        <ul v-if="chapters.length > 0" class="chapter__list" data-testid="chapter-list">
-          <li v-for="chapter in chapters" :key="chapter.chapterTitle">
+        <ul v-if="chapterRows.length > 0" class="chapter__list" data-testid="chapter-list">
+          <li v-for="row in chapterRows" :key="row.title">
             <button
               type="button"
               class="chapter__option"
-              :class="{ 'chapter__option--active': chat.currentChapter === chapter.chapterTitle }"
-              :data-testid="`chapter-option-${chapter.chapterTitle}`"
-              :data-active="String(chat.currentChapter === chapter.chapterTitle)"
+              :class="{ 'chapter__option--active': chat.currentChapter === row.title }"
+              :data-testid="`chapter-option-${row.title}`"
+              :data-active="String(chat.currentChapter === row.title)"
               :disabled="chat.streaming || busy"
-              @click="choose(chapter.chapterTitle)"
+              @click="choose(row.title)"
             >
-              {{ chapter.chapterTitle }}
+              <span v-if="row.num" class="chapter__num">{{ row.num }}</span>
+              <span class="chapter__body">
+                <span class="chapter__title">{{ row.name }}</span>
+                <span class="chapter__meta">{{ row.meta }}</span>
+              </span>
+              <!-- 选中标记：**不只靠颜色**（描边 + 勾同时给） -->
+              <span class="chapter__check">
+                <Check v-if="chat.currentChapter === row.title" :size="13" />
+              </span>
             </button>
           </li>
         </ul>
@@ -145,7 +196,9 @@ async function choose(title: string): Promise<void> {
           这个学段还没有编入教材章节。
         </p>
 
-        <!-- 「不限章节」永远可选：选了它 = 清空当前章节，回到自由问答 -->
+        <!-- 「不限章节」永远可选：选了它 = 清空当前章节，回到自由问答。
+             ★ 它**不是一章**：放在目录下面、用虚线隔开、并且不参与上面的章号对齐 ——
+               混进目录里会成为「第 9 章 不限章节」，那是个假章节。 -->
         <button
           type="button"
           class="chapter__option chapter__option--none"
@@ -154,7 +207,14 @@ async function choose(title: string): Promise<void> {
           :disabled="chat.streaming || busy"
           @click="choose('')"
         >
-          不限章节（自由问答）
+          <span class="chapter__none-ico" aria-hidden="true"></span>
+          <span class="chapter__body">
+            <span class="chapter__title">不限章节（自由问答）</span>
+            <span class="chapter__meta">问到哪一章就讲哪一章，不优先某一章</span>
+          </span>
+          <span class="chapter__check">
+            <Check v-if="chat.currentChapter === ''" :size="13" />
+          </span>
         </button>
       </template>
 
@@ -235,28 +295,39 @@ async function choose(title: string): Promise<void> {
   margin-top: 8px;
 }
 
+/* ★ 目录：**一列**，不是一堆换行的按钮。
+ *   走查结论是一堆平铺按钮看不出「这是一本教材的目录」——目录的关键是
+ *   章号在左、标题在右、上下对齐，扫一眼就知道自己在第几章。 */
 .chapter__list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-direction: column;
+  gap: 2px;
   margin: 0;
   padding: 0;
   list-style: none;
+  max-width: 560px;
 }
 
 .chapter__option {
-  padding: 3px 12px;
-  border-radius: var(--k12-r-pill);
-  border: 1px solid var(--k12-border-strong);
-  background: var(--k12-surface);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 10px;
+  /* 触控下限（自绘按钮，自己也要够高 —— 与 base.css 那条 28px 同一口径） */
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: var(--k12-r-inset);
+  background: transparent;
   color: var(--k12-fg-2);
   font: inherit;
   font-size: var(--k12-fs-xs);
+  text-align: left;
   cursor: pointer;
 }
 
 .chapter__option:hover:not(:disabled) {
-  border-color: var(--k12-accent-ink);
+  background: var(--k12-surface-2);
   color: var(--k12-accent-ink);
 }
 
@@ -265,17 +336,83 @@ async function choose(title: string): Promise<void> {
   color: var(--k12-muted-2);
 }
 
-/* 「不限章节」跟章按钮分开一点：它不是一章，是「不限定」 */
-.chapter__option--none {
-  margin-top: 8px;
+/* 章号：固定宽度，各行的标题因此**左边对齐**（不固定宽度的话
+ * 「第1章」与「第10章」会让下面每一行各自错开一点，看起来像没排过版）。 */
+.chapter__num {
+  flex: none;
+  width: 48px;
+  font-size: var(--k12-fs-xs);
+  font-weight: 650;
+  color: var(--k12-muted);
+  font-variant-numeric: tabular-nums;
 }
 
-/* 当前生效的那一章：与 `.chapter__badge` 同一视觉语言（选中 = 强调色） */
+.chapter__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.chapter__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--k12-fs-xs);
+}
+
+/* 一行说明：只用契约里真有的计数（知识点数 / 已掌握数），不编简介。
+ * ⚠️ 用 `--k12-fs-xs`（13px）而不是 `--k12-fs-micro`（12px）：
+ *    micro 那一档只给 ≤4 字的角标，而“3 个知识点”是要被读的说明文字。 */
+.chapter__meta {
+  flex: none;
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
+  white-space: nowrap;
+}
+
+.chapter__check {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--k12-r-pill);
+  color: var(--k12-accent-ink);
+}
+
+/* 当前生效的那一章：浅底 + 强调描边 + 勾（**不只靠颜色**） */
 .chapter__option--active {
-  border-color: var(--k12-accent-border);
   background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
   color: var(--k12-accent-ink);
   font-weight: 600;
+}
+.chapter__option--active .chapter__check {
+  background: var(--k12-accent-ink);
+  color: var(--k12-surface);
+}
+.chapter__option--active .chapter__num {
+  color: var(--k12-accent-ink);
+}
+
+/* 「不限章节」不是一章（见模板注释）：虚线隔开 + 这一行用同宽的空占位，
+ * 让它的标题与上面各章的标题**左边对齐**（不对齐会看起来像另一份列表）。 */
+.chapter__option--none {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--k12-border-strong);
+  border-radius: 0;
+}
+.chapter__option--none:hover:not(:disabled) {
+  border-radius: var(--k12-r-inset);
+}
+.chapter__none-ico {
+  flex: none;
+  width: 48px;
 }
 
 .chapter__note {

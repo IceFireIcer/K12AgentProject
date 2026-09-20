@@ -153,8 +153,25 @@ export function summaryLine(report: ReportView, days: number): string {
 export function composeReportMarkdown(
   report: ReportView,
   days: number,
-  overview?: ReportOverview
+  overview?: ReportOverview,
+  /**
+   * 知识点显示名（`kpId → 中文名`）。
+   *
+   * ★ 为什么必须由调用方传进来：报告里的 `mastery` 行**只带 kpId**
+   *   （契约 `Mastery` 结构上没有名字），名字的唯一来源是 kb 的知识点清单。
+   *   本函数是纯函数，不该去够 store —— 所以由 `stores/study.ts` 在导出时把
+   *   已经取到的名字映射传进来（它本来就会 `ensureNames()`）。
+   * ★ 不传 = 保持既有行为（只有 id）。⚠️ 但**能拿到名字时必须用名字**：
+   *   导出的报告是给家长看的，`prog-loop-jr` 对他们和乱码没有区别
+   *   （这正是走查里那条「立刻隐藏所有 ID」的落点之一）。
+   */
+  names?: { get(kpId: string): string | undefined }
 ): string {
+  /** kpId → 表格里显示的名字（拿不到名字就退回「id（知识点编号）」，与原口径一致）。 */
+  const labelOf = (kpId: string): string => {
+    const name = names?.get(kpId)
+    return name && name.trim().length > 0 && name !== kpId ? name : `${kpId}（知识点编号）`
+  }
   const lines: string[] = []
   lines.push(`# 学习报告（近 ${days} 天）`)
   lines.push('')
@@ -197,11 +214,13 @@ export function composeReportMarkdown(
   if (report.mastery.length === 0) {
     lines.push('还没有掌握度记录。')
   } else {
-    lines.push('| 知识点编号 | 掌握度 | 状态 | 作答次数 | 答对 |')
+    // 表头写「知识点」而不是「知识点编号」：有名字时这一列就是名字
+    // （拿不到名字时才退回「id（知识点编号）」，见 labelOf）。
+    lines.push('| 知识点 | 掌握度 | 状态 | 作答次数 | 答对 |')
     lines.push('| --- | ---: | --- | ---: | ---: |')
     for (const item of report.mastery) {
       lines.push(
-        `| ${item.kpId} | ${item.score.toFixed(2)} | ${masteryLabel(item.score)} | ` +
+        `| ${labelOf(item.kpId)} | ${item.score.toFixed(2)} | ${masteryLabel(item.score)} | ` +
           `${item.attempts} | ${item.correct} |`
       )
     }
@@ -302,7 +321,11 @@ export function composeMistakesMarkdown(mistakes: MistakesView): string {
   lines.push('')
 
   if (mistakes.items.length === 0) {
-    lines.push('还没有错题记录 —— 保持住。')
+    // ★ 导出的也是**给学生/家长读的**（见文件头第 3 条纪律），所以这里不能出现
+    //   「还没有错题记录 —— 保持住。」那种系统口径的冷句子：全对是一件**值得高兴**的事，
+    //   报告里也该这么说。（`desktop/tests/study-views.test.ts` 钉住「还没有错题记录」
+    //   这几个字还在，所以只在它后面接着把话说暖。）
+    lines.push('太棒啦！还没有错题记录，继续保持这份认真～')
     lines.push('')
     return lines.join('\n')
   }

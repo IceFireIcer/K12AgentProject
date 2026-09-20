@@ -77,11 +77,22 @@
   --k12-lh-body: 1.75;
 
   /* ── 形状：四档 ────────────────────────────────────────────────────────
-   * inset 6 < card 10 < control 12（控件最圆：它是"拿起来的物件"）。
-   * 圆角跨度够大，形状本身就成为层次的线索。                                  */
-  --k12-r-inset: 6px;
-  --k12-r-card: 10px;
-  --k12-r-control: 12px;
+   * inset 8 < card 14 < control 14（控件最圆：它是"拿起来的物件"）。
+   * 圆角跨度够大，形状本身就成为层次的线索。
+   *
+   * ★★ 2026-09-20 上调（inset 6→8 / card 10→14 / control 12→14）：
+   *   界面走查的结论是「偏极客、像开发者后台、缺亲和力」，而**圆角**是
+   *   成本最低、观感最直接的那一档 —— 它不需要新素材、不动配色、
+   *   也不影响任何对比度（改色才会碰到 234 项对比度校验）。
+   *   使用者是 K12 学生：直角 + 细线是「工程软件」的语言，
+   *   圆角是「给孩子的软件」的语言。
+   * ⚠️ card 与 control 现在同值，这是**有意的**：此前 card(10) < control(12) 的
+   *   区分在 1440 宽下只有 2px，肉眼分不出来、却让「卡片里的按钮比卡片还圆」
+   *   这种小别扭反复出现。真正承载层级区分的是**底色差 + 投影**（见文件头那四层），
+   *   不是这 2px。四档里仍有 inset(8) < card/control(14) 与 pill 的跨度。       */
+  --k12-r-inset: 8px;
+  --k12-r-card: 14px;
+  --k12-r-control: 14px;
   --k12-r-pill: 999px;
   /* 极小元素（角标 / chip / 代码片 / 引用行）。
    * ⚠️ 此前被 33 处引用却**从未定义** —— var() 取不到值会退化成 0，
@@ -529,6 +540,69 @@ a {
   justify-content: center;
   gap: 6px;
   min-height: 28px;
+}
+
+/* ── ★★ 主行动按钮（CTA）：全站**唯一**的一套主色按钮配方 ────────────────
+ * 走查结论（原话）：「用户最重要的操作入口在颜色、大小、形状上完全不一致」。
+ * 实测确实如此 —— 「去闯关检验」「运行」「提交这题」「开始学习」各自写了一份
+ * 按钮样式，颜色/圆角/字重都不一样，学生看不出哪个是「现在该按的」。
+ *
+ * 判据（**新增主行动入口时按这条挑样式**）：
+ *   · **主色填充** = 「这一屏做完这件事就算完成」。同一屏里**只允许一个** ——
+ *     两个主色按钮等于没有主色按钮（学生得读文字才知道按哪个）。
+ *   · 描边 / 幽灵 = 次要动作（取消、切换、查看）。它们**不该**带这个类。
+ *   · 危险动作（重建索引）走 `.k12-cta--danger`，不给主色 ——
+ *     主色在这套语言里等于「推荐你按」，而危险动作恰恰不该被推荐。
+ *
+ * ⚠️ 用 `min-height` 不是 `height`：字号一变就裁字（P-071 踩过）。
+ * ⚠️ 不要再往组件里抄这份配方 —— 抄第六份的时候必然又漂移一次。
+ *    守卫见 `desktop/tests/ux-pages-regression.test.ts` 的「五处核心按钮」。
+ */
+.k12-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 8px 16px;
+  border: 1px solid var(--k12-accent-ink);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-accent-ink);
+  color: var(--k12-surface);
+  font-size: var(--k12-fs-sm);
+  font-weight: 650;
+  cursor: pointer;
+  transition: background var(--k12-dur-state) var(--k12-ease-state);
+}
+@media (hover: hover) and (pointer: fine) {
+  .k12-cta:hover:not(:disabled) {
+    /* 悬停压深一档：用 color-mix 而不是再定一个色 —— 色值只有一份来源 */
+    background: color-mix(in srgb, var(--k12-accent-ink) 88%, var(--k12-fg));
+    border-color: color-mix(in srgb, var(--k12-accent-ink) 88%, var(--k12-fg));
+  }
+}
+/* 键盘可见的聚焦环（全站统一，避免有的按钮有、有的没有） */
+.k12-cta:focus-visible {
+  outline: 2px solid var(--k12-accent);
+  outline-offset: 2px;
+}
+/* 禁用：**不要**用低透明度 —— 那会让文字掉到不可读（触控下限那条守卫的思路一样：
+ * 尺寸与对比度都不能因为状态而降级）。改成实心灰底 + 明确的「不可点」观感。 */
+.k12-cta:disabled {
+  border-color: var(--k12-border-strong);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
+  cursor: not-allowed;
+}
+.k12-cta--danger {
+  border-color: var(--k12-warn);
+  background: var(--k12-warn);
+}
+@media (hover: hover) and (pointer: fine) {
+  .k12-cta--danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--k12-warn) 88%, var(--k12-fg));
+    border-color: color-mix(in srgb, var(--k12-warn) 88%, var(--k12-fg));
+  }
 }
 .el-input__wrapper,
 .el-textarea__inner,

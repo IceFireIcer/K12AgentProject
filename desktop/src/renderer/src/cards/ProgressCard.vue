@@ -16,9 +16,37 @@
  *
  * ★ 轻量实现（§11.4）：动画只用 CSS `transition` / `@keyframes`，**不引游戏引擎、不引 Anime.js**。
  */
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import Badge from '../components/Badge.vue'
 import ProgressBar from '../components/ProgressBar.vue'
+import { useKnowledgeStore } from '../stores/knowledge'
+import { kpLabel } from '../study/kp-label'
+
+/** 知识点在界面上的名字（**教材里的中文名**，取不到就不显示名字那一格）。 */
+const knowledge = useKnowledgeStore()
+
+/**
+ * ★★ 关卡名原来直接印 `{{ level.kpId }}` —— 于是这张卡片在对话里长成
+ *   `ai-definition-jr  学习中  0.00`：学生看到的是**数据库主键**，不是知识点的名字。
+ *   走查把它列为「开发测试数据泄漏」的典型（「未解锁 0.00」那一屏就是它）。
+ * ★ 与 `CodingCard` / `QuizCard` / 学习档案同一条口径（`study/kp-label.ts`）：
+ *   取不到中文名就**不显示名字那一格**，绝不回落成 slug；
+ *   原始 id 仍在 `<li>` 的 `data-kp-id` 上（排障与断言要用，但不渲染）。
+ */
+function levelName(kpId: string): string {
+  const name = kpLabel(kpId, null, knowledge.kpNameOf)
+  return name === '未命名知识点' ? '' : name
+}
+
+/** 徽章的 `name` 会进 tooltip（`Badge.vue` 的 `title`）—— 同样不许把 slug 写进去。 */
+function badgeName(kpId: string): string {
+  return levelName(kpId)
+}
+
+onMounted(() => {
+  // 名字表是异步取的；失败不阻断卡片（最多少显示一列名字）
+  void knowledge.ensureNames().catch(() => {})
+})
 
 /** 一个关卡（`progress` 表的一行 + 该知识点的掌握度）。 */
 interface LevelView {
@@ -106,7 +134,7 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
       <Badge
         v-if="earnedBadges.length > 0"
         :badge="earnedBadges[earnedBadges.length - 1].badge"
-        :name="earnedBadges[earnedBadges.length - 1].kpId"
+        :name="badgeName(earnedBadges[earnedBadges.length - 1].kpId)"
         compact
       />
       <span v-else class="chip" data-testid="progress-no-badge">还没有徽章</span>
@@ -126,12 +154,14 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
         :data-badge="level.badge ?? ''"
       >
         <span class="level__dot" aria-hidden="true"></span>
-        <span class="level__name">{{ level.kpId }}</span>
+        <!-- ★ 名字取不到时这一格不渲染（见 `levelName` 的说明）；
+             原始 id 在 `<li>` 的 `data-kp-id` 上，不在这里显示。 -->
+        <span v-if="levelName(level.kpId)" class="level__name">{{ levelName(level.kpId) }}</span>
         <span class="level__stage" data-testid="progress-stage">{{ STAGE_LABELS[level.stage] }}</span>
         <span class="level__mastery" data-testid="progress-mastery">
           {{ level.mastery.toFixed(2) }}
         </span>
-        <Badge v-if="level.badge" :badge="level.badge" :name="level.kpId" compact />
+        <Badge v-if="level.badge" :badge="level.badge" :name="levelName(level.kpId)" compact />
       </li>
     </ol>
 

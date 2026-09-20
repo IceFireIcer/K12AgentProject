@@ -26,6 +26,7 @@ import { computed, ref } from 'vue'
 import type { components } from '@shared/api-types'
 import { resolveStudyBridge, type StudyBridge } from '../api/study'
 import { composeMistakesMarkdown, composeReportMarkdown } from '../study/report-markdown'
+import { useKnowledgeStore } from './knowledge'
 import type { GradeLevel } from '@shared/ipc-events'
 
 /** 四个档案端点的契约类型（**全部来自生成物**，不在这里手写一份，见 `api/study.ts`）。 */
@@ -126,11 +127,36 @@ export interface SessionSearchHitShape {
 export const REPORT_DAY_OPTIONS = [7, 14, 30] as const
 
 export const useStudyStore = defineStore('study', () => {
+  /** 知识点名索引（导出报告时把 kpId 换成中文名 —— 见 `exportReport` 的说明）。 */
+  const knowledge = useKnowledgeStore()
   const report = ref<ReportView | null>(null)
   const reportDays = ref<number>(7)
   const mistakes = ref<MistakesView | null>(null)
   const chapters = ref<ChaptersView | null>(null)
   const graph = ref<GraphView | null>(null)
+
+  /**
+   * ★★ 错题本的**过期标记**（本轮修掉的真实缺陷：错题本读到之后永远不会再读）。
+   *
+   * 缺陷形态：写入侧一直是好的（每次判分都往 `learning_history` 落一条
+   * `is_correct = 0/1` 的流水），坏的是读取侧 —— `loadMistakes()` 过去只被
+   * `loadAll()` 调一次，而 `loadAll()` 只在 `views/Study.vue` 的 `onMounted` 里跑；
+   * 那个视图挂在 `<KeepAlive>` 里（`App.vue`），切走**不卸载**、切回也**不重挂**。
+   * 于是学生答错一题、回到学习档案，看到的是**逐字节相同**的旧错题本
+   * （相当一部分学生会认为「这次错的题没记上」）。
+   *
+   * 修法两条，都在本 store 里，**不动别的 store**：
+   *   ① `loadMistakes()` 自带缓存判据：有数据、且没过期就直接返回 ——
+   *      于是它可以被「进档案页 / 每次切回档案页 / 切到错题本分页」反复调用，
+   *      既不重复打请求，也不会把列表与加载态抖三遍；
+   *   ② `invalidateMistakes()` 只翻这个标记、**不发请求**：谁观察到「刚判过分」，
+   *      谁就翻它，真正的取数留给下一次需要时那一处（一处取数，不会并发抢写）。
+   *      当前调用点：`views/Study.vue`（对话内题卡出现新批改结果时翻标记）。
+   *      ⚠️ 闯关页判分（`stores/quiz.ts` 的 `submit`）那条路**没有**翻标记，
+   *      它由「切回档案页时补一次」兜住（见 `views/Study.vue` 的 `onActivated`）——
+   *      正确性不依赖它，只少一次触发。
+   */
+  const mistakesStale = ref(false)
 
   /** 每个区块自己的加载态（互不阻塞：地图慢不该让报告转圈）。 */
   const loading = ref<Record<'report' | 'mistakes' | 'chapters' | 'graph', boolean>>({
@@ -162,6 +188,9 @@ export const useStudyStore = defineStore('study', () => {
 
   /** 正在飞的章节请求对应的学段（见 `loadChapters` 的第 ② 条保护）。**非响应式**。 */
   let chaptersInFlight: GradeLevel | null = null
+
+  /** 正在飞的错题请求（同上：三个挂载点会同时触发，**非响应式**）。 */
+  let mistakesInFlight: Promise<void> | null = null
 
   function ensureBridge(): StudyBridge | null {
     if (bridge.value) return bridge.value
@@ -203,7 +232,10 @@ export const useStudyStore = defineStore('study', () => {
       }
       const parsed = accept(result.data)
       if (parsed === null) {
-        errors.value[key] = '本地数据服务返回的结构不符合预期（契约可能已变化）。'
+        // ★ 学生话。原来的「（契约可能已变化）」是开发者的判断（pydantic 契约漂移），
+        //   学生读到只会以为自己点坏了什么 —— 具体原因进日志，界面只说「取不到」。
+        console.warn('[study] 本地数据服务的返回结构不符合预期（契约可能已变化）', key)
+        errors.value[key] = '这份数据暂时取不到，稍后再试试。'
         return
       }
       assign(parsed)
@@ -228,15 +260,45 @@ export const useStudyStore = defineStore('study', () => {
     )
   }
 
-  async function loadMistakes(): Promise<void> {
-    await load(
-      'mistakes',
-      (api) => api.readStudyMistakes(),
-      (data) => readWithDefaults<MistakesView>(data, ['items'], ['items']),
-      (value) => {
-        mistakes.value = value
-      }
-    )
+  /**
+   * 读错题本。
+   *
+   * ★ **幂等**（与 `loadChapters` 同一思路）：数据已在手上、且没有过期标记时不发请求。
+   *   这一条是必须的 —— 它会被反复调用（进档案页的 `loadAll`、每次切回档案页、
+   *   切到「错题本」分页各一次，见 `views/Study.vue`）。
+   * ★ `force = true` 是**手动刷新**（错题本工具栏上的「刷新」按钮）的入口。
+   * ★ 失败时**保留过期标记**：下一次进入还会再试一次，而不是把「读失败」缓存住。
+   */
+  async function loadMistakes(force = false): Promise<void> {
+    // 同一份请求已在飞 → 直接复用（三个挂载点可能同时触发，见 `mistakesInFlight`）
+    if (mistakesInFlight) return await mistakesInFlight
+    if (!force && mistakes.value !== null && !mistakesStale.value) return
+    const request = (async () => {
+      await load(
+        'mistakes',
+        (api) => api.readStudyMistakes(),
+        (data) => readWithDefaults<MistakesView>(data, ['items'], ['items']),
+        (value) => {
+          mistakes.value = value
+          // 只有**成功**才清过期标记：读失败时保持过期，下一次进入还会再试一次
+          // （把一次网络抖动缓存成「错题本就是空的」是最难查的一类假数据）。
+          mistakesStale.value = false
+        }
+      )
+    })()
+    mistakesInFlight = request
+    try {
+      await request
+    } finally {
+      // 只清掉**仍然登记在案**的那一次（与 `stores/quiz.ts` 的取题收尾同一手法：
+      // 迟到的旧请求不该把新请求的登记项抹掉，否则下一次调用会多发一份）
+      if (mistakesInFlight === request) mistakesInFlight = null
+    }
+  }
+
+  /** 把错题本标记为过期（**只翻标记，不发请求**）。见 `mistakesStale` 的注释。 */
+  function invalidateMistakes(): void {
+    mistakesStale.value = true
   }
 
   /**
@@ -396,12 +458,22 @@ export const useStudyStore = defineStore('study', () => {
    *
    * ★ 拼装是**纯函数**（`study/report-markdown.ts`），主进程只负责写盘；
    * ★ 学生取消保存时**不显示错误**（`canceled` 是正常路径）。
+   * ★★ 导出前先 `ensureNames()` 并把 `kpId → 中文名` 传进拼装函数：
+   *   报告里的掌握度表**只有 kpId**（契约的 `Mastery` 结构上没有名字），
+   *   而这份文件是给家长看的 —— `prog-loop-jr` 对他们和乱码没有区别。
+   *   名字取不到时不阻拦导出（退回「id（知识点编号）」，与既有口径一致）：
+   *   一次取名失败不该让「导出」整个失效。
    */
   async function exportReport(): Promise<void> {
     if (!report.value) return
+    try {
+      await knowledge.ensureNames()
+    } catch {
+      // 取名字失败只影响表格那一列的可读性，不影响导出本身
+    }
     await runExport(
       `学习报告-${report.value.studentId}-${reportDays.value}天.md`,
-      () => composeReportMarkdown(report.value!, reportDays.value)
+      () => composeReportMarkdown(report.value!, reportDays.value, undefined, knowledge.kpIndex)
     )
   }
 
@@ -451,6 +523,8 @@ export const useStudyStore = defineStore('study', () => {
     report,
     reportDays,
     mistakes,
+    /** ★ 错题本是否已被标记为过期（界面一般不需要读它，`loadMistakes()` 自己会判断）。 */
+    mistakesStale,
     chapters,
     graph,
     loading,
@@ -466,6 +540,8 @@ export const useStudyStore = defineStore('study', () => {
     hasAnyError,
     loadReport,
     loadMistakes,
+    /** ★ 标记错题本过期（只翻标记；下一次 `loadMistakes()` 才会真的重取）。 */
+    invalidateMistakes,
     loadChapters,
     loadGraph,
     loadAll,

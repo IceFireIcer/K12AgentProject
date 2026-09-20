@@ -50,9 +50,11 @@ import { useSettingsStore } from './stores/settings'
 import { useSidecarStore } from './stores/sidecar'
 import { useStudentStore } from './stores/student'
 import { useTraceStore } from './stores/trace'
-import { nextView, PAGES, useUiStore, VIEW_LABELS } from './stores/ui'
+import { nextView, isTeacherOnlyPage, PAGES, useUiStore, VIEW_LABELS } from './stores/ui'
+import { useViewModeStore } from './stores/viewMode'
 
 const ui = useUiStore()
+const viewMode = useViewModeStore()
 const chat = useChatStore()
 const sidecar = useSidecarStore()
 const student = useStudentStore()
@@ -123,6 +125,26 @@ onMounted(() => {
 
 // 首屏取数：立刻跑一次 + sidecar 就绪后补跑一次（见上面那段说明）
 useOnBackendReady(loadInitialData)
+
+/**
+ * 切回学生视角时，把停在「教师专属页」上的学生带回对话页。
+ *
+ * ★ 为什么必须有这一段：教师视角下侧栏会多出「教材知识库」（`nav: 'teacher'`）。
+ *   如果学生正停在那页、把开关切回学生视角，侧栏里那一项会消失 ——
+ *   而页面本身**还在渲染**（它是 `KeepAlive` 里的分支，没有路由会把他弹走）。
+ *   结果是「一个侧栏里找不到、也说不清怎么进来的运维页面」，
+ *   学生只能靠顶栏那个三步循环按钮摸出去。
+ * ★ 只处理「从教师切回学生」这一个方向：反过来（学生 → 教师）停在对话页是正常的，
+ *   没有理由把评委弹到知识库页上去。
+ */
+watch(
+  () => viewMode.isTeacher,
+  (isTeacher, wasTeacher) => {
+    if (wasTeacher === true && !isTeacher && isTeacherOnlyPage(ui.page)) {
+      ui.go('chat')
+    }
+  }
+)
 
 onUnmounted(() => {
   chat.disconnect()

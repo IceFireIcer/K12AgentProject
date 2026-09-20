@@ -203,9 +203,13 @@ export interface K12Api {
    */
   onSessionChanged(listener: (state: SessionCurrent) => void): () => void
   /**
-   * 把一段 Markdown 存成文件（报告 / 错题本导出）。
+   * 把一段文本存成文件（学习报告 / 错题本 → Markdown，学习地图 → CSV）。
    * ★ **回执只有文件名**（完整路径不进渲染进程）；文件名由主进程清理。
    * ★ 学生取消保存时回 `{ok:false, canceled:true}` —— 那是正常路径，不是错误。
+   * ★ 后缀由 `payload.extension` 从白名单里挑（`.md` / `.csv`，不填 = `.md`）：
+   *   写盘**只发生在主进程的原生保存对话框**之后，渲染进程指定不了路径，也造不出后缀。
+   *   方法名沿用 `exportMarkdown`（改名会让白名单守卫与 8 个调用点一起动，
+   *   而它现在承载的仍是「把一段文本存成文件」这一件事）。
    */
   exportMarkdown(payload: FileExportRequest): Promise<FileExportResult>
   /**

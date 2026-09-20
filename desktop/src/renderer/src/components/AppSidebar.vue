@@ -3,9 +3,15 @@
  * 左侧导航栏。
  *
  * 导航项**由 `stores/ui.ts` 的 `PAGES` / `PAGE_ORDER` 推导**（页面清单只在那一处声明）：
- * 只有 `nav: true` 的页面进侧栏、顺序按 `PAGE_ORDER`、分组标题取 `PAGES[name].section`
+ * 只有 `visibleInSidebar()` 放行的页面进侧栏、顺序按 `PAGE_ORDER`、分组标题取 `PAGES[name].section`
  * （空串 = 独占一组且不渲染组标题 —— 对话是主入口，不该被归进某个分组）。
  * 在这里再抄一份清单，就会出现「加了页面忘了加导航」这类漂移。
+ *
+ * ★★ `nav` 是**三态**（true / 'teacher' / false），判据收口在 `visibleInSidebar()`：
+ *   教师视角下会多出「教材知识库」（数据检视 + 导入 / 重建，学生不该看到
+ *   `kb.sqlite` 路径与两个破坏性按钮）。侧栏只是**调那个函数**，
+ *   不自己比较字段 —— 写错方向的表现（学生看到运维页 / 评委看不到它）
+ *   都不会报错，只能靠收口把它变成一处可读的代码。
  *
  * ★ 图标名也是**数据**（`PAGES[name].icon` 存的是 lucide 的组件名），所以要用一张
  *   名字 → 组件的表来解析；没有这张表就只能按页面写死 import。
@@ -47,8 +53,9 @@ import {
   Trophy
 } from 'lucide-vue-next'
 import { BRAND_NAME, BRAND_TAGLINE } from '@shared/brand'
-import { PAGES, PAGE_ORDER, useUiStore } from '../stores/ui'
+import { PAGES, PAGE_ORDER, useUiStore, visibleInSidebar } from '../stores/ui'
 import type { PageName } from '../stores/ui'
+import { useViewModeStore } from '../stores/viewMode'
 import { useStudentStore } from '../stores/student'
 import { useThemeStore } from '../stores/theme'
 import { useChatStore } from '../stores/chat'
@@ -57,6 +64,7 @@ import { gradeOriginLabel } from '../labels'
 import { logoUrlFor } from '../brand-logo'
 
 const ui = useUiStore()
+const viewMode = useViewModeStore()
 const student = useStudentStore()
 const theme = useThemeStore()
 const chat = useChatStore()
@@ -80,9 +88,9 @@ interface NavItem {
   icon: unknown
 }
 
-/** 侧栏项：`nav: true` 的页，按 `PAGE_ORDER` 的顺序（不另排序、不另起名） */
+/** 侧栏项：被 `visibleInSidebar` 放行的页，按 `PAGE_ORDER` 的顺序（不另排序、不另起名） */
 const navItems = computed<NavItem[]>(() =>
-  PAGE_ORDER.filter((name) => PAGES[name].nav).map((name) => ({
+  PAGE_ORDER.filter((name) => visibleInSidebar(PAGES[name], viewMode.isTeacher)).map((name) => ({
     name,
     title: PAGES[name].title,
     icon: ICONS[PAGES[name].icon ?? ''] ?? LayoutDashboard
@@ -218,7 +226,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
       </p>
       <div
         class="sb__privacy"
-        title="涉未成年人数据：最小化采集，不采集生物特征；对话正文不进 SQLite"
+        title="你的学习记录只存在这台电脑上：一人一份，不会传到任何服务器，也不会拿去做别的事。"
       >
         <ShieldCheck :size="14" />
         <span class="sb__privacy-text">数据不出端 · 全本地</span>

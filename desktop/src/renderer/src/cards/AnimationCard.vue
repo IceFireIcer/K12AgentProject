@@ -55,7 +55,11 @@ const degraded = ref<boolean>(false)
  */
 const degradeReason = ref<string>('')
 /** 降级气泡上给学生看的**固定中文**（不随原因变化，也不含任何内部标识）。 */
-const DEGRADED_NOTICE_TEXT = '动画没能加载，已用文字讲解'
+// ★ 文案口径（评审）：旧句「动画没能加载，已用文字讲解」读起来像一句**故障通告**
+//   （"没能加载"是系统的口径，不是学生关心的），而且听不出"我现在能做什么"。
+//   新句先说清楚**现在有什么**（文字讲解已经把这件事讲清楚了），再说**可以怎么办**
+//   （让团团换个说法）—— 降级不是坏消息，只是换了种讲法。
+const DEGRADED_NOTICE_TEXT = '这段动画这次没能播出来，下面这段文字已经把要点讲清楚了；想换个说法就问团团。'
 /** 沙箱阶段（`loading` 时显示加载提示，而不是一块空白）。 */
 const phase = ref<'loading' | 'ready' | 'degraded'>('loading')
 const progress = ref<number>(0)
@@ -178,7 +182,7 @@ onMounted(() => {
   if (!mountIframe.value) {
     degraded.value = true
     phase.value = 'degraded'
-    degradeReason.value = view.degradeReason ?? '本次没有可播放的动画内容（已用文字讲解顶上）'
+    degradeReason.value = view.degradeReason ?? '这次没有可播放的动画（已用文字讲解顶上）'
     return
   }
   host.value = buildHost()
@@ -301,6 +305,29 @@ watch(iframeEl, (element) => {
   background: var(--k12-surface);
   border: 1px solid var(--k12-border-strong);
   box-shadow: var(--k12-shadow-card);
+  /**
+   * ★★ 舞台高度 = **按比例 + 下限 + 上限**，不是定值（本次修复的核心之一）。
+   *
+   * 修的是什么：旧样式是 `.anim__frame { height: 300px }` —— 一个**钉死的 300px**。
+   * 动画 HTML 自己是「标题 + 说明 + 画布」的纵向布局（见 `_shared/base.css` 的 `#stage`
+   * 与 `flex: 1` 的 `.anim-canvas`），内容一多（长标题 / 两句说明 / 方形画布）就超出 300px，
+   * 而 iframe 内部是 `overflow: hidden` —— 多出来的部分被**静默切掉**，没有省略号也不能滚
+   * （与 P-057 那类「固定高 + overflow = 悄悄少一行」同一个病）。
+   *
+   * 三个数为什么是这三个：
+   *   - `--k12-anim-ratio: 16 / 9`：对话栏里卡片宽度约 640–820px → 自然高度约 360–460px，
+   *     **比原来的 300px 高**，长内容有了位置；纵向还能再长（下面上限封着）。
+   *   - `--k12-anim-min: 300px`：就是原来那个值的唯一价值 —— 简单动画
+   *     （只有一行标题 + 一根柱子）在任何宽度下都不会塌成一条窄缝。保留它。
+   *   - `--k12-anim-max: 420px`：对话栏是**阅读**栏，动画不该把一段回答挤到屏幕外。
+   *     ⚠️ 上限会影响到能放下的内容量，所以一旦又出现「被切了」，先调这里，
+   *     不要用 `overflow: auto` 兜住（那会把滚动条装进 iframe，学生滚的时候以为在滚对话）。
+   * 代价（明说）：同屏多张动画卡片的高度随宽度一起缩放，不再每张都是同一个 300px ——
+   * 这是想要的（内容放得下优先于绝对等高）。
+   */
+  --k12-anim-ratio: 16 / 9;
+  --k12-anim-min: 300px;
+  --k12-anim-max: 420px;
 }
 
 .anim--degraded {
@@ -439,7 +466,11 @@ watch(iframeEl, (element) => {
 .anim__frame {
   display: block;
   width: 100%;
-  height: 300px;
+  /* ★ 高度按比例生长（三个数与理由见 `.anim` 上的说明）——
+   * 定值 300px 会把放不下的内容静默切掉（iframe 内部是 overflow:hidden）。 */
+  aspect-ratio: var(--k12-anim-ratio);
+  min-height: var(--k12-anim-min);
+  max-height: var(--k12-anim-max);
   border: 1px solid var(--k12-border);
   border-radius: var(--k12-r-inset);
   /* iframe 里的动画 HTML 按白底绘制 → 必须给**不透明**的 paper 白。
@@ -447,7 +478,12 @@ watch(iframeEl, (element) => {
   background: var(--k12-surface);
 }
 
+/* 全屏：舞台要大（这个模式的目的就是看动画），所以这里**放开对话栏那个上限**；
+ * 视口高的 70% 与原值一致，保留 640px 的兜底上限。 */
 .anim--expanded .anim__frame {
+  aspect-ratio: auto;
+  min-height: 0;
+  max-height: none;
   height: min(70vh, 640px);
 }
 

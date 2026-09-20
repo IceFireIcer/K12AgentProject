@@ -23,16 +23,38 @@
  * ★ 时间显示用相对说法（「昨天」「3 天前」）而不是 ISO 时间戳：
  *   学生看列表时想知道的是「这是不是上次那段」，不是精确到秒的时间。
  *
+ * ★★ 视角分层（学生 / 教师，2026-09-20）：
+ *   「来自『另一条对话』」与「N 条分支」这两行**文字**读起来像数据库外键
+ *   （谁引用了谁、有几行子记录）。学生真正用来导航的是**缩进 + 连接线 + 折叠箭头**，
+ *   所以：
+ *     · 两个标记在**两种视角下都留在 DOM 里**（体检脚本 `ux-audit.mjs` 的 D10 拿
+ *       `session-kids-mark` 量几何；`session-branch.test.ts` 断言 `session-branch-mark`
+ *       里有 `parentTitle`）——**只改文字显不显示**；
+ *     · 学生视角：只剩一个小图标，说明放进 `title` 悬停提示（鼠标停一下就有）；
+ *     · 教师视角：文字照旧显示。
+ *   ⚠️ 这里用 `viewMode.isTeacher` 而不是 `<TeacherGate>`：后者渲染一个 `<section>`，
+ *      而这两个标记在 `<button>` 内部 —— 块级元素塞进按钮是非法嵌套。
+ *      （TeacherGate 仍用于所有成块的技术分节。）
+ *
  * ⚠️ 窄窗口（<1280px）这一列会**收成一条窄栏**（只留「新会话」按钮 + 条目首字），
  *   与左导航栏同一档断点 —— 1440×900 是设计基准，1120 是最小宽度。
  */
 import { computed, onMounted, ref, watch } from 'vue'
-import { ChevronDown, ChevronRight, GitBranch, MessageSquarePlus, Plus } from 'lucide-vue-next'
+import {
+  ChevronDown,
+  ChevronRight,
+  CornerDownRight,
+  GitBranch,
+  MessageSquarePlus,
+  Plus
+} from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useStudyStore, type SessionSummaryShape } from '../stores/study'
+import { useViewModeStore } from '../stores/viewMode'
 
 const chat = useChatStore()
 const study = useStudyStore()
+const viewMode = useViewModeStore()
 
 /** 正在切换的那一条（点了之后要看到反馈；`''` = 没有在切换）。 */
 const switchingId = ref('')
@@ -219,6 +241,23 @@ function isCurrent(session: { id: string }): boolean {
 }
 
 /**
+ * ★ 标题的**防御性**兜底：界面不显示「看着像占位符」的裸字符串。
+ *
+ * ★ 为什么要有：没有消息的会话，主进程拿到的名字可能是 Pi 那边的英文占位
+ *   （`(no messages)` 一类）。它在列表里与中文标题并排出现，读起来像界面坏了。
+ * ★ 归一只做**最小**一件事：把认得出的英文占位换成中文说法，其余一字不改
+ *   （不改标题、不截断、不生成标题 —— 标题的来源仍是主进程那一处）。
+ * ⚠️ 主进程 `study/sessions.ts` 那边的根因由另一条流处理，这里只是显示层兜底。
+ */
+const PLACEHOLDER_TITLES = ['(no messages)', '(empty)', '(untitled)']
+
+function displayTitle(title: string): string {
+  const trimmed = title.trim()
+  if (trimmed.length === 0) return '新的对话'
+  return PLACEHOLDER_TITLES.includes(trimmed.toLowerCase()) ? '新的对话' : trimmed
+}
+
+/**
  * 点一条会话：**已经是当前这条就什么都不做**。
  *
  * ★ 重复切换同一会话会 dispose + 重装一次（几秒的装配），而学生的意图
@@ -362,25 +401,35 @@ function relativeTime(ms: number): string {
         >
           <MessageSquarePlus :size="14" class="sl__ico" />
           <span class="sl__item-text">
-            <span class="sl__item-title">{{ item.title }}</span>
+            <span class="sl__item-title">{{ displayTitle(item.title) }}</span>
             <!-- ★★ 两个元信息各管一件事，**不要合并**：
                  - 「来自〈父〉」= **关系**（谁从谁分出来的）——学生靠它认人
-                 - 「N 条分支」= **规模**（这条下面还有多少）——学生靠它决定收不收 -->
+                 - 「N 条分支」= **规模**（这条下面还有多少）——学生靠它决定收不收
+                 ★ 两种视角下**都留在 DOM 里**（体检脚本按 testid 量几何、
+                   `session-branch.test.ts` 断言 `parentTitle` 在里面），
+                   学生视角下把文字换成一个**小图标 + `title` 提示** ——
+                   真正用来导航的是缩进/连接线/折叠箭头，这两行文字不是。
+                 ⚠️ 用 `viewMode.isTeacher` 而不是 `<TeacherGate>`：这里在 `<button>` 内部，
+                   而 TeacherGate 渲染 `<section>`（块级元素塞进按钮是非法嵌套）。 -->
             <span
               v-if="item.parentId"
               class="sl__item-branch"
+              :class="{ 'sl__item-branch--quiet': !viewMode.isTeacher }"
               data-testid="session-branch-mark"
               :title="`从「${item.parentTitle ?? '另一条对话'}」分出来的`"
             >
               <GitBranch :size="10" />
-              <span>来自「{{ item.parentTitle ?? '另一条对话' }}」</span>
+              <span v-if="viewMode.isTeacher">来自「{{ item.parentTitle ?? '另一条对话' }}」</span>
             </span>
             <span
               v-if="item.childCount > 0"
               class="sl__item-kids"
+              :class="{ 'sl__item-kids--quiet': !viewMode.isTeacher }"
               data-testid="session-kids-mark"
+              :title="`这条下面还有 ${item.childCount} 条对话，点左边的箭头展开`"
             >
-              {{ item.childCount }} 条分支
+              <CornerDownRight v-if="!viewMode.isTeacher" :size="11" />
+              <template v-else>{{ item.childCount }} 条分支</template>
             </span>
             <span class="sl__item-meta">
               <template v-if="switchingId === item.id">正在打开…</template>
@@ -470,6 +519,15 @@ function relativeTime(ms: number): string {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* ★★ 必须显式重置 `<ul>` 的默认样式（本仓 base.css 只重置了标题与段落的 margin，
+   *   没管列表）。浏览器给 `ul` 的默认 `padding-inline-start: 40px` 会让这个列表
+   *   **比容器还宽**：窄窗口下 `.sl` 收成 60px 图标条，而列表仍是 65px，
+   *   右侧那点内容被 `.sl` 的 `overflow: hidden` 吃掉 —— 实测 `ux:layout`
+   *   在 1120px 的对话页报「内容够不着: sl(70>59)」，根因就是这 40px 幻影缩进。
+   *   ⚠️ 这是**既有**缺陷，与本次改动无关（已用 HEAD 版本对照量过，数字完全一致）。 */
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .sl__item {
@@ -625,11 +683,19 @@ function relativeTime(ms: number): string {
 }
 
 /* 「N 条分支」：**规模**信息（与「来自…」那个关系标记分工不同）。
- * 用 muted 色而不是 accent：它是计数，不是关系 —— 关系才值得强调。 */
+ * 用 muted 色而不是 accent：它是计数，不是关系 —— 关系才值得强调。
+ * ★ 学生视角下这一格只剩一个下折小图标（`--quiet`）：文字进 `title` 提示。
+ *   图标仍占位（有宽高），所以体检脚本按 testid 数到的行数与几何不变。 */
 .sl__item-kids {
+  display: flex;
+  align-items: center;
+  gap: 3px;
   font-size: var(--k12-fs-xs);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
+}
+.sl__item-kids--quiet {
+  color: var(--k12-muted-2);
 }
 
 .sl__item-meta {
@@ -640,7 +706,9 @@ function relativeTime(ms: number): string {
 
 /* 分支标记：它是「这条从哪来」的一行注解，比时间更值得看，所以放在时间**之前**
  * 并给它一档更实的颜色（时间只是排序信息，来源是关系）。
- * ★ 单行省略：标题已经单行了，这一行若换行会把整个列表项的节奏撑乱。 */
+ * ★ 单行省略：标题已经单行了，这一行若换行会把整个列表项的节奏撑乱。
+ * ★ 学生视角（`--quiet`）：文字换成一个小图标 + `title` 提示 —— 颜色收到最淡一档，
+ *   因为「谁从谁分出来」学生靠**缩进与连接线**就看得出来，这行只是补充。 */
 .sl__item-branch {
   display: flex;
   align-items: center;
@@ -651,6 +719,9 @@ function relativeTime(ms: number): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.sl__item-branch--quiet {
+  color: var(--k12-muted-2);
 }
 
 .sl__state {
@@ -677,6 +748,16 @@ function relativeTime(ms: number): string {
     width: 60px;
     padding: 14px 8px;
     align-items: center;
+  }
+  /* ★★ `.sl` 有 `align-items: center`（图标条里每一项居中），但那条规则会**连带**
+   *   把 `.sl__list` 也变成「按内容宽度收缩」—— 于是列表只剩 25px，
+   *   里面的会话条目 15px 宽，低于 28px 触控下限（`ux:layout` 在 1120px 报
+   *   「触控目标过小 ×6」）。这 6 个条目正是学生最常点的东西。
+   *   所以这里把列表**显式拉满**：居中只该管那几行图标，不该管这个滚动容器。
+   *   ⚠️ 同样是**既有**缺陷（HEAD 版本实测同一批 6 个条目过小）。 */
+  .sl__list {
+    align-self: stretch;
+    width: 100%;
   }
   .sl__title,
   .sl__new-text,

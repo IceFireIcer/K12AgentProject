@@ -14,6 +14,10 @@
 
 import type { components } from '@shared/api-types'
 import type { GradeLevel } from '@shared/ipc-events'
+// 导出物后缀的白名单类型（**纯类型 import，编译后擦除**）：定义在 `study/export-naming.ts`，
+// 那里同时是 `sanitizeFileName` 的实现处 —— 后缀集合只有一份，不会「契约里收 .csv、
+// 清理函数里只认 .md」这种分叉。
+import type { ExportExtension } from '../study/export-naming.ts'
 
 /**
  * 设置域的三个契约类型：**全部来自 `@shared/api-types`（pydantic → OpenAPI → TS 生成物）**，
@@ -584,13 +588,18 @@ export type SessionOpenResult = SessionStateResult
 /**
  * 导出的入参。
  *
- * ★ `content` 是**已经拼好的 Markdown 文本**：拼装发生在渲染进程
- *   （它手里有报告/错题本的数据），主进程只负责「问路径 + 写盘」。
+ * ★ `content` 是**已经拼好的文本**（Markdown / CSV 都一样）：拼装发生在渲染进程
+ *   （它手里有报告/错题本/依赖图的数据），主进程只负责「问路径 + 写盘」。
+ * ★ `extension` 是**后缀白名单里的一员**（`.md` / `.csv`），省略即 `.md` ——
+ *   渲染进程只能挑，不能造（见 `study/export-naming.ts` 的 `readExportExtension`）。
+ *   一条通道承载两种导出物，是为了不动通道总数（三处守卫都按它计数）。
  */
 export interface FileExportRequest {
-  /** 建议的文件名（主进程会清理：去分隔符与 `..`、限长、强制 `.md`）。 */
+  /** 建议的文件名（主进程会清理：去分隔符与 `..`、限长、把后缀统一成 `extension`）。 */
   fileName: string
   content: string
+  /** 导出物后缀（受白名单约束；不填 = `.md`）。 */
+  extension?: ExportExtension
 }
 
 /** 导出的回执：**只有文件名**（完整路径不进渲染进程）。 */

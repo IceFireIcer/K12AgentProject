@@ -1868,21 +1868,41 @@ if (injected?.ok !== true) {
     )
 
     // 作答 → 提交：走真实的聊天链路（无 Key 时本轮会以 error 收尾，这不影响卡片的断言）
+    //
+    // ⚠️ 必须点**还没作答**的那一题：实现层把答对之后的提交键改成禁用的「已完成」
+    //   （学生答对了再点一次没有意义，见 `cards/QuizCard.vue` 的 `submitLabel`）。
+    //   而上面注入的那条判分结果对应的正是**第 1 题** —— 直接 querySelector 拿第一个
+    //   `quiz-submit`，拿到的必然是个禁用按钮，`click()` 静默无效，
+    //   于是后面「出现【练习作答】」永远等不到。所以这里挑**第一个可点的**提交键。
     const beforeSubmit = await turnCount()
     const submitted = await evaluate(`(() => {
       const card = Array.from(document.querySelectorAll('[data-testid="quiz-card"]')).pop()
       if (!card) return { ok: false, reason: '找不到练习卡片' }
-      const option = card.querySelector('[data-testid="quiz-option"] input[type="radio"]')
-      if (!option) return { ok: false, reason: '找不到选择题选项' }
-      option.click()
-      const button = card.querySelector('[data-testid="quiz-submit"]')
-      if (!button) return { ok: false, reason: '找不到提交按钮' }
+      const button = Array.from(card.querySelectorAll('[data-testid="quiz-submit"]')).find(
+        (candidate) => !candidate.disabled
+      )
+      if (!button) return { ok: false, reason: '找不到可提交的作答按钮（全部已判分或禁用）' }
+      const question = button.closest('[data-testid="quiz-question"]')
+      const option = question && question.querySelector('[data-testid="quiz-option"] input[type="radio"]')
+      if (option) option.click()
+      const blank = question && question.querySelector('[data-testid="quiz-blank"], [data-testid="quiz-code-blank"]')
+      if (blank) {
+        blank.value = '1'
+        blank.dispatchEvent(new Event('input', { bubbles: true }))
+      }
       button.click()
-      return { ok: true }
+      const stem = question && question.querySelector('[data-testid="quiz-stem"]')
+      return { ok: true, stem: stem ? stem.textContent : '' }
     })()`)
     if (submitted?.ok !== true) {
       check('练习卡片：选中选项后可以提交作答', false, submitted?.reason ?? '点击失败')
     } else {
+      // ★ 断言的是**题干**而不是 qid：qid（`gen-ai-definition-jr-…`）里嵌着知识点 slug，
+      //   已从学生气泡里撤掉（见 `cards/quiz.ts` 的 `submissionBody` 说明）——
+      //   它对学生的唯一用处是「我知道自己答的是哪题」，而那由题干承担。
+      //   题号仍在 **wire 文本**里（模型调 submit_quiz 要用），由
+      //   `tests/renderer-quiz.test.ts` 的单元测试钉着。
+      const submittedStem = String(submitted.stem ?? '').slice(0, 12)
       const submittedTurn = await waitFor(
         `(() => {
           const turns = document.querySelectorAll('[data-testid="chat-turn"]')
@@ -1896,8 +1916,8 @@ if (injected?.ok !== true) {
         10_000
       )
       check(
-        '练习卡片：提交把「题号 + 作答」交给主 Agent（前端不判分）',
-        typeof submittedTurn === 'string' && submittedTurn.includes(choiceSource.out.qid),
+        '练习卡片：提交把「题目 + 作答」交给主 Agent（前端不判分）',
+        typeof submittedTurn === 'string' && submittedStem.length > 0 && submittedTurn.includes(submittedStem),
         `学生消息：「${String(submittedTurn).slice(0, 90)}…」（轮次 ${beforeSubmit} → ${await turnCount()}）`
       )
       // 提交这一轮由主进程回应（无 Key 时是能力受限提示，有 Key 时是真批改）——不在此断言内容

@@ -1,6 +1,14 @@
 <script setup lang="ts">
 /**
- * 教材知识库（数据层检视视图）。
+ * 教材知识库（**教师控制台** —— 数据层检视视图）。
+ *
+ * ★★ 这一页只属于**教师 / 答辩视角**（`stores/ui.ts` 的 `PAGES.knowledge.nav === 'teacher'`，
+ *    学生视角下侧栏根本不给入口）。所以它不再假装是一页「谁都能看的教材目录」：
+ *    页头第一句就说明它是**数据层检视**，技术列（kp_id / 向量状态 / 文件路径）照旧保留 ——
+ *    那正是这一页存在的理由（答辩要看「库里到底有什么、有没有真的嵌进去」）。
+ *
+ * ★ 学生需要「看教材」这件事由**学习档案 → 章节进度**承担（`study/ChaptersTab.vue`），
+ *   不在这里做第二份 —— 两处各写一套必然会分叉。
  *
  * ★ 这一页的主角是**表**，不是统计。
  *   此前顶部 4 个磁贴的数字用了 22px（xl 档），而表格正文只有 13px ——
@@ -18,15 +26,23 @@
  *
  * ★ 控件换成了 Element Plus：搜索框 → `el-input`（带空态），表格 → `el-table`
  *   （带空态与列排序），标签 → `el-tag`。手写 `<table>` 没有排序、没有空态、窄屏会横向溢出。
+ *
+ * ★★ 两个按钮都是**重活**（重建要跑整份教材的分块 + 嵌入，实测 ~6s 纯 CPU；
+ *    导入默认重建，所以它同样是重活），因此两处都**先问一句**再动手 ——
+ *    用全站唯一的确认框（`stores/confirm.ts`），而不是「按下去就开始跑」。
  */
 import { computed, onMounted, ref } from 'vue'
 import { RefreshCw, Upload, FileUp, AlertTriangle, CheckCircle2 } from 'lucide-vue-next'
 import { useKnowledgeStore } from '../stores/knowledge'
+import { useConfirm } from '../stores/confirm'
 import { GRADE_LABELS } from '../labels'
 import { GRADE_LEVELS } from '../api/grade'
+import EmptyState from '../components/EmptyState.vue'
+import TeacherGate from '../components/TeacherGate.vue'
 import type { GradeLevel } from '@shared/ipc-events'
 
 const knowledge = useKnowledgeStore()
+const confirm = useConfirm()
 
 /** 内容类型的中文名（契约里 `contentType` 是自由字符串，认不出就原样显示）。 */
 const TYPE_LABEL: Record<string, string> = {
@@ -85,12 +101,17 @@ const importGrade = computed<GradeLevel | undefined>(() =>
 )
 
 /**
- * 选文件 → 读全文 → 交给 store 导入。
+ * 选文件 → 读全文 → **确认** → 交给 store 导入。
  *
  * ★ 前端**不做任何校验**：文件头、kp_id 与文件名是否一致、超纲术语、学段错位
  *   全部由 Python 侧判定（那里的术语文表才是权威）。本页只把「未通过的原因」逐条显示。
  * ★ 选中后立刻清空 input：同一个文件再选一次也要能再次触发 `change`
  *   （不清空的话第二次导入静默无反应）。
+ * ★★ **确认放在选完文件之后**：这时候才知道学生选的是哪一份（文件名 + 大小能进确认框），
+ *    比「先问一句要不要导入、再让他去选文件」有用得多；而且这一步是重活
+ *    （服务端的 `rebuild` 默认为 true —— 导入完会把整份教材重新嵌入一遍，
+ *    实测 ~6s 纯 CPU），所以必须让他知道「按下去会等几秒、机器会忙一阵」。
+ * ★ 取消 = 什么都不做，**不包括**重选文件（input 已经清空，再点按钮即可重选）。
  */
 async function onFilePicked(event: Event) {
   const input = event.target as HTMLInputElement
@@ -98,6 +119,16 @@ async function onFilePicked(event: Event) {
   input.value = ''
   if (!file) return
   const markdown = await file.text()
+
+  const ok = await confirm.ask({
+    title: `导入「${file.name}」？`,
+    body:
+      '导入后会把整份教材重新分块并嵌入一遍（几秒钟，期间电脑会忙一阵），' +
+      '完成后这个知识点立刻能被检索到。文件内容有问题时会逐条列出来，不会写进库。',
+    confirmText: '导入并重建'
+  })
+  if (!ok) return
+
   await knowledge.importMarkdown({
     fileName: file.name,
     markdown,
@@ -116,14 +147,26 @@ function formatElapsed(ms: number | null): string {
 const elapsedText = computed(() => formatElapsed(knowledge.lastElapsedMs))
 
 /**
- * 发起重建。
+ * 发起重建 —— **先确认**。
  *
+ * ★ 这是全站最重的一个按钮：整份教材重新分块 + 嵌入（实测 ~6s，教材变多会更久），
+ *   期间 CPU 跑满、界面上的其它操作会变卡。按下去之前必须有一句话说明这件事
+ *   （`danger: true` 是因为它**没有中间状态可取消** —— 开始了就得等它跑完）。
  * ★ 这里**没有**假进度、也没有计时器：`rebuildPhase` 由 store 按真实回执推进
  *   （`running` → `done` / `failed`），主进程对这条通道用的是长超时（整份教材的
  *   分块 + 嵌入是秒级到十几秒的活）。失败时 `rebuildMessage` 是服务端给的**可读中文**，
- *   直接用那条消息驱动失败横幅，不在前端编原因。
+ *   直接用那条消息驱动失败态，不在前端编原因。
  */
 async function rebuild() {
+  const ok = await confirm.ask({
+    title: '重建索引？',
+    body:
+      '会把整份教材重新分块、重新算一遍向量（几秒钟，期间电脑会忙一阵）。' +
+      '你自己导入的教材会一起算进去，不会丢；期间可以继续用别的页面。',
+    confirmText: '开始重建',
+    danger: true
+  })
+  if (!ok) return
   await knowledge.rebuild()
 }
 
@@ -152,12 +195,45 @@ const scope = computed(() => {
   ]
 })
 
-/** 操作栏里的"用的是哪一份库"（路径可能很长，交给 `.pa__info` 的溢出裁剪）。 */
-const kbPathLabel = computed(() =>
-  knowledge.stats?.kbPath
-    ? `数据层检视视图 · ${knowledge.stats.kbPath}`
-    : '数据层检视视图 · 本地知识库'
+/**
+ * 操作栏左侧那句总说明。
+ *
+ * ★★ **这里不再放 `kb.sqlite` 的完整路径。**
+ *   原来这一槽是 `数据层检视视图 · <完整 Windows 路径>` —— 两个问题：
+ *     ① 路径里带着开发机的用户名与目录结构，而它在**页面的操作栏**（最显眼的一行）；
+ *     ② 路径很长（实测 ~90 字符），把这一行顶到换行，两个按钮被挤到下面一行。
+ *   现在这里只留「这是一页什么页」，**路径移到下方明确标注的技术读数块里**
+ *   （`<TeacherGate label="技术读数">`），并按末尾几段截短。
+ * ★ 这一槽不能空着：`.pa__info { flex: 1 }` 是这条栏把操作推到右边的唯一依仗，
+ *   槽为空会被 `.pa__info:empty { display: none }` 收掉，两个按钮就会跑到左边去。
+ */
+const viewScopeLabel = computed(() =>
+  knowledge.stats?.userRebuilt ? '数据层检视视图 · 本机知识库（你重建过的那一份）' : '数据层检视视图 · 本机知识库'
 )
+
+/**
+ * 知识库文件的**完整路径** —— 只给技术读数块用（学生看不到这一页）。
+ *
+ * ★ 取不到时给空串（`<TeacherGate>` 里那一行整块不渲染），不编一个假路径出来。
+ */
+const kbPath = computed(() => knowledge.stats?.kbPath ?? '')
+
+/**
+ * 把长路径截成「… + 末尾几段」。
+ *
+ * ★ 为什么是**路径**而不是只给目录：老师说「到底在用哪一份库」时，
+ *   要的是「哪个目录下的哪个文件」—— 只给目录名会丢掉「随包 / 用户重建」这层区别。
+ * ★ 完整路径进 `title`（悬停可见），所以截短**不丢失信息**，只是不占版面。
+ * ★ 只保留末尾 3 段（如 `…\server\_data\shared\kb.sqlite`）：
+ *   再长就会把这一行顶到换行，那正是原来那个问题的成因。
+ */
+function shortenPath(full: string, keep = 3): string {
+  const parts = full.split(/[/\\]/).filter((part) => part.length > 0)
+  if (parts.length <= keep) return full
+  return `…\\${parts.slice(-keep).join('\\')}`
+}
+
+const kbPathShort = computed(() => (kbPath.value ? shortenPath(kbPath.value) : ''))
 
 /** 取数失败（桥缺失 / 端点报错）：三种来源合成一条可读中文，先到先得。 */
 const loadError = computed(
@@ -175,11 +251,13 @@ onMounted(() => {
     <PageActions>
       <!-- ⚠️ `#info` 里**只留原句不重复的那一半**：「教材来源：人工编写 Markdown +
            元数据（不做 PDF 解析）」已经由下面身份行的 `meta` 承担，两处同一句话是冗余。
-           ⚠️ 但不能整个删掉这个槽：`.pa__info { flex: 1 }` 是这条栏把操作推到右边的唯一
+           ⚠️ 但整个槽**不能空着**：`.pa__info { flex: 1 }` 是这条栏把操作推到右边的唯一
            依仗，槽为空会被 `.pa__info:empty { display: none }` 收掉，
-           两个按钮就会跑到**左边**去 —— 与本项目其余各页的按钮位置不一致。 -->
+           两个按钮就会跑到**左边**去 —— 与本项目其余各页的按钮位置不一致。
+           ⚠️ 这里也**不放完整路径**（那会把这一行顶到换行，两个按钮被挤下去）——
+           路径在下面明确标注的技术读数块里，且是截短过的。 -->
       <template #info>
-        <span>{{ kbPathLabel }}</span>
+        <span>{{ viewScopeLabel }}</span>
       </template>
       <input
         ref="fileInput"
@@ -216,28 +294,54 @@ onMounted(() => {
     <PageIdentity
       main="库里到底有什么教材"
       meta="教材来源：人工编写 Markdown + 元数据（不做 PDF 解析）"
-      hint="先按学段筛，再搜知识点；导入或重建后表格会立刻刷新"
+      hint="先按学段筛，再搜知识点；导入或重建前会先问一句，确认后才开始"
     />
 
-    <!-- 取数失败（sidecar 没起来 / 桥缺失）：说清原因，别让表格空着让人以为是"库里没有"。 -->
-    <div v-if="loadError" class="kb__fail" data-testid="kb-load-error">
-      <AlertTriangle :size="15" />
-      <div class="kb__fail-text">
-        <p class="kb__fail-title">读不到知识库</p>
-        <p class="kb__fail-msg">{{ loadError }}</p>
-      </div>
+    <!-- ── 这一页是什么 ────────────────────────────────────────────────
+         学生视角下侧栏根本没有这个入口（`PAGES.knowledge.nav === 'teacher'`），
+         所以这里不必再遮技术词 —— 但要**说清这一页的位置**：
+         它是数据层检视，学生看教材的地方是「学习档案 → 章节进度」。 -->
+    <TeacherGate label="这一页是什么">
+      <p class="kb__tech">
+        这是教材知识库的**数据层检视**页（教师 / 答辩用）：表里每一行都是
+        <code>kb.sqlite</code> 里的真实记录，用来核对「教材进来了没有、向量嵌上了没有」。
+        学生看教材进度走「学习档案 → 章节进度」，不需要这一页。
+      </p>
+    </TeacherGate>
+
+    <!-- 取数失败（sidecar 没起来 / 桥缺失）：说清原因，别让表格空着让人以为是"库里没有"。
+         ★ 用全站统一的 EmptyState（原来是自己拼的一块红条），title 给人话，
+           原始报错收进技术块 —— 这一页是教师控制台，报错原文对排障有用，
+           但不该与「你该怎么办」混成一段。 -->
+    <EmptyState
+      v-if="loadError"
+      tone="error"
+      title="读不到知识库"
+      desc="本地知识库服务暂时没响应。先确认后端已启动，再点下面这个按钮重试。"
+      data-testid="kb-load-error"
+    >
       <el-button size="small" @click="knowledge.loadAll(true)">重试</el-button>
-    </div>
+    </EmptyState>
 
     <!-- 重建失败：失败原因来自服务端（模型缺失 / 维度不符 / 教材格式错），逐字显示 + 可重试。 -->
-    <div v-else-if="knowledge.rebuildPhase === 'failed'" class="kb__fail" data-testid="kb-rebuild-fail">
-      <AlertTriangle :size="15" />
-      <div class="kb__fail-text">
-        <p class="kb__fail-title">重建索引失败</p>
-        <p class="kb__fail-msg">{{ knowledge.rebuildMessage }}</p>
-      </div>
+    <EmptyState
+      v-else-if="knowledge.rebuildPhase === 'failed'"
+      tone="error"
+      title="重建索引失败"
+      desc="教材还是原来的那一份，没有损坏。修好下面说的原因之后再重试一次。"
+      data-testid="kb-rebuild-fail"
+    >
       <el-button size="small" @click="rebuild">重试</el-button>
-    </div>
+    </EmptyState>
+
+    <!-- 出错的**原始原因**：教师排障要它，所以一条都不删，只是单独收进技术块
+         （与上面两句「你该怎么办」分开 —— 混成一段时，人会以为那串状态码才是要读的东西）。 -->
+    <TeacherGate v-if="loadError" label="原始报错">
+      <p class="kb__tech">{{ loadError }}</p>
+    </TeacherGate>
+    <TeacherGate v-else-if="knowledge.rebuildPhase === 'failed'" label="原始报错">
+      <p class="kb__tech">{{ knowledge.rebuildMessage }}</p>
+    </TeacherGate>
 
     <!-- 导入回执：说清"选了什么、认出了什么 / 哪几条没过"。
          ⚠️ 位置固定在**身份行与表格卡片之间**（不插进卡片内部）——
@@ -287,6 +391,19 @@ onMounted(() => {
       </template>
     </p>
     <p v-else-if="knowledge.statsLoading" class="kb__scope kb__scope--pending">正在读取知识库体检数字…</p>
+
+    <!-- ── 技术读数：这一页真正在检视的**是哪一份文件** ────────────────────
+         它必须在这里、而不是页头那一行：页头是「这一页能做什么」，
+         而文件路径是**排障时要核对的东西**（老师/评委问「你现在用的是哪一份库」）。
+         截短后 3 段显示、完整路径进 `title`，所以既看得清又不顶版。 -->
+    <TeacherGate v-if="kbPathShort" label="技术读数">
+      <p class="kb__tech">
+        正在检视的知识库文件：<code class="kb__path" :title="kbPath">{{ kbPathShort }}</code>
+      </p>
+      <p class="kb__tech">
+        随包知识库是只读的；重建后写入的是用户目录下的这一份，检索时优先用它。
+      </p>
+    </TeacherGate>
 
     <SurfacePanel class="card">
       <header class="card__head">
@@ -379,15 +496,26 @@ onMounted(() => {
           </template>
         </el-table-column>
         <template #empty>
-          <el-empty
-            :description="
-              loadError
-                ? '知识库没读上来'
-                : knowledge.points === null
-                  ? '正在读取知识点清单…'
-                  : '没有匹配的知识点'
-            "
-            :image-size="72"
+          <!-- 空态 / 加载态 / 出错态共用一个组件：三种时刻的位置与结构完全一样，
+               分开写只会让「加载中说成没有数据」这类错话各处复现一次。
+               ⚠️ 出错时**不重复**上面那块错误卡的文案 —— 这里只说「表为什么是空的」，
+                  处置按钮在上面那一块（同一页不放两个一样作用的按钮）。 -->
+          <EmptyState
+            v-if="loadError"
+            tone="error"
+            title="这一张表暂时读不出来"
+            desc="上面那块说明了原因，修好后点它的「重试」即可。"
+          />
+          <EmptyState
+            v-else-if="knowledge.points === null"
+            tone="loading"
+            title="正在读取知识点清单…"
+          />
+          <EmptyState
+            v-else
+            tone="empty"
+            title="没有匹配的知识点"
+            desc="换个关键词，或者把上面的学段筛选切回「全部」。"
           />
         </template>
       </el-table>
@@ -402,33 +530,30 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.kb__fail {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 13px 15px;
-  border-radius: var(--k12-r-card);
-  background: var(--k12-bad-soft);
-  border: 1px solid var(--k12-bad-border);
-  color: var(--k12-bad);
-}
-.kb__fail-text {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.kb__fail-title {
-  font-size: var(--k12-fs-sm);
-  font-weight: 650;
-  color: var(--k12-fg);
-}
-.kb__fail-msg {
+/* ── 教师视角里的技术说明 ────────────────────────────────────────────────
+ * 与栅格里的说明同档（13px / `--k12-fs-xs`）：它们是**排障读物**，不是页面正文，
+ * 但也不是 ≤4 字的角标 —— 12px（`--k12-fs-micro`）只留给角标。 */
+.kb__tech {
   font-size: var(--k12-fs-xs);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
+.kb__tech code {
+  font-family: var(--k12-font-mono);
+  font-size: var(--k12-fs-xs);
+}
+/* 路径：等宽 + 浅底，可换行（截短后仍可能很长，`break-all` 保证它不顶破容器）。
+ * 完整路径在 `title` 上，悬停可见 —— 截短是不占版面，不是丢信息。 */
+.kb__path {
+  display: inline-block;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: var(--k12-r-flat);
+  background: var(--k12-surface-2);
+  color: var(--k12-accent-ink);
+  word-break: break-all;
+}
+
 .kb__file {
   display: none;
 }

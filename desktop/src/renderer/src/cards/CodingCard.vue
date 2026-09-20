@@ -29,8 +29,10 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useChatStore } from '../stores/chat'
+import { useKnowledgeStore } from '../stores/knowledge'
 import type { InlineCard } from '../api/events'
 import { createCodeEditor, observeEditorResize, type CodeEditorHandle } from '../sandbox/monaco-setup'
+import { kpLabel } from '../study/kp-label'
 import {
   runStudentCode,
   subscribeRunnerStatus,
@@ -43,14 +45,35 @@ import {
   collectHints,
   collectResult,
   formatRunMeta,
-  readCodingCard
+  hintRequestDisplayText,
+  readCodingCard,
+  retryCardDisplayText,
+  retryRequestWireText,
+  runRequestDisplayText
 } from './coding'
 
 const props = defineProps<{ card: InlineCard }>()
 const chat = useChatStore()
+const knowledge = useKnowledgeStore()
 
 const view = computed(() => readCodingCard(props.card.payload))
 const kpId = computed(() => (view.value.kind === 'unknown' ? '' : view.value.kpId))
+
+/**
+ * 卡片头上那个知识点 chip 的文字（**教材里的中文名**，不是 slug）。
+ *
+ * ★ 用 `study/kp-label.ts` 的共用规则（取不到名字给中性标签，不回落成 id）——
+ *   与学习档案 / 闯关 / 依赖图同一条口径，不在这里另写一份兜底。
+ * ★ 名字表可能还没取到（`knowledge.ensureNames()` 是异步的），所以这里**取不到就先不显示**
+ *   那个 chip（`v-if="kpName"`）：一个空的 chip 比一个写着 `prog-loop-jr` 的 chip 好，
+ *   而清单到齐之后它会自动出现。
+ */
+const kpName = computed(() => {
+  const id = kpId.value
+  if (id === '') return ''
+  const name = kpLabel(id, null, knowledge.kpNameOf)
+  return name === '未命名知识点' ? '' : name
+})
 
 /**
  * 整段对话里的卡片（提示与评估结果都可能在别的轮次里）。
@@ -163,6 +186,9 @@ onMounted(() => {
   unsubscribeStatus = subscribeRunnerStatus((status) => {
     runnerStatus.value = status
   })
+  // 知识点中文名（卡片头那个 chip）——**失败不阻断卡片**：取不到就不显示 chip，
+  // 卡片其余部分照常可用（`ensureNames` 自己幂等，多张卡片同时调也只发一次）。
+  void knowledge.ensureNames().catch(() => {})
 })
 
 /**
@@ -249,8 +275,10 @@ async function run(): Promise<void> {
   }
 
   // 真实输出已经显示了；再请模型给中文反馈（那一步失败不影响上面的展示）
+  // ★★ 两个文本必须一起给（评审抓到的缺陷）：wire 里那句「请用 evaluate_code…不要直接给正确代码」
+  //   是**写给模型的指令**，只准进 wire；学生气泡里显示的是 `runRequestDisplayText()` 那句自然的话。
   if (!chat.streaming) {
-    void chat.send(buildRunRequestMessage(kpId.value, code))
+    void chat.send(runRequestDisplayText(), buildRunRequestMessage(kpId.value, code))
   }
 }
 
@@ -263,7 +291,22 @@ function askForHint(): void {
     return
   }
   localHint.value = null
-  void chat.send(buildHintRequestMessage(kpIdValue, currentCode()))
+  // ★ 同上：wire 里有内部指令，气泡里只显示学生语言（两个文本成对给出）。
+  void chat.send(hintRequestDisplayText(), buildHintRequestMessage(kpIdValue, currentCode()))
+}
+
+/**
+ * 卡片没画出来时的出口：请团团**重新取一次**这个知识点的模板。
+ *
+ * ★ 这是学生自己能走的一条路（旧版只有一句"老师重新来一遍就好"，而他没有任何按钮）。
+ * ★ wire 文本还是走同一条纪律（见 `buildHintRequestMessage` 的说明）：
+ *   括号里那句是给模型看的指令；学生气泡里显示的是 `retryCardDisplayText()`。
+ * ★ 读不出知识点 id 时不渲染按钮（模板里 v-if）—— 点了也不知道要重取哪一题。
+ */
+function retryCard(): void {
+  const kpIdValue = view.value.kind === 'unknown' ? view.value.kpId : ''
+  if (kpIdValue === '' || chat.streaming) return
+  void chat.send(retryCardDisplayText(), retryRequestWireText(kpIdValue))
 }
 
 /** 重置为脚手架（学生改乱了之后想重来）。 */
@@ -321,7 +364,12 @@ const interruptNotice = computed(() => {
   >
     <header class="coding__head">
       <span class="title">编程练习</span>
-      <span class="chip tool" data-testid="coding-kp">{{ view.kpId }}</span>
+      <!-- ★★ 这里原来直接印 `{{ view.kpId }}`（`prog-loop-jr` 这种 slug）——
+           卡片在**对话正文里**，那是学生看得最多的地方，摆一个内部主键
+           与走查那条「立刻隐藏所有 ID」正面冲突。改成教材里的中文名；
+           取不到名字时**整个 chip 不出现**（不回落成 slug）。
+           原始 id 仍在容器的 `data-kp-id` 上（排障与断言要用，但不渲染）。 -->
+      <span v-if="kpName" class="chip tool" data-testid="coding-kp" :title="view.kpId">{{ kpName }}</span>
       <span class="chip" :class="`chip--${pyodideBadge.tone}`" data-testid="coding-pyodide">
         {{ pyodideBadge.text }}
       </span>
@@ -438,23 +486,63 @@ const interruptNotice = computed(() => {
     </p>
 
     <p v-if="localHint" class="coding__hint" data-testid="coding-hint-local">{{ localHint }}</p>
+    <!-- ★★ 这句话必须与**同一张卡片上的「求助」按钮**保持一致（走查后修正）。
+         原来写的是「…运行，不会上传、也碰不到学习数据。卡住就点「求助」」——
+         两句互相打脸：点「求助」会把**学生代码的前 400 字**发给团团
+         （见 `cards/coding.ts` 的 `buildHintRequestMessage` + `codePreview`）。
+         一个把字面意思当真、刚读完「不会上传」就去点求助的 10 岁学生，
+         会以为求助也是本地的。
+         现在拆成两件**各自都成立**的事：
+           · 运行 / 执行 —— 只在这台电脑的沙箱里，不联网；
+           · 求助 —— 会把你写的那几行发给团团（它要靠这个才能帮你找问题）。
+         ⚠️ 改这句话之前先读 `buildHintRequestMessage`：它带 `codePreview(code)`。 -->
     <p class="coding__foot">
-      代码在你电脑上的浏览器沙箱里运行，不会上传、也碰不到学习数据。卡住就点「求助」。
+      代码在你电脑上的沙箱里运行，不会上传。点「求助」时，会把你写的那几行发给团团看 ——
+      它是靠这个帮你找问题的。
     </p>
   </article>
 
-  <!-- 认不出的载荷：一句说明，绝不猜 -->
+  <!-- ── 认不出的载荷：不猜内容，但**残余能读到的部分照样给学生** ──────────
+       ★ 旧版这里是一句「编程卡片的内容格式不对，老师重新来一遍就好」——
+         它把「格式不对」这种系统内部的话摆给了学生，而且一旦卡片没能渲染，
+         学生连这题要干什么都看不到了。现在分三层：
+         ① 有题目要求就照常显示（那是学习材料，不是调试信息）；
+         ② 一句学生话说明「卡片这次没画出来」，配上能自己走的路（再出一遍 / 用话讲）；
+         ③ 主进程给的排障原文只进 `data-*` 属性（与动画卡片的 `data-degrade-reason` 同一手法），
+            脚本与排障能读到，学生不用看。 -->
   <article
     v-else-if="view.kind === 'unknown'"
     class="coding coding--unknown"
     data-testid="coding-card-unknown"
     :data-tool="card.tool ?? ''"
+    :data-detail="view.text || null"
   >
     <header class="coding__head">
       <span class="title">编程练习</span>
-      <span class="chip chip--warn">这张卡片没能显示出来</span>
+      <span class="chip chip--warn">这张卡片这次没画出来</span>
     </header>
-    <p class="coding__goal">{{ view.text || '编程卡片的内容格式不对，老师重新来一遍就好。' }}</p>
+    <p v-if="view.task" class="coding__goal" data-testid="coding-unknown-task">
+      <span class="coding__goal-label">这题要做的：</span>{{ view.task }}
+    </p>
+    <!-- ★ 这一句**永远是学生话**：编程侧的失败文本是写给模型/排障的
+         （例如「取代码模板需要知识点 id…请先确认要练哪个知识点」），
+         照搬进学生气泡就是又一份"开发者视角"。原文只进上面的 `data-detail`。 -->
+    <p class="coding__fallback" data-testid="coding-unknown-notice">
+      卡片里原来的代码框和运行按钮这次没能准备好。你可以点下面的按钮让团团重出一遍，也可以直接问它「这道题用中文讲讲怎么做」。
+    </p>
+    <div class="coding__actions">
+      <!-- ★ 读不出知识点 id 时不渲染（点了也不知道要重取哪道题 —— 那是假按钮） -->
+      <button
+        v-if="view.kpId"
+        class="btn btn--primary"
+        type="button"
+        data-testid="coding-unknown-retry"
+        :disabled="chat.streaming"
+        @click="retryCard"
+      >
+        让团团再出一遍
+      </button>
+    </div>
   </article>
 </template>
 
@@ -470,6 +558,16 @@ const interruptNotice = computed(() => {
 
 .coding--unknown {
   border-style: dashed;
+}
+
+/* 卡片没画出来时给学生的说明：一句完整的、能照做的话 → 次级正文档
+ * （与 `.coding__goal` 同一落点；不是红色报错 —— 这一条不是故障，是"这次没成"）。 */
+.coding__fallback {
+  margin-top: 10px;
+  /* 说明文字是**给学生读的** → 次级正文档（与 `.coding__goal` 同档） */
+  font-size: var(--k12-fs-sm);
+  line-height: 1.8;
+  color: var(--k12-muted);
 }
 
 /* ── 状态胶囊（角标语义）─────────────────────────────────────────────

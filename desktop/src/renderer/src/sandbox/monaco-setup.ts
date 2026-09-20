@@ -96,7 +96,33 @@ export const DEFAULT_EDITOR_THEME: CodeEditorTheme = 'vs'
 /** Monaco 用的语言 id（契约里 `CodeTemplate.language` 固定 `"python"`）。 */
 export const EDITOR_LANGUAGE = 'python'
 
-/** 学生代码的编辑器选项（教学取向：行号、自动换行、**关掉代码提示的噪声**）。 */
+/**
+ * 学生代码的编辑器选项（教学取向：行号、自动换行、缩进参考线、**关掉代码提示的噪声**）。
+ *
+ * ── ★ 字号 / 行高（走查结论：代码字太小、行距太挤）────────────────────────
+ *
+ * `15 / 24`（1.6 倍行距），三条依据：
+ *   ① **代码不许比正文小**：设计系统的正文是 16px（`--k12-fs-md`，D-043 的字号阶梯），
+ *      而 K12 的学生里有一大批是刚接触键盘的 —— 13px 的等宽字对他们是"看不清"而不是"紧凑"；
+ *   ② 不直接取 16px：等宽字在**同样字号下视觉上比 UI 字更大**（字面更宽更满），
+ *      15px 已经与正文观感齐平、再大就比正文重（那会违反「内容里最重的是正文」这条层级纪律）；
+ *   ③ 行距按 1.6 倍：Python 是**缩进即语法**的语言，行距太挤时"缩进了几层"会看不出来
+ *      （那正是 `IndentationError` 最让人想不通的地方）。
+ *
+ * ⚠️ 改这两个数要同时看编辑器容器的**高度**（两处，都写死了）：
+ *     `views/Coding.vue` 的 `.code__editor` = 420px ≈ (420−16)÷24 ≈ 16 行；
+ *     `cards/CodingCard.vue` 的 `.coding__editor` = 300px ≈ 12 行（内联卡片，可展开/全屏）。
+ *     高度与行高一起决定"一屏能看到几行"，只改一边就会出现"字大了但一行都看不全"。
+ *
+ * ── ★ 缩进参考线 / 括号连线（`guides`）──────────────────────────────────
+ *
+ * 目标版本：**monaco-editor 0.56.0**（`^0.56.0`）。0.56 支持 `guides.indentation` /
+ * `guides.bracketPairs`（`IGuidesOptions`，见 `esm/vs/editor/editor.api.d.ts`）。
+ * ⚠️ 事实核对：**`indentation` 在 0.56 的默认值本来就是 `true`**（`editorOptions.js` 的
+ * `GuideOptions` 默认块），所以这一条是"写明意图"而不是"打开一个新开关"；
+ * 真正的变化是 `bracketPairs`（默认 `false`）—— 括号配对连线对
+ * `(height_m ** 2)` 这类嵌套表达式是实打实的帮助。
+ */
 export function editorOptions() {
   return {
     language: EDITOR_LANGUAGE,
@@ -118,8 +144,13 @@ export function editorOptions() {
     // 字体：等宽，与设计系统的 --font-mono 同族（回退链保证本机一定有字体可用）
     fontFamily:
       "ui-monospace, 'Cascadia Mono', Consolas, 'Courier New', 'Microsoft YaHei Mono', monospace",
-    fontSize: 13,
-    lineHeight: 20,
+    fontSize: 15,
+    lineHeight: 24,
+    // 缩进参考线 + 括号配对连线（见文件头的版本核对）。
+    // `bracketPairsHorizontal` 保持默认 `'active'`：只给当前括号对画横线，不糊满屏。
+    guides: { indentation: true, bracketPairs: true, highlightActiveBracketPair: true },
+    // 上下各 8px：首行/末行贴着外框时，行号与缩进会看起来像被裁掉了
+    padding: { top: 8, bottom: 8 },
     // 编辑器自己滚动，不把整页撑开（卡片高度固定）
     scrollbar: { alwaysConsumeMouseWheel: false },
     automaticLayout: false, // 由我们用 ResizeObserver 显式 layout（更可控）

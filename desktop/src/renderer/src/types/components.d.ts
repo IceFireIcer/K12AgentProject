@@ -44,6 +44,7 @@ declare module 'vue' {
     FloatPanel: typeof import('./../components/FloatPanel.vue')['default']
     GradeIndicator: typeof import('./../components/GradeIndicator.vue')['default']
     InlineCard: typeof import('./../cards/InlineCard.vue')['default']
+    MascotMark: typeof import('./../components/MascotMark.vue')['default']
     MessageComposer: typeof import('./../components/MessageComposer.vue')['default']
     ModelPicker: typeof import('./../components/ModelPicker.vue')['default']
     PageActions: typeof import('./../components/PageActions.vue')['default']
@@ -55,6 +56,7 @@ declare module 'vue' {
     SidecarBadge: typeof import('./../components/SidecarBadge.vue')['default']
     SourceChips: typeof import('./../components/SourceChips.vue')['default']
     SurfacePanel: typeof import('./../components/SurfacePanel.vue')['default']
+    TeacherGate: typeof import('./../components/TeacherGate.vue')['default']
     WindowControls: typeof import('./../components/WindowControls.vue')['default']
   }
 }

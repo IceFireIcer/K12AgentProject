@@ -23,9 +23,16 @@
  *    所以它被**删掉**了，而不是换一个名字继续假装。要请老师看代码，
  *    真实路径是在对话里说一句「帮我看看这段代码」——那是模型经 `evaluate_code` 走的那条线。
  *
+ * ★★ **受众分离（本条是这一页的读改纪律）**：
+ *    上面那些机制（端点名 / Worker / 后端怎么归一）**只进教师视角**
+ *    （`<TeacherGate>`，学生视角下不在 DOM 里），学生看到的是「你现在该做什么」：
+ *      · 页面上的层级说明 → 折叠块里的**家长也能读懂**的一段话（默认收起）；
+ *      · 底部那句运行说明 → 「只在这台电脑上运行、结果只用来给你中文解释」；
+ *      · 关卡名 → 教材里的中文名（取不到用中性的「未命名知识点」，**绝不摆 kp id 这种 slug**）。
+ *
  * ── 布局（改动前先读）────────────────────────────────────────────────
  *
- *   左 268px 任务简报（要做什么 / 学习路径 / 分级求助 / 机制说明折叠）
+ *   左 268px 任务简报（要做什么 / 学习路径（分三组收起）/ 卡住的求助 / 机制说明折叠）
  *   右侧主区（操作栏 → 身份行 → 编辑器 + 运行 + 输出 + 提示）
  *
  * 内容区的最大字号（22px）落在身份行上：任务名 16px（块标题档）、正文 13–14px、
@@ -37,11 +44,23 @@
  *   而**共用**同一套底层件：`monaco-setup.ts` / `pyodide-runner.ts` / `cards/coding.ts` 的纯函数。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { AlertTriangle, Check, Download, FileText, FlaskConical, Lightbulb, RotateCcw } from 'lucide-vue-next'
+import {
+  AlertTriangle,
+  Check,
+  ChevronRight,
+  Download,
+  FileText,
+  FlaskConical,
+  Lightbulb,
+  RotateCcw
+} from 'lucide-vue-next'
 import PageIdentity from '@/components/PageIdentity.vue'
+import EmptyState from '@/components/EmptyState.vue'
+import TeacherGate from '@/components/TeacherGate.vue'
 import { useCodeStore, CODE_HINT_MAX } from '../stores/code'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { useQuizStore } from '../stores/quiz'
+import { useOnBackendReady } from '../composables/useOnBackendReady'
 import { createCodeEditor, observeEditorResize, type CodeEditorHandle } from '../sandbox/monaco-setup'
 import {
   runStudentCode,
@@ -50,6 +69,10 @@ import {
   type RunnerStatus
 } from '../sandbox/pyodide-runner'
 import { formatRunMeta } from '../cards/coding'
+// ★ 「拿不到中文名时显示什么」的唯一口径是 `study/kp-label.ts`：有名字用名字，
+//   没名字用中性的「未命名知识点」（原始 id 只进 `title` 悬停可见）——
+//   绝不退回 `prog-loop-jr` 这种 slug（学生看到只会以为报错）。这套规则原本在三页各写一份。
+import { kpLabel, kpLabelResolved } from '../study/kp-label'
 
 const code = useCodeStore()
 const quiz = useQuizStore()
@@ -74,23 +97,35 @@ const STAGE_LABELS: Record<string, string> = {
   mastered: '已掌握'
 }
 
-/** 知识点中文名（来自教材知识库；取不到就如实显示 kp id，不编一个名字）。 */
-function kpName(kpId: string): string {
-  // `points` 在契约里是可选的（`KnowledgePointListResponse.points?`）—— 缺省当空清单，
-  // 于是取不到名字时如实退回 kp id（与 store 的 `filteredPoints` 同一口径）。
-  const point = (knowledge.points?.points ?? []).find((item) => item.kpId === kpId) ?? null
-  return point?.name ?? ''
-}
-
+/**
+ * 知识点显示名（教材里的中文名）。
+ *
+ * ★ 名字的唯一来源是教材知识点清单（`stores/knowledge.ts` 的 `kpIndex`，经 `kpLabel` 消费）——
+ *   本页**不自己建第二份名字表**，也不逐行 `.find()`（那既贵又是第二处实现）。
+ * ★ 这一段的兜底原本是 `kpName(kpId) || kpId` —— 于是拿不到名字时，10 岁的学生看到的是
+ *   `ph-data-train-predict` 这样的 slug（实测形态：教材换代后老库里查不到名字的残留行）。
+ *   现在退回中性的「未命名知识点」，原始 id 只进 `title`（悬停可见，排障/答辩要它）。
+ */
 function levelLabel(kpId: string): string {
-  return kpName(kpId) || kpId
+  return kpLabel(kpId, null, (id) => knowledge.kpNameOf(id))
 }
 
-/** 当前题目的显示名：优先教材里的名字，其次 kp id（mono 显示）。 */
+/** 名字是否真的取到了（取不到时把 kp id 放进 `title`，界面上不显示它）。 */
+function levelNameResolved(kpId: string): boolean {
+  return kpLabelResolved(kpId, null, (id) => knowledge.kpNameOf(id))
+}
+
+/** 当前题目的显示名：教材里的中文名；取不到用中性标签（不再显示 kp id）。 */
 const taskName = computed(() => {
   const kpId = code.template?.kpId ?? code.activeKpId
   if (kpId === '') return ''
   return levelLabel(kpId)
+})
+
+/** 当前题目**有没有**中文名（没有就不显示「对应知识点」那一行 —— 见模板里的说明）。 */
+const taskNameResolved = computed(() => {
+  const kpId = code.template?.kpId ?? code.activeKpId
+  return kpId !== '' && levelNameResolved(kpId)
 })
 
 /** 脚手架里的 TODO 处数（真实数出来的；填完它们就是这一题的目标）。 */
@@ -100,6 +135,57 @@ const todoCount = computed(() => (code.template?.scaffold.match(/TODO/g) ?? []).
 const attempts = ref(0)
 /** 已经拿到分析结果的那一次尝试号（对不上就说明反馈是上一次的，不该冒充这一次）。 */
 const analyzedAttempt = ref(0)
+
+/* ------------------------------------------------------------------ *
+ * 学习路径的分组：整条路径有几十关，平铺出来就是一堵墙
+ * ------------------------------------------------------------------ */
+
+/**
+ * ★ 分组的目的只有一个：**「我做过什么 / 接下来做什么」要一眼能答**。
+ *
+ * 分组只按**服务端给的 stage** 切，顺序仍是服务端的拓扑序（本页不重排）。
+ * 三组的默认开合不是随手定的：
+ *   · 「正在学」默认展开 —— 它就是「接下来做什么」，学生一进页面要直接看到；
+ *   · 「已经走过」默认收起 —— 它回答的是过去，关数会越攒越多；
+ *   · 「还没解锁」默认收起 —— 关数最多（一个新学生的路径就是几十关），
+ *     全摊开会把「正在学」那几关挤到看不见的地方。
+ * 前两组仍是可点的按钮（键盘可达），第三组本来就是点不动的（未解锁）。
+ */
+const openLevels = computed(() => levels.value.filter((level) => level.stage === 'learning'))
+const doneLevels = computed(() =>
+  levels.value.filter((level) => level.stage === 'quizzed' || level.stage === 'mastered')
+)
+const lockedLevels = computed(() => levels.value.filter((level) => level.stage === 'locked'))
+const showDone = ref(false)
+const showLocked = ref(false)
+
+/** 编辑器区有没有「要做的事」：读到模板了，或者手里还有一份草稿。都没有才是空态。 */
+const editorHasWork = computed(() => code.template !== null || code.draft.trim() !== '')
+
+/**
+ * 编辑器区的空态分三种，**原因分开说**（取数失败不该看起来像「你还没选题目」）：
+ * 正在读 / 读取失败 / 还没有题目可选。文案都指下一步动作，不解释内部机制。
+ *
+ * ★ `quiz.progressLoading` 也要算进「正在读」：进页面时先读学习路径，
+ *   读完之后才会自动打开第一关 —— 不挡这一段的话，学生会先看到一帧
+ *   「还没有选题目」，紧接着它自己变掉（像刚刚点坏了什么）。
+ */
+const editorStage = computed<'loading' | 'error' | 'empty'>(() => {
+  if (code.templateLoading || quiz.progressLoading) return 'loading'
+  if (code.templateError !== null) return 'error'
+  return 'empty'
+})
+
+/** 空态里那句「下一步做什么」——按「有没有可做的关卡」分开写，不硬凑一句万能话。 */
+const editorEmptyDesc = computed(() => {
+  if (levels.value.length === 0) {
+    return '左边还没读到学习路径。先回对话里问几句，让团团把学段判出来，这里就会有第一关。'
+  }
+  if (openLevels.value.length === 0) {
+    return '左边的关卡都还没解锁。先把正在学的那一关通过，后面会一关一关打开。'
+  }
+  return '在左边的「学习路径」里点一关，这里就会出现那一题的代码骨架 —— 标着 TODO 的地方就是你要补的地方。'
+})
 
 /**
  * 读学习路径 + 知识点名，并**默认打开第一个已解锁的关卡**。
@@ -147,6 +233,19 @@ let stopResizeObserver: (() => void) | null = null
 const editorReady = ref(false)
 /** 装配失败时的可读说明（**绝不白屏**：脚手架会以只读文本顶上）。 */
 const editorFailure = ref('')
+
+/**
+ * 编辑框是否占位显示。
+ *
+ * ★ 空态之外还有**一个必须一直能看见**的东西：Monaco 自己装配失败时的说明
+ *   （`data-testid="coding-view-editor-failure"`）。它此前挂在一个总是可见的框里；
+ *   现在这个框会被空态换掉，所以判据要把「有故障说明」也算进来 ——
+ *   否则「编辑器起不来」这条最需要被看见的信息会跟着空态一起消失（白屏且无解释）。
+ */
+const editorVisible = computed(() => editorHasWork.value || editorFailure.value !== '')
+
+/** 编辑器区的引导空态。与 {@link editorVisible} **互为补集**：两者不会同时出现（否则同一句话读两遍）。 */
+const showEditorEmpty = computed(() => !editorHasWork.value && editorFailure.value === '')
 
 /**
  * 装配 Monaco（异步：内部才动态 import，vite 因此把它切成独立 chunk）。
@@ -342,10 +441,14 @@ const verdictLabel = computed(() => {
 })
 
 /* ------------------------------------------------------------------ *
- * 下载（前端就能做，所以它是真的：Blob + a[download]）
+ * 下载（走主进程的原生保存对话框，见 downloadCode 的说明）
  * ------------------------------------------------------------------ */
 
 const downloaded = ref(false)
+/** 导出进行中（按钮据此禁用，避免连点弹两次保存框）。 */
+const downloading = ref(false)
+/** 导出回执（已保存 / 取消了 / 失败了）—— 只说文件名，不说完整路径。 */
+const downloadNote = ref<string | null>(null)
 
 /**
  * 下载当前代码（.py）。
@@ -354,19 +457,48 @@ const downloaded = ref(false)
  *   `expectedBehavior` 都来自 `useCodeStore()`，不是原型里那份假数据。
  * ★ 之前那个「1.5 秒后把按钮文字还原」的计时器一并删掉了 —— 按钮状态由学生的动作驱动，
  *   装一个定时器只为了演一下「我变回去了」，是本轮要清掉的那种假动作。
+ *
+ * ★★ 走**系统原生保存对话框**（`file:export`，与学习报告 / 学习地图同一条通道），
+ *   不再用 `Blob` + `<a download>`：后者在 Electron 里弹出来的是**浏览器那套下载保存框**，
+ *   地址栏位置会显示一段 `blob:` 开头的内部地址（走查截图里抓到就是这个）。
+ *   ⚠️ 这里刻意不写出那个完整地址：渲染进程里出现回环地址字面量会被
+ *      `architecture-guards.test.ts` 的 G3 拦下（那条守卫是防「渲染进程直连 sidecar」的，
+ *      按文件整体扫描、不区分注释）。
+ * ⚠️ 文件名用**题目中文名**（`taskName`），不是 `template.kpId` ——
+ *   下载下来的文件叫 `prog-loop-jr.py` 对学生没有任何意义。
  */
-function downloadCode(): void {
+async function downloadCode(): Promise<void> {
   const template = code.template
   if (template === null) return
+  const api = window.api
+  if (typeof api?.exportMarkdown !== 'function') {
+    downloadNote.value = '导出还没接线：保存对话框暂时用不了。'
+    return
+  }
   const header = `# ${levelLabel(template.kpId)}\n# 期望效果：${template.expectedBehavior}\n\n`
-  const blob = new Blob([header + code.draft], { type: 'text/x-python;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = `${template.kpId}.py`
-  anchor.click()
-  URL.revokeObjectURL(url)
-  downloaded.value = true
+  downloading.value = true
+  downloadNote.value = null
+  try {
+    const result = await api.exportMarkdown({
+      fileName: `${taskName.value} - 我的代码`,
+      content: header + code.draft,
+      extension: '.py'
+    })
+    if (result.ok) {
+      // ★ 回执只回**文件名**（完整路径不进渲染进程，见 D-035）
+      downloadNote.value = `已保存：${result.fileName}`
+      downloaded.value = true
+      return
+    }
+    // 取消不是失败（学生主动关掉对话框），不该报错吓人
+    downloadNote.value = result.canceled ? '这次没有保存。' : '这次没能保存，稍后再试试。'
+    if (!result.canceled) console.warn('[coding] 导出代码失败：', result.message)
+  } catch (error) {
+    console.warn('[coding] 导出代码异常：', error)
+    downloadNote.value = '这次没能保存，稍后再试试。'
+  } finally {
+    downloading.value = false
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -379,6 +511,19 @@ onMounted(() => {
     runnerStatus.value = status
   })
   void mountEditor()
+})
+
+/**
+ * 首屏取数（学习路径 + 知识点名）走**统一的重试机制**。
+ *
+ * ★ 为什么不能只在 `onMounted` 里发一次（本项目已有过一次同类缺陷，见 `views/Dependency.vue`
+ *   的注释）：本页在 `App.vue` 的 `<KeepAlive>` 里，切走再切回来**不会重挂**；
+ *   而 sidecar 是独立进程，冷启动头几秒必然还没就绪 —— 只发一次的话，
+ *   「路径为空」会就地定格成永久状态，学生看到的是一个再也变不出东西的页面。
+ * `loadPath` 本身是幂等的（两个 store 的读取都带「已有数据/在途就短路」），
+ * 正是 `useOnBackendReady` 要求的形态（它先立刻跑一次，就绪后再补跑一次）。
+ */
+useOnBackendReady(() => {
   void loadPath()
 })
 
@@ -389,6 +534,21 @@ watch(
     if (scaffold !== '' && editor !== null && editor.getValue() !== scaffold) editor.setValue(scaffold)
   }
 )
+
+/**
+ * ★ 编辑器容器从「藏起来」变回「看得见」时必须重算布局。
+ *
+ * 原因：没有题目时整个编辑区被空态换掉（容器尺寸 0×0，见 `editorVisible`），
+ * 而 Monaco 的 `automaticLayout: false` 意味着**它自己不会去量**
+ * （见 `sandbox/monaco-setup.ts` 的注释：布局由本页的 ResizeObserver 显式驱动）。
+ * 不等 ResizeObserver 那一拍，学生点完关卡会先看到一帧**空白的编辑框**
+ * （有时长到下一帧才恢复）—— 那正好是「我点了没反应」的观感。
+ * 这里显式补一次，让它与脚手架同帧出现。
+ */
+watch(editorVisible, (visible) => {
+  if (!visible) return
+  void nextTick(() => editor?.layout())
+})
 </script>
 
 <template>
@@ -412,8 +572,14 @@ watch(
           <el-descriptions-item label="做到这样就算完成">
             <code class="code__mono">{{ code.template.expectedBehavior }}</code>
           </el-descriptions-item>
-          <el-descriptions-item label="对应知识点">{{ code.template.kpId }}</el-descriptions-item>
-          <el-descriptions-item label="脚手架里的 TODO">{{ todoCount }} 处</el-descriptions-item>
+          <!-- ★ 「对应知识点」只在**真的取到中文名**时出现。
+               ⚠️ 这里原本直接摆 `code.template.kpId`（`prog-loop-jr` 这种 slug）——
+               学生对着一串英文短横线只会以为软件坏了。名字取不到就**整行不显示**：
+               摆一个「未命名知识点」在这里没有增量信息（任务名那一行已经在说同一件事了）。 -->
+          <el-descriptions-item v-if="taskNameResolved" label="对应知识点">
+            {{ taskName }}
+          </el-descriptions-item>
+          <el-descriptions-item label="要补的 TODO">{{ todoCount }} 处</el-descriptions-item>
         </el-descriptions>
       </template>
       <p v-else-if="code.templateLoading" class="code__desc">正在读这一题的脚手架…</p>
@@ -425,40 +591,116 @@ watch(
       <section class="code__sec">
         <span class="code__sec-label">学习路径</span>
         <!-- ★ 这一块是原型里那份写死的「完成步骤」的**真实版本**：顺序与阶段都来自
-             服务端的闯关进度（按依赖图拓扑序排好），本页只显示、不重排。 -->
-        <p class="code__sec-note">
-          {{ levels.length }} 关 · 顺序与是否解锁由闯关闭环决定；点一关就换到那一题。
+             服务端的闯关进度（按依赖图拓扑序排好），本页只显示、不重排。
+             这一行是「一眼答」：走过几关 / 在学几关 / 还锁着几关。 -->
+        <p class="code__sec-note" data-testid="coding-view-path-summary">
+          共 {{ levels.length }} 关 · 已经走过 {{ doneLevels.length }} 关 · 正在学
+          {{ openLevels.length }} 关 · 还有 {{ lockedLevels.length }} 关没解锁
         </p>
       </section>
 
-      <ul v-if="levels.length > 0" class="path" data-testid="coding-view-path">
-        <li
-          v-for="level in levels"
-          :key="level.kpId"
-          class="path__item"
-          :data-stage="level.stage"
-          :class="{ 'path__item--on': level.kpId === selectedKpId }"
-        >
+      <!-- ── 学习路径：按 stage 分三组（正在学默认展开，另外两组默认收起）──────
+           `data-testid="coding-view-path"` 落在**外层容器**上：三组共用它，
+           于是「这一页有没有路径」这个判断与分组细节无关（分组以后还会再调）。 -->
+      <div v-if="levels.length > 0" class="pathgrps" data-testid="coding-view-path">
+        <!-- ① 正在学（默认展开 —— 这就是「接下来做什么」） -->
+        <section v-if="openLevels.length > 0" class="pathgrp">
+          <p class="pathgrp__label">正在学（{{ openLevels.length }} 关）</p>
+          <ul class="path">
+            <li
+              v-for="level in openLevels"
+              :key="level.kpId"
+              class="path__item"
+              :data-stage="level.stage"
+              :class="{ 'path__item--on': level.kpId === selectedKpId }"
+            >
+              <button
+                type="button"
+                class="path__btn"
+                :data-testid="`coding-view-level-${level.kpId}`"
+                :data-active="level.kpId === selectedKpId ? 'true' : 'false'"
+                :title="levelNameResolved(level.kpId) ? undefined : level.kpId"
+                :disabled="running"
+                @click="openTask(level.kpId)"
+              >
+                <span class="path__dot" aria-hidden="true" />
+                <span class="path__name">{{ levelLabel(level.kpId) }}</span>
+                <span class="path__stage">{{ STAGE_LABELS[level.stage] ?? level.stage }}</span>
+              </button>
+            </li>
+          </ul>
+        </section>
+
+        <!-- ② 已经走过（默认收起：它回答的是过去，关数只会越攒越多） -->
+        <section v-if="doneLevels.length > 0" class="pathgrp">
           <button
-            v-if="level.stage !== 'locked'"
             type="button"
-            class="path__btn"
-            :data-testid="`coding-view-level-${level.kpId}`"
-            :data-active="level.kpId === selectedKpId ? 'true' : 'false'"
-            :disabled="running"
-            @click="openTask(level.kpId)"
+            class="pathgrp__toggle k12-tap"
+            :aria-expanded="showDone"
+            data-testid="coding-view-path-done-toggle"
+            @click="showDone = !showDone"
           >
-            <span class="path__dot" aria-hidden="true" />
-            <span class="path__name">{{ levelLabel(level.kpId) }}</span>
-            <span class="path__stage">{{ STAGE_LABELS[level.stage] ?? level.stage }}</span>
+            <ChevronRight :size="13" class="pathgrp__ico" :data-open="showDone" aria-hidden="true" />
+            已经走过 {{ doneLevels.length }} 关
           </button>
-          <div v-else class="path__btn path__btn--locked" :data-testid="`coding-view-level-${level.kpId}`">
-            <span class="path__dot" aria-hidden="true" />
-            <span class="path__name">{{ levelLabel(level.kpId) }}</span>
-            <span class="path__stage">{{ STAGE_LABELS.locked }}</span>
-          </div>
-        </li>
-      </ul>
+          <ul v-show="showDone" class="path">
+            <li
+              v-for="level in doneLevels"
+              :key="level.kpId"
+              class="path__item"
+              :data-stage="level.stage"
+              :class="{ 'path__item--on': level.kpId === selectedKpId }"
+            >
+              <button
+                type="button"
+                class="path__btn"
+                :data-testid="`coding-view-level-${level.kpId}`"
+                :data-active="level.kpId === selectedKpId ? 'true' : 'false'"
+                :title="levelNameResolved(level.kpId) ? undefined : level.kpId"
+                :disabled="running"
+                @click="openTask(level.kpId)"
+              >
+                <span class="path__dot" aria-hidden="true" />
+                <span class="path__name">{{ levelLabel(level.kpId) }}</span>
+                <span class="path__stage">{{ STAGE_LABELS[level.stage] ?? level.stage }}</span>
+              </button>
+            </li>
+          </ul>
+        </section>
+
+        <!-- ③ 还没解锁（默认收起：关数最多，摊开会把「正在学」挤走） -->
+        <section v-if="lockedLevels.length > 0" class="pathgrp">
+          <button
+            type="button"
+            class="pathgrp__toggle k12-tap"
+            :aria-expanded="showLocked"
+            data-testid="coding-view-path-locked-toggle"
+            @click="showLocked = !showLocked"
+          >
+            <ChevronRight :size="13" class="pathgrp__ico" :data-open="showLocked" aria-hidden="true" />
+            还有 {{ lockedLevels.length }} 关没解锁
+          </button>
+          <ul v-show="showLocked" class="path">
+            <li
+              v-for="level in lockedLevels"
+              :key="level.kpId"
+              class="path__item"
+              :data-stage="level.stage"
+            >
+              <!-- 未解锁的关卡**不是按钮**：点了也不该有反应（那才是诚实的「还打不开」） -->
+              <div
+                class="path__btn path__btn--locked"
+                :data-testid="`coding-view-level-${level.kpId}`"
+                :title="levelNameResolved(level.kpId) ? undefined : level.kpId"
+              >
+                <span class="path__dot" aria-hidden="true" />
+                <span class="path__name">{{ levelLabel(level.kpId) }}</span>
+                <span class="path__stage">{{ STAGE_LABELS.locked }}</span>
+              </div>
+            </li>
+          </ul>
+        </section>
+      </div>
       <p v-else-if="quiz.progressLoading || knowledge.pointsLoading" class="code__desc">正在读学习路径…</p>
       <p v-else class="code__brief-err" data-testid="coding-view-path-error">
         <AlertTriangle :size="14" />
@@ -468,34 +710,56 @@ watch(
       <div class="code__hint-note">
         <Lightbulb :size="15" />
         <div>
-          <p class="code__hint-title">分级求助</p>
+          <p class="code__hint-title">卡住了怎么办</p>
+          <!-- ★ 面向学生的说法：说清「提示是怎么给的」就够，不写级别编号、不说「跳级」这类规则词。 -->
           <p class="code__hint-text">
-            卡住时用右侧的「求助」，提示按 1 → {{ CODE_HINT_MAX }} 逐级给，不会一次把答案说满。
-            第 {{ CODE_HINT_MAX }} 级才会给出完整写法。
+            先自己想一想，实在想不出来再点右边的「求助」。提示是一级一级给的：先是方向，
+            再具体一点，最后一级才会把写法写全 —— 所以别急着一次点到底。
           </p>
           <p v-if="code.currentHintLevel > 0" class="code__hint-text" data-testid="coding-view-hint-progress">
-            已给到第 {{ code.currentHintLevel }} 级（最多 {{ CODE_HINT_MAX }} 级）。
+            已给到第 {{ code.currentHintLevel }} 级（一共 {{ CODE_HINT_MAX }} 级）。
           </p>
         </div>
       </div>
 
-      <!-- ── 机制 / 合规说明：默认折叠（不是每轮都要读，但接线时是硬约束）──── -->
+      <!-- ── 机制 / 合规说明：默认折叠 ─────────────────────────────────────
+           这是**有意披露**（学生好奇、家长关心），但必须是「点开才看」的第二层，
+           而且要说人话：一段给好奇的学生 / 家长读的说明，而不是架构备忘。
+           真正的技术口径（端点名 / Worker / 后端不做执行）压在下面的教师视角块里。 -->
       <el-collapse class="code__fold">
         <el-collapse-item name="runtime">
           <template #title>
             <span class="code__fold-t"><FlaskConical :size="14" />代码在哪里执行 · 安全边界</span>
           </template>
           <p class="code__fold-p">
-            代码在<strong>本机浏览器的 Pyodide Web Worker</strong> 里执行（带超时中断）：
-            既不进应用主进程，也不进 Python 数据服务，运行完只把 stdout / stderr 交给后端。
+            你的代码在<strong>这台电脑上</strong>运行：用的是应用自带的一小套 Python，
+            <strong>不用联网</strong>，也不会跑到应用外面去。写错了、写了死循环也不要紧 ——
+            它最多跑一会儿就会被停下来。
           </p>
           <p class="code__fold-p">
-            后端那个端点<strong>不执行任何代码</strong>：它只把报错翻译成中文、挑下一级提示 ——
-            「谁能跑代码」与「谁解释报错」因此是两条互不相通的线。
+            跑完之后，只有「程序打印出来的内容」和「报错信息」会被送到<strong>同一台电脑上的</strong>学习服务：
+            它负责把报错翻成中文、挑下一条提示。它本身<strong>不会运行任何代码</strong>——
+            所以「谁会跑代码」和「谁会解释报错」是两件分开的事，跑代码这件事始终只在你的电脑里发生。
           </p>
           <p class="code__fold-p">
-            编辑器是 Monaco（资源随包分发，断网可用）；第一次点「运行」时才加载 Python 运行环境。
+            编辑器和这套 Python 都随应用一起装在本机上：<strong>断网也能用</strong>，
+            第一次点「运行」时它才会准备一下环境（要等几秒）。
           </p>
+          <TeacherGate label="技术口径（教师 / 答辩）">
+            <p class="code__fold-p">
+              代码在<strong>渲染进程的 Pyodide Web Worker</strong> 里执行（带超时中断）：
+              既不进 Electron 主进程，也不进 Python 数据服务。Pyodide 资源本地自托管
+              （<code class="code__mono">desktop/resources/pyodide/</code>），无任何 CDN 引用。
+            </p>
+            <p class="code__fold-p">
+              运行完由渲染进程把 <code class="code__mono">stdout</code> /
+              <code class="code__mono">stderr</code> 经主进程 <code class="code__mono">code:run-hint</code>
+              转发给 sidecar 的 <code class="code__mono">POST /api/code/run-hint</code>：
+              该端点<strong>不执行任何代码</strong>（它连 <code class="code__mono">exec</code> /
+              <code class="code__mono">subprocess</code> 都不 import），只做报错归一与提示挑选，
+              且<strong>不调用任何 LLM</strong> —— 所以这一步不产生模型调用、也未把运行输出送给模型。
+            </p>
+          </TeacherGate>
         </el-collapse-item>
       </el-collapse>
     </aside>
@@ -504,8 +768,9 @@ watch(
     <section class="code__stage">
       <PageActions>
         <template #info>
+          <!-- ★ 题目名用**教材里的中文名**（`taskName`），不再摆 `template.kpId` 那种 slug。 -->
           <span v-if="code.template !== null">
-            题目 {{ code.template.kpId }} · 期望 <code class="code__mono">{{ code.template.expectedBehavior }}</code>
+            题目 {{ taskName }} · 期望 <code class="code__mono">{{ code.template.expectedBehavior }}</code>
           </span>
           <span v-else>还没有可做的题目</span>
         </template>
@@ -516,12 +781,21 @@ watch(
           <RotateCcw :size="14" />
           <span class="btn__label">重新读模板</span>
         </el-button>
-        <el-button :disabled="code.template === null" data-testid="coding-view-download" @click="downloadCode">
+        <el-button
+          :disabled="code.template === null || downloading"
+          :loading="downloading"
+          data-testid="coding-view-download"
+          @click="downloadCode"
+        >
           <Check v-if="downloaded" :size="14" />
           <Download v-else :size="14" />
           <span class="btn__label">{{ downloaded ? '已下载' : '下载代码' }}</span>
         </el-button>
       </PageActions>
+      <!-- 导出回执（含「取消了」这一档：学生自己关掉对话框不该被当成出错） -->
+      <p v-if="downloadNote" class="code__download-note" data-testid="coding-view-download-note">
+        {{ downloadNote }}
+      </p>
 
       <!-- 身份行（22px，全页唯一）：说的是「这页在干什么」，不是重复顶栏的「编程环境」。 -->
       <PageIdentity
@@ -536,10 +810,13 @@ watch(
           <span class="chip" :data-phase="runnerStatus.phase" data-testid="coding-view-pyodide">
             {{ pyodideBadge }}
           </span>
-          <span v-if="code.hintLoading" class="chip">正在取下一级提示…</span>
+          <span v-if="code.hintLoading" class="chip">正在取提示…</span>
         </header>
 
-        <div class="code__editor-wrap">
+        <!-- ⚠️ 用 `v-show` 而**不是 `v-if`**：`mountEditor()` 在挂载时就要拿到宿主节点
+             （此时往往还什么题都没选），`v-if` 会让 `editorHost` 在那一刻是 null →
+             编辑器永远装配不起来（表现是「代码框一直空着，只有脚手架文本」）。 -->
+        <div v-show="editorVisible" class="code__editor-wrap">
           <div ref="editorHost" class="code__editor" data-testid="coding-view-editor"></div>
           <!-- 编辑器没装配好（还在加载 / 加载失败）时，脚手架以只读文本顶上 —— 保底可读 -->
           <pre
@@ -552,39 +829,81 @@ watch(
           </p>
         </div>
 
+        <!-- ── 还没有题目可做时的引导态 ────────────────────────────────────
+             ★ 缺陷现场：这一页的默认状态（没选题目 / 这一关没有模板）右边是一个
+             **空的编辑器框**，旁边一行小字 —— 学生不知道下一步该动哪里。
+             现在编辑器区给一条明确的下一步，「团团」也在（空态是引导，不是情绪）。
+             · `data-testid="coding-view-editor-empty"` 落在这个空态上；
+             · 取数失败那一支保持原有的两个 testid 不动
+               （左栏的 `coding-view-template-error`、编辑器框里的 `coding-view-editor-failure`），
+               所以这里**只指路不重复那句话说一遍**（左栏就在旁边）。
+             ⚠️ 与 `v-show="editorVisible"` 互为补集：编辑器装配失败时走的是上面那一支
+               （那条说明必须看得见），两边不会同时出现在屏幕上。 -->
+        <EmptyState
+          v-if="showEditorEmpty"
+          :tone="editorStage === 'error' ? 'error' : editorStage === 'loading' ? 'loading' : 'empty'"
+          :mascot="editorStage === 'empty'"
+          :title="
+            editorStage === 'loading'
+              ? '正在准备这一题的代码'
+              : editorStage === 'error'
+                ? '这道题还没读上来'
+                : '还没有选题目'
+          "
+          :desc="
+            editorStage === 'loading'
+              ? '马上就好 —— 读完这里就会出现这一题的代码骨架。'
+              : editorStage === 'error'
+                ? '左边写清了原因。可以点上面的「重新读模板」再试一次，或者换一关做。'
+                : editorEmptyDesc
+          "
+          data-testid="coding-view-editor-empty"
+        />
+
         <!-- 操作栏。★ 原型上那个「提交批改」按钮**刻意不在这里**：
              本项目没有教师批改端点（批改只有后端判客观题 `/api/quiz/grade` 与
              本页的报错归一 `/api/code/run-hint` 这两条真实通道），所以与其摆一个
              永远只会假装转 900ms 的按钮，不如不给 —— 要请老师看代码，真实路径是
-             在对话里说「帮我看看这段代码」（模型经 `evaluate_code` 走的那条线）。 -->
+             在对话里说「帮我看看这段代码」（模型经 `evaluate_code` 走的那条线）。
+             ★★ 按钮走设计系统：几何 / 字重 / 焦点环 / 禁用观感全部来自 `.k12-cta`
+             （`assets/base.css` 里**唯一**的一套主行动配方，不再各页自己调色）。
+               · 「运行」= 这一屏的主行动（做完它这一轮就算完成）→ 实心主色，**只此一个**；
+               · 「求助」= 同一条路上的第二步 → 沿用 `.k12-cta` 的几何与交互态，
+                 填充改成描边（`code__act--quiet`）。base.css 的判据写得很明白：
+                 「同一屏里只允许一个主色填充按钮 —— 两个等于没有主色按钮」；
+               · 「重置代码」= 次要动作 → 保持 Element Plus 的默认观感（不给主色）。 -->
         <div class="code__actions">
-          <el-button
-            type="primary"
-            :loading="running"
+          <button
+            class="k12-cta"
+            type="button"
             :disabled="running || code.template === null"
             data-testid="coding-view-run"
             @click="run"
           >
             {{ running ? '正在运行…' : '运行' }}
-          </el-button>
-          <el-button
-            :loading="code.hintLoading"
+          </button>
+          <button
+            class="k12-cta code__act--quiet"
+            type="button"
             :disabled="running || code.hintLoading || !code.canAskMoreHints"
             data-testid="coding-view-hint"
             @click="askForHint"
           >
             {{
-              code.canAskMoreHints
-                ? `求助（下一级：第 ${Math.min(code.currentHintLevel + 1, CODE_HINT_MAX)} 级）`
-                : '提示已给完'
+              code.hintLoading
+                ? '正在取提示…'
+                : code.canAskMoreHints
+                  ? `求助（下一级：第 ${Math.min(code.currentHintLevel + 1, CODE_HINT_MAX)} 级）`
+                  : '提示已给完'
             }}
-          </el-button>
+          </button>
           <el-button :disabled="running || code.template === null" data-testid="coding-view-reset" @click="resetToScaffold">
             <RotateCcw :size="14" />
             <span class="btn__label">重置代码</span>
           </el-button>
           <span v-if="attempts > 0" class="code__attempts k12-num">第 {{ attempts }} 次运行</span>
         </div>
+
 
         <p v-if="localHint" class="code__local-hint" data-testid="coding-view-local-hint">{{ localHint }}</p>
         <p v-if="code.hintError" class="code__local-hint" data-testid="coding-view-hint-error">
@@ -663,11 +982,39 @@ watch(
         </p>
       </SurfacePanel>
 
-      <p class="code__foot-note">
-        代码经 <code class="code__mono">POST /api/code/run-hint</code> 之外的两条本地链路完成：
-        执行在本页的 Pyodide Worker 里，报错归一与提示挑选在后端 ——
-        发送给模型的内容里不含你的运行输出。
+      <!-- ── 运行说明 ──────────────────────────────────────────────────────
+           ★★ 这一行为什么必须分开写两版（本条是受众分离的落点）：
+           原来它直接摆在页面上，写的是「代码经 POST /api/code/run-hint 之外的两条本地链路完成：
+           执行在本页的 Pyodide Worker 里，报错归一与提示挑选在后端 —— 发送给模型的内容里不含
+           你的运行输出」。这是**设计说明**（HTTP 动词、端点路径、Worker、什么没发给模型），
+           学生读了只会想「我是不是哪里搞错了」；它同时是「设计合理性」的证据，不能删。
+           所以分成两层：
+             · 学生看见的那一句 —— 只留**他真正在意的两个承诺**，学生话；
+             · 原句 —— 原样进 `<TeacherGate>`（学生视角下不在 DOM 里）。
+           ⚠️ 这两句都逐条对着代码核过（只说自己真的做到的事）：
+             ① 「只在这台电脑上运行」= 渲染进程的 Pyodide Worker，资源本地自托管
+                （`sandbox/pyodide-runner.ts`，无 CDN 引用）；
+             ② 「不会上传」= 没有任何一条链路把代码送出这台机器（sidecar 只监听**回环地址**，
+                不对局域网开放 —— 地址本身只在主进程的 `sidecar/manager.ts` 里出现）；
+             ③ 「结果只用来给你中文解释」= 本页的运行结果只走 `code:run-hint` →
+                `/api/code/run-hint`，那个端点只做报错归一与提示挑选，**不调用任何 LLM**
+                （`server/app/routes/code.py` 连 `exec` / `subprocess` 都不 import）。
+           ⚠️ **刻意不写「不会发给团团」**：那句话在**本页**成立（本页的「求助」只送
+              `kpId + level`，见 `stores/code.ts` 的 `askForHint`），但学生在对话里
+              点编程卡的「求助」时走的是另一条路（`buildHintRequestMessage` 会带上
+              代码前 400 字）—— 同一句话在一个地方成立、在另一个地方不成立，
+              就不该印在面板上。**本页这句话是准确的**：执行在本机沙箱、
+              运行结果只送到本机 sidecar 做报错归一（那个端点不调 LLM）。 -->
+      <p class="code__foot-note" data-testid="coding-view-run-locally">
+        你的代码只在<strong>这台电脑上</strong>运行，不会上传；运行结果只用来给你中文解释。
       </p>
+      <TeacherGate>
+        <p class="code__foot-note" data-testid="coding-view-run-note-teacher">
+          代码经 <code class="code__mono">POST /api/code/run-hint</code> 之外的两条本地链路完成：
+          执行在本页的 Pyodide Worker 里，报错归一与提示挑选在后端 ——
+          发送给模型的内容里不含你的运行输出。
+        </p>
+      </TeacherGate>
     </section>
   </div>
 </template>
@@ -760,10 +1107,68 @@ watch(
   color: var(--k12-muted);
 }
 
-/* ── 学习路径（原型的「完成步骤」的真实版本）────────────────────────── */
+/* ── 学习路径（原型的「完成步骤」的真实版本）──────────────────────────
+ * ★ 分三组：正在学（默认展开）/ 已经走过 / 还没解锁（两组默认收起）。
+ *   原来的写法是 `levels.map` 平铺 57 关 —— 一堵墙，学生既找不到「我在哪」，
+ *   也看不出「下一步是哪一关」（新学生的路径里绝大多数是 locked）。
+ *   分组只按服务端的 `stage`，顺序仍是服务端的拓扑序（本页不重排）。 */
+.pathgrps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: -6px;
+}
+.pathgrp {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+/* 分组标签：meta 档 13px（不是 micro —— 它是标签不是角标）。 */
+.pathgrp__label {
+  font-size: var(--k12-fs-xs);
+  font-weight: 650;
+  color: var(--k12-fg-2);
+}
+/* 收起/展开的开关：`.k12-tap` 保底 28px 触控高度（设计系统的共享下限）。 */
+.pathgrp__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--k12-r-inset);
+  background: transparent;
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .pathgrp__toggle:hover {
+    background: var(--k12-surface);
+    border-color: var(--k12-border);
+  }
+}
+/* 箭头：收起时向右、展开时向下（180° 旋转）—— 形状本身说明有更多内容。 */
+.pathgrp__ico {
+  flex: none;
+  color: var(--k12-muted);
+  /* 状态过渡（不是入场动效）：与 `ProgressBar` / `ConfirmDialog` 同一口径，
+   * `prefers-reduced-motion` 下关掉 —— 方向本身仍然由旋转角度表达，信息不丢。 */
+  transition: transform var(--k12-dur-state) var(--k12-ease-state);
+}
+.pathgrp__ico[data-open='true'] {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pathgrp__ico {
+    transition: none;
+  }
+}
 .path {
   list-style: none;
-  margin: -6px 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -779,9 +1184,12 @@ watch(
   border-radius: var(--k12-r-inset);
   background: transparent;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  /* ★ 列表项按字号阶梯是 **sm（14px）**，不是 meta 档 —— 关卡名是学生要读的内容
+   *   （原来这里是 `--k12-fs-xs` 13px，与「列表项 = 14px」那条档位不符）。 */
+  font-size: var(--k12-fs-sm);
   text-align: left;
   cursor: pointer;
+  min-height: 30px;
 }
 @media (hover: hover) and (pointer: fine) {
 .path__btn:hover:not(:disabled) {
@@ -965,18 +1373,27 @@ watch(
   overflow: hidden;
   background: var(--k12-surface);
 }
+/* ★ 420px 的由来（与 `sandbox/monaco-setup.ts` 的 lineHeight 24 + padding 上下各 8 配套）：
+ *   (420 − 8 − 8) ÷ 24 ≈ 16 行 —— 一份模板的脚手架通常 10–20 行，
+ *   一屏基本能看全，补 TODO 时不用来回滚（360px 只剩 14 行，首屏就要滚）。
+ * ⚠️ 这个数是**容器高度**（Monaco 不带 `automaticLayout`，靠本页的 ResizeObserver 量这个盒子），
+ *   改它要连同 `editorOptions()` 的 lineHeight 一起想：行高变了，同样的高度看到的行数就变了。
+ * ⚠️ 页面纵向是 `.code__stage` 自己在滚（`overflow-y: auto`），所以这里长高只会让页面多滚一点，
+ *   不会把内容挤出视口（`npm run ux:layout` 量的是横向裁切，与这里无关）。 */
 .code__editor {
   width: 100%;
-  height: 360px;
+  height: 420px;
 }
 /* Monaco 未就绪时的脚手架回显（**保底可读**，不是空白） */
 .code__scaffold {
   margin: 0;
   padding: 12px;
-  min-height: 140px;
+  min-height: 180px;
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
-  line-height: var(--k12-lh-body);
+  /* ★ 与编辑器同档：脚手架回显是代码，学生要照着抄 —— 不许比编辑器里那 15px 小一档
+   *   （原来这里是 `--k12-fs-xs` 13px，与「代码不许比正文小」的口径打架）。 */
+  font-size: var(--k12-fs-sm);
+  line-height: var(--k12-lh-ui);
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--k12-fg-2);
@@ -987,6 +1404,27 @@ watch(
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+/* ★ 次要动作变体（「求助」）：几何、字重、焦点环、禁用观感**全部沿用 `.k12-cta`**
+ *   （base.css 的那份配方是唯一来源，这里只换「填充」这一件事）。
+ *   ⚠️ 选择器写成 `.k12-cta.code__act--quiet...` 是**刻意**的：`.k12-cta` 与
+ *      本类是**同权重**的单类选择器，谁生效取决于样式表顺序（构建产物说了算）；
+ *      加上 `.k12-cta` 与 `:not(:disabled)` 把权重抬到一定高于 base.css 那一支。 */
+.k12-cta.code__act--quiet {
+  border-color: var(--k12-accent-border);
+  background: var(--k12-surface);
+  color: var(--k12-accent-ink);
+}
+@media (hover: hover) and (pointer: fine) {
+  .k12-cta.code__act--quiet:hover:not(:disabled) {
+    border-color: var(--k12-accent-ink);
+    background: var(--k12-accent-soft);
+  }
+}
+.k12-cta.code__act--quiet:disabled {
+  border-color: var(--k12-border-strong);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
 }
 .code__attempts {
   margin-left: auto;
@@ -1111,5 +1549,14 @@ watch(
   font-size: var(--k12-fs-xs);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg-2);
+}
+
+/* 导出回执：与操作行同一屏，紧跟在按钮区下面（学生刚点完就在手边） */
+.code__download-note {
+  margin-top: var(--k12-sp-2);
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
+  word-break: break-all;
 }
 </style>

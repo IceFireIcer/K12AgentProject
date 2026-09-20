@@ -30,6 +30,8 @@ import {
   collectQuizResults,
   isBlankAnswer,
   optionLetter,
+  quizSubmissionDisplayText,
+  quizUserTextDisplay,
   readQuizCard
 } from '../src/renderer/src/cards/quiz.ts'
 import { GRADE_LABELS, formatMasteryDelta, gradeAdaptNotice } from '../src/renderer/src/labels.ts'
@@ -217,6 +219,36 @@ test('提交消息：带上题目编号与学生的作答，并明确要求走�
   assert.ok(message.includes('total = 3 + 5'), '提交消息必须带学生的作答')
   assert.ok(message.includes('submit_quiz'), '要明确要求模型调用 submit_quiz')
   assert.ok(!message.includes('答对了'), '前端不许出现任何判分结论')
+})
+
+test('★★ 学生气泡里的那份**不带题目编号**（qid 里嵌着知识点 slug）', () => {
+  // 真机扫描抓到的形态：qid 形如 `gen-ai-definition-jr-45238405-1` ——
+  // 它中间的 `ai-definition-jr` 就是知识点主键。它出现在学生自己的气泡里，
+  // 等于把内部 ID 印在他眼前（走查那条「立刻隐藏所有 ID」）。
+  // ★ 模型仍需要 qid（上一条测试钉着 wire 里有），所以这里断言的是**两份文本的差别**：
+  //   wire 有、display 没有。两条合起来才把「哪份给谁看」这件事钉住。
+  const question = { qid: 'gen-ai-definition-jr-45238405-1', stem: CHOICE_QUESTION.stem }
+  const wire = buildQuizSubmissionMessage(question, 'B')
+  const shown = quizSubmissionDisplayText(question, 'B')
+
+  assert.ok(wire.includes(question.qid), 'wire 文本必须带 qid')
+  assert.ok(!shown.includes(question.qid), `学生气泡里不许出现 qid：${shown}`)
+  assert.ok(!shown.includes('题目编号'), '「题目编号」那一行整体不该出现在学生气泡里')
+  assert.ok(shown.includes(CHOICE_QUESTION.stem.slice(0, 10)), '但题干要留着（学生得知道自己答的是哪题）')
+  assert.ok(shown.includes('B'), '学生的作答要留着')
+  assert.ok(!shown.includes('submit_quiz'), '写给模型的指令同样不许出现在气泡里')
+
+  // ★ 回看路径（历史消息）也要挡住题号：JSONL 里存的就是上面那份 wire 原文，
+  //   实测真机扫描在恢复出来的气泡里读到了 `ai-definition-jr` —— 实时挡了、回看没挡。
+  const restored = quizUserTextDisplay(wire)
+  assert.ok(!restored.includes(question.qid), `回看时也要去掉题号：${restored}`)
+  assert.ok(!restored.includes('题目编号'), '「题目编号」那一行整行去掉')
+  assert.ok(restored.includes(CHOICE_QUESTION.stem.slice(0, 10)), '回看时题干要留着')
+  assert.ok(!restored.includes('submit_quiz'), '回看时那句指令也要去掉')
+
+  // 反向对照：**学生自己打的字**绝不能被改写（哪怕他也写了「题目编号：」）
+  const studentOwn = '题目编号：这是我自己的笔记，别动它'
+  assert.equal(quizUserTextDisplay(studentOwn), studentOwn, '认不出前缀就原样返回，绝不改写学生的话')
 })
 
 test('提交消息：长题干截断，不把整段材料灌进 prompt', () => {

@@ -22,20 +22,39 @@
  *
  * ── 布局（改动前先读）────────────────────────────────────────────────
  *
- *   身份行（22px，全页唯一） → 舞台（全宽） → 舞台说明 → 底部横向胶片条
+ *   身份行（24px，全页唯一） → 舞台（全宽） → 舞台说明 → 底部横向动画条
  *
- * 模板从「左侧竖栏」变为**底部横向条**：舞台独占一行拿到全宽，模板仍是页面级选择，
- * 但退到内容之下。条高固定（项高 108px）、项宽固定 220px、横向滚动不换行 ——
- * 于是条的高度不随模板数量长高，永远不会反过来挤压舞台。
- * 舞台标题 16px（块标题档），模板名 13px，标记 / 说明 12px。
+ * 模板从「左侧竖栏」变为**底部横向条**：舞台独占一行拿到全宽，动画仍是页面级选择，
+ * 但退到内容之下。项宽固定 220px、项高**下限** 108px（随内容长高）、横向滚动不换行 ——
+ * 于是条的高度不随动画数量长高，永远不会反过来挤压舞台。
+ * 舞台标题 18px（块标题档），条上的段名 14px，标记 / 说明 13px。
+ * ⚠️ 卡片的高度必须是**下限**而不是定值：定值 + `overflow: hidden` 会把放不下的
+ *    内容**静默切掉**（四学段全适配的模板实测被切过一整行，见
+ *    `tests/ux-pages-regression.test.ts` 的两条守卫）。
  *
  * ⚠️ 本页**刻意不做动效**（无 transition / animation）：动画本身在沙箱里跑，
  *    页面这一层不需要再用动效抢注意力。
+ *
+ * ── ★★ 学生视角 / 教师·答辩视角（`stores/viewMode.ts` + `<TeacherGate>`）────
+ *
+ *   本页此前把**实现侧的备忘直接印给学生**：沙箱属性名（`allow-scripts`）、
+ *   一次性 nonce 的绑定与失效规则、模板 id、毫秒换算的标称时长、「可调参数 N 项」、
+ *   以及「模板清单 → 渲染 → 托管」的三步链路说明。那是写给我们自己的验收证据，
+ *   学生读到的是一张工程便条。
+ *
+ *   现在的纪律（与 `views/Quiz.vue` 同一条）：**学生视角一个字不留，教师视角一条不删**。
+ *   判据不是「这句话有没有用」，而是「它在向谁解释什么」：
+ *     · 向学生解释**他看到的画面** → 留在页面上（「动画就在这台电脑上播放，断网也能看」）；
+ *     · 向我们解释**怎么实现的** → 进 `<TeacherGate>`。
+ *   ★ 唯一从技术说明里**留下来给学生**的是「断网也能看」那一句 ——
+ *     它是真话（模板与动画库都随包内联，见 `server/app/routes/resources.py`），
+ *     而且是家长最在意的一条，不是实现细节。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Library, Pause, Play, RotateCcw, Wand2 } from 'lucide-vue-next'
 import SurfacePanel from '@/components/SurfacePanel.vue'
 import PageIdentity from '@/components/PageIdentity.vue'
+import TeacherGate from '@/components/TeacherGate.vue'
 import { GRADE_LABELS } from '../labels'
 import { useAnimationStore } from '../stores/animation'
 import { useChatStore } from '../stores/chat'
@@ -60,9 +79,27 @@ const chat = useChatStore()
 const grade = computed<GradeLevel | null>(() => chat.currentGrade)
 const gradeLabel = computed(() => (grade.value === null ? null : GRADE_LABELS[grade.value]))
 
-/** 学段字面量 → 中文名（模板声明的是机器字面量 `junior` 这种；本页不另写一张表）。 */
+/** 学段字面量 → 中文名（模板声明的是机器字面量 `junior` 这种；本页不另写一张表）。
+ *  ★ 一个学段一个名字只有一个实现：下面两个拼装函数与卡片上的学段标签都调它。 */
+function gradeName(level: string): string {
+  return GRADE_LABELS[level as GradeLevel] ?? level
+}
+
+/** 教师视角的紧凑写法（`小学高年级 / 初中 / 高中`）—— 后台目录的读法。 */
 function gradeText(levels: string[]): string {
-  return levels.map((level) => GRADE_LABELS[level as GradeLevel] ?? level).join(' / ')
+  return levels.map(gradeName).join(' / ')
+}
+
+/**
+ * 学生视角的一句话（`适合小学高年级、初中、高中`）。
+ *
+ * ★ 为什么不直接复用 `gradeText`：` / ` 分隔是**目录读法**，印在卡片上像一串标签值；
+ *   顿号（`、`）才是中文里「并列几档」的自然写法。两者用途不同，不要合并 ——
+ *   合并之后必然有一边将就另一边。
+ */
+function gradeAudienceText(levels: string[]): string {
+  const names = levels.map(gradeName)
+  return names.length === 0 ? '所有年级' : `适合${names.join('、')}`
 }
 
 /** 时长（毫秒 → 秒，一位小数）。模板标称值，不是本次播放的实测值。 */
@@ -154,7 +191,7 @@ const stageError = computed<string>(
  *   而失败原因全是**后端给的可读中文**（通道缺失 / 渲染不过 / 托管不过），
  *   这里只负责原样显示，不加工、不美化。
  */
-const DEGRADED_NOTICE_TEXT = '动画没能加载，已用文字讲解顶上'
+const DEGRADED_NOTICE_TEXT = '这个动画这次没播出来，下面这段文字把要点讲清楚了 —— 一样好学。'
 
 /** 静态图同样过一遍 scheme 白名单（载荷不可信，不该让降级视图替我们对外发请求）。 */
 const fallbackImage = computed(() => readFallbackImage(anim.payload?.fallbackImage ?? null))
@@ -306,11 +343,12 @@ onBeforeUnmount(() => {
  *  ★ 不用载荷里的 `concept` 当标题 —— 那是这一轮讲什么，不是这块舞台在放什么。 */
 const stageTitle = computed(() => anim.activeTemplate?.title ?? '还没有可播放的动画')
 
-/** 主按钮文案：没渲染过是「渲染到舞台」，已渲染过是「重新生成」。 */
+/** 主按钮文案。
+ *  ★ 用「播放 / 再放一次」而不是「渲染到舞台 / 重新生成」：对屏幕前的学生来说，
+ *    这一步发生的事情就是**这段动画开始播**；渲染与托管是它背后怎么实现的（那句话进教师视角）。 */
 const renderLabel = computed(() => {
-  if (anim.rendering) return '正在渲染…'
-  if (anim.hosting) return '正在托管…'
-  return anim.payload === null ? '渲染到舞台' : '重新生成'
+  if (anim.rendering || anim.hosting) return '正在准备…'
+  return anim.payload === null ? '播放这段动画' : '再放一次'
 })
 
 /** 进度读数（百分比；模板总时长单独按标称值显示，不拿它冒充实测耗时）。 */
@@ -319,8 +357,22 @@ const stageDuration = computed(() =>
   anim.payload === null || anim.payload.durationMs <= 0 ? '' : fmtDuration(anim.payload.durationMs)
 )
 
-/** 胶片条上那句口径：本机共几份、本次匹配几份、按谁匹配的。 */
+/**
+ * 胶片条上那句口径（**学生版**）：按当前学段列了几段。
+ *
+ * ★ 原来这里是「本机 8 个模板 · 本次匹配 3 个（初中）」——「本机共几份」是**随包资产**
+ *   的统计口径（后台目录的读法），学生关心的是「这里有几段是给我的」。
+ *   原始口径进 `<TeacherGate>`，一个字没删。
+ */
 const stripMeta = computed(() => {
+  const matchedCount = anim.matched.length
+  return gradeLabel.value === null
+    ? `共 ${matchedCount} 段（学段还没定，先都列出来）`
+    : `适合${gradeLabel.value}的共 ${matchedCount} 段`
+})
+
+/** 胶片条上那句口径（**教师 / 答辩视角**）：本机共产出几份、本次匹配几份、按谁匹配的。 */
+const stripMetaTeacher = computed(() => {
   const total = anim.availableIds.length
   const matchedCount = anim.matched.length
   return gradeLabel.value === null
@@ -328,13 +380,15 @@ const stripMeta = computed(() => {
     : `本机 ${total} 个模板 · 本次匹配 ${matchedCount} 个（${gradeLabel.value}）`
 })
 
-/** 载荷来源徽章（模板直取 / 即时生成）—— 只有真的渲染出产物时才显示。 */
+/** 载荷来源徽章（内置模板 / 即时生成）。
+ *  ★ 与对话里的动画卡（`cards/AnimationCard.vue`）用**同一对词**：同一个东西在
+ *    两个界面上叫两个名字，学生只会以为它们是两回事。 */
 const sourceLabel = computed(() => {
   if (anim.payload === null) return ''
-  return anim.payload.source === 'generated' ? '即时生成' : '模板直取'
+  return anim.payload.source === 'generated' ? '即时生成' : '内置模板'
 })
 
-/** 脚手架：模板里可调的参数（本页一律用模板默认值，不假装调过参）。 */
+/** 教师 / 答辩视角：模板里可调的参数（本页一律用模板默认值，不假装调过参）。 */
 const paramNote = computed(() => {
   const params = anim.activeTemplate?.params ?? []
   return params.length === 0 ? '' : `可调参数 ${params.length} 项（本次用默认值）`
@@ -343,28 +397,30 @@ const paramNote = computed(() => {
 
 <template>
   <div class="anim" data-testid="animation-view">
-    <!-- 身份行（22px，全页唯一）：内容区的最大字号在这里。
-         `main` 说的是「这页在讲什么」，不是重复顶栏的「动画讲解」；
-         `meta` 承接原先写在左侧栏里的口径（模板优先 / 真沙箱），同一句话说一遍。 -->
+    <!-- 身份行（全页唯一的大字号）：内容区的最大字号在这里。
+         `main` 说的是「这页在讲什么」，不是重复顶栏的「动画讲解」。
+         ★ `meta` 原来是「模板优先，生成补充；舞台在沙箱里真播」—— 那是**生成侧与沙箱侧
+           的内部口径**（评委要看，学生不必）。现在学生读到的是一句邀请，
+           原文一句不删地搬进下面「舞台上的技术口径」那个 `<TeacherGate>`。 -->
     <PageIdentity
       main="把过程一步步画出来看"
-      meta="模板优先，生成补充；舞台在沙箱里真播"
-      hint="先挑模板，再在舞台上播放"
+      meta="挑一个动画，看它一步步动起来"
+      hint="先挑一个动画，再点播放"
     />
 
     <!-- ══ 舞台：全宽主对象 ══════════════════════════════════════════════ -->
     <SurfacePanel flush class="anim__stage-card">
       <header class="anim__head">
         <div class="anim__head-text">
-          <!-- 16px：块标题档。不得用 22px 去与身份行争焦点 —— 本页最大字号只有一个。 -->
+          <!-- 18px：块标题档。不得再往上抬去与身份行争焦点 —— 本页最大字号只有一个。 -->
           <h2 class="anim__title">{{ stageTitle }}</h2>
+          <!-- ★ 学生视角：**这是什么 + 适合谁**。模板 id、毫秒换算的标称时长、
+               「可调参数 N 项」都是实现事实，全部进下面的 `<TeacherGate>`（一个字没删）。 -->
           <p v-if="anim.activeTemplate" class="anim__sub">
-            模板 <code>{{ anim.activeTemplate.id }}</code>
-            · 适配 {{ gradeText(anim.activeTemplate.gradeLevels) }}
-            · 标称时长 {{ fmtDuration(anim.activeTemplate.durationMs) }}
-            <template v-if="paramNote"> · {{ paramNote }}</template>
+            {{ anim.activeTemplate.concept }}
+            · {{ gradeAudienceText(anim.activeTemplate.gradeLevels) }}
           </p>
-          <p v-else class="anim__sub">从下面的模板条里挑一个，渲染到舞台上。</p>
+          <p v-else class="anim__sub">从下面的动画里挑一个，点「播放这段动画」就能看。</p>
         </div>
         <span v-if="sourceLabel" class="anim__src">{{ sourceLabel }}</span>
         <button
@@ -396,7 +452,7 @@ const paramNote = computed(() => {
             @load="onFrameLoad"
           />
           <p v-if="sandboxPhase === 'loading'" class="anim__veil" data-testid="animation-view-loading">
-            动画加载中…（超过 5 秒会自动切换成文字讲解）
+            动画正在准备…（等太久的话，会用文字把要点讲给你）
           </p>
         </template>
 
@@ -421,17 +477,19 @@ const paramNote = computed(() => {
           </p>
         </div>
 
-        <!-- ③ 加载 / 空 / 错误 / 未渲染：四种「没有画面」的时刻，各说各的原因 -->
+        <!-- ③ 加载 / 空 / 错误 / 未渲染：四种「没有画面」的时刻，各说各的原因。
+             ★ 文案按 `EmptyState` 的规则写：只说**学生眼下的处境**与**下一步做什么**，
+               不解释「后端在干什么」（旧句「在读模板清单 / 渲染 / 换一次性地址」就是反例）。 -->
         <EmptyState
           v-else-if="stageState === 'loading'"
           tone="loading"
-          title="正在准备这一页的动画"
-          desc="在读模板清单 / 渲染 / 换一次性地址 —— 都是本机完成，不需要联网。"
+          title="动画正在准备"
+          desc="马上就好，都是在这台电脑上完成的。"
         />
         <EmptyState
           v-else-if="stageState === 'error'"
           tone="error"
-          title="动画没能渲染出来"
+          title="这个动画没能放出来"
           :desc="stageError"
           data-testid="animation-view-error"
         >
@@ -440,14 +498,14 @@ const paramNote = computed(() => {
         <EmptyState
           v-else-if="stageState === 'empty'"
           tone="empty"
-          title="本机没有匹配上的动画模板"
-          :desc="`共有 ${anim.availableIds.length} 份模板，但都不适配当前学段（${gradeLabel ?? '待判定'}）。先去对话里问一问，或者换一档学段再回来。`"
+          title="这里还没有能放的动画"
+          :desc="`${gradeLabel ?? '你的学段'}这一档暂时没有配好的动画。先去对话里问问团团，或者换一档学段再回来看看。`"
         />
         <EmptyState
           v-else
           tone="empty"
-          title="舞台还空着"
-          desc="上面选中的模板还没有渲染 —— 点「渲染到舞台」就能看到它真的动起来。"
+          title="还没挑动画"
+          :desc="`在下面选一个，再点「${renderLabel}」就能看到它动起来。`"
         />
       </div>
 
@@ -485,18 +543,57 @@ const paramNote = computed(() => {
       </p>
     </SurfacePanel>
 
+    <!-- 学生视角：一句人话（「断网也能看」对家长尤其重要，且它是**真的** ——
+         模板与动画库都随包内联，没有任何外链）。
+         ★★ 下面那段沙箱属性 / nonce 机制是**安全实现备忘**，此前直接印在学生页面上；
+            现在整段进 `<TeacherGate>`，一句话不删（评委要看的就是这段设计证据）。 -->
     <p class="anim__note">
-      舞台是 <strong>sandboxed iframe</strong>（沙箱属性只有 <code>allow-scripts</code>），
-      动画库内联进 HTML，断网也能演示；资源地址是一次性 nonce（绑定学生 + 知识点 + 有效期，用一次即失效）。
+      动画就在这台电脑上播放，画面不会跳到别的地方去；<strong>断网也能看</strong>。
     </p>
+    <TeacherGate label="动画是怎么安全播放的">
+      <p class="anim__note anim__note--gate">
+        舞台是 <strong>sandboxed iframe</strong>（沙箱属性只有 <code>allow-scripts</code>），
+        动画库内联进 HTML，断网也能演示；资源地址是一次性 nonce（绑定学生 + 知识点 + 有效期，用一次即失效）。
+      </p>
+    </TeacherGate>
 
-    <!-- ══ 底部横向胶片条：舞台在上、模板条在下 ═════════════════════════────
+    <!-- ★★ 舞台的技术口径（**教师 / 答辩视角**，紧挨着舞台而不是塞在下面的动画条里 ——
+         它说的是舞台）：
+           · 身份行 `meta` 的**原文**（模板优先 / 生成补充 / 真沙箱）；
+           · 模板 id、毫秒换算的标称时长、「可调参数 N 项（本次用默认值）」；
+           · 载荷来源徽章的口径。 -->
+    <TeacherGate label="舞台上的技术口径">
+      <p class="anim__strip-note">
+        <span class="k12-label">身份行原文</span>
+        模板优先，生成补充；舞台在沙箱里真播。
+      </p>
+      <p class="anim__strip-note">
+        <span class="k12-label">当前模板</span>
+        <template v-if="anim.activeTemplate">
+          模板 <code>{{ anim.activeTemplate.id }}</code>
+          · 适配 {{ gradeText(anim.activeTemplate.gradeLevels) }}
+          · 标称时长 {{ fmtDuration(anim.activeTemplate.durationMs) }}
+          <template v-if="paramNote"> · {{ paramNote }}</template>
+        </template>
+        <template v-else>还没有选中模板。</template>
+      </p>
+      <p class="anim__strip-note">
+        <span class="k12-label">载荷来源</span>
+        徽章「{{ sourceLabel || '（未渲染）' }}」取自载荷的 <code>source</code> 字段
+        （<code>template</code> = 模板直取，<code>generated</code> = 自由生成）。
+        舞台上的进度由沙箱的节流回调驱动（~10Hz），本页不装本地计时器。
+      </p>
+    </TeacherGate>
+
+    <!-- ══ 底部横向动画条：舞台在上、其它动画在下 ═════════════════════════────
          项宽固定 220px、项高**下限** 108px（随内容长高），横向滚动不换行 ——
-         条的高度不随模板数量长高，也不会反过来挤压舞台。 -->
-    <section class="anim__strip" aria-label="动画模板">
+         条的高度不随动画数量长高，也不会反过来挤压舞台。
+         ★ 标题是**学生读的一行**（「还能看这几段动画」），不是后台目录名
+           （原来是「动画模板」：那是我们内部对这批资产的叫法）。 -->
+    <section class="anim__strip" aria-label="还能看的动画">
       <header class="strip__head">
         <Library :size="14" class="strip__ico" />
-        <span class="strip__title">动画模板</span>
+        <span class="strip__title">还能看这几段动画</span>
         <span class="strip__meta" data-testid="animation-view-strip-meta">{{ stripMeta }}</span>
       </header>
 
@@ -515,26 +612,37 @@ const paramNote = computed(() => {
           <span class="tpl__top">
             <span class="tpl__name">{{ t.title }}</span>
           </span>
+          <!-- ★ 学生视角：**它讲的是什么 + 给谁看**。
+               「时长 4.8s」（毫秒换算的标称值）与「可调参数 N 项」是模板的**后台口径**，
+               一张选片卡上摆这些，学生读到的是目录条目而不是「我能不能看懂它」。
+               学段仍然保留（学生按它判断「这档是给我的吗」），只是换成自然说法。 -->
+          <span class="tpl__concept">{{ t.concept }}</span>
           <span class="tpl__grades">
-            <span v-for="g in t.gradeLevels" :key="g" class="tpl__grade">{{ gradeText([g]) }}</span>
+            <span v-for="g in t.gradeLevels" :key="g" class="tpl__grade">{{ gradeName(g) }}</span>
           </span>
-          <span class="tpl__concept">{{ t.concept }} · 时长 {{ fmtDuration(t.durationMs) }}</span>
         </button>
 
         <p v-if="anim.matched.length === 0" class="strip__empty">
-          没有适配当前学段的模板 —— 先去对话里问一问，或者换一档学段再回来。
+          这里还没有能放的动画 —— 先去对话里问问团团，或者换一档学段再回来看看。
         </p>
       </div>
 
-      <!-- 「模板优先，生成补充」的**真实分工**：本页只走模板这条路，
-           自由生成那条（校验 → 失败重试 ≤3 → 降级文字/静态图）在对话里由
-           `generate_animation` 完成 —— 本页不重复实现一遍。 -->
-      <p class="anim__strip-note">
-        <span class="k12-label">链路</span>
-        模板清单 → 按模板渲染 → 一次性地址托管给沙箱：本页走的就是这三步（每一步都是后端端点）。
-        自由生成（校验 → 失败重试 ≤3 次 → 降级为文字或静态图）在对话里由 <code>generate_animation</code> 完成。
-        模板内不得内联 CDN（沙箱断网会白屏）。
-      </p>
+      <!-- ★★ 技术口径（**教师 / 答辩视角**）：胶片条上「本机共几份 / 匹配几份」，
+           以及「模板优先，生成补充」的**真实分工**。原文一句不删 —— 它是
+           「设计合理性」那 25% 的证据（本页只走模板这条路，自由生成那条在对话里由
+           `generate_animation` 完成，本页不重复实现一遍）。 -->
+      <TeacherGate label="模板清单与生成的分工">
+        <p class="anim__strip-note">
+          <span class="k12-label">模板口径</span>
+          <span data-testid="animation-view-strip-meta-teacher">{{ stripMetaTeacher }}</span>
+        </p>
+        <p class="anim__strip-note">
+          <span class="k12-label">链路</span>
+          模板清单 → 按模板渲染 → 一次性地址托管给沙箱：本页走的就是这三步（每一步都是后端端点）。
+          自由生成（校验 → 失败重试 ≤3 次 → 降级为文字或静态图）在对话里由 <code>generate_animation</code> 完成。
+          模板内不得内联 CDN（沙箱断网会白屏）。
+        </p>
+      </TeacherGate>
     </section>
   </div>
 </template>
@@ -565,7 +673,7 @@ const paramNote = computed(() => {
   flex-direction: column;
   gap: 3px;
 }
-/* 16px 块标题档（旧版 22px：与身份行同权，焦点不在「这页在讲什么」上） */
+/* 块标题档（lg = 18px）：身份行之下第一档，不得与它同权争焦点 */
 .anim__title {
   font-size: var(--k12-fs-lg);
   font-weight: 650;
@@ -745,6 +853,11 @@ const paramNote = computed(() => {
   color: var(--k12-fg-2);
   padding: 0 2px;
 }
+/* 进 `<TeacherGate>` 的那一段：外面已经套了一层虚线技术块（10/12 内边距），
+ * 这里不再加左右内边距，否则文字会比块里的其它内容缩进一截。 */
+.anim__note--gate {
+  padding: 0;
+}
 .anim__note code {
   font-family: var(--k12-font-mono);
   font-size: var(--k12-fs-xs);
@@ -771,7 +884,7 @@ const paramNote = computed(() => {
 .strip__ico {
   flex: none;
 }
-/* 13px：次级区块标题，不得与身份行的 22px 相争。 */
+/* 13px：次级区块标题，不得与身份行争字号。 */
 .strip__title {
   font-size: var(--k12-fs-sm);
   font-weight: 650;

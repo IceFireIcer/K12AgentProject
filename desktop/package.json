@@ -29,6 +29,8 @@
     "ux:attribute": "node scripts/ux-scroll-attribution.mjs",
     "ux:pages": "node scripts/ux-pages-audit.mjs",
     "ux:layout": "node scripts/ux-layout-audit.mjs",
+    "ux:student": "node scripts/ux-student-view-scan.mjs",
+    "guards:mutation": "node scripts/verify-guard-mutations.mjs",
     "build:server": "node scripts/build-server.mjs",
     "check:server": "node scripts/build-server.mjs --check dist",
     "check:server:packaged": "node scripts/build-server.mjs --check packaged",

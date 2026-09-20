@@ -111,10 +111,15 @@ export const useQuizStore = defineStore('quiz', () => {
     progressError.value = null
     try {
       const result = await lookup.bridge.readQuizProgress()
+      // ★★ 失败文案必须过一遍面向学生的翻译（与 `bankError` 同一条纪律）。
+      //   这里原来是**直出** `result.message`，而它来自主进程的 wire 层，
+      //   形如「读取失败（HTTP 503）：<后端 detail>」—— HTTP 状态码与内部细节
+      //   会直接印在**编程页左侧的关卡列表**与**闯关页**上（两处都渲染这个字段）。
+      //   这正是走查那条「界面文案不得包含服务器路径 / HTTP 状态码」的落点。
       if (result.ok) progress.value = result.data as QuizProgressView
-      else progressError.value = result.message
+      else progressError.value = toStudentFacingMessage(result.message, { topic: 'quiz' })
     } catch (thrown) {
-      progressError.value = thrown instanceof Error ? thrown.message : String(thrown)
+      progressError.value = describeClientError(thrown, { topic: 'quiz' })
     } finally {
       progressLoading.value = false
     }
@@ -188,16 +193,33 @@ export const useQuizStore = defineStore('quiz', () => {
   }
 
   /**
+   * 这道题是不是**已有终态**（答对了）。
+   *
+   * ★★ 判据只读后端判分回来的 `correct`（前端不比对答案、不自己判对错）。
+   * 为什么需要它：判分口径是「**首次作答决定**」——答对之后再提交，
+   * 服务端照常判分照常给反馈，但掌握度与闯关进度**一个字都不会变**，
+   * 反馈里还会多一句「这次就算再练一遍，不计分」。那是一次**没有效果**的提交，
+   * 界面上不该有一个键在邀请学生去做它（评审实测：答对后按钮仍写着「再提交一次」）。
+   * 页面的提交键据此变「已完成」并禁用（`views/Quiz.vue` 的 `submitDisabled`），
+   * 这里再挡一道：即使有别的调用方绕过界面调用 `submit()`，也不会发那次无意义的请求。
+   */
+  function isSettled(qid: string): boolean {
+    return attempts.value[qid]?.result?.correct === true
+  }
+
+  /**
    * 提交一题并判分。
    *
    * ★ 判分**只在后端**：这里拿回来的 `correct` / `feedback` / `masteryDelta` 是权威结论。
    * ★ 防连点：同一题提交中直接返回（连点会判两次、写两次掌握度）。
+   * ★ 答对即终态：已判为正确的题不再重发（见 `isSettled`）。
    * ★ 判完顺手刷新进度与画像 —— 刚过的那一关应该立刻在关卡列表里变样，
    *   而不是等学生自己再点一次刷新。
    */
   async function submit(qid: string, answer: string): Promise<void> {
     const existing = attempts.value[qid]
     if (existing?.submitting) return
+    if (isSettled(qid)) return
     const trimmed = answer.trim()
     if (trimmed.length === 0) {
       attempts.value = {

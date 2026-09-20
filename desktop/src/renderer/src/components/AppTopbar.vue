@@ -37,12 +37,14 @@ import type { PageName } from '../stores/ui'
 import { useChatStore } from '../stores/chat'
 import { useInsightStore } from '../stores/insight'
 import { useModelStore } from '../stores/model'
+import { useViewModeStore } from '../stores/viewMode'
 import { chapterLineLabel } from '../labels'
 
 const ui = useUiStore()
 const chat = useChatStore()
 const insight = useInsightStore()
 const model = useModelStore()
+const viewMode = useViewModeStore()
 
 const title = computed(() => PAGES[ui.page].title)
 
@@ -73,12 +75,21 @@ const subtitle = computed(() => {
   return TOPIC_PAGES.has(ui.page) ? topic.value || fallback : fallback
 })
 
-/** 模型 chip 的悬停说明；设置还没读到时如实说「正在读取」，不假报一个模型名 */
-const modelTitle = computed(() =>
-  model.current === null
-    ? '正在读取模型设置…（点击选择）'
-    : `当前模型：${model.current.providerName} · ${model.current.modelId}（点击更换）`
-)
+/**
+ * 模型 chip 的悬停说明；设置还没读到时如实说「正在读取」，不假报一个模型名。
+ *
+ * ★ 末尾那半句必须**随视角变**：学生视角下模型弹层是只读的
+ *   （换模型是老师 / 评委的事，见 `ModelPicker.vue` 与 `stores/viewMode.ts`），
+ *   那时还写「点击更换」就是在承诺一件做不到的事 —— 学生点开看到一个
+ *   没有可点项的清单，只会以为自己点错了。与 `MessageComposer.vue` 同一口径。
+ */
+const modelTitle = computed(() => {
+  if (model.current === null) {
+    return viewMode.isTeacher ? '正在读取模型设置…（点击选择）' : '正在读取模型设置…'
+  }
+  const name = `当前模型：${model.current.providerName} · ${model.current.modelId}`
+  return viewMode.isTeacher ? `${name}（点击更换）` : `${name}（想换模型请去设置里的高级设置）`
+})
 </script>
 
 <template>
@@ -89,7 +100,10 @@ const modelTitle = computed(() =>
     </div>
 
     <div class="tb__right">
-      <!-- 模型指示器：可点即换 —— 不然学生只能去设置页改，而他在对话中间想换模型时不会想到那。 -->
+      <!-- 模型指示器：点开看当前模型（教师视角下可直接换）。
+           ★ 学生视角下弹层是**只读**的（换模型连带 BaseURL/Key/计费，是老师或家长的事），
+             所以 `modelTitle` 也随视角变 —— 学生视角下不再写「点击更换」，
+             否则就是承诺一件点不动的事（见 `ModelPicker.vue` 文件头）。 -->
       <button type="button" class="tb__model" :title="modelTitle" @click="model.openPicker()">
         <Cpu :size="13" />
         <span class="tb__model-name">{{ model.shortLabel }}</span>

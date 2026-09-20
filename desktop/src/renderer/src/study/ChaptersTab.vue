@@ -9,20 +9,52 @@
  *   渲染进程只是显示，既不拼目录也不数关卡。
  * ★ 清单顺序是**教材顺序**（服务端按章号排，不是字典序、也不是入库顺序 ——
  *   那两个都会把「第 10 章」或「第 6 章」排错位置）。
+ *
+ * ★★ 知识点 chip 显示的是**中文名**，不是 `kp_id`（走查结论）：
+ *   这一栏以前直接渲染 `chapter.kpIds`，于是四年级学生看到的是
+ *   `ai-definition-jr`、`narrow-ai-jr` 这种 slug —— 对他而言那不是「有个性的名字」，
+ *   而是一串看不出是什么的字母（**看起来像报错**）。
+ *   名字的唯一来源是教材知识点清单（`stores/knowledge.ts` 的 `kpNameOf`，
+ *   与对话右栏、学习档案、闯关页同一处），本页不自己建名字表。
+ *   ⚠️ 名字**取不到就整条不渲染**：那多半是上一代教材留下的残留 id，
+ *      显示 slug 比什么都不显示更糟（`study/kp-label.ts` 记了完整口径）。
  */
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useStudyStore } from '../stores/study'
+import { useKnowledgeStore } from '../stores/knowledge'
+import { kpLabelResolved } from '../study/kp-label'
 import { GRADE_LABELS } from '../labels'
 
 defineOptions({ name: 'StudyChaptersTab' })
 
 const study = useStudyStore()
+const knowledge = useKnowledgeStore()
 
 const chapters = computed(() => study.chapters)
 const gradeLabel = computed(() => {
   const level = chapters.value?.gradeLevel
   return level ? (GRADE_LABELS[level] ?? level) : '待判定'
 })
+
+/**
+ * 一章里**能显示名字**的知识点（顺序 = 教材定义序，服务端给的 `kpIds` 原序）。
+ *
+ * ★ 这里过滤掉取不到名字的那些，而不是渲染成 slug —— 见文件头的说明。
+ * ★ `ensureNames()` 是幂等的（取到过就不发请求），本页只在挂载时调一次；
+ *   失败**不阻断本页**（`catch` 掉）：章节进度与掌握数字才是这一页的主体，
+ *   名字拿不到只让 chip 少几条，不该让整页变成错误态。
+ */
+onMounted(() => {
+  void knowledge.ensureNames().catch(() => {})
+})
+
+function namedKpIds(kpIds: readonly string[] | undefined): string[] {
+  return (kpIds ?? []).filter((kpId) => kpLabelResolved(kpId, null, (id) => knowledge.kpNameOf(id)))
+}
+
+function kpName(kpId: string): string {
+  return knowledge.kpNameOf(kpId) ?? kpId
+}
 
 /** 一章的完成度（0..1）。**只用于显示进度条**，不参与任何判定。 */
 function ratio(mastered: number, total: number): number {
@@ -70,7 +102,9 @@ function ratio(mastered: number, total: number): number {
             ></span>
           </div>
           <p class="chapter__kps">
-            <span v-for="kpId in chapter.kpIds" :key="kpId" class="kp">{{ kpId }}</span>
+            <span v-for="kpId in namedKpIds(chapter.kpIds)" :key="kpId" class="kp">
+              {{ kpName(kpId) }}
+            </span>
           </p>
         </li>
       </ul>

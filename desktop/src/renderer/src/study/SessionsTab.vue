@@ -19,11 +19,14 @@
  */
 import { computed, ref } from 'vue'
 import { useStudyStore, type SessionTranscriptShape } from '../stores/study'
+import { useChatStore } from '../stores/chat'
 import { formatMs } from '../study/report-markdown'
 
 defineOptions({ name: 'StudySessionsTab' })
 
 const study = useStudyStore()
+/** 回看历史时要借用它的「学生版译文」（见 `open()` 里的说明）。 */
+const chat = useChatStore()
 
 const openTranscript = ref<SessionTranscriptShape | null>(null)
 const openId = ref<string | null>(null)
@@ -59,7 +62,24 @@ async function open(sessionId: string): Promise<void> {
   loadingTranscript.value = true
   openId.value = sessionId
   try {
-    openTranscript.value = await study.readTranscript(sessionId)
+    const transcript = await study.readTranscript(sessionId)
+    // ★★ 回看的正文必须过一遍**学生版译文**（与对话页恢复会话同一条纪律）。
+    //   主进程项目里的 `message.text` 是 JSONL 里的**wire 原文** —— 里面带着
+    //   卡片写给模型的内部指令（「请用 submit_quiz 提交批改…」）与嵌着知识点 slug 的
+    //   题目编号（`gen-ai-definition-jr-…`）。实时路径与对话页恢复都挡住了这两样，
+    //   而**这一条路曾经漏着**：学生在档案页点开自己的历史会话，又能读到它们。
+    //   翻译的唯一实现是 `stores/chat.ts` 的 `studentFacingUserText`（别再写第二份）。
+    openTranscript.value =
+      transcript === null
+        ? null
+        : {
+            ...transcript,
+            messages: transcript.messages.map((message) =>
+              message.role === 'user'
+                ? { ...message, text: chat.studentFacingUserText(message.text) }
+                : message
+            )
+          }
   } finally {
     loadingTranscript.value = false
   }

@@ -379,7 +379,7 @@ function handleRun(message: RunMessage): void {
     const failure: ErrorMessage = {
       type: 'error',
       runId: message.runId,
-      failure: 'Pyodide 尚未加载完成（还没收到 ready）。请稍等片刻再运行。'
+      failure: '代码运行器还没准备好，稍等一下再点运行试试。'
     }
     self.postMessage(failure)
     return
@@ -430,13 +430,15 @@ self.onmessage = (event: MessageEvent<WorkerInbound>): void => {
 
   if (message.type === 'init') {
     void handleInit(message).catch((error: unknown) => {
+      // ★ 这句会**原样印到学生的编程页上**（走 `phase: 'failed'` 的 `failure`），
+      //   所以它只能有一句学生能懂的话 —— 原来的「本地资源应位于 <renderer>/pyodide/；
+      //   离线演示不允许走 CDN」是写给打包/排障的人看的（路径 + CDN 取舍），
+      //   学生读到只会以为自己弄坏了什么。技术细节进 console，界面文案归学生。
+      console.error('[pyodide] 初始化失败：', error)
       const failure: ErrorMessage = {
         type: 'error',
         runId: 'init',
-        failure:
-          'Pyodide 加载失败：' +
-          (error instanceof Error ? error.message : String(error)) +
-          '（本地资源应位于 <renderer>/pyodide/；离线演示不允许走 CDN。）'
+        failure: '运行环境没准备好，这段时间先看点别的，或者稍后再试一次。'
       }
       self.postMessage(failure)
     })

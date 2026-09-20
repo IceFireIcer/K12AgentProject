@@ -17,6 +17,15 @@
  *     ★ 来源标签（手动选中 / AI 引擎推算）只有 `labels.ts` 那一处实现，
  *       两处各写一份映射迟早对不上。
  *
+ * ★★ **视角分层（学生 / 教师，2026-09-20）**：这一栏原来是**运维视角写满**的 ——
+ *    降级链档位名、毫秒耗时、`degraded` 原值、Python 诊断串（`t4|答题=连对10`）、
+ *    「隔离在 SQL 层强制，模型改不了 WHERE」全都摆在学生面前。
+ *    现在分两层（机制见 `stores/viewMode.ts`）：
+ *      · **学生**看到的是人话：这次参考了什么、团团这轮做了什么、当前学段与掌握度；
+ *      · **教师 / 答辩**（`<TeacherGate>`）看到上面那批**原始证据** —— 一条都没删，
+ *        因为那正是「设计合理性」25% 的材料。
+ *    ⚠️ 分层只改「默认给谁看」，**不改任何数据通路**：降级档位仍原样读 Python。
+ *
  * 响应式：≥1280px 是常驻栏（`open` 控制显隐）；<1280px 变成浮层面板 + 遮罩，
  * 点遮罩即关。判断放在 CSS 里，`open` 由 ChatView 持有 —— 组件自己不去监听窗口，
  * 免得同一份断点逻辑在两个地方各写一遍。
@@ -25,8 +34,11 @@
  *   学生问一句寒暄时本来就不会查教材，那时把整条链画成红的是撒谎。
  */
 import { computed, ref, watch } from 'vue'
-import { BookOpen, GitBranch, Info, Radar, Route, Sparkles, TrendingUp, X } from 'lucide-vue-next'
+import { BookOpen, GitBranch, Info, Route, Sparkles, TrendingUp, X } from 'lucide-vue-next'
 import EmptyState from './EmptyState.vue'
+import TeacherGate from './TeacherGate.vue'
+import { DEGRADE_LEVELS, TRACE_TEACHER_NOTE, isolationTeacherText } from './rail-evidence'
+import { kpLabel, kpLabelResolved } from '../study/kp-label'
 import { useChatStore } from '../stores/chat'
 import { useInsightStore } from '../stores/insight'
 import { useKnowledgeStore } from '../stores/knowledge'
@@ -69,7 +81,7 @@ const tab = ref<TabKey>('context')
  * ★ 文案刻意**压到 4/2/2 字**（「上下文 / 工具 / 学段」而不是「学习上下文 / 工具调用 / 学段」）：
  *   右栏只有 288px，三个等宽段各约 88px —— 五字标签会被截成「学习…」，
  *   看起来像排版坏了（实测截图里就是这样）。三段的语义在各自页内已由小标题说清
- *   （「检索降级链」「本轮工具调用」「当前学段」），这里只需要能区分。
+ *   （「这段回答的依据」「团团这轮做了什么」「当前学段」），这里只需要能区分。
  */
 /** 页签的取值（与 `TabKey` 同一联合，`satisfies` 让漏项在编译期报出来）。 */
 const TABS = [
@@ -91,19 +103,12 @@ const TABS = [
  *   - 比命中档**更弱**的档位是「未走到」（还没轮到它，不能画成失败）。
  * ★ `null`（这一轮没检索）时四档统一「本轮未检索」。
  *
- * ★ 档位名**刻意压到最短**（「向量检索 · 本地模型」而不是「向量检索 · fastembed 本地」）：
- *   右栏只有 288px，而这一行还要并排放状态标签 —— 名字一长就折成两行，
- *   四档高度参差不齐（实测截图里就是第一档比其它三档高一倍）。
- *   技术名词（fastembed）在这里没有信息价值：学生关心的是「本地 / 云端」这个区别，
- *   具体用的哪个模型在设置页与右栏统计里都写着。
+ * ★★ 档位名与那句硬边界原文都住在 `./rail-evidence.ts` —— **那是刻意的分文件**：
+ *   它们是教师 / 答辩视角的证据（只有 `<TeacherGate>` 里渲染），单独成文件之后
+ *   扫描守卫可以对**本文件零豁免**。若把技术串留在本文件里，守卫就必须给整个右栏开豁免，
+ *   而开了豁免之后谁往学生那一半塞一句 SQL 它都看不见了（变异测试实测如此）。
+ *   详见 `rail-evidence.ts` 的文件头。
  */
-const DEGRADE_LEVELS: Array<{ key: Degraded; label: string }> = [
-  { key: 'vector', label: '向量检索 · 本地模型' },
-  { key: 'cloud', label: '云端 Embedding' },
-  { key: 'fts', label: 'FTS5 关键词兜底' },
-  { key: 'outline', label: '依赖图 + 大纲' }
-]
-
 const lastDegraded = computed<Degraded | null>(() => chat.lastCitationDegraded)
 
 const degradeChain = computed(() => {
@@ -117,19 +122,82 @@ const degradeChain = computed(() => {
   })
 })
 
-/** 学段隔离提示：只在**真的检索过**时给（没检索时说「隔离生效」是无意义的话）。 */
+/**
+ * ★★ **学生视角**：最近一次真正查了教材的那一轮，它的引用（`Citation[]`）。
+ *
+ * 为什么不直接读 `lastCitationDegraded`：那个值只说「走到哪一档」（运维量），
+ * 学生要知道的是「这次参考了什么」。而引用行里本来就带着**章节标题与学段**
+ * （`Citation` 的 5 个冻结字段），段数就是它们的条数 ——
+ * **不新增任何数据通路、不在渲染进程重新推理检索**。
+ */
+const latestCitationTurn = computed(() => {
+  for (let index = chat.turns.length - 1; index >= 0; index -= 1) {
+    const turn = chat.turns[index]
+    if (turn !== undefined && turn.citations.length > 0) return turn
+  }
+  return null
+})
+
+/**
+ * **学生视角**的一句人话：「本次参考了「初中」教材 3 段」。
+ *
+ * ★ 学段只在**全都一样**时才写进句子里：一轮里可能同时取到本学段与向上兼容的
+ *   更低学段块，那时写一个学段名就是假的 —— 宁可只说「教材 N 段」。
+ * ★ 拿不到引用时（没检索过 / 刚恢复出来的历史会话 —— 恢复不带引用，见
+ *   `api/events.ts` 的说明）说「这次没查教材」，**不是失败**：
+ *   寒暄一轮本来就不查教材。
+ */
+const basisSentence = computed(() => {
+  const turn = latestCitationTurn.value
+  if (turn === null) return '这次回答没查教材，团团用的是自己会的知识。'
+  const count = turn.citations.length
+  const first = turn.citations[0]
+  if (first !== undefined && turn.citations.every((item) => item.gradeLevel === first.gradeLevel)) {
+    return `本次参考了「${GRADE_LABELS[first.gradeLevel]}」教材 ${count} 段`
+  }
+  return `本次参考了教材 ${count} 段`
+})
+
+/**
+ * 学段隔离提示：只在**真的检索过**时给（没检索时说「隔离生效」是无意义的话）。
+ *
+ * ★★ 两种说法分给两种视角（学生 / 教师）：
+ *   - `studentText`：说「不会超纲」——学生关心的是这个；**本文件里只有它**；
+ *   - `teacherText`：那句**硬边界证据**原文（「隔离在 SQL 层强制，模型改不了 WHERE」）
+ *     一字不删地进教师视角 —— 但它的**字面量住在 `rail-evidence.ts`**，
+ *     本文件只负责在 gate 里把它渲染出来（否则扫描守卫要给整个右栏开豁免）。
+ */
 const isolationNotice = computed(() => {
   if (lastDegraded.value === null) return null
   const label = chat.currentGradeLabel ?? GRADE_UNKNOWN_LABEL
   return {
     gradeLabel: label,
-    text: `本次仅使用「${label}」及以下教材块（隔离在 SQL 层强制，模型改不了 WHERE）`
+    studentText:
+      chat.currentGradeLabel === null
+        ? '团团只用了你当前学段的教材，不会超纲。'
+        : `团团这次只用了「${label}」和更低学段的教材，不会超纲。`,
+    teacherText: isolationTeacherText(label)
   }
 })
 
-/** 知识点显示名（拿不到回退 id —— **不编名字**）。 */
+/**
+ * 知识点显示名（**教材里的中文名**）。
+ *
+ * ★★ 这里曾经是 `knowledge.kpNameOf(kpId) ?? kpId` —— 一个**回落成 slug** 的兜底。
+ *   它平时看不出来（名字表正常时总取得到），但在**教材换代**之后就会露出来：
+ *   `learning.db` 按学生长期保留，换代后老库里还有指向已删除知识点的掌握度行，
+ *   那些行没有中文名 —— 于是右栏的「掌握度」列表里出现 `ph-data-train-predict`，
+ *   正是走查那条「看起来像报错」的形态（同一个缺陷在档案页已经修过一轮）。
+ * ★ 现在与全仓同一条口径（`study/kp-label.ts`）：取不到名字给中性标签，
+ *   **不回落成 id**；id 只进 `title`（排障要看，学生不会被它吓到）。
+ */
 function kpName(kpId: string): string {
-  return knowledge.kpNameOf(kpId) ?? kpId
+  return kpLabel(kpId, null, knowledge.kpNameOf)
+}
+
+/** 名字是否真的取到了（取不到时不把 slug 放进 `title` 之外的地方）。 */
+function kpNameResolved(kpId: string): boolean {
+  return kpLabelResolved(kpId, null, knowledge.kpNameOf)
 }
 
 /**
@@ -142,7 +210,9 @@ function kpName(kpId: string): string {
 const recommendedName = computed(() => {
   const item = insight.recommended
   if (item === null) return ''
-  return item.name.trim() || item.kpId
+  // ★ 走共用口径：服务端给的 `name` 与 kpId 相同时等于没有名字（`routes/study.py`
+  //   在查不到名字时会把 id 原样填进来）—— 那时给中性标签，**不摆 slug**。
+  return kpLabel(item.kpId, item.name, knowledge.kpNameOf)
 })
 
 /** 掌握度行（store 已按分数降序排好，同分按 kpId 兜底）。 */
@@ -170,7 +240,7 @@ const kpRow = computed(() => masteryRows.value.find((row) => row.kpId === kpDeta
 
 const traceGroups = computed(() => trace.byTurn)
 const latestTurn = computed(() => trace.turn)
-const traceNote = '路由由模型自选；学段隔离、参数校验、内容终审均在代码层强制。'
+const traceNote = TRACE_TEACHER_NOTE
 
 /**
  * Tool 名的中文说法（轨迹里给人看的一句）。
@@ -193,6 +263,25 @@ const TOOL_LABELS: Record<string, string> = {
 function toolLabel(toolName: string): string {
   return TOOL_LABELS[toolName] ?? toolName
 }
+
+/**
+ * ★★ **学生视角**：这一轮团团做了什么（「团团这轮做了：查教材、出题」）。
+ *
+ * ★ 只取**最后一轮**：这一页的标题就是「团团这轮做了什么」，把前面几轮也堆上来
+ *   等于把「刚才发生了什么」混进「现在发生了什么」。
+ * ★ 同一个 Tool 调了多次只报一次（学生关心「用了哪几种本领」，不是调用条数）。
+ * ★ 名字来自 {@link TOOL_LABELS} 这一处映射 —— 与轨迹导出用的是同一份中文说法。
+ */
+const traceSummary = computed(() => {
+  const group = traceGroups.value[traceGroups.value.length - 1]
+  if (group === undefined) return ''
+  const actions: string[] = []
+  for (const entry of group.entries) {
+    const label = toolLabel(entry.toolName)
+    if (!actions.includes(label)) actions.push(label)
+  }
+  return `团团这轮做了：${actions.join('、')}`
+})
 
 /* ------------------------------------------------------------------ *
  * ③ 学段
@@ -303,33 +392,46 @@ watch(tab, () => {
         <!-- ══ ① 学习上下文 ═══════════════════════════════════════════════ -->
         <section v-if="tab === 'context'" class="sec">
           <div class="sec__head">
-            <Radar :size="14" />
-            <h3 class="sec__title">检索降级链</h3>
+            <Info :size="14" />
+            <h3 class="sec__title">这段回答的依据</h3>
           </div>
-          <p class="sec__hint">
-            四级在一次调用内走完（Python 侧），前端只读结果。
-            <template v-if="lastDegraded === null">本轮没有查教材，所以四档都还没走到。</template>
-          </p>
+          <!-- 学生视角：这次回答**参考了什么**（一句人话，取代原来的四级链） -->
+          <p class="basis" data-testid="answer-basis">{{ basisSentence }}</p>
 
-          <ul class="chain" data-testid="degrade-chain">
-            <li
-              v-for="level in degradeChain"
-              :key="level.key"
-              class="chain__row"
-              :class="{ 'chain__row--on': level.active, 'chain__row--skip': level.skipped }"
-              :data-level="level.key"
-              :data-active="String(level.active)"
-            >
-              <span class="chain__dot" />
-              <span class="chain__label">{{ level.label }}</span>
-              <span class="chain__state">{{ level.state }}</span>
-            </li>
-          </ul>
-
+          <!-- 学段隔离：学生看到的是「不会超纲」；SQL 那句话在下面的教师视角里 -->
           <p v-if="isolationNotice" class="isolation" data-testid="isolation-notice">
             <Info :size="13" />
-            <span>{{ isolationNotice.text }}</span>
+            <span>{{ isolationNotice.studentText }}</span>
           </p>
+
+          <!-- ★★ 教师 / 答辩视角：四级降级链 + 那句硬边界证据。
+               ★ 链的实现**一个字没改**（`DEGRADE_LEVELS` / `degradeChain` 都在脚本里），
+                 只是默认不给学生看 —— 它仍是「设计合理性」那一项的材料。
+               ★ `data-testid="degrade-chain"` 保留在这块**内部**：它在教师视角里位置不变，
+                 学生视角下整块不在 DOM 里（体检脚本据此断言分层真的生效）。 -->
+          <TeacherGate label="检索降级链">
+            <p class="sec__hint">
+              四级在一次调用内走完（Python 侧），前端只读结果。
+              <template v-if="lastDegraded === null">本轮没有查教材，所以四档都还没走到。</template>
+            </p>
+
+            <ul class="chain" data-testid="degrade-chain">
+              <li
+                v-for="level in degradeChain"
+                :key="level.key"
+                class="chain__row"
+                :class="{ 'chain__row--on': level.active, 'chain__row--skip': level.skipped }"
+                :data-level="level.key"
+                :data-active="String(level.active)"
+              >
+                <span class="chain__dot" />
+                <span class="chain__label">{{ level.label }}</span>
+                <span class="chain__state">{{ level.state }}</span>
+              </li>
+            </ul>
+
+            <p v-if="isolationNotice" class="note">{{ isolationNotice.teacherText }}</p>
+          </TeacherGate>
 
           <div class="sec__head sec__head--gap">
             <TrendingUp :size="14" />
@@ -341,7 +443,12 @@ watch(tab, () => {
           <p v-else-if="masteryRows.length === 0" class="sec__hint">还没有练习记录。</p>
           <ul v-else class="mastery" data-testid="rail-mastery">
             <li v-for="row in masteryRows" :key="row.kpId">
-              <button type="button" class="mastery__row" @click="kpDetail = row.kpId">
+              <button
+                type="button"
+                class="mastery__row"
+                :title="kpNameResolved(row.kpId) ? undefined : row.kpId"
+                @click="kpDetail = row.kpId"
+              >
                 <span class="mastery__name">{{ row.name }}</span>
                 <el-progress
                   :percentage="Math.round(row.score * 100)"
@@ -360,7 +467,7 @@ watch(tab, () => {
               <p class="reco__title">建议下一步：{{ recommendedName }}</p>
               <p class="reco__desc">{{ insight.recommended.reason }}</p>
             </div>
-            <button type="button" class="reco__btn" @click="goQuiz()">去闯关检验</button>
+            <button type="button" class="reco__btn k12-cta" @click="goQuiz()">去闯关检验</button>
           </div>
         </section>
 
@@ -368,11 +475,18 @@ watch(tab, () => {
         <section v-else-if="tab === 'tools'" class="sec">
           <div class="sec__head">
             <Route :size="14" />
-            <h3 class="sec__title">本轮工具调用</h3>
-            <span v-if="trace.hasDegraded" class="tag tag--warn" data-testid="trace-degraded">有降级</span>
-            <span v-if="trace.failureCount > 0" class="tag tag--bad" data-testid="trace-failures">
-              {{ trace.failureCount }} 次未成功
-            </span>
+            <!-- 标题也用学生的话：它原本是「本轮工具调用」——「调用」是工程动词，
+                 而这一页在两种视角下说的都是**同一件事**（团团这轮做了什么），
+                 只是教师视角里多给了原始轨迹。 -->
+            <h3 class="sec__title">团团这轮做了什么</h3>
+            <!-- 「有降级 / N 次未成功」是运维量：学生看不懂「降级」，教师看它是证据。
+                 `v-if` 放在 gate 上：两个都为空时不留一个空元素占 `sec__head` 的 `gap`。 -->
+            <TeacherGate v-if="trace.hasDegraded || trace.failureCount > 0" class="tags">
+              <span v-if="trace.hasDegraded" class="tag tag--warn" data-testid="trace-degraded">有降级</span>
+              <span v-if="trace.failureCount > 0" class="tag tag--bad" data-testid="trace-failures">
+                {{ trace.failureCount }} 次未成功
+              </span>
+            </TeacherGate>
           </div>
 
           <p v-if="trace.bridgeError" class="warn" data-testid="trace-bridge-error">
@@ -381,36 +495,49 @@ watch(tab, () => {
           <EmptyState
             v-else-if="traceGroups.length === 0"
             tone="empty"
-            title="还没有工具调用"
-            desc="问一个需要查教材、出题或生成动画的问题，这里会实时显示模型调了哪些工具。"
+            title="团团还没动手"
+            desc="问一个需要查教材、出题或做动画的问题，这里会显示团团用到了哪些本领。"
           />
 
-          <el-collapse v-else :model-value="[latestTurn]" data-testid="trace-groups">
-            <el-collapse-item
-              v-for="group in traceGroups"
-              :key="group.turn"
-              :name="group.turn"
-              :title="`第 ${group.turn} 轮 · ${group.entries.length} 次调用`"
-            >
-              <ul class="trace" :data-testid="`trace-turn-${group.turn}`">
-                <li
-                  v-for="(entry, index) in group.entries"
-                  :key="`${group.turn}-${index}`"
-                  class="trace__row"
-                  :data-ok="String(entry.ok)"
-                >
-                  <span class="trace__dot" :class="entry.ok ? 'is-ok' : 'is-bad'" />
-                  <span class="trace__name">{{ toolLabel(entry.toolName) }}</span>
-                  <span class="trace__args">{{ entry.argsSummary }}</span>
-                  <span class="trace__meta k12-num">
-                    {{ entry.latencyMs }}ms<template v-if="entry.degraded"> · {{ entry.degraded }}</template>
-                  </span>
-                </li>
-              </ul>
-            </el-collapse-item>
-          </el-collapse>
+          <!-- 学生视角：一句人话（取代毫秒耗时 / degraded 原值 / 参数摘要）。
+               ★ 用 `traceGroups.length > 0` 而不是 `v-else`：`bridgeError` 那条分支下
+                 可能一条轨迹都没有，那时渲染一个空盒子会像「内容没加载出来」。 -->
+          <p v-else-if="traceGroups.length > 0" class="trace-summary" data-testid="trace-summary">
+            {{ traceSummary }}
+          </p>
 
-          <p class="note">{{ traceNote }}</p>
+          <!-- 教师 / 答辩视角：完整轨迹（毫秒、档位、参数摘要、轮次分组） -->
+          <TeacherGate label="工具调用轨迹">
+            <el-collapse v-if="traceGroups.length > 0" :model-value="[latestTurn]" data-testid="trace-groups">
+              <el-collapse-item
+                v-for="group in traceGroups"
+                :key="group.turn"
+                :name="group.turn"
+                :title="`第 ${group.turn} 轮 · ${group.entries.length} 次调用`"
+              >
+                <ul class="trace" :data-testid="`trace-turn-${group.turn}`">
+                  <li
+                    v-for="(entry, index) in group.entries"
+                    :key="`${group.turn}-${index}`"
+                    class="trace__row"
+                    :data-ok="String(entry.ok)"
+                  >
+                    <span class="trace__dot" :class="entry.ok ? 'is-ok' : 'is-bad'" />
+                    <span class="trace__name">{{ toolLabel(entry.toolName) }}</span>
+                    <span class="trace__args">{{ entry.argsSummary }}</span>
+                    <span class="trace__meta k12-num">
+                      {{ entry.latencyMs }}ms<template v-if="entry.degraded"> · {{ entry.degraded }}</template>
+                    </span>
+                  </li>
+                </ul>
+              </el-collapse-item>
+            </el-collapse>
+          </TeacherGate>
+
+          <!-- 这段说明本身就是写给评委的（「哪些约束在代码层强制」），学生视角下不出现 -->
+          <TeacherGate>
+            <p class="note">{{ traceNote }}</p>
+          </TeacherGate>
         </section>
 
         <!-- ══ ③ 学段 ═════════════════════════════════════════════════════ -->
@@ -426,13 +553,10 @@ watch(tab, () => {
             <span v-else class="grade__origin">还没判出来</span>
           </p>
 
-          <p v-if="confidence !== null" class="sec__hint" data-testid="rail-confidence">
-            判定置信度 {{ Math.round(confidence * 100) }}%（低于 60% 时系统不会改动学段）
-          </p>
-
           <p v-if="insight.errors.gradeSignals" class="warn" data-testid="rail-signals-error">
             {{ insight.errors.gradeSignals }}
           </p>
+          <!-- 四类信号的分值条：学生看得懂（「用词水平 / 追问深度」），保留 -->
           <ul v-else-if="gradeSignals.length > 0" class="signals" data-testid="rail-signals">
             <li
               v-for="(signal, index) in gradeSignals"
@@ -446,10 +570,31 @@ watch(tab, () => {
                   :style="{ width: `${Math.round(Math.max(0, Math.min(1, signal.value)) * 100)}%` }"
                 />
               </span>
-              <span class="signals__raw">{{ signal.raw ?? '—' }}</span>
             </li>
           </ul>
           <p v-else class="sec__hint">系统还没从对话里攒到足够的判定依据。</p>
+
+          <!-- ★★ 教师 / 答辩视角：置信度与**原始诊断串**。
+               `signal.raw` 是 Python 的 `encode_turn_raw` 产出的排障串
+               （实测形态 `t4|答题=连对10,正确率1.0`），学生读它只会以为界面坏了；
+               而它是「判定依据看得见」的证据，所以一字不删地留在这里。 -->
+          <template v-if="confidence !== null || gradeSignals.length > 0">
+            <TeacherGate label="学段判定依据">
+              <p v-if="confidence !== null" class="sec__hint" data-testid="rail-confidence">
+                判定置信度 {{ Math.round(confidence * 100) }}%（低于 60% 时系统不会改动学段）
+              </p>
+              <ul v-if="gradeSignals.length > 0" class="raws" data-testid="rail-signals-raw">
+                <li
+                  v-for="(signal, index) in gradeSignals"
+                  :key="`raw-${signal.signalType}-${index}`"
+                  class="raws__row"
+                >
+                  <span class="raws__name">{{ signalLabel(signal.signalType) }}</span>
+                  <code class="raws__value">{{ signal.raw ?? '—' }}</code>
+                </li>
+              </ul>
+            </TeacherGate>
+          </template>
 
           <div class="sec__head sec__head--gap">
             <BookOpen :size="14" />
@@ -482,7 +627,11 @@ watch(tab, () => {
           <header class="kpd__head">
             <div class="kpd__head-text">
               <p class="kpd__title">{{ kpRow.name }}</p>
-              <p class="kpd__sub"><code>{{ kpRow.kpId }}</code></p>
+              <!-- 知识点 id（`prog-loop-jr`）是教材库里的内部 slug，学生视角下不显示
+                   —— 与「消息 pi-message:<uuid>」同一类排障字段。 -->
+              <TeacherGate>
+                <p class="kpd__sub"><code>{{ kpRow.kpId }}</code></p>
+              </TeacherGate>
             </div>
             <button type="button" class="kpd__close" title="关闭" @click="kpDetail = null">
               <X :size="16" />
@@ -495,11 +644,17 @@ watch(tab, () => {
               <el-descriptions-item label="答对次数">{{ kpRow.correct }}</el-descriptions-item>
             </el-descriptions>
             <p class="kpd__hint">
-              掌握度由判分规则算出（单次变化限幅 ±0.2）——模型改不了它，只有答题结果能改。
+              掌握度会跟着你每次答题的结果慢慢变化 —— 答得越准，它就越靠近 100%。
             </p>
+            <!-- 判分规则细节是教师视角的内容（学生只需要知道「它跟着答题结果走」） -->
+            <TeacherGate label="掌握度规则">
+              <p class="kpd__hint">
+                掌握度由判分规则算出（单次变化限幅 ±0.2）——模型改不了它，只有答题结果能改。
+              </p>
+            </TeacherGate>
           </div>
           <footer class="kpd__foot">
-            <button type="button" class="kpd__btn kpd__btn--primary" @click="goQuiz()">
+            <button type="button" class="k12-cta" @click="goQuiz()">
               <GitBranch :size="14" /> 去闯关检验
             </button>
           </footer>
@@ -632,6 +787,18 @@ watch(tab, () => {
   font-size: var(--k12-fs-xs);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
+}
+/* ★★ 学生视角的两句人话（「本次参考了…」/「团团这轮做了：…」）。
+ * 它们取代了降级链与毫秒轨迹，所以在这一栏里是**正文**（`sm` 14px），
+ * 不再是那一堆 `xs` 的运维小字 —— 这两句是学生唯一要读的东西。 */
+.basis,
+.trace-summary {
+  padding: 10px 11px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
+  font-size: var(--k12-fs-sm);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-fg-2);
 }
 .warn {
   font-size: var(--k12-fs-xs);
@@ -781,19 +948,23 @@ watch(tab, () => {
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
+/* ★★ 按钮本体不再本地描边 —— 它现在是设计系统的**主要动作**（`.k12-cta`，
+ * 定义在 `base.css`）。本地那份配方（第 6 份）已随这次改动删掉：
+ * 抄第 6 份的时候必然又漂移一次（见 `base.css` 里那段说明）。
+ * 只保留「不被拉伸」这一条本地约束（`flex: none` 是布局，不是皮肤）。 */
 .reco__btn {
   flex: none;
-  padding: 7px 11px;
-  border: 1px solid var(--k12-accent);
-  border-radius: var(--k12-r-control);
-  background: var(--k12-accent);
-  color: var(--k12-surface);
-  font-size: var(--k12-fs-xs);
-  font-weight: 650;
-  cursor: pointer;
 }
 
 /* ── 工具轨迹 ── */
+/* `TeacherGate` 的根节点会继承本组件的 scope，所以这里能直接给它排版：
+ * 那两个角标原本是 `sec__head` 的 flex 子项，包进 gate 之后要自己带 flex 容器，
+ * 否则两个角标之间只剩空白节点（间距从 6px 变成 0）。 */
+.tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .tag {
   padding: 2px 7px;
   border-radius: var(--k12-r-flat);
@@ -894,13 +1065,30 @@ watch(tab, () => {
   height: 100%;
   background: var(--k12-accent);
 }
-.signals__raw {
-  grid-column: 2;
+/* 教师视角里的**原始诊断串**（`signal.raw`）：
+ * 它是等宽的一行，会很长（`t4|答题=连对10,正确率1.0`）—— 允许折行，不省略号截断：
+ * 这一块的全部意义就是「原样看得见」，截一半反而没法核对。 */
+.raws {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.raws__row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.raws__name {
+  flex: none;
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+.raws__value {
+  min-width: 0;
+  font-family: var(--k12-font-mono);
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-fg-2);
+  word-break: break-all;
 }
 
 .hist__line {
@@ -991,23 +1179,11 @@ watch(tab, () => {
   border-top: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
 }
-.kpd__btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  border-radius: var(--k12-r-control);
-  border: 1px solid var(--k12-border);
-  background: var(--k12-surface);
-  color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
-  font-weight: 650;
-  cursor: pointer;
-}
-.kpd__btn--primary {
-  border-color: var(--k12-accent);
-  background: var(--k12-accent);
-  color: var(--k12-surface);
+/* ★ 抽屉里那颗按钮此前有一份**本地配方**（`.kpd__btn` / `--primary`：自己描边、
+ * 自己调色）—— 它就是「第五份 `.btn`」里的一员。现在改用设计系统的 `.k12-cta`，
+ * 本地只剩「撑满一行」这条布局约束（皮肤一律来自 `base.css`）。 */
+.kpd__foot .k12-cta {
+  width: 100%;
 }
 
 /* 窄屏：常驻栏变浮层（判断放 CSS，`open` 由 ChatView 持有） */

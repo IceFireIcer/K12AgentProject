@@ -1,12 +1,25 @@
 <script setup lang="ts">
 /**
- * 设置：供应商 / 嵌入模型 / 学段 / 教材章节 / 外观主题 / 隐私与本地服务。
+ * 设置：**学段 / 教材章节 / 外观主题**（学生视角）+ **高级设置（教师 / 答辩）**。
  *
  * ── 结构：左「章节索引」+ 右「单列字段」──────────────────────────────────
- * 左栏 180px 是可点跳转的章节索引，右栏是当前章节的字段；供应商章节排在最前
- * 且占满右栏宽度，字段完整展开（它才是这一页的主任务）。
+ * 左栏 180px 是可点跳转的章节索引，右栏是当前章节的字段。
  * 跳转用 `scrollTop` 直接赋值（`behavior: 'auto'`）—— 本版**动效为零**，
  * `smooth` 也算动效，不要加。
+ *
+ * ── ★★ 两段式：学生看三节，技术三节进「高级设置」────────────────────────
+ * 走查结论：这一页此前把「供应商 / 嵌入模型 / 隐私与本地服务」直接摆在学生面前 ——
+ * 一个 10 岁学生打开「设置」看到 BaseURL、端口号、进程号，那不是设置页，是运维控制台。
+ * 现在分成两段：
+ *   · **学生段**（默认可见）：学段 / 教材章节 / 外观主题 —— 这三节是学生真的会改的东西；
+ *   · **高级段**（`viewMode.advancedOpen` 或教师视角时展开）：供应商 / 嵌入模型 /
+ *     隐私与本地服务，外加「教师视角」开关。
+ *
+ * ⚠️ **这不是权限系统**（见 `stores/viewMode.ts`）：没有账号体系，开关是可绕过的。
+ *    它保证的只是「学生日常不会撞见运维术语」，文案里**不许**写成安全边界。
+ * ⚠️ ★ **供应商那三节是「移到后面」，不是「删掉」**：赛题硬要求供应商 / BaseURL /
+ *    API Key / Model ID 全部可改（不写死供应商）。谁把 BaseURL 输入框删掉，谁就违反了需求。
+ *    本页只改「默认给谁看」（默认收起 = 学生日常不需要），能力一个字没减。
  *
  * ⚠️ 焦点：全页内容区最大字号是身份行的 22px（PageIdentity），
  *    章节标题 16px 必须**小于**它 —— 否则"卡片的重量盖过内容"。
@@ -40,9 +53,11 @@
  * 用户真的把容器滚到了别处（scrollTop 离开钉住点 >2px）才交还给位置判定。
  * 没有定时器、没有 rAF、没有"等滚动结束"的猜测 —— 状态完全由 scrollTop 决定。
  */
-import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
+  Check,
+  ChevronRight,
   Cpu,
   Database,
   Eye,
@@ -54,7 +69,8 @@ import {
   Palette,
   Plug,
   Server,
-  ShieldCheck
+  ShieldCheck,
+  SlidersHorizontal
 } from 'lucide-vue-next'
 import { GRADE_LEVELS } from '../api/grade'
 import { EMBEDDING_MODE_LABELS, MANUAL_PRESET_ID, type EmbeddingMode } from '../api/settings'
@@ -64,7 +80,8 @@ import { useKnowledgeStore } from '../stores/knowledge'
 import { useSettingsStore } from '../stores/settings'
 import { useSidecarStore } from '../stores/sidecar'
 import { useStudyStore } from '../stores/study'
-import { SATS, useThemeStore } from '../stores/theme'
+import { SATS, useThemeStore, type SatKey } from '../stores/theme'
+import { useViewModeStore } from '../stores/viewMode'
 import PageIdentity from '../components/PageIdentity.vue'
 import SurfacePanel from '../components/SurfacePanel.vue'
 import type { GradeLevel } from '@shared/ipc-events'
@@ -75,6 +92,8 @@ const study = useStudyStore()
 const knowledge = useKnowledgeStore()
 const sidecar = useSidecarStore()
 const theme = useThemeStore()
+/** 学生 / 教师视角（见文件头：这是**防误入**，不是权限）。 */
+const viewMode = useViewModeStore()
 
 /* ------------------------------------------------------------ 供应商 */
 
@@ -131,6 +150,31 @@ function runProbe(): void {
 function runFetchModels(): void {
   void settings.fetchModels()
 }
+
+/**
+ * 探测结论的**一句话白话**（给不懂 HTTP 的人看）。
+ *
+ * ★ 后端那句原文是**排障文案**，形态是
+ *   「连通成功：https://api.deepseek.com/models 返回 HTTP 200，可见模型 2 个（示例：…）。
+ *     保存后即以 … 调用。」——信息完整，但一个学生读到 URL + HTTP 状态码只会以为出了问题。
+ *   **后端文案不在这里改**（有测试盯着「连通成功」「重新填写 API Key」等字符串）：
+ *   这里只把同一份结果**再表述一次**，原文一字不改地放在下面的「技术详情」里。
+ * ★ 判据用正则从原文里**取事实**（模型个数 / HTTP 状态码），取不到就说一句不含细节的
+ *   「连通正常」—— 不编一个具体数字出来。
+ */
+const probeSummary = computed(() => {
+  const result = settings.probe
+  if (result === null) return ''
+  if (!result.ok) return '还没连通 —— 具体原因和改法在下面的「技术详情」里。'
+  const models = /可见模型\s*(\d+)\s*个/.exec(result.message)
+  if (models) return `连通正常（这个地址上有 ${models[1]} 个模型可用）`
+  const http = /返回 HTTP\s*(\d{3})/.exec(result.message)
+  if (http) return `连通正常（对方返回 HTTP ${http[1]}）`
+  return '连通正常'
+})
+
+/** 探测结果的标题那两个词（学生可见口径，与后端文案同一个词，不要改）。 */
+const probeTitle = computed(() => (settings.probe?.ok ? '连通成功' : '未能连通'))
 
 /* ------------------------------------------------------------ 嵌入模型 */
 
@@ -213,7 +257,13 @@ async function chooseChapter(title: string): Promise<void> {
 
 /* ------------------------------------------------------------ 外观主题 */
 
-function setSat(value: unknown): void {
+/**
+ * 切饱和度（应用**立刻**生效 —— store 的 `watchEffect` 把 `data-sat` 写到 `<html>` 上，
+ * 三张预览卡看的也正是同一组令牌，所以「点完页面就变」不需要保存这一步）。
+ * ★ 参数仍在运行时收窄一次：模板来的值在类型上可信，但这条写路径是 store 的
+ *   公开入口之一，多一道白名单不花什么（与 store 内部的三档字面量一致）。
+ */
+function setSat(value: SatKey): void {
   if (value === 'vivid' || value === 'soft' || value === 'mono') theme.setSat(value)
 }
 
@@ -250,16 +300,35 @@ watch(
 )
 
 // ── 章节索引与跳转 ────────────────────────────────────────────────────────
+/**
+ * 子导航（**学生段在前，技术节在后**，与右栏的渲染顺序一一对应）。
+ *
+ * ★ 两段合并成一个数组，是因为左栏的滚动判定（`derivedSection`）与跳转（`goTo`）
+ *   都按 `data-section` 在同一套元素上跑 —— 拆成两个数组会让「当前在哪一节」
+ *   出现两套判据。段落归属由 `group` 字段表达，渲染时各自渲染一段。
+ */
 const SECTIONS = [
-  { id: 'provider', label: '供应商' },
-  { id: 'embedding', label: '嵌入模型' },
-  { id: 'grade', label: '学段' },
-  { id: 'chapter', label: '教材章节' },
-  { id: 'theme', label: '外观主题' },
-  { id: 'privacy', label: '隐私与本地服务' }
+  { id: 'grade', label: '学段', group: 'learner' },
+  { id: 'chapter', label: '教材章节', group: 'learner' },
+  { id: 'theme', label: '外观主题', group: 'learner' },
+  { id: 'provider', label: '供应商', group: 'advanced' },
+  { id: 'embedding', label: '嵌入模型', group: 'advanced' },
+  { id: 'privacy', label: '隐私与本地服务', group: 'advanced' }
 ] as const
 
 type SectionId = (typeof SECTIONS)[number]['id']
+
+const LEARNER_SECTIONS = SECTIONS.filter((s) => s.group === 'learner')
+const ADVANCED_SECTIONS = SECTIONS.filter((s) => s.group === 'advanced')
+
+/**
+ * 高级区是否展开 = 学生主动点开了它，**或者**本来就在教师视角。
+ *
+ * ★ 为什么教师视角下强制展开：高级区里那三节正是「设计合理性」的证据
+ *   （供应商可改 / 嵌入与索引状态 / 本地服务边界），评委切了视角还要再点一次
+ *   才看得见，等于把证据藏起来。而 `advancedOpen` 是纯内存状态，不会带到下次启动。
+ */
+const advancedVisible = computed(() => viewMode.isTeacher || viewMode.advancedOpen)
 
 /** 跳转落点：章节顶离容器顶留一点余量（与判定线配合，见 SPY_LINE_RATIO） */
 const NAV_OFFSET = 12
@@ -272,7 +341,7 @@ const rootRef = ref<HTMLElement | null>(null)
 let scroller: HTMLElement | null = null
 let sectionEls: HTMLElement[] = []
 
-const activeId = ref<SectionId>('provider')
+const activeId = ref<SectionId>('grade')
 /** 点击后的"钉子"：记住跳转落点的 scrollTop，直到用户真的滚开才交还给位置判定 */
 let pinnedTop: number | null = null
 
@@ -280,17 +349,28 @@ function isSectionId(v: string | undefined): v is SectionId {
   return SECTIONS.some((s) => s.id === v)
 }
 
+/**
+ * 默认落点：学生段的**第一节**。
+ *
+ * ⚠️ 高级区未展开时，右栏里根本没有 `[data-section="provider"]` 那两个节点 ——
+ * 初值若还写 `'provider'`，左栏会在进页面时把「供应商」标成当前章节，
+ * 而那一条此刻并不存在（点它既滚不动、也不该被高亮）。
+ */
+function defaultSection(): SectionId {
+  return LEARNER_SECTIONS[0].id
+}
+
 /** 纯位置判定：章节顶越过判定线的**最后一个**章节就是"当前章节" */
 function derivedSection(): SectionId {
   const c = scroller
-  if (!c) return 'provider'
+  if (!c) return defaultSection()
   // 已到底：页尾那一节可能永远到不了判定线（scrollTop 被 clamp），直接认它
   if (c.scrollTop + c.clientHeight >= c.scrollHeight - 2) {
     const last = sectionEls[sectionEls.length - 1]?.dataset.section
     if (isSectionId(last)) return last
   }
   const line = c.getBoundingClientRect().top + Math.max(SPY_FLOOR, c.clientHeight * SPY_LINE_RATIO)
-  let current: SectionId = 'provider'
+  let current: SectionId = defaultSection()
   for (const el of sectionEls) {
     const id = el.dataset.section
     if (isSectionId(id) && el.getBoundingClientRect().top <= line) current = id
@@ -329,6 +409,47 @@ function bindSectionSpy(): void {
   onScroll()
 }
 
+/**
+ * 高级区展开/收起后，右栏的 `[data-section]` 节点**整批换掉**了 ——
+ * 必须重新收集，否则那些新出现的章节既不参与判定、也跳不过去
+ * （`goTo` 在旧数组里找不到 `provider`，点了没反应）。
+ */
+watch(advancedVisible, async (visible) => {
+  await nextTick()
+  sectionEls = [...(rootRef.value?.querySelectorAll<HTMLElement>('[data-section]') ?? [])]
+  if (!visible && ADVANCED_SECTIONS.some((s) => s.id === activeId.value)) {
+    activeId.value = defaultSection()
+  }
+  onScroll()
+})
+
+/**
+ * 展开高级区（唯一入口：左栏底部那一条）。
+ *
+ * ★ 展开之后**顺势滚到「供应商」那一节**：学生点的是「高级设置」，
+ *   期待的是「看到那批设置」，而不是「页面下方的某处凭空多了一段」——
+ *   尤其在窄窗口里（左栏变成顶部一行 tab、当前视口停在「外观主题」附近）。
+ * ★ 与 `goTo` 同一套「钉子」手法：滚动位置钉住，直到用户真的滚开。
+ */
+async function openAdvancedArea(): Promise<void> {
+  viewMode.openAdvanced()
+  await nextTick()
+  sectionEls = [...(rootRef.value?.querySelectorAll<HTMLElement>('[data-section]') ?? [])]
+  const first = ADVANCED_SECTIONS[0].id
+  const el = sectionEls.find((e) => e.dataset.section === first)
+  const c = scroller
+  if (c && el) {
+    c.scrollTop += el.getBoundingClientRect().top - c.getBoundingClientRect().top - NAV_OFFSET
+    pinnedTop = c.scrollTop
+  }
+  activeId.value = first
+}
+
+/** 收起高级区（只在学生视角下给这个按钮：教师视角下它是强制展开的）。 */
+function closeAdvancedArea(): void {
+  viewMode.closeAdvanced()
+}
+
 onBeforeUnmount(() => {
   scroller?.removeEventListener('scroll', onScroll)
   window.removeEventListener('resize', onScroll)
@@ -337,11 +458,13 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="rootRef" class="st" data-testid="settings-view">
-    <!-- 身份行：本页在讲什么。22px，是全页内容区的**最大**字号 -->
+    <!-- 身份行：本页在讲什么。22px，是全页内容区的**最大**字号。
+         ⚠️ 文案跟着分区改过：学生的三节是「学段 / 章节 / 外观」，
+            「填供应商与 Key」那条主路径只对老师 / 评委成立（它现在在高级区里）。 -->
     <PageIdentity
-      main="模型接哪家、数据存在哪"
-      meta="配置写入本地 config.json，API Key 仅存本机"
-      hint="先填供应商与 Key 并测试连通，再保存"
+      main="学段、教材章节与外观"
+      meta="偏好存在本机，随时可以改回来"
+      hint="学段与章节随时可换 —— 之前学过的记录都还在"
     />
 
     <!-- 三条全局状态：桥没接线 / 读写失败 / 正向提示。
@@ -357,11 +480,12 @@ onBeforeUnmount(() => {
     </p>
 
     <div class="st__body">
-      <!-- 左栏：章节索引（可点跳转，当前章节高亮） -->
+      <!-- 左栏：章节索引（可点跳转，当前章节高亮）。
+           两段：学生段（学段 / 教材章节 / 外观主题）+ 高级段（仅展开时列出）。 -->
       <nav class="nav" aria-label="设置章节">
         <p class="k12-label nav__title">章节</p>
         <ul class="nav__list">
-          <li v-for="s in SECTIONS" :key="s.id">
+          <li v-for="s in LEARNER_SECTIONS" :key="s.id">
             <button
               type="button"
               class="nav__item"
@@ -373,11 +497,279 @@ onBeforeUnmount(() => {
             </button>
           </li>
         </ul>
+
+        <!-- 高级段：展开后才列出来。未展开时这里只有一条入口 ——
+             学生日常看不到「供应商 / 嵌入模型 / 隐私」这三节的存在。 -->
+        <ul v-if="advancedVisible" class="nav__list nav__list--sub">
+          <li v-for="s in ADVANCED_SECTIONS" :key="s.id">
+            <button
+              type="button"
+              class="nav__item"
+              :class="{ 'is-active': s.id === activeId }"
+              :aria-current="s.id === activeId ? 'true' : undefined"
+              @click="goTo(s.id)"
+            >
+              {{ s.label }}
+            </button>
+          </li>
+        </ul>
+
+        <button
+          type="button"
+          class="nav__advanced"
+          data-testid="settings-advanced-entry"
+          :aria-expanded="advancedVisible"
+          @click="openAdvancedArea"
+        >
+          <SlidersHorizontal :size="13" />
+          <span>高级设置（教师 / 答辩）</span>
+          <ChevronRight :size="13" class="nav__advanced-ico" />
+        </button>
       </nav>
 
-      <!-- 右栏：各章节的字段（**单列**，不再用 2 列网格） -->
+      <!-- 右栏：各章节的字段（**单列**，不再用 2 列网格）。
+           ★ DOM 顺序 = 视觉顺序 = 左栏索引顺序，三者必须一致：滚动判定
+             （`derivedSection`）按 DOM 顺序取「最后一个越过判定线的章节」，
+             一旦用 CSS `order` 调换视觉顺序，判定就会指向另一节。 -->
       <div class="st__sections">
-        <!-- ① 供应商：本页主任务，占满右栏宽度，字段完整展开 -->
+        <!-- ① 学段（第二个手动入口，D-037）：与对话页顶栏指示器**共用同一条写路径** -->
+        <SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">
+          <header class="card__head">
+            <GraduationCap :size="15" />
+            <h2 class="card__title">学段</h2>
+            <span class="card__meta">系统自动判定，你也能自己指定</span>
+          </header>
+
+          <div class="field">
+            <p class="field__label">当前学段</p>
+            <div class="readonly">
+              <span class="k12-dot readonly__dot" />
+              <span class="readonly__text">{{ gradeText }}</span>
+              <span class="readonly__origin" data-testid="settings-grade-source">
+                {{ gradeSource }}
+              </span>
+            </div>
+            <p class="hint">
+              学段由系统按你问的问题自动判断（判错了或还没判出来，就自己指定一档）。
+              自己指定后 10 轮内系统不再自动改，期满照旧按你的实际水平调整。
+            </p>
+          </div>
+
+          <div class="opts">
+            <button
+              v-for="level in GRADE_LEVELS"
+              :key="level"
+              type="button"
+              class="opt"
+              :class="{ 'opt--on': chat.currentGrade === level }"
+              :data-testid="`settings-grade-option-${level}`"
+              :data-active="String(chat.currentGrade === level)"
+              :disabled="chat.streaming || gradeBusy"
+              @click="chooseGrade(level)"
+            >
+              {{ GRADE_LABELS[level] }}
+            </button>
+          </div>
+
+          <p v-if="gradeError" class="warn" data-testid="settings-grade-error">{{ gradeError }}</p>
+          <p v-if="chat.gradeNotice" class="notice" data-testid="settings-grade-notice">
+            {{ chat.gradeNotice }}
+          </p>
+          <p v-if="chat.gradeBridgeError" class="warn" data-testid="settings-grade-bridge">
+            {{ chat.gradeBridgeError }}
+          </p>
+        </SurfacePanel>
+
+        <!-- ② 教材章节（软偏好，D-038）：与学段是两件独立的事 -->
+        <SurfacePanel class="card" data-section="chapter" data-testid="settings-chapter-block">
+          <header class="card__head">
+            <ListChecks :size="15" />
+            <h2 class="card__title">教材章节</h2>
+            <span class="card__meta">只影响「优先围绕哪一章讲」</span>
+          </header>
+
+          <div class="field">
+            <p class="field__label">当前章节</p>
+            <div class="readonly">
+              <span class="readonly__text" data-testid="settings-chapter-line">{{ chapterLine }}</span>
+            </div>
+            <p class="hint" data-testid="settings-chapter-hint">
+              选择章节不会改变学段 —— 章节只让回答与检索优先围绕这一章，问到别的章照常回答。
+              两件事各自独立：改学段会清空章节（那本教材不存在了），清空后回到自由问答。
+            </p>
+            <p v-if="chapterListGrade" class="hint">
+              清单来自{{ chapterListGrade }}的教材，与「学习档案 → 章节进度」是同一份。
+            </p>
+          </div>
+
+          <p v-if="chapterUnavailable" class="hint" data-testid="settings-chapter-no-grade">
+            还没有判定出你的学段：教材章节按学段分，判定出来之后就能从这里选。
+          </p>
+          <p v-else-if="study.loading.chapters" class="hint" data-testid="settings-chapter-loading">
+            正在读取教材章节…
+          </p>
+          <template v-else>
+            <p v-if="study.errors.chapters" class="warn" data-testid="settings-chapter-list-error">
+              {{ study.errors.chapters }}
+            </p>
+            <div v-if="chapterOptions.length > 0" class="opts">
+              <button
+                v-for="chapter in chapterOptions"
+                :key="chapter.chapterTitle"
+                type="button"
+                class="opt"
+                :class="{ 'opt--on': chat.currentChapter === chapter.chapterTitle }"
+                :data-testid="`settings-chapter-option-${chapter.chapterTitle}`"
+                :data-active="String(chat.currentChapter === chapter.chapterTitle)"
+                :disabled="chat.streaming || chapterBusy"
+                @click="chooseChapter(chapter.chapterTitle)"
+              >
+                {{ chapter.chapterTitle }}
+              </button>
+            </div>
+            <p v-else-if="!study.errors.chapters" class="hint" data-testid="settings-chapter-empty">
+              这个学段还没有编入教材章节。
+            </p>
+            <!-- 「不限章节」永远可选：选了它 = 清空当前章节，回到自由问答 -->
+            <button
+              type="button"
+              class="opt opt--none"
+              data-testid="settings-chapter-option-none"
+              :data-active="String(chat.currentChapter === '')"
+              :disabled="chat.streaming || chapterBusy"
+              @click="chooseChapter('')"
+            >
+              不限章节（自由问答）
+            </button>
+          </template>
+
+          <p v-if="chapterError" class="warn" data-testid="settings-chapter-error">{{ chapterError }}</p>
+          <p v-if="chat.chapterNotice" class="notice" data-testid="settings-chapter-notice">
+            {{ chat.chapterNotice }}
+          </p>
+          <p v-if="chat.chapterBridgeError" class="warn" data-testid="settings-chapter-bridge">
+            {{ chat.chapterBridgeError }}
+          </p>
+        </SurfacePanel>
+
+        <!-- ③ 外观主题（配色跟着学段走；改学段的入口在上面那一区块） -->
+        <SurfacePanel class="card" data-section="theme">
+          <header class="card__head">
+            <Palette :size="15" />
+            <h2 class="card__title">外观主题</h2>
+            <span class="card__meta">学段色调由系统决定</span>
+          </header>
+
+          <div class="field">
+            <p class="field__label">当前学段色调（只读）</p>
+            <div class="readonly" data-testid="settings-grade">
+              <span class="k12-dot readonly__dot" />
+              <span class="readonly__text">{{ theme.gradeIndicatorText }}</span>
+            </div>
+            <p class="hint">
+              强调色与页面底色跟着学段一起换。要改学段用上面的「学段」区块 —— 那一处与对话页
+              顶栏的指示器是同一个开关，改一次两处都变。
+            </p>
+          </div>
+
+          <!-- ★★ 饱和度 = 三张**预览卡**，不是三个纯文字按钮。
+               走查结论：原先是「高饱和 / 柔和 / 素净」三个没有配色的文字按钮 ——
+               学生根本看不出点下去会发生什么，只能靠试。
+               ★ 卡里那些小色块**不写任何色值**：每张卡带 `data-grade` / `data-sat`，
+                 由 tokens.generated.css 的 `.k12-swatch[data-grade][data-sat]` 把那一组
+                 主题令牌就地重新定义（与「配色总览」页同一手法），卡内色块再引用
+                 `var(--k12-page)` / `var(--k12-accent)` —— 看到的就是真的会生效的那一组。
+               ★ 选中态**不只是颜色**：描边 + 勾选标记 + `aria-checked` 三样同时给。 -->
+          <div class="field">
+            <p class="field__label">饱和度</p>
+            <div class="sats" role="radiogroup" aria-label="饱和度">
+              <button
+                v-for="s in SATS"
+                :key="s.key"
+                type="button"
+                role="radio"
+                class="sat k12-swatch"
+                :class="{ 'sat--on': theme.sat === s.key }"
+                :data-grade="theme.displayGrade"
+                :data-sat="s.key"
+                :data-testid="`settings-sat-${s.key}`"
+                :data-active="String(theme.sat === s.key)"
+                :aria-checked="theme.sat === s.key"
+                @click="setSat(s.key)"
+              >
+                <span class="sat__mock" aria-hidden="true">
+                  <span class="sat__mock-bar" />
+                  <span class="sat__mock-chip" />
+                  <span class="sat__mock-card">
+                    <span class="sat__mock-line" />
+                    <span class="sat__mock-line sat__mock-line--short" />
+                  </span>
+                </span>
+                <span class="sat__foot">
+                  <span class="sat__label">{{ s.label }}</span>
+                  <span class="sat__check">
+                    <Check v-if="theme.sat === s.key" :size="13" />
+                  </span>
+                </span>
+                <span class="sat__desc">{{ s.desc }}</span>
+              </button>
+            </div>
+            <p class="hint">{{ theme.satMeta.desc }} —— 点一下立刻生效，不用保存。</p>
+          </div>
+        </SurfacePanel>
+
+        <!-- ── 高级设置（教师 / 答辩）────────────────────────────────────────
+             ★ 学生视角下**整段不在 DOM 里**（`v-if`，不是 CSS 隐藏）：
+               「供应商 / 嵌入模型 / 隐私」这三节是技术设置，学生日常用不到。
+             ⚠️ 这不是权限：没有账号体系，开关可绕过（见 `stores/viewMode.ts`）。
+                文案里不许把它说成安全边界 —— 它只是「默认不摆出来」。 -->
+        <section v-if="advancedVisible" class="adv" data-testid="settings-advanced">
+          <header class="adv__head">
+            <SlidersHorizontal :size="15" />
+            <h2 class="adv__title">高级设置（教师 / 答辩）</h2>
+            <button
+              v-if="!viewMode.isTeacher"
+              type="button"
+              class="adv__close"
+              data-testid="settings-advanced-close"
+              @click="closeAdvancedArea"
+            >
+              收起
+            </button>
+          </header>
+
+          <p class="adv__note">
+            这里是给老师 / 评委看的技术设置（供应商、嵌入模型、本地服务），学生日常不需要。
+            <strong>它不是权限开关</strong>：本应用没有账号体系，谁都能打开 ——
+            它只保证学生平时不会撞见端口号、BaseURL 这类术语。
+          </p>
+
+          <!-- 教师视角开关：`viewMode.toggle()`（localStorage 持久化，重启照常保留） -->
+          <div class="adv__switch">
+            <div class="adv__switch-text">
+              <p class="adv__switch-title">教师视角</p>
+              <p class="adv__switch-desc">
+                打开后，对话页右栏会多出「检索降级链」「工具调用轨迹」这类原始证据，侧栏也会多出
+                「教材知识库」—— 答辩时用来展示设计依据。
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              class="adv__toggle"
+              data-testid="settings-teacher-toggle"
+              :aria-checked="viewMode.isTeacher"
+              :data-on="String(viewMode.isTeacher)"
+              @click="viewMode.toggle()"
+            >
+              <span class="adv__knob" aria-hidden="true" />
+              <span class="adv__toggle-text">{{ viewMode.isTeacher ? '已打开' : '未打开' }}</span>
+            </button>
+          </div>
+
+        <!-- ④ 供应商：技术设置（默认收起在高级区里）。
+             ⚠️ ★ 赛题硬要求：供应商 / BaseURL / API Key / Model ID **必须可改** ——
+                这里只是「默认不摆给学生」，字段与能力一个都没删。 -->
         <SurfacePanel class="card" data-section="provider" data-testid="settings-llm">
           <header class="card__head">
             <Plug :size="15" />
@@ -519,7 +911,14 @@ onBeforeUnmount(() => {
             </el-form-item>
           </el-form>
 
-          <!-- 探测结果：成功与失败都显示，一字不改（探测不会修改你填的内容） -->
+          <!-- 探测结果：**分两层，谁都能看懂，谁都能查到**。
+               · 标题那两个词（`连通成功` / `未能连通`）是**既有的学生可见口径**，一字不改 ——
+                 它足够短，学生读得懂，也是验收脚本与后端文案共同认的那个串；
+               · 中间那句是白话结论（不带 URL、不带状态码）；
+               · 后端那一整段诊断原文收进「技术详情」里**一字不改** ——
+                 排障、截图、答辩要的都是它（`<details>` 折叠不影响 `textContent`，
+                 所以按文本取值的检查照样能读到 `连通成功：… HTTP 200 …`）。
+               ★ 探测不会修改你填的内容。 -->
           <div v-if="settings.probing" class="probe probe--pending" data-testid="settings-probe-pending">
             正在向该端点发起一次真实请求…
           </div>
@@ -530,10 +929,17 @@ onBeforeUnmount(() => {
             data-testid="settings-probe-result"
             :data-ok="String(settings.probe.ok)"
           >
-            <p class="probe__title">
-              探测结果（{{ settings.probeAt }}）· {{ settings.probe.ok ? '连通成功' : '未能连通' }}
+            <p class="probe__title" data-testid="settings-probe-title">
+              {{ probeTitle }}
+              <span class="probe__at">探测于 {{ settings.probeAt }}</span>
             </p>
-            <p class="probe__msg" data-testid="settings-probe-message">{{ settings.probe.message }}</p>
+            <p class="probe__msg" data-testid="settings-probe-summary">{{ probeSummary }}</p>
+            <details class="tech">
+              <summary class="tech__sum" data-testid="settings-probe-raw-summary">
+                技术详情（服务端原始回执）
+              </summary>
+              <p class="probe__msg" data-testid="settings-probe-message">{{ settings.probe.message }}</p>
+            </details>
           </div>
 
           <div class="card__foot">
@@ -558,19 +964,20 @@ onBeforeUnmount(() => {
             <el-button data-testid="settings-save-only" :disabled="settings.busy" @click="runSaveOnly">
               仅保存
             </el-button>
-            <el-button
-              type="primary"
+            <!-- 本页的主动作：走共享的 `.k12-cta` 配方（主按钮的样式只允许有一处实现） -->
+            <button
+              type="button"
+              class="k12-cta"
               data-testid="settings-save"
-              :loading="settings.saving"
               :disabled="settings.busy"
               @click="runSave()"
             >
-              保存并生效
-            </el-button>
+              {{ settings.saving ? '正在保存…' : '保存并生效' }}
+            </button>
           </div>
         </SurfacePanel>
 
-        <!-- ② 嵌入模型 -->
+        <!-- ⑤ 嵌入模型（技术设置，与供应商同属高级区） -->
         <SurfacePanel class="card" data-section="embedding" data-testid="settings-embedding">
           <header class="card__head">
             <Database :size="15" />
@@ -689,175 +1096,15 @@ onBeforeUnmount(() => {
           </div>
         </SurfacePanel>
 
-        <!-- ③ 学段（第二个手动入口，D-037）：与对话页顶栏指示器**共用同一条写路径** -->
-        <SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">
-          <header class="card__head">
-            <GraduationCap :size="15" />
-            <h2 class="card__title">学段</h2>
-            <span class="card__meta">系统自动判定，你也能自己指定</span>
-          </header>
-
-          <div class="field">
-            <p class="field__label">当前学段</p>
-            <div class="readonly">
-              <span class="k12-dot readonly__dot" />
-              <span class="readonly__text">{{ gradeText }}</span>
-              <span class="readonly__origin" data-testid="settings-grade-source">
-                {{ gradeSource }}
-              </span>
-            </div>
-            <p class="hint">
-              学段由系统按你问的问题自动判断（判错了或还没判出来，就自己指定一档）。
-              自己指定后 10 轮内系统不再自动改，期满照旧按你的实际水平调整。
-            </p>
-          </div>
-
-          <div class="opts">
-            <button
-              v-for="level in GRADE_LEVELS"
-              :key="level"
-              type="button"
-              class="opt"
-              :class="{ 'opt--on': chat.currentGrade === level }"
-              :data-testid="`settings-grade-option-${level}`"
-              :data-active="String(chat.currentGrade === level)"
-              :disabled="chat.streaming || gradeBusy"
-              @click="chooseGrade(level)"
-            >
-              {{ GRADE_LABELS[level] }}
-            </button>
-          </div>
-
-          <p v-if="gradeError" class="warn" data-testid="settings-grade-error">{{ gradeError }}</p>
-          <p v-if="chat.gradeNotice" class="notice" data-testid="settings-grade-notice">
-            {{ chat.gradeNotice }}
-          </p>
-          <p v-if="chat.gradeBridgeError" class="warn" data-testid="settings-grade-bridge">
-            {{ chat.gradeBridgeError }}
-          </p>
-        </SurfacePanel>
-
-        <!-- ④ 教材章节（软偏好，D-038）：与学段是两件独立的事 -->
-        <SurfacePanel class="card" data-section="chapter" data-testid="settings-chapter-block">
-          <header class="card__head">
-            <ListChecks :size="15" />
-            <h2 class="card__title">教材章节</h2>
-            <span class="card__meta">只影响「优先围绕哪一章讲」</span>
-          </header>
-
-          <div class="field">
-            <p class="field__label">当前章节</p>
-            <div class="readonly">
-              <span class="readonly__text" data-testid="settings-chapter-line">{{ chapterLine }}</span>
-            </div>
-            <p class="hint" data-testid="settings-chapter-hint">
-              选择章节不会改变学段 —— 章节只让回答与检索优先围绕这一章，问到别的章照常回答。
-              两件事各自独立：改学段会清空章节（那本教材不存在了），清空后回到自由问答。
-            </p>
-            <p v-if="chapterListGrade" class="hint">
-              清单来自{{ chapterListGrade }}的教材，与「学习档案 → 章节进度」是同一份。
-            </p>
-          </div>
-
-          <p v-if="chapterUnavailable" class="hint" data-testid="settings-chapter-no-grade">
-            还没有判定出你的学段：教材章节按学段分，判定出来之后就能从这里选。
-          </p>
-          <p v-else-if="study.loading.chapters" class="hint" data-testid="settings-chapter-loading">
-            正在读取教材章节…
-          </p>
-          <template v-else>
-            <p v-if="study.errors.chapters" class="warn" data-testid="settings-chapter-list-error">
-              {{ study.errors.chapters }}
-            </p>
-            <div v-if="chapterOptions.length > 0" class="opts">
-              <button
-                v-for="chapter in chapterOptions"
-                :key="chapter.chapterTitle"
-                type="button"
-                class="opt"
-                :class="{ 'opt--on': chat.currentChapter === chapter.chapterTitle }"
-                :data-testid="`settings-chapter-option-${chapter.chapterTitle}`"
-                :data-active="String(chat.currentChapter === chapter.chapterTitle)"
-                :disabled="chat.streaming || chapterBusy"
-                @click="chooseChapter(chapter.chapterTitle)"
-              >
-                {{ chapter.chapterTitle }}
-              </button>
-            </div>
-            <p v-else-if="!study.errors.chapters" class="hint" data-testid="settings-chapter-empty">
-              这个学段还没有编入教材章节。
-            </p>
-            <!-- 「不限章节」永远可选：选了它 = 清空当前章节，回到自由问答 -->
-            <button
-              type="button"
-              class="opt opt--none"
-              data-testid="settings-chapter-option-none"
-              :data-active="String(chat.currentChapter === '')"
-              :disabled="chat.streaming || chapterBusy"
-              @click="chooseChapter('')"
-            >
-              不限章节（自由问答）
-            </button>
-          </template>
-
-          <p v-if="chapterError" class="warn" data-testid="settings-chapter-error">{{ chapterError }}</p>
-          <p v-if="chat.chapterNotice" class="notice" data-testid="settings-chapter-notice">
-            {{ chat.chapterNotice }}
-          </p>
-          <p v-if="chat.chapterBridgeError" class="warn" data-testid="settings-chapter-bridge">
-            {{ chat.chapterBridgeError }}
-          </p>
-        </SurfacePanel>
-
-        <!-- ⑤ 外观主题（配色跟着学段走；改学段的入口在上面那一区块） -->
-        <SurfacePanel class="card" data-section="theme">
-          <header class="card__head">
-            <Palette :size="15" />
-            <h2 class="card__title">外观主题</h2>
-            <span class="card__meta">学段色调由系统决定</span>
-          </header>
-
-          <div class="field">
-            <p class="field__label">当前学段色调（只读）</p>
-            <div class="readonly" data-testid="settings-grade">
-              <span class="k12-dot readonly__dot" />
-              <span class="readonly__text">{{ theme.gradeIndicatorText }}</span>
-            </div>
-            <p class="hint">
-              强调色与页面底色跟着学段一起换。要改学段用上面的「学段」区块 —— 那一处与对话页
-              顶栏的指示器是同一个开关，改一次两处都变。
-            </p>
-          </div>
-
-          <div class="field">
-            <p class="field__label">饱和度</p>
-            <el-radio-group :model-value="theme.sat" @change="setSat">
-              <el-radio-button v-for="s in SATS" :key="s.key" :value="s.key">
-                {{ s.label }}
-              </el-radio-button>
-            </el-radio-group>
-            <p class="hint">{{ theme.satMeta.desc }}</p>
-          </div>
-        </SurfacePanel>
-
-        <!-- ⑥ 隐私与本地服务 -->
+        <!-- ⑥ 隐私与本地服务（技术状态，高级区最后一张；先讲「东西存在哪」这件安心的事） -->
         <SurfacePanel class="card" data-section="privacy">
           <header class="card__head">
             <ShieldCheck :size="15" />
             <h2 class="card__title">隐私与本地服务</h2>
           </header>
 
-          <!-- 本地数据服务的**真实**阶段（不再是写死的一行状态） -->
-          <div class="sidecar" data-testid="settings-sidecar" :data-phase="sidecar.phase">
-            <span class="k12-dot" />
-            <span class="sidecar__text">本地数据服务：{{ sidecar.phaseText }}</span>
-            <span v-if="sidecar.state?.port" class="mono">端口 {{ sidecar.state.port }}</span>
-            <span v-if="sidecar.state?.pid" class="mono">进程 {{ sidecar.state.pid }}</span>
-          </div>
-          <p v-if="sidecar.errorText" class="warn" data-testid="settings-sidecar-error">
-            {{ sidecar.errorText }}
-          </p>
-
+          <!-- 先给结论（学生与家长要读的是这三条），端口 / 进程号收进下面的「技术详情」：
+               一个 10 岁学生读到「端口 51234」什么也判断不了，只会觉得界面很怪。 -->
           <el-descriptions :column="1" size="small" border>
             <el-descriptions-item label="数据存储">全本地，不上传</el-descriptions-item>
             <el-descriptions-item label="对话历史">
@@ -871,7 +1118,24 @@ onBeforeUnmount(() => {
             <li><HardDrive :size="14" /><span>对话正文不进 SQLite；一人一库，不跨学生复用连接。</span></li>
             <li><Cpu :size="14" /><span>涉未成年人数据最小化采集，不采集生物特征。</span></li>
           </ul>
+
+          <!-- 本地数据服务的**真实**阶段（不再是写死的一行状态）。
+               端口 / 进程号是排障数字：留在 `<details>` 里，需要时才展开
+               （`<details>` 是原生折叠，键盘与读屏都直接可用，不必自己写一个）。 -->
+          <details class="tech">
+            <summary class="tech__sum">技术详情（端口 / 进程号）</summary>
+            <div class="sidecar" data-testid="settings-sidecar" :data-phase="sidecar.phase">
+              <span class="k12-dot" />
+              <span class="sidecar__text">本地数据服务：{{ sidecar.phaseText }}</span>
+              <span v-if="sidecar.state?.port" class="mono">端口 {{ sidecar.state.port }}</span>
+              <span v-if="sidecar.state?.pid" class="mono">进程 {{ sidecar.state.pid }}</span>
+            </div>
+            <p v-if="sidecar.errorText" class="warn" data-testid="settings-sidecar-error">
+              {{ sidecar.errorText }}
+            </p>
+          </details>
         </SurfacePanel>
+        </section>
       </div>
     </div>
   </div>
@@ -961,6 +1225,47 @@ onBeforeUnmount(() => {
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
   font-weight: 650;
+}
+
+/* 高级段与上面那三条之间画一条细线：它们是**另一组东西**（技术设置），
+ * 不是第五个学生设置项。分隔线是组与组之间的关系，不额外加标题（省一行视觉噪音）。 */
+.nav__list--sub {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--k12-border);
+}
+
+/* 「高级设置（教师 / 答辩）」入口：quiet 的一条 —— 它在左栏底部，
+ * 是**次级**入口而不是第四个设置项，所以不用 `.nav__item` 那套高亮语言。 */
+.nav__advanced {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 7px 11px;
+  /* 触控下限（守卫在 base.css 层给 Element Plus 与 `.k12-tap` 定 28px；
+   * 这里是自绘按钮，自己也要够高） */
+  min-height: 28px;
+  border: 1px dashed var(--k12-border-strong);
+  border-radius: var(--k12-r-control);
+  background: transparent;
+  color: var(--k12-muted);
+  font-family: inherit;
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .nav__advanced:hover {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
+  }
+}
+.nav__advanced-ico {
+  margin-left: auto;
+  flex: none;
 }
 
 /* ── 右栏：章节卡片 ─────────────────────────────────────────────────────── */
@@ -1291,6 +1596,265 @@ onBeforeUnmount(() => {
   background: var(--k12-surface-2);
 }
 
+/* ── 高级设置（教师 / 答辩）──────────────────────────────────────────────
+ * 它是右栏里的一段**说明 + 开关 + 三张技术卡片**的共同容器，不是第五张卡片。
+ * 用虚线框圈起来：与「白卡片 = 内容面」区分开 —— 这一块本身没有字段，
+ * 底色**保持透出页面底**（不新造第 5 种表面，见 base.css 的层次规则：
+ * paper-2 是「卡片**内**的嵌入块」，用它去包卡片会把材质关系反过来）。 */
+.adv {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px dashed var(--k12-border-strong);
+  border-radius: var(--k12-r-card);
+  background: transparent;
+}
+.adv__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--k12-muted);
+}
+.adv__title {
+  font-size: var(--k12-fs-lg);
+  font-weight: 620;
+  color: var(--k12-fg);
+}
+/* 收起键在右缘，与卡片头的 meta 同一位置（本页「右侧那一格」只放一种东西） */
+.adv__close {
+  margin-left: auto;
+  padding: 3px 11px;
+  min-height: 28px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-family: inherit;
+  font-size: var(--k12-fs-xs);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .adv__close:hover {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
+  }
+}
+/* ★ 这段文案里**不许**出现「安全 / 权限 / 保护」这类词：开关是可绕过的，
+ *   把它说成安全边界会让人以为界面藏起来的东西是安全的（见 stores/viewMode.ts）。 */
+.adv__note {
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg-2);
+}
+.adv__note strong {
+  color: var(--k12-fg);
+  font-weight: 650;
+}
+.adv__switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 11px 13px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+}
+.adv__switch-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.adv__switch-title {
+  font-size: var(--k12-fs-sm);
+  font-weight: 650;
+  color: var(--k12-fg);
+}
+.adv__switch-desc {
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg-2);
+}
+/* 开关：轨道 + 滑块。
+ * ⚠️ 状态**不只靠颜色**：轨道上的字写着「已打开 / 未打开」，滑块位置也不同
+ *   （色盲学生、以及把界面调成素净主题时都还分得清）。 */
+.adv__toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 11px 3px 4px;
+  min-height: 28px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
+  font-family: inherit;
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.adv__toggle[data-on='true'] {
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  color: var(--k12-accent-ink);
+}
+.adv__knob {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-muted-2);
+}
+.adv__toggle[data-on='true'] .adv__knob {
+  background: var(--k12-accent-ink);
+}
+.adv__toggle-text {
+  white-space: nowrap;
+}
+
+/* ── 饱和度预览卡 ────────────────────────────────────────────────────────
+ * 三张卡各带自己的 `data-grade` / `data-sat`，`.k12-swatch[...]` 那一组规则
+ * （tokens.generated.css）就地重定义主题令牌 —— 所以卡内的色块引用
+ * `var(--k12-page)` / `var(--k12-accent)` 时，取到的就是**那一档**的真实取值。
+ * 组件里因此没有、也不该有任何硬编码色值。 */
+.sats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.sat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  min-height: 28px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .sat:hover {
+    border-color: var(--k12-accent-border);
+  }
+}
+/* 选中：描边 + 勾（**不只靠颜色**）。两张卡同时「看起来选中」是不可能的：
+ * 勾只有一个，`aria-checked` 也只有一个为 true。 */
+.sat--on {
+  border-color: var(--k12-accent);
+  box-shadow: inset 0 0 0 1px var(--k12-accent);
+}
+/* 小样：一个「页面底色 + 强调条 + 标签胶囊 + 白卡」的等比缩影。
+ * ★ 为什么放这四样：三档饱和度的差别**不在强调色本身**（accent 由学段决定），
+ *   而在「页面底色 / 浅底分级 / 胶囊底色」这三处（实测 vivid `#FFF2E4` vs
+ *   soft `#fff9f3` vs mono `#FAFAFB`）。摆一个只有强调色的方块，三张卡会长得一样。 */
+.sat__mock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-page);
+  border: 1px solid var(--k12-border);
+}
+.sat__mock-bar {
+  height: 5px;
+  border-radius: var(--k12-r-flat);
+  background: var(--k12-accent);
+}
+/* 胶囊：`--k12-chip-bg` / `--k12-chip-fg` 是饱和度轴上差别最大的一组
+ * （vivid `#feede1` → soft `#fff5ef` → mono `#FFFFFF`）。 */
+.sat__mock-chip {
+  height: 8px;
+  width: 44%;
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-chip-bg);
+  border: 1px solid var(--k12-chip-fg);
+}
+.sat__mock-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px;
+  border-radius: var(--k12-r-flat);
+  background: var(--k12-surface);
+}
+.sat__mock-line {
+  height: 3px;
+  border-radius: var(--k12-r-flat);
+  background: var(--k12-accent-soft);
+}
+.sat__mock-line--short {
+  width: 62%;
+}
+.sat__foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sat__label {
+  font-size: var(--k12-fs-sm);
+  font-weight: 650;
+  color: var(--k12-fg);
+}
+.sat__check {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--k12-r-pill);
+  color: var(--k12-accent-ink);
+}
+.sat--on .sat__check {
+  background: var(--k12-accent-ink);
+  color: var(--k12-surface);
+}
+.sat__desc {
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-muted);
+}
+
+/* ── 「技术详情」折叠块（原生 `<details>`：键盘与读屏直接可用）────────────
+ * 端口号 / 进程号 / 服务端原始回执都收在这里：需要的人点开就有，
+ * 学生日常不会先读到它们。 */
+.tech {
+  border-top: 1px solid var(--k12-border);
+  padding-top: 6px;
+}
+.tech__sum {
+  /* 可点目标：给足高度（原生 summary 默认约 20px） */
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .tech__sum:hover {
+    color: var(--k12-accent-ink);
+  }
+}
+.tech__sum:focus-visible {
+  outline: 2px solid var(--k12-accent);
+  outline-offset: 2px;
+}
+.tech .sidecar {
+  margin-top: 6px;
+}
+/* 探测结果里的时刻：它是时间戳不是标题，比主句轻一档 */
+.probe__at {
+  font-weight: 500;
+  color: var(--k12-muted);
+}
+
 /* ── 窄窗口：索引收成一行横向 tab，右栏单列满宽 ───────────────────────── */
 @media (max-width: 1279px) {
   .st__body {
@@ -1309,6 +1873,15 @@ onBeforeUnmount(() => {
   }
   .nav__item {
     width: auto;
+  }
+  /* 高级入口在窄窗口里也排进那一行，不再占一整个块 */
+  .nav__advanced {
+    width: auto;
+    margin-top: 6px;
+  }
+  .nav__list--sub {
+    border-top: none;
+    padding-top: 0;
   }
 }
 </style>

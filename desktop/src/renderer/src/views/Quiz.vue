@@ -33,24 +33,42 @@
  *
  * ⚠️ 「连对 / 经验」在契约里没有对应模型（只有掌握度与学习记录），**不渲染**这两个数 ——
  *   没有数据源的数字画出来就是假统计。徽章（`levels[].badge`）是服务端真实字段，
- *   有就显示、没有就不显示。
+ *   有就显示、没有就不显示。（这条说明本身也是**写给评委看的**，见下一条。）
+ *
+ * ★★ 学生视角 / 教师·答辩视角（`stores/viewMode.ts` + `<TeacherGate>`）——
+ *   本页此前把几处**写给评委的 API 映射说明直接印在学生页面上**（评审最刺眼的一条：
+ *   「『连对 / 经验』在契约里没有对应模型……」「关卡徽章取服务端的 `progress.badge`」）。
+ *   现在的纪律：**学生视角一个字不留，教师视角一条不删**（设计合理性那 25% 要证据）。
+ *   判据不是「这句话有没有用」，而是「它在向谁解释什么」：
+ *     · 向学生解释**他自己的学习** → 留在页面上（「还没解锁」「再试一次」）；
+ *     · 向我们解释**实现** → 进 `<TeacherGate>`（kp_id、契约里没有什么模型、关卡怎么播种）。
+ *   ★ 学生视角里**绝不出现内部标识**：`kp_id` / `qid` 这类 slug 要么进 `<TeacherGate>`，
+ *     要么退回中性占位（`未命名知识点`）—— 界面上摆 `ai-definition-jr` 是开发期产物。
  */
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { Trophy, Lock, Circle, PlayCircle, CheckCircle2, History, X, Info, RotateCcw } from 'lucide-vue-next'
-import { useQuizStore } from '../stores/quiz'
+import { useQuizStore, type QuizAttempt } from '../stores/quiz'
+import TeacherGate from '../components/TeacherGate.vue'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { QUIZ_TYPE_LABELS, SCORED_BY_LABELS, formatMasteryDelta } from '../labels'
 import { isBlankAnswer, optionLetter, type QuizQuestionType } from '../cards/quiz'
 import type { QuizResultView } from '../api/data'
 import { useEscape } from '../composables/useEscape'
 import { useFocusReturn } from '../composables/useFocusReturn'
+import { useReducedMotion } from '../composables/useReducedMotion'
 
 const quiz = useQuizStore()
 const knowledge = useKnowledgeStore()
 
-/** 四个阶段的中文名与图标（阶段字面量来自服务端进度，不在前端推导）。 */
+/**
+ * 四个阶段的中文名与图标（阶段字面量来自服务端进度，不在前端推导）。
+ *
+ * ★ `locked` 说「还没解锁」而不是「未解锁」：这两个字是**给学生的提示**，不是状态码。
+ *   它出现在关卡条上会连成一整排（评审说的「一堵墙」），所以措辞与视觉一起降调
+ *   （见 `.stg--locked` 的去色样式），而不是把状态码翻译一遍贴在按钮上。
+ */
 const stageMeta: Record<string, { label: string; icon: unknown }> = {
-  locked: { label: '未解锁', icon: Lock },
+  locked: { label: '还没解锁', icon: Lock },
   learning: { label: '学习中', icon: Circle },
   quizzed: { label: '已闯关', icon: PlayCircle },
   mastered: { label: '已掌握', icon: CheckCircle2 }
@@ -64,8 +82,7 @@ const levels = computed(() => quiz.levels)
  * kp_id → 中文名。
  *
  * ⚠️ 关卡进度只给 `kpId`（没有名字），而界面上不能只摆 `ai-definition-jr` 这种标识。
- *    中文名的来源是**教材知识点清单**（与依赖图谱同一个 `kb.sqlite`）——
- *    取不到名字时原样显示 kpId，不编一个名字出来。
+ *    中文名的来源是**教材知识点清单**（与依赖图谱同一个 `kb.sqlite`）。
  */
 const kpNames = computed(() => {
   const map = new Map<string, string>()
@@ -73,8 +90,23 @@ const kpNames = computed(() => {
   return map
 })
 
+/** 查不到中文名时的中性占位（**不是** kp_id，见下）。 */
+const UNNAMED_POINT = '未命名知识点'
+
+/**
+ * 知识点中文名；查不到时给**中性占位**，绝不退回 kp_id 原文。
+ *
+ * ★★ 为什么不能退回 `kpId`（评审发现：界面上出现过 `ai-definition-jr`）：
+ *   它是我们内部的标识（slug），不是学生的语言 —— 学生看到的是「一个读不懂的机器串」，
+ *   而且它把「我们怎么给知识点编号」摆给了不该关心这件事的人。
+ *   查不到名字只剩两种情形（服务端已按当前教材白名单过滤掉已删除知识点，
+ *   见 `routes/quiz.py` 的 `progress_snapshot(known_kp_ids=…)`）：
+ *     ① 知识点清单还没取回来（那一小段窗口）；
+ *     ② 清单里真的没有它。
+ *   两种都该说「我暂时不知道它叫什么」，而不是把 slug 顶上去。
+ */
 function nameOf(kpId: string): string {
-  return kpNames.value.get(kpId) ?? kpId
+  return kpNames.value.get(kpId) ?? UNNAMED_POINT
 }
 
 /**
@@ -132,10 +164,19 @@ const questionRows = computed(() =>
   }))
 )
 
+/**
+ * 题目来源的**中文说法**（`bank` / `generated` 是契约里的枚举）。
+ *
+ * ★ 说人话：`本地题库` / `模型生成` 是我们这边的实现语言（学生不知道什么叫"题库"、
+ *   也不该关心它在哪、更不知道"模型生成"意味着什么）。对学生有意义的是
+ *   「这是教材配的题」还是「这是团团现给你出的题」。
+ *   ⚠️ 文案与对话内练习卡片（`cards/QuizCard.vue` 的 `sourceLabel`）**必须一字不差** ——
+ *   同一件事在两条路径上说法不同，读起来就像两个不同的功能。
+ */
 const sourceLabel = computed(() => {
   const source = quiz.bank?.source
-  if (source === 'bank') return '本地题库'
-  if (source === 'generated') return '模型生成'
+  if (source === 'bank') return '教材配套题'
+  if (source === 'generated') return '团团出的题'
   return ''
 })
 
@@ -149,8 +190,68 @@ function onInput(qid: string, event: Event) {
   drafts[qid] = target ? target.value : ''
 }
 
+/**
+ * 提交键的文案与禁用（**一题一个终态**）。
+ *
+ * ★★ 修的是什么（评审发现的真实缺陷）：旧文案是
+ *   `row.attempt?.result ? '再提交一次' : '提交这题'` —— **答对之后**按钮还在请学生
+ *   「再提交一次」，于是他真的会再点一次，而服务端的反馈里写着「这次就不重复计分」。
+ *   一个邀请学生做无用功、做完还被系统告知「不算」的按钮。
+ *
+ * 判据只读**后端判分结果**里的 `correct`（`QuizResultView`，那一个布尔是唯一权威，
+ * 前端不自己比对答案）：
+ *   · 答对 → 「已完成」且**禁用**（终态：再提交一次不会改变任何结论）；
+ *   · 答错 → 仍然可点，文案是「再试一次」（那才是这个按钮真正在邀请他做的事）；
+ *   · 判分在途 → 「正在判分…」且禁用（防连点：连点会判两次、写两次掌握度）。
+ *
+ * ⚠️ 注意禁用的是**按钮的交互**，不是把按钮藏起来：它仍在 DOM 里、
+ *    `data-testid="quiz-submit"` 仍然数得到（探针要能证明的是「它被禁用了」，
+ *    而不是「它不见了」—— 后者会让界面在学生答对后看起来像坏掉了）。
+ */
+function submitLabel(attempt: QuizAttempt | null): string {
+  if (attempt?.submitting === true) return '正在判分…'
+  if (!attempt?.result) return '提交这题'
+  return attempt.result.correct ? '已完成' : '再试一次'
+}
+
+/** 提交键是否禁用：判分在途，或**这道题已经答对**（终态，再点没有意义）。 */
+function submitDisabled(attempt: QuizAttempt | null): boolean {
+  if (attempt?.submitting === true) return true
+  return attempt?.result?.correct === true
+}
+
+/** 题目列表的根元素（答对后用它把视线送到下一题，见 `advanceAfterCorrect`）。 */
+const listRef = ref<HTMLElement | null>(null)
+/** 减动效偏好：滚动是 JS 发起的移动，CSS 的 `@media` 收不掉它。 */
+const reducedMotion = useReducedMotion()
+
+/**
+ * 答对之后把注意力送到**下一道还没答对的题**上。
+ *
+ * ★ 为什么要有这一步：一道题答对之后它的提交键变成禁用的「已完成」——
+ *   如果学生没注意到，视线仍停在那一题上，「接下来做什么」就没有答案；
+ *   而这是**三题一关**的练习，往下走才是常态。
+ * ★ 找不到下一题（最后一题，或后面的题都已经答对）时**什么都不做**：
+ *   不滚动、不弹提示 —— 「点完画面对不上」的假动作比不做更差。
+ * ★ 查找用模板里已经有的 `data-testid="quiz-question-N"`（题号即序号），
+ *   不另外维护一份 DOM ref 数组：两份状态里必然有一份会过期。
+ * ★ 减动效偏好（`useReducedMotion`，全站同一口径）：它是一次**移动**，所以
+ *   `prefers-reduced-motion` 下改成瞬移 —— 内容照样送到眼前，只是不再滑过去。
+ *   （CSS 的 `@media` 收不掉 JS 发起的滚动，这一条只能在 JS 侧读。）
+ */
+async function advanceAfterCorrect(index: number): Promise<void> {
+  const next = questionRows.value.find(
+    (row) => row.index > index && row.attempt?.result?.correct !== true
+  )
+  if (!next) return
+  await nextTick()
+  listRef.value
+    ?.querySelector<HTMLElement>(`[data-testid="quiz-question-${next.index + 1}"]`)
+    ?.scrollIntoView({ block: 'center', behavior: reducedMotion.value ? 'auto' : 'smooth' })
+}
+
 /** 提交一题：非空校验 + 交给 store（判分只在后端）。防连点在 store 里。 */
-async function submit(qid: string) {
+async function submit(qid: string, index: number) {
   const answer = (drafts[qid] ?? '').trim()
   if (isBlankAnswer(answer)) {
     localHint.value = '先写下你的答案，再点提交。'
@@ -158,6 +259,8 @@ async function submit(qid: string) {
   }
   localHint.value = ''
   await quiz.submit(qid, answer)
+  // 只有这一提交**真的被判定为对**才往下送；答错要留在原地接着想（retry 是正当的）
+  if (quiz.attempts[qid]?.result?.correct === true) await advanceAfterCorrect(index)
 }
 
 /* ---------------------------------------------------------------- 本轮小结 */
@@ -316,20 +419,34 @@ onMounted(() => {
           <span v-if="level.badge" class="stg__badge" :title="level.badge">{{ badgeTier(level.badge) }}</span>
         </button>
       </div>
+      <!-- 空态：**对学生只说他的处境**（现在没有可闯的关卡），机制另说（见下） -->
       <p v-else-if="!quiz.progressLoading" class="stages__empty" data-testid="quiz-levels-empty">
-        还没有可闯的关卡 —— 服务端会在首次打开闯关页时按依赖图播种关卡路径；知识库为空时这里会是空的。
+        还没有可以闯的关卡 —— 教材内容准备好之后，这里会一关一关地排出来。
       </p>
 
-      <!-- ★ 只说明**缺的是什么**：契约里没有「连对 / 经验」这类模型，
-           所以这两个数不渲染（没有数据源的数字画出来就是假统计）；
-           徽章是真实字段，有就显示在关卡条上。 -->
-      <p class="stages__note">
-        <Info :size="13" />
-        <span>
-          「连对 / 经验」在契约里没有对应模型（只有掌握度与学习记录），本页不显示这两个数；
-          关卡徽章取服务端的 <code>progress.badge</code>，未解锁关卡为空。
-        </span>
-      </p>
+      <!-- 关卡是怎么来的（**教师 / 答辩视角**）：这是实现说明，不是给学生的解释。
+           学生视角整段不渲染；教师视角里它一直可见（评委要看这条链路）。 -->
+      <TeacherGate label="关卡是怎么来的">
+        <p class="stages__gate">
+          服务端会在首次打开闯关页时按依赖图播种关卡路径；知识库为空时这里是空的。
+        </p>
+      </TeacherGate>
+
+      <!-- ★★ 契约映射说明（**教师 / 答辩视角**）——
+           缺陷现场：这段 memo 原本直接印在学生页面上（「『连对 / 经验』在契约里没有对应
+           模型……」「关卡徽章取服务端的 progress.badge」），学生看到的是我们写给自己的
+           一张便条。它只说明**缺的是什么**：契约里没有「连对 / 经验」这类模型，所以这两个数
+           不渲染（没有数据源的数字画出来就是假统计）；徽章是真实字段，有就显示在关卡条上。
+           教师视角**一个字没删**（设计合理性那 25% 的证据就在这），只是不再给学生看。 -->
+      <TeacherGate label="为什么不显示「连对 / 经验」">
+        <p class="stages__note">
+          <Info :size="13" />
+          <span>
+            「连对 / 经验」在契约里没有对应模型（只有掌握度与学习记录），本页不显示这两个数；
+            关卡徽章取服务端的 <code>progress.badge</code>，还没解锁的关卡为空。
+          </span>
+        </p>
+      </TeacherGate>
     </section>
 
     <!-- ── 当前关卡标题（16px 块标题档：不得追平身份行的 22px）────────── -->
@@ -344,7 +461,11 @@ onMounted(() => {
         </el-tag>
         <el-tag v-if="quiz.bank" size="small" effect="plain" round>{{ questions.length }} 题</el-tag>
         <el-tag v-if="sourceLabel" size="small" effect="plain" round>{{ sourceLabel }}</el-tag>
-        <code class="quiz__kp">{{ activeLevel.kpId }}</code>
+        <!-- kp_id：**教师 / 答辩视角**才有。学生视角里去掉它 ——
+             标题已经写着这一关的中文名，裸 slug（`ai-definition-jr`）是内部标识，不是他的语言。 -->
+        <TeacherGate>
+          <code class="quiz__kp">{{ activeLevel.kpId }}</code>
+        </TeacherGate>
       </div>
     </header>
 
@@ -372,11 +493,14 @@ onMounted(() => {
       />
 
       <!-- ② 取题中 -->
+      <!-- 取题中：只说「正在发生什么 + 学生得到什么承诺」。
+           旧文案「题目来自本地题库（答案留在后端，不下发到界面）」是**我们的实现**，
+           不是学生需要知道的（答案不在界面上的**承诺**另有表述）。 -->
       <EmptyState
         v-else-if="quiz.bankLoading && !quiz.bank"
         tone="loading"
         title="正在取题…"
-        desc="题目来自本地题库（答案留在后端，不下发到界面）。"
+        desc="题目马上就好，答案不会出现在界面上，放心自己练。"
       />
 
       <!-- ③ 取题失败 -->
@@ -398,7 +522,7 @@ onMounted(() => {
 
       <!-- ⑤ 题目列表 -->
       <template v-else>
-        <ol class="qlist" data-testid="quiz-questions">
+        <ol ref="listRef" class="qlist" data-testid="quiz-questions">
           <li
             v-for="row in questionRows"
             :key="row.question.qid"
@@ -449,18 +573,21 @@ onMounted(() => {
               @input="onInput(row.question.qid, $event)"
             />
 
+            <!-- 主提交键：走设计系统的 `.k12-cta`（全站主要动作只有一份配方）。
+                 文案与禁用见 `submitLabel` / `submitDisabled`：答对即终态（「已完成」+禁用），
+                 答错仍可点（「再试一次」）。
+                 ⚠️ 旧的「判分在本地完成，答案不下发到界面」是**判分实现说明**，
+                 已从学生视角去掉（答案是否下发是承诺、不是机制，页面上别用机制去证明它）。 -->
             <div class="qitem__foot">
-              <el-button
-                size="small"
-                type="primary"
-                :loading="row.attempt?.submitting === true"
-                :disabled="row.attempt?.submitting === true"
+              <button
+                type="button"
+                class="k12-cta"
                 data-testid="quiz-submit"
-                @click="submit(row.question.qid)"
+                :disabled="submitDisabled(row.attempt)"
+                @click="submit(row.question.qid, row.index)"
               >
-                {{ row.attempt?.result ? '再提交一次' : '提交这题' }}
-              </el-button>
-              <span class="qitem__hint">判分在本地完成，答案不下发到界面</span>
+                {{ submitLabel(row.attempt) }}
+              </button>
             </div>
 
             <!-- 逐题错误（传输层失败 / 判分端点报错）：原样显示服务端那句话 -->
@@ -488,7 +615,9 @@ onMounted(() => {
     <SurfacePanel class="mastery">
       <header class="mastery__head">
         <span class="mastery__title">本关与相邻关卡的掌握度</span>
-        <span class="mastery__meta">由后端判分累积（服务端进度里的 mastery）</span>
+        <!-- 括号里原来是「（服务端进度里的 mastery）」—— 字段名对学生的意义 = 没有。
+             学生要回答的问题是「这个百分比是哪来的、算不算数」：答案是「每次答完题自动累加」。 -->
+        <span class="mastery__meta">每次答题后自动更新</span>
       </header>
       <div v-if="masteryRows.length > 0" class="mastery__rows" data-testid="quiz-mastery">
         <div v-for="row in masteryRows" :key="row.kpId" class="mrow">
@@ -514,15 +643,28 @@ onMounted(() => {
          这里只放它装不下的机制细节，避免同一句话说两遍。 -->
     <SurfacePanel class="howto" flush>
       <el-collapse class="howto__collapse">
+        <!-- 学生视角：只回答他真会问的两件事 —— 「掌握度怎么变」「同一题再答会怎样」
+             （第二句是**判分口径的实话**：首次作答决定，重复提交只更新结论、不重复计分）。 -->
         <el-collapse-item title="判分与掌握度说明" name="how">
           <p class="howto__p">
-            掌握度变化限幅 ±0.2（防一次答题从 0 到 1）。
-            题库里的标准答案只保留在 Python 侧，发给界面的一律是无 <code>answer</code> 的
-            <code>QuizQuestionOut</code>（解析也不下发 —— 它往往直接写着答案，只在判分后的
-            <code>feedback</code> 里出现）。提交后经 IPC → sidecar <code>/api/quiz/grade</code> 判分，
-            返回 <code>QuizResult</code>（含 <code>masteryDelta</code>）；同一题重交只更新结论，
-            不会把正确率重复计数。
+            每题提交后马上判分，掌握度会跟着变一点：答对往上、答错往下，单次变化有上限
+            （答得再好也不会一次从 0 涨满）。同一道题重复提交只更新这题的结论，
+            正确率与掌握度不会因此重复计分 —— <strong>第一次作答</strong>才是计分的那一次。
           </p>
+          <p class="howto__p">答案与解析不会出现在界面上，判分之后才会以反馈的形式告诉你思路。</p>
+
+          <!-- ★ 上面那些**机制**（字段名、端点、IPC 链路）挪进教师 / 答辩视角：
+               它们是这套判分链路「设计合理性」那一项的证据，一条都没删，只是换了读者。 -->
+          <TeacherGate label="判分链路的机制细节">
+            <p class="howto__p">
+              掌握度变化限幅 ±0.2（防一次答题从 0 到 1）。
+              题库里的标准答案只保留在 Python 侧，发给界面的一律是无 <code>answer</code> 的
+              <code>QuizQuestionOut</code>（解析也不下发 —— 它往往直接写着答案，只在判分后的
+              <code>feedback</code> 里出现）。提交后经 IPC → sidecar <code>/api/quiz/grade</code> 判分，
+              返回 <code>QuizResult</code>（含 <code>masteryDelta</code>）；同一题重交只更新结论，
+              不会把正确率重复计数。
+            </p>
+          </TeacherGate>
         </el-collapse-item>
       </el-collapse>
     </SurfacePanel>
@@ -560,9 +702,13 @@ onMounted(() => {
               >
                 <div class="hw__row-top">
                   <span class="hw__kp">第 {{ row.index + 1 }} 题 · {{ QUIZ_TYPE_LABELS[row.type] }}</span>
-                  <!-- ⚠️ 这里放的是 qid，**不是时间**：契约里没有逐次作答的历史端点，
-                       库里那些带时间的记录只用于统计聚合，前端读不到，所以不编造时间戳。 -->
-                  <span class="hw__qid k12-num">{{ row.qid }}</span>
+                  <!-- ⚠️ 放的是 **qid**，不是时间（这是**教师 / 答辩视角**才有的标识）：
+                       契约里没有逐次作答的历史端点，库里那些带时间的记录只用于统计聚合，
+                       前端读不到，所以不编造时间戳 —— 但**也不把 qid 摆给学生**：
+                       `prog-loop-jr-q1` 对他没有任何意义（题号已经在左边写着了）。 -->
+                  <TeacherGate>
+                    <span class="hw__qid k12-num">{{ row.qid }}</span>
+                  </TeacherGate>
                 </div>
                 <p class="hw__stem">{{ row.stem }}</p>
                 <div class="hw__row-mid">
@@ -705,9 +851,25 @@ onMounted(() => {
   background: var(--k12-accent-soft);
   border-color: var(--k12-accent-ink);
 }
+/* ★★ 还没解锁的关卡要**整体退到背景里**（评审：一屏 50 多关时，「未解锁」连成
+ * 一堵墙，把真正能做的两三关淹掉了）：虚线边框 + 透明底 + 全灰字。
+ *
+ * ⚠️ 刻意**不用 `opacity` 压暗**（旧写法是 `opacity: .6`）：那会把文字一起压到
+ *   读不清（与 `.k12-cta:disabled` 那条纪律同一个道理 —— 状态不该以可读性为代价），
+ *   而且 opacity 连对比度校验都测不出来。改成实打实的灰字（muted / muted-2 都是
+ *   有对比度保证的令牌），尺寸与边框位置一个字不动 —— 关卡条不会因此跳一下。
+ * ⚠️ 状态逻辑与服务端给的 `badge` 都不在这里改：这里只改**观感**。 */
 .stg--locked {
-  opacity: 0.6;
+  background: transparent;
+  border-style: dashed;
   cursor: not-allowed;
+}
+.stg--locked .stg__name {
+  color: var(--k12-muted);
+}
+.stg--locked .stg__stage,
+.stg--locked .stg__pct {
+  color: var(--k12-muted-2);
 }
 .stg__ico {
   flex: none;
@@ -758,17 +920,20 @@ onMounted(() => {
 .stg--on .stg__pct {
   color: var(--k12-accent-ink);
 }
-/* 说明便条：12px meta，不是告警条 —— 它解释的是"为什么不显示那两个数" */
+/* ── 教师 / 答辩视角里那两段说明（学生视角整块不渲染，见 `.stages` 的模板）────
+ * ⚠️ 里面**不再自带底色 / 内边距**：`<TeacherGate label>` 已经给了一个浅底虚线框，
+ *   再叠一层同色底等于白叠（卡中卡同色 = 看不出层次，E3 那条纪律）。
+ *   文字样式与页面其它 meta 一致（12px / muted），尺寸不靠 `padding` 撑。 */
+.stages__gate,
+.stages__note {
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
+}
 .stages__note {
   display: flex;
   align-items: flex-start;
   gap: 7px;
-  padding: 8px 11px;
-  border-radius: var(--k12-r-inset);
-  background: var(--k12-surface-2);
-  font-size: var(--k12-fs-xs);
-  line-height: var(--k12-lh-ui);
-  color: var(--k12-muted);
 }
 .stages__note svg {
   flex: none;
@@ -929,15 +1094,12 @@ onMounted(() => {
   outline: 2px solid var(--k12-accent-border);
   outline-offset: 1px;
 }
+/* 提交键独占这一行（原来旁边还挂着「判分在本地完成」那句实现说明，已去掉）。 */
 .qitem__foot {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-}
-.qitem__hint {
-  font-size: var(--k12-fs-xs);
-  color: var(--k12-muted);
 }
 .qitem__err {
   font-size: var(--k12-fs-xs);

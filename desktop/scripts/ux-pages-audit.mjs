@@ -2,7 +2,8 @@
  * 逐页 UX 体检：把侧栏八个页面**逐个走一遍**，量「人用起来顺不顺」。
  *
  * 为什么需要它：`ux-audit.mjs` 只覆盖对话页（最高频，但不是全部）。
- * 动画 / 编程 / 闯关 / 学习档案 / 教材知识库 / 依赖图谱 / 设置 这七页
+ * 动画 / 编程 / 闯关 / 学习档案 / 学习地图 / 设置 这六页（学生视角；
+ * 教材知识库是教师专属页，不在学生侧栏里）
  * 各有各的交互形态 —— 编辑器能不能打字、列表空态有没有说明、按钮点下去有没有反馈，
  * 这些在对话页的量法里都体现不出来。
  *
@@ -140,13 +141,34 @@ async function auditPage(cdp, label) {
       // 卡在加载态？（页面上只有「加载中」而没有任何可操作的东西）
       loadingOnly: /加载中|正在载入/.test(text) && clickable.length <= 3,
       // 裸露的技术词（学生看不懂 / 像是坏了）
+      //
+      // ★★ 2026-09-20 扩表：原来的六条只抓「明显的坏味道」（undefined / 堆栈 / 失败）。
+      //    但 83 张真机截图的走查发现的问题**不是坏味道**，是「太专业」——
+      //    「FTS5 关键词兜底」「隔离在 SQL 层强制」「kp_id」「sandboxed iframe」
+      //    这些每一句都"正常渲染"，原来那六条一条都抓不到。
+      //    所以这里补上**开发者 / 运维术语**那一类。
+      // ⚠️ 与 tests/student-view-discipline.test.ts 的 TERMS 同口径：那份扫源码全文
+      //    （能覆盖展开态 / 状态分支），这份扫**真实 DOM**（能覆盖模板字符串拼出来的句子）。
+      //    两份互补，改一份时另一份要跟着改。
+      // ⚠️ 本段是**模板字符串里的页面代码**，所以注释里不能出现反引号（会提前结束字符串）
+      //    也不能出现美元加大括号（会被当成插值）—— 这条注释本身就是踩过之后写的。
       leaks: [
         /\\bundefined\\b/.test(text) && 'undefined',
         /\\[object Object\\]/.test(text) && '[object Object]',
         /\\bNaN\\b/.test(text) && 'NaN',
         /TypeError|ReferenceError|Cannot read prop/.test(text) && '异常堆栈',
         /HTTP\\s*5\\d\\d/.test(text) && 'HTTP 5xx',
-        /读取失败|加载失败/.test(text) && '失败文案'
+        /读取失败|加载失败/.test(text) && '失败文案',
+        // ── 开发者 / 运维术语（走查新增）────────────────────────────────
+        /\\bSQL\\b|SQLite|kb\\.sqlite|learning\\.db/.test(text) && '数据库术语',
+        /\\bWHERE\\b|regex|FTS5|\\bnonce\\b|allow-scripts|sandboxed/.test(text) && '安全/检索实现细节',
+        /\\bkp_id\\b/.test(text) && '内部字段名 kp_id',
+        /\\bPyodide\\b|POST \\/api|GET \\/api|HTTP 200/.test(text) && '接口/运行时细节',
+        // kp slug 形态（ai-definition-jr 这种）：本仓 kp_id 的构造规则
+        /[a-z][a-z0-9]*(?:-[a-z0-9]+)+-(?:pl|ph|jr|sr)\\b/.test(text) && '知识点 slug',
+        /检索降级链|降级链|兜底|向量检索|云端 Embedding/.test(text) && '检索实现黑话',
+        /已嵌入|向量维度|分块/.test(text) && '向量库术语',
+        /端口号|进程号/.test(text) && '运维数字'
       ].filter(Boolean),
       // 横向溢出
       overflow: (() => {
@@ -182,7 +204,12 @@ async function auditPage(cdp, label) {
 
 async function main() {
   const cdp = await Cdp.attach()
-  const pages = ['动画讲解', '编程环境', '闯关练习', '学习档案', '教材知识库', '依赖图谱', '设置']
+  // ★★ 学生视角的侧栏里**没有**「教材知识库」：它现在是教师 / 答辩专属页
+  //    （`PAGES.knowledge.nav === 'teacher'`）。这个体检脚本跑的是**学生视角**
+  //    （应用默认就是学生视角，且脚本不改视角），所以清单里不能有它 ——
+  //    列了它会红成「侧栏找不到这个入口」，那是**跑法不对**而不是产品坏了。
+  //    （那一页的教师侧体检由 `ux-layout-audit.mjs` 或人工走查看；它不进学生路径。）
+  const pages = ['动画讲解', '编程环境', '闯关练习', '学习档案', '学习地图', '设置']
 
   // 起点：先回对话页，保证每次切换都从同一状态出发
   await goto(cdp, '对话课堂')

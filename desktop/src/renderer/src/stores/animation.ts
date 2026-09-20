@@ -150,7 +150,9 @@ export const useAnimationStore = defineStore('animation', () => {
   ): Promise<void> {
     const templateId = input.templateId ?? activeTemplateId.value
     if (!templateId && !input.kpId) {
-      renderError.value = '没有可渲染的模板 —— 先选一个。'
+      // ★ 这句会**原样显示给学生**（`Animation.vue` 的错误态直接渲染 `renderError`）：
+      //   说清下一步做什么，不要写成写给我们自己的断言（旧句「没有可渲染的模板」）。
+      renderError.value = '还没有挑动画 —— 先从下面的动画里选一个吧。'
       return
     }
     if (templateId) activeTemplateId.value = templateId
@@ -194,12 +196,14 @@ export const useAnimationStore = defineStore('animation', () => {
   async function host(payloadId?: string): Promise<HostedAnimation | null> {
     const current = payload.value
     if (current === null) {
-      hostError.value = '还没有渲染结果可托管。'
+      hostError.value = '这段动画还没准备好，先点一次播放吧。'
       return null
     }
     const kpId = activeTemplate.value?.kpIds?.[0] ?? ''
     if (!kpId) {
-      hostError.value = '这条动画没有关联的知识点，无法按学生托管。'
+      // 「按学生托管」「没有关联的知识点」是**实现侧口径**（会原样显示给学生）：
+      // 学生的处境是「这段动画这次放不出来」，不是「nonce 绑不上 kp_id」。
+      hostError.value = '这段动画这次放不出来 —— 换一段，或者先去对话里问问团团。'
       return null
     }
     const lookup = resolveDataBridge()

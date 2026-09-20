@@ -7,11 +7,26 @@
  *   （`nodeRect` / `edgePath`），这里只负责把数字放进 SVG 属性里。
  * ★ 已掌握 / 未掌握的区分只用**填充色与描边**（不靠颜色单独承载语义，
  *   文字上也能看出来：`data-mastered` 供断言与无障碍读取）。
+ *
+ * ---------------------------------------------------------------------------
+ * ★★ 节点是**真的可点、键盘可达**的（走查结论：原来一个点击处理都没有）
+ * ---------------------------------------------------------------------------
+ * 一个学生看着这张图，最自然的动作就是「点一下某个知识点」—— 原来点了毫无反应
+ * （图上没有任何提示说「这里不可点」，于是像坏了）。现在每个节点是一枚
+ * `role="button"` + `tabindex="0"` 的元素：鼠标点击、Tab 聚焦、Enter / Space 都能选中。
+ *
+ * ★ 选中态**不只靠颜色**（本项目的明文规则）：被选中的节点外面多一圈**环**
+ *   （`.node__ring`，尺寸与描边都变了），键盘聚焦时那圈环变成虚线 ——
+ *   灰度打印或色觉差异下，「选中 / 聚焦」照样看得出来。
+ * ★ 节点**不重排、不改画布尺寸**：环画在节点矩形外侧（半径 +4px 的余量），
+ *   布局输出的 `x/y/width/height` 一个数都没动（守卫钉着 1610×1600 与 13px 字号）。
  */
 import { computed } from 'vue'
 import { edgePath, nodeLabel, nodeRect, type GraphLayout } from './layout'
 
-const props = defineProps<{ layout: GraphLayout }>()
+const props = defineProps<{ layout: GraphLayout; selected?: string }>()
+
+const emit = defineEmits<{ select: [kpId: string] }>()
 
 /** 画布为空时的占位尺寸（避免 `viewBox="0 0 0 0"` 这种非法值）。 */
 const viewBox = computed(() =>
@@ -20,10 +35,24 @@ const viewBox = computed(() =>
     : '0 0 100 100'
 )
 
-/** 每个节点的矩形（预算一次，避免模板里反复调用）。 */
+/** 每个节点的矩形与选中环（预算一次，避免模板里反复调用）。 */
 const rects = computed(() =>
-  props.layout.nodes.map((node) => ({ node, rect: nodeRect(node) }))
+  props.layout.nodes.map((node) => {
+    const rect = nodeRect(node)
+    return {
+      node,
+      rect,
+      // 选中环：节点矩形外扩 4px。**不参与布局**（纯装饰，画在节点下层）
+      ring: { x: rect.x - 4, y: rect.y - 4, width: rect.width + 8, height: rect.height + 8 },
+      on: props.selected === node.kpId
+    }
+  })
 )
+
+/** 无障碍标签：知识点名 + 掌握状态（读屏用户听到的是这句话，不是一串坐标）。 */
+function labelOf(node: { name: string; kpId: string; mastered: boolean }): string {
+  return `${nodeLabel(node.name, node.kpId)}${node.mastered ? '，已掌握' : '，还没掌握'}`
+}
 </script>
 
 <template>
@@ -32,8 +61,8 @@ const rects = computed(() =>
     :viewBox="viewBox"
     :width="layout.width || 100"
     :height="layout.height || 100"
-    role="img"
-    aria-label="知识点依赖图"
+    role="group"
+    aria-label="知识点依赖图（可以用 Tab 逐个浏览、回车选中）"
     data-testid="study-map-svg"
   >
     <!-- 边：先画（在节点下层），直角折线 -->
@@ -52,12 +81,32 @@ const rects = computed(() =>
     <!-- 节点 -->
     <g class="map__nodes">
       <g
-        v-for="{ node, rect } in rects"
+        v-for="{ node, rect, ring, on } in rects"
         :key="node.kpId"
+        class="hit"
+        :class="{ 'hit--on': on }"
         :data-testid="`map-node-${node.kpId}`"
         :data-mastered="node.mastered ? 'true' : 'false'"
         :data-layer="node.layer"
+        :data-selected="on ? 'true' : 'false'"
+        role="button"
+        tabindex="0"
+        :aria-pressed="on ? 'true' : 'false'"
+        :aria-label="labelOf(node)"
+        @click="emit('select', node.kpId)"
+        @keydown.enter.prevent="emit('select', node.kpId)"
+        @keydown.space.prevent="emit('select', node.kpId)"
       >
+        <!-- 选中环（画在节点下层；键盘聚焦时变虚线 —— 形状本身承载「当前在哪」） -->
+        <rect
+          :x="ring.x"
+          :y="ring.y"
+          :width="ring.width"
+          :height="ring.height"
+          rx="13"
+          class="ring"
+          aria-hidden="true"
+        />
         <rect
           :x="rect.x"
           :y="rect.y"
@@ -65,7 +114,7 @@ const rects = computed(() =>
           :height="rect.height"
           rx="9"
           class="node"
-          :class="{ 'node--mastered': node.mastered }"
+          :class="{ 'node--mastered': node.mastered, 'node--on': on }"
         />
         <text :x="node.x" :y="node.y" class="node__text" text-anchor="middle" dominant-baseline="middle">
           {{ nodeLabel(node.name, node.kpId) }}
@@ -117,6 +166,34 @@ const rects = computed(() =>
   stroke-width: 1.4;
 }
 
+/* 节点是一个可点、可聚焦的整体（`<g>` 而不是 `<rect>`：文字也是它的一部分） */
+.hit {
+  cursor: pointer;
+}
+
+/* 键盘聚焦：SVG 元素上 `:focus-visible` 在 Chromium 里可用；
+ * 这里给的是**形状**变化（虚线环），不是又一个颜色。 */
+.hit:focus-visible {
+  outline: none;
+}
+
+.hit:focus-visible .ring {
+  stroke: var(--k12-accent-ink);
+  stroke-dasharray: 5 4;
+  opacity: 1;
+}
+
+.ring {
+  fill: none;
+  stroke: var(--k12-accent);
+  stroke-width: 2;
+  opacity: 0;
+}
+
+.hit--on .ring {
+  opacity: 1;
+}
+
 .node {
   fill: var(--k12-surface);
   stroke: var(--k12-border-strong);
@@ -129,9 +206,19 @@ const rects = computed(() =>
   stroke-width: 1.6;
 }
 
+/* 选中：加粗描边（尺寸也变了，不只是颜色） */
+.node--on {
+  stroke: var(--k12-accent-ink);
+  stroke-width: 2.6;
+}
+
 .node__text {
   font-size: var(--k12-fs-xs);
   fill: var(--k12-fg);
   pointer-events: none;
+}
+
+.hit--on .node__text {
+  font-weight: 650;
 }
 </style>

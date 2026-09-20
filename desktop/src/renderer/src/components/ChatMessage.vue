@@ -7,7 +7,7 @@
  *   `citation`→ 来源行（`SourceChips`）+「教材原文」抽屉（点开看节级全文）
  *   `payload` → 内联卡片（`InlineCard`：动画 / 编程 / 练习三种）
  *   `blocked` → 正文已被替换成安全提示 + 撤回说明（`BlockedNotice`）
- *   `done`    → 状态变成「回答完成」
+ *   `done`    → 状态不再是角标（`showsStatusChip`：内容出现就是完成）
  *   `error`   → 可读的降级提示（`DegradedNotice`）
  *
  * ★ 每条回答都标出**这一轮用的学段**（`turn.gradeLevel`）：这个值来自系统对学段的
@@ -22,20 +22,30 @@
  * ★ 「教材原文」抽屉从 `api/events.ts` 的 `citationDetails` 取 —— 那里面是
  *   Python 一直就在返回、之前被投影丢掉的那几个字段（节级正文 / 相关度 / 父块 id）。
  *   取不到时按钮显示「原文暂时取不到」，而不是点下去毫无反应。
+ *
+ * ── ★★ 视角分层（学生 / 教师，2026-09-20）────────────────────────────────
+ *   ① `消息 pi-message:<uuid>`（内部 id）、抽屉里的「检索方式 `vector`」「父块 chunk-id」
+ *      —— 全是排障字段，学生看不懂 → 进 `<TeacherGate>`；
+ *   ② 「回答完成」角标不再渲染（`showsStatusChip`：内容已经出现在屏幕上就是完成信号）；
+ *   ③ 「从这里重新问」原本是一条**常显在主流程里的链接**：学生会误点、读起来像 Git 概念。
+ *      现在收进一个 `⋯` 小菜单，文案改成学生的话「换个思路再问」——
+ *      点击链路（`emit('branch')` → 页面确认框）**一字未改**。
  */
 import { computed, ref } from 'vue'
-import { BookMarked, GitBranch, X } from 'lucide-vue-next'
+import { BookMarked, Ellipsis, GitBranch, X } from 'lucide-vue-next'
 import type { ChatTurn } from '../api/events'
 import type { CitationDetail } from '@shared/ipc-events'
-import { GRADE_LABELS, TURN_STATUS_LABELS } from '../labels'
+import { GRADE_LABELS, TURN_STATUS_LABELS, showsStatusChip } from '../labels'
 import { DEFAULT_LOGO_URL } from '../brand-logo'
 import { parseMarkdown } from '../markdown'
+import { useDismissable } from '../composables/useDismissable'
 import { useEscape } from '../composables/useEscape'
 import { useFocusReturn } from '../composables/useFocusReturn'
 import InlineCard from '../cards/InlineCard.vue'
 import BlockedNotice from './BlockedNotice.vue'
 import DegradedNotice from './DegradedNotice.vue'
 import SourceChips from './SourceChips.vue'
+import TeacherGate from './TeacherGate.vue'
 
 const props = defineProps<{
   turn: ChatTurn
@@ -76,6 +86,16 @@ function emitBranch(): void {
 
 const streaming = computed(() => props.turn.status === 'streaming')
 const statusLabel = computed(() => TURN_STATUS_LABELS[props.turn.status])
+/**
+ * 要不要显示状态角标。
+ *
+ * ★ 判据收口在 `labels.showsStatusChip()`（`done` 不显示）——**不要**在这里写
+ *   `!== 'done'`：那个条件还有别的消费方（导出 / 卡片），各写一份迟早漏一处，
+ *   表现是「有的地方还挂着『回答完成』」。
+ * ★ 角标元素与 `:data-status`（挂在 `<article>` 上）都保留：`data-status` 是
+ *   体检脚本判「正在流式 / 已结束」的稳定锚点，与角标显不显示是两件事。
+ */
+const showStatus = computed(() => showsStatusChip(props.turn.status))
 const gradeLabel = computed(() => (props.turn.gradeLevel ? GRADE_LABELS[props.turn.gradeLevel] : null))
 
 /**
@@ -102,6 +122,21 @@ const activeSource = computed<CitationDetail | null>(() =>
   sourceOpen.value === null ? null : (props.detailOf?.(sourceOpen.value) ?? null)
 )
 
+/**
+ * 抽屉标题下那一行副标题的来源：**从本轮的引用行里按 chunkId 找回来**。
+ *
+ * ★ 原先那里显示的是 `chunk:<uuid>`（切片 id）—— 学生视角里它比「检索方式 vector」
+ *   更难懂。同一份信息（这一条出自哪一章哪一节）在 `turn.citations` 里本来就有
+ *   （那一行同时给了 `chapterTitle` / `sectionTitle`），只是原始对象 `activeSource`
+ *   不带它。所以这里按 id 反查一次，把**人话**填进副标题。
+ * ★ 找不到就不显示（不编一个「未知章节」）。
+ */
+const activeCitation = computed(() => {
+  const id = sourceOpen.value
+  if (id === null) return null
+  return props.turn.citations.find((citation) => citation.chunkId === id) ?? null
+})
+
 useEscape(
   () => {
     sourceOpen.value = null
@@ -120,6 +155,60 @@ useEscape(
  */
 const drawerRef = ref<HTMLElement | null>(null)
 useFocusReturn(drawerRef, () => sourceOpen.value !== null)
+
+/* ── 引用行：摘录（把「数据库查询结果」读成「一本书的条目」）─────────────────
+ * ★ 走查结论原话：编号列表重复着「第3章 核心技术分支 + 原文」，像一次 SQL 的结果集。
+ *   学生要的是「这句话出自哪儿、大概说了什么」——
+ *   所以每一条引用补一行**节级正文的摘录**（`CitationDetail.text` 本来就在手里，
+ *   只是此前只有点开抽屉才看得到）。
+ * ★ 摘录**只做截断**，不做摘要、不改写：改一个字的教材正文都会让「原文」按钮撒谎。
+ * ★ 详情还没到位时（事件里没带 details）整行不渲染 —— 不编一句更像样的假原文。
+ */
+const EXCERPT_MAX_CHARS = 58
+
+function excerptOf(chunkId: string): string {
+  const detail = props.detailOf?.(chunkId) ?? null
+  const text = detail === null ? '' : detail.text.replace(/\s+/g, ' ').trim()
+  if (text.length === 0) return ''
+  return text.length > EXCERPT_MAX_CHARS ? `${text.slice(0, EXCERPT_MAX_CHARS)}…` : text
+}
+
+/**
+ * 引用行 + 它自己的摘录（**一次算好**，模板里不再两处各调一次 `excerptOf`）。
+ *
+ * ★ 条数与顺序**严格跟随 `turn.citations`**：`[data-testid="citation-sources"] li`
+ *   的条数被体检脚本用来判「引用真的渲染出来了没」，一条都不能少。
+ */
+const sourceRows = computed(() =>
+  props.turn.citations.map((citation) => ({
+    citation,
+    excerpt: excerptOf(citation.chunkId)
+  }))
+)
+
+/* ── 分叉点：收进 `⋯` 小菜单 ───────────────────────────────────────────────
+ * ★ 为什么不再是一条常显的链接：它挂在**每条回答**下面，学生划着读的时候
+ *   很容易误点到（一点就会换一条会话线），而且「从这里重新问」读起来像 Git 的
+ *   分支概念，不像一句人话。收进 `⋯` 之后：默认只有一个安静的小圆点菜单，
+ *   展开才看到「换个思路再问」。
+ * ★ 浮层必须有键盘出口与「点外部关掉」：用 `useDismissable`（全站唯一实现，
+ *   见 `composables/useDismissable.ts` 里那段「为什么 Esc 与点外部要写在一起」）。
+ */
+const branchMenuOpen = ref(false)
+const branchBoxRef = ref<HTMLElement | null>(null)
+useDismissable({
+  panel: branchBoxRef,
+  open: () => branchMenuOpen.value,
+  close: () => {
+    branchMenuOpen.value = false
+  }
+})
+
+/** 点了菜单里的那一项：收起菜单，再把分叉点交给上层（**链路与从前完全一样**）。 */
+function pickBranch(): void {
+  branchMenuOpen.value = false
+  emitBranch()
+}
 </script>
 
 <template>
@@ -154,14 +243,22 @@ useFocusReturn(drawerRef, () => sourceOpen.value !== null)
           >
             {{ gradeLabel }}
           </span>
+          <!-- 状态角标：`done` 不再渲染（内容出现就是完成），其余三态保留。
+               `data-testid="turn-status"` 与 `:data-status` 都留着 —— 体检脚本按它们量状态。 -->
           <span
+            v-if="showStatus"
             class="chip"
             :class="streaming ? 'chip--accent' : 'chip--ok'"
             data-testid="turn-status"
           >
             {{ statusLabel }}
           </span>
-          <span v-if="turn.messageId" class="chip chip--quiet">消息 {{ turn.messageId }}</span>
+          <!-- 内部消息 id（`pi-message:<uuid>`）是排障字段，学生视角下不出现。
+               ★ `v-if` 放在 gate 上而不是里面的 chip 上：空元素在 flex 行里也会占一个
+                 `gap`（`.meta` 的 8px），虽然看不见却会把后面的东西推一下。 -->
+          <TeacherGate v-if="turn.messageId">
+            <span class="chip chip--quiet">消息 {{ turn.messageId }}</span>
+          </TeacherGate>
         </div>
 
         <!-- 正文（delta 逐字累积，按极简 Markdown 渲染成结构化节点）。为空且还在流式时给一句「正在查教材」而不是空白。 -->
@@ -213,22 +310,27 @@ useFocusReturn(drawerRef, () => sourceOpen.value !== null)
             <span v-if="streaming" class="caret" aria-hidden="true" />
           </div>
 
-          <!-- 引用：既有 chips（沿用既有契约），也可点开原文 -->
+          <!-- 引用：既有 chips（沿用既有契约），也可点开原文。
+               ★ 列表本身保留（`citation-sources` 的 `li` 条数被体检脚本用来判「引用渲染出来了没」），
+                 但排版从「编号 + 两行元信息」改成**一条书目**：
+                 小节标题是主行、章节是它的出处、再补一行节级摘录 —— 读起来是
+                 「这句话出自《第 3 章 · 核心技术分支》」，而不是一次查询的结果集。 -->
           <div v-if="turn.citations.length > 0" class="cites">
-            <p class="cites__label">教材依据</p>
+            <p class="cites__label">这段话参考了这些地方</p>
             <SourceChips :citations="turn.citations" />
             <ul class="srcs" data-testid="citation-sources">
-              <li v-for="(citation, index) in turn.citations" :key="citation.chunkId">
+              <li v-for="(row, index) in sourceRows" :key="row.citation.chunkId">
                 <button
                   type="button"
                   class="srcs__btn"
-                  :title="`查看教材原文：${citation.sectionTitle}`"
-                  @click="sourceOpen = citation.chunkId"
+                  :title="`查看教材原文：${row.citation.sectionTitle}`"
+                  @click="sourceOpen = row.citation.chunkId"
                 >
                   <span class="srcs__num k12-num">{{ index + 1 }}</span>
                   <span class="srcs__text">
-                    <span class="srcs__title">{{ citation.sectionTitle }}</span>
-                    <span class="srcs__path">{{ citation.chapterTitle }}</span>
+                    <span class="srcs__title">{{ row.citation.sectionTitle }}</span>
+                    <span class="srcs__path">出自 {{ row.citation.chapterTitle }}</span>
+                    <span v-if="row.excerpt" class="srcs__excerpt">{{ row.excerpt }}</span>
                   </span>
                   <span class="srcs__more">原文</span>
                 </button>
@@ -245,23 +347,48 @@ useFocusReturn(drawerRef, () => sourceOpen.value !== null)
         <BlockedNotice v-if="turn.blocked" :notice="turn.blocked" />
         <DegradedNotice v-if="turn.error" :notice="turn.error" />
 
-        <!-- ── 分叉点：从这里重新问 ────────────────────────────────────────
+        <!-- ── 分叉点：换个思路再问 ────────────────────────────────────────
              ★ 只在**这一轮已经结束**时出现：流式途中点它，学生拿到的是一段
                没写完的回答当分支点（他不会想要那个）。
              ★ 只在**真的有条目 id** 时出现（`branchable`）：老会话 / 认不出条目
-               的历史消息没有分叉点 —— 宁可不给按钮，也不要给一个点了就报错的。 -->
-        <div v-if="branchable" class="branch" data-testid="turn-branch">
+               的历史消息没有分叉点 —— 宁可不给按钮，也不要给一个点了就报错的。
+             ★★ 呈现方式（2026-09-20 走查）：它原来是一条**常显的链接**，
+                挂在每条回答下面 —— 学生划着读时容易误点（一点就换会话线），
+                而且「从这里重新问」读起来像 Git 概念。现在收进 `⋯` 菜单：
+                默认只是一个安静的小圆点，展开才看到「换个思路再问」这句话。
+                ★★ `data-testid="branch-restart"` **留在那个常显的 `⋯` 触发器上**
+                   （不是菜单项）：`ux-audit.mjs` 的 D7/D9 是拿它**数 + 量**的 ——
+                   「每条有回答的轮次旁都有可点入口」，而挂在菜单项上的话，
+                   菜单没展开时它在 DOM 里根本不存在（D7 会假红）。
+                   真正的动作是菜单项（`branch-restart-action`），点击链路一字未改。 -->
+        <div v-if="branchable" ref="branchBoxRef" class="branch" data-testid="turn-branch">
           <button
             type="button"
-            class="branch__btn"
+            class="branch__more"
             data-testid="branch-restart"
-            title="保留这段对话，另开一条从这里接着问（原来的不会被改动）"
+            :aria-expanded="branchMenuOpen"
+            aria-haspopup="menu"
+            aria-label="换个思路再问"
+            title="换个思路再问"
             :disabled="branching"
-            @click="emitBranch()"
+            @click="branchMenuOpen = !branchMenuOpen"
           >
-            <GitBranch :size="13" />
-            <span>从这里重新问</span>
+            <Ellipsis :size="15" />
           </button>
+          <div v-if="branchMenuOpen" class="branch__menu" role="menu">
+            <button
+              type="button"
+              class="branch__item"
+              role="menuitem"
+              data-testid="branch-restart-action"
+              title="保留这段对话，另开一条从这里接着问（原来的不会被改动）"
+              :disabled="branching"
+              @click="pickBranch()"
+            >
+              <GitBranch :size="13" />
+              <span>换个思路再问</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -284,7 +411,14 @@ useFocusReturn(drawerRef, () => sourceOpen.value !== null)
               <p class="src__title">
                 {{ activeSource && activeSource.text ? '教材原文' : '原文暂时取不到' }}
               </p>
-              <p class="src__sub"><code>{{ sourceOpen }}</code></p>
+              <!-- 学生视角：这里是「出自哪一章哪一节」这句人话（此前是 `chunk:<uuid>`） -->
+              <p v-if="activeCitation" class="src__sub">
+                {{ activeCitation.chapterTitle }} · {{ activeCitation.sectionTitle }}
+              </p>
+              <!-- 内部切片 id 只在教师视角里出现（排障要按它去库里捞） -->
+              <TeacherGate>
+                <p class="src__sub"><code>{{ sourceOpen }}</code></p>
+              </TeacherGate>
             </div>
             <button type="button" class="src__close" title="关闭" @click="sourceOpen = null">
               <X :size="16" />
@@ -301,21 +435,32 @@ useFocusReturn(drawerRef, () => sourceOpen.value !== null)
             </p>
           </div>
 
+          <!-- ★★ 抽屉底部只有**相关度**是学生看得懂的（「这句话跟问题有多贴」）；
+               「检索方式 vector」「来源（依赖图扩展补充）」「父块 chunk-id」都是排障字段
+               → 整块进教师视角。
+               ⚠️ 相关度对**还没拿到细节**的情形显示「—」（不补 0）。 -->
           <footer v-if="activeSource" class="src__foot">
             <el-descriptions :column="1" size="small" border>
               <el-descriptions-item label="相关度">
                 {{ activeSource.score != null ? activeSource.score.toFixed(2) : '—' }}
               </el-descriptions-item>
-              <el-descriptions-item label="检索方式">
-                <el-tag size="small" effect="plain">{{ activeSource.degraded ?? 'vector' }}</el-tag>
-              </el-descriptions-item>
-              <el-descriptions-item label="来源">
-                {{ activeSource.expanded ? '依赖图扩展补充' : '直接命中' }}
-              </el-descriptions-item>
-              <el-descriptions-item label="父块">
-                <code class="src__mono">{{ activeSource.parentChunkId ?? '—' }}</code>
-              </el-descriptions-item>
             </el-descriptions>
+            <TeacherGate label="检索细节">
+              <el-descriptions :column="1" size="small" border>
+                <el-descriptions-item label="检索方式">
+                  <el-tag size="small" effect="plain">{{ activeSource.degraded ?? 'vector' }}</el-tag>
+                </el-descriptions-item>
+                <el-descriptions-item label="来源">
+                  {{ activeSource.expanded ? '依赖图扩展补充' : '直接命中' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="父块">
+                  <code class="src__mono">{{ activeSource.parentChunkId ?? '—' }}</code>
+                </el-descriptions-item>
+                <el-descriptions-item label="切片 id">
+                  <code class="src__mono">{{ activeSource.chunkId }}</code>
+                </el-descriptions-item>
+              </el-descriptions>
+            </TeacherGate>
           </footer>
         </aside>
       </div>
@@ -581,6 +726,17 @@ useFocusReturn(drawerRef, () => sourceOpen.value !== null)
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
+/* 摘录：正文的**同族**（它是教材里那句话本身），所以比元信息实一档，
+ * 但比回答正文小一档 —— 引用整体是「依据」，不跟回答抢注意力。 */
+.srcs__excerpt {
+  margin-top: 2px;
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .srcs__more {
   flex: none;
   padding: 2px 8px;
@@ -647,6 +803,13 @@ useFocusReturn(drawerRef, () => sourceOpen.value !== null)
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
+/* 副标题在两种视角下共用一个类：学生看到的是「第3章 · 核心技术分支」，
+ * 教师看到的是等宽的 `chunk:<uuid>` —— 所以字号/颜色共用，等宽字体只给 `code`。 */
+.src__sub {
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
+}
 .src__close {
   flex: none;
   display: inline-flex;
@@ -683,6 +846,9 @@ useFocusReturn(drawerRef, () => sourceOpen.value !== null)
   color: var(--k12-muted);
 }
 .src__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   padding: 14px 18px;
   border-top: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
@@ -693,35 +859,78 @@ useFocusReturn(drawerRef, () => sourceOpen.value !== null)
   color: var(--k12-accent-ink);
   word-break: break-all;
 }
-/* ── 分叉点（从这里重新问）─────────────────────────────────────────────────
- * 它是**每条回答的附属动作**，不是主干控件：常态淡、悬停才明显，
- * 免得整页回答下面挂一排按钮把阅读节奏打散。
- * ★ 尺寸走 28px 高（UX 体检 C1 的触控下限）—— 它虽小，但学生真会点。 */
+/* ── 分叉点（换个思路再问）─────────────────────────────────────────────────
+ * 它是**每条回答的附属动作**，不是主干控件：常态只是一个安静的小圆点，
+ * 悬停才明显 —— 免得整页回答下面挂一排按钮把阅读节奏打散，
+ * 也免得学生划着读的时候**误点**（一点就会换一条会话线）。
+ * ★ 尺寸走 28px 见方（UX 体检 C1 的触控下限）—— 它虽小，但学生真会点。 */
 .branch {
+  position: relative;
   display: flex;
   margin-top: 6px;
 }
-.branch__btn {
+.branch__more {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  width: 28px;
   min-height: 28px;
-  padding: 4px 10px;
+  padding: 0;
   border: 1px solid transparent;
-  border-radius: var(--k12-r-pill);
+  border-radius: var(--k12-r-control);
   background: transparent;
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
-  .branch__btn:hover:not(:disabled) {
+  .branch__more:hover:not(:disabled) {
     border-color: var(--k12-border-strong);
     background: var(--k12-surface-2);
     color: var(--k12-accent-ink);
   }
 }
-.branch__btn:disabled {
+.branch__more:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* 展开后的小菜单：**向左对齐触发器、向下展开**（它在阅读栏左缘，
+ * 向右展开会伸进正文里把字压住）。 */
+.branch__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  min-width: 156px;
+  padding: 4px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-float);
+}
+.branch__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 9px;
+  border: none;
+  border-radius: var(--k12-r-inset);
+  background: transparent;
+  color: var(--k12-fg-2);
+  font-family: inherit;
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .branch__item:hover:not(:disabled) {
+    background: var(--k12-accent-soft);
+    color: var(--k12-accent-ink);
+  }
+}
+.branch__item:disabled {
   opacity: 0.5;
   cursor: default;
 }

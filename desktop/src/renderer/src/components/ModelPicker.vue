@@ -6,10 +6,29 @@
  * 而输入条上的模型 chip 是个不可点的 `<span>`。学生看到"deepseek-v4-flash"
  * 却没有任何办法换掉它。
  *
- * 三件事在这里同时成立：
- *   ① **选**：从候选清单里挑，选中即生效（输入条、顶栏、设置页同步）；
- *   ② **探测**：选完能当场验证可用性，给结论与时间，而不是"选完祈祷"；
- *   ③ **兜底**：想用目录里没有的，直接去设置页自填 —— 赛题要求"不写死供应商"。
+ * ── ★★ 两种视角（`viewMode.isTeacher`）：学生看状态，老师看配置 ──────────
+ * 走查结论：把「探测可用性」与「去设置页自定义 BaseURL / Model ID」摆给一个 K12 学生，
+ * 等于把一套专家配置界面塞进日常操作里 —— 他既不需要换端点，也读不懂那行提示。
+ * 现在分两档：
+ *   · **学生视角：只读**。打开就是「在用哪个模型 + 有哪些可选」，**列表项不可点**，
+ *     也没有探测按钮与那条指向 BaseURL 的链接。
+ *   · **教师 / 答辩视角**：完整三件事都回来 ——
+ *       ① **选**：从候选清单里挑，选中即生效（输入条、顶栏、设置页同步）；
+ *       ② **探测**：选完能当场验证可用性，给结论与时间，而不是"选完祈祷"；
+ *       ③ **兜底**：想用目录里没有的，直接去设置页自填 —— 赛题要求"不写死供应商"。
+ *
+ * ⚠️ 学生的模型从哪来：**设置页那条保存链路**（`settings.save()` → `applyLlmConfig`
+ *   → 写 `config.json` + 重写 Pi 的 `models.json`）。学生在学生视角下走
+ *   设置 →「高级设置（教师 / 答辩）」→ 供应商（两次点击），弹层里那条
+ *   `model-student-hint` 会把这条路指出来。
+ *
+ * ★★ 学生视角下**列表项不可点**是有意的 —— **别把点击加回去**：
+ *   换模型实质是「换一个后端」，它连带 BaseURL / Key / 计费口径，
+ *   是老师或家长的决定，不是学生日常要按的按钮。
+ *   ⚠️ 既然如此，那两处 chip 的 `title` 也必须跟着改（`MessageComposer.vue` /
+ *      `AppTopbar.vue` 各一处）：学生视角下不许再写「点这里更换」——
+ *      那是在承诺一件做不到的事，学生点开只会看到一个点不动的清单
+ *      （与「按钮文案指向下一个视图」那条纪律同类：界面不许撒谎）。
  *
  * ── 数据与动作全部来自 `stores/model.ts`（设置域的门面）──────────────────
  * 候选清单 = 当前供应商的候选（Pi 预设 ∪ 拉取结果），选中经 `select()` 写回
@@ -37,10 +56,12 @@ import { useModelStore } from '../stores/model'
 import type { ModelOption } from '../stores/model'
 import { useSettingsStore } from '../stores/settings'
 import { useUiStore } from '../stores/ui'
+import { useViewModeStore } from '../stores/viewMode'
 
 const model = useModelStore()
 const settings = useSettingsStore()
 const ui = useUiStore()
+const viewMode = useViewModeStore()
 
 /**
  * 面板根元素。它是**模态**（全屏遮罩 + `aria-modal="true"`），所以焦点必须收束：
@@ -83,7 +104,11 @@ const currentLine = computed(() => {
 const emptyLine = computed(() => {
   if (settings.loading) return '正在读取设置…'
   if (model.catalog.length > 0) return ''
-  return '这一家供应商没有候选模型 —— 用下面的入口去设置页自填 BaseURL / Model ID。'
+  // 「去设置页自填」这条指引只对教师 / 答辩视角成立：学生视角下那个入口不在界面上
+  // （见文件头），所以这句话也要跟着换 —— 否则会把学生指到一个他看不到的地方。
+  return viewMode.isTeacher
+    ? '这一家供应商没有候选模型 —— 用下面的入口去设置页自填 BaseURL / Model ID。'
+    : '这一家供应商没有可选模型。'
 })
 
 function isActive(option: ModelOption): boolean {
@@ -93,6 +118,21 @@ function isActive(option: ModelOption): boolean {
     current.providerId === option.providerId &&
     current.modelId === option.modelId
   )
+}
+
+/**
+ * 列表项第二行：教师视角给「供应商 · BaseURL」，学生视角**只给供应商名**。
+ *
+ * ★ 为什么把 URL 也归到教师那一侧：它是排查用的端点地址，学生认不出
+ *   `https://api.deepseek.com/v1` 和他有什么关系，而同一家供应商的多个模型
+ *   靠「模型名 + 供应商名」已经分得开。端点本身没被藏起来 ——
+ *   它在设置页的高级区里，一字不少。
+ */
+function optionMeta(option: ModelOption): string {
+  if (option.providerName.length === 0) return viewMode.isTeacher ? option.baseUrl : ''
+  return viewMode.isTeacher
+    ? `${option.providerName} · ${option.baseUrl}`
+    : option.providerName
 }
 
 /**
@@ -149,7 +189,9 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
         <div class="mp__box k12-float" data-testid="model-picker">
           <header class="mp__head">
             <div class="mp__head-text">
-              <p class="mp__title">选择模型</p>
+              <!-- 标题跟着形态走：学生那一份不能叫「选择模型」——
+                   它是一个说明面板（点不了），写着「选择」而选不了就是一句谎话。 -->
+              <p class="mp__title">{{ viewMode.isTeacher ? '选择模型' : '正在使用的模型' }}</p>
               <p class="mp__sub">{{ currentLine }}</p>
             </div>
             <button type="button" class="mp__close" title="关闭" @click="model.closePicker()">
@@ -157,7 +199,13 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
             </button>
           </header>
 
-          <div class="mp__list">
+          <!-- ★★ 候选清单分两种形态（同一份数据、同一批 testid）：
+               · 教师 / 答辩视角 = **可选**的按钮列表（点一项即换，选中就保存）；
+               · 学生视角 = **只读**的展示列表（哪一个是当前在用的，标出来就够了）。
+                 ⚠️ 学生这一份刻意不做成「看起来能点、点了没反应」的按钮：
+                    假按钮比没有按钮更坏 —— 学生会反复点它然后以为软件坏了。
+                    它是 `<li>`（无 role、无指针态），读屏也不会把它念成可操作项。 -->
+          <div v-if="viewMode.isTeacher" class="mp__list">
             <p v-if="emptyLine" class="mp__empty">{{ emptyLine }}</p>
             <button
               v-for="opt in model.catalog"
@@ -178,7 +226,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
                   {{ opt.modelId }}
                   <ImageIcon v-if="opt.vision" :size="12" class="mp__vision" title="支持图片输入" />
                 </span>
-                <span class="mp__item-meta">{{ opt.providerName }} · {{ opt.baseUrl }}</span>
+                <span v-if="optionMeta(opt)" class="mp__item-meta">{{ optionMeta(opt) }}</span>
               </span>
               <span v-if="(opt.tags ?? []).length > 0" class="mp__tags">
                 <span v-for="t in opt.tags ?? []" :key="t" class="mp__tag">{{ t }}</span>
@@ -186,9 +234,37 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
             </button>
           </div>
 
+          <ul v-else class="mp__list mp__list--plain">
+            <li v-if="emptyLine" class="mp__empty">{{ emptyLine }}</li>
+            <li
+              v-for="opt in model.catalog"
+              :key="`${opt.providerId}/${opt.modelId}`"
+              class="mp__item mp__item--static"
+              :class="{ 'mp__item--on': isActive(opt) }"
+              data-testid="model-option"
+              :data-model="opt.modelId"
+              :data-provider="opt.providerId"
+              :data-active="String(isActive(opt))"
+            >
+              <span class="mp__check">
+                <Check v-if="isActive(opt)" :size="14" />
+              </span>
+              <span class="mp__item-text">
+                <span class="mp__item-name">
+                  {{ opt.modelId }}
+                  <ImageIcon v-if="opt.vision" :size="12" class="mp__vision" title="支持图片输入" />
+                </span>
+                <span v-if="optionMeta(opt)" class="mp__item-meta">{{ optionMeta(opt) }}</span>
+              </span>
+              <span v-if="isActive(opt)" class="mp__now">正在用</span>
+            </li>
+          </ul>
+
           <!-- 探测：选完当场验证。**真实外呼**（`settings.probeNow()`），
-               结论与时刻都来自服务端回执，不是编的延迟。 -->
-          <div class="mp__probe">
+               结论与时刻都来自服务端回执，不是编的延迟。
+               ★ 只在教师 / 答辩视角出现（见文件头）：学生视角下这一格整个不渲染 ——
+                 探测是排障动作，学生点它得到的一段 HTTP 结论对他没有用处。 -->
+          <div v-if="viewMode.isTeacher" class="mp__probe">
             <button
               type="button"
               class="mp__probe-btn"
@@ -218,7 +294,17 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
             </div>
           </div>
 
-          <footer class="mp__foot">
+          <!-- 学生视角的收尾：一句实话 + **去哪儿换**。
+               它替代了教师视角那条「去设置页自定义 BaseURL / Model ID」——
+               学生的模型从哪来见文件头：设置 → 高级设置（教师 / 答辩）里的「供应商」那一节，
+               与老师的入口是同一份表单（`Model ID` 输入框 + 拉取模型清单 + 保存并生效）。 -->
+          <footer v-else class="mp__foot">
+            <p class="mp__hint" data-testid="model-student-hint">
+              想在几个模型之间换，可以在「设置 → 高级设置（教师 / 答辩）→ 供应商」里改 Model ID。
+            </p>
+          </footer>
+
+          <footer v-if="viewMode.isTeacher" class="mp__foot">
             <button
               type="button"
               class="mp__link"
@@ -305,6 +391,11 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   flex-direction: column;
   gap: 6px;
 }
+/* 学生视角那一份是**只读**列表（`<ul>`）：去掉列表符号与内边距即可与上面同形 */
+.mp__list--plain {
+  margin: 0;
+  list-style: none;
+}
 .mp__empty {
   padding: 16px 8px;
   font-size: var(--k12-fs-xs);
@@ -323,8 +414,12 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   text-align: left;
   cursor: pointer;
 }
+/* 只读项：**不能**长得像能点的 —— 假按钮会让学生反复点然后以为软件坏了 */
+.mp__item--static {
+  cursor: default;
+}
 @media (hover: hover) and (pointer: fine) {
-  .mp__item:hover {
+  .mp__item:not(.mp__item--static):hover {
     border-color: var(--k12-accent-border);
   }
 }
@@ -332,6 +427,17 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
 .mp__item--on {
   background: var(--k12-accent-soft);
   border-color: var(--k12-accent);
+}
+/* 「正在用」：只读列表里那一项的状态字（学生要的是「现在用的是哪个」） */
+.mp__now {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-accent-ink);
+  color: var(--k12-surface);
+  font-size: var(--k12-fs-xs);
+  font-weight: 650;
+  white-space: nowrap;
 }
 .mp__check {
   flex: none;
@@ -472,6 +578,12 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
 .mp__foot {
   padding: 12px 18px;
   border-top: 1px solid var(--k12-border);
+}
+/* 学生视角收尾那句：它是一句说明不是链接，所以用 meta 的字色而不是强调色 */
+.mp__hint {
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-muted);
 }
 .mp__link {
   display: inline-flex;

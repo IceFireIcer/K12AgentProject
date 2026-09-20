@@ -7,22 +7,29 @@
  * 不会因为功能变多而挤满按钮（见 `stores/ui.ts` 的注释）。
  *
  * 三件事在这一层做完，各分页只管渲染：
- *   ① **进入时取数**（`onMounted` / 切页时按需）；
+ *   ① **进入时取数**（`onMounted` / `onActivated` / 切页时按需）；
  *   ② **分页切换**（`ui.studyTab`，允许从「错题本」直接跳到「会话」）；
  *   ③ **学段变化的重新取数**：章节与地图按学段查，系统推断出学段后要重取
  *      —— 否则学生会一直看着**上一个学段**的章节（这是最容易漏的一处）。
  *
  * ★ 分页组件挂在 `<KeepAlive>` 里：地图的缩放/滚动位置、会话搜索框的内容
  *   都属于组件本地状态，切到别的页再回来不该丢（与对话页的卡片同一条理由）。
+ *
+ * ★★ 本页自己也在 `App.vue` 的 `<KeepAlive>` 里 —— `onMounted` 一辈子只跑一次，
+ *   「答错一题后回到档案页」的那次**不重挂**。所以「回到这一页时补一次取数」
+ *   必须由 `onActivated` 承担（见下方 `onActivated` 的注释：这是错题本
+ *   永远不刷新的那条真实缺陷的落点）。
  */
-import { computed, onMounted, watch } from 'vue'
+import { computed, onActivated, onMounted, watch } from 'vue'
 import { useChatStore } from '../stores/chat'
 import { useStudyStore } from '../stores/study'
+import { useQuizStore } from '../stores/quiz'
 import { useUiStore } from '../stores/ui'
 import { STUDY_TABS, findStudyTab } from '../study/tabs'
 
 const chat = useChatStore()
 const study = useStudyStore()
+const quiz = useQuizStore()
 const ui = useUiStore()
 
 const current = computed(() => findStudyTab(ui.studyTab))
@@ -32,6 +39,22 @@ onMounted(() => {
   // 学段可能还没判定出来（`chat.currentGrade === null`）——那时章节/地图会给出
   // 一句「还没判定出学段」而不是编一个默认学段去查（见 store 里的注释）。
   void study.loadAll(chat.currentGrade)
+})
+
+/**
+ * ★★ 每次**回到**档案页都补一次错题本（`KeepAlive` 不重挂，所以只能挂这里）。
+ *
+ * 为什么非有它不可：错题在别处产生（对话内题卡、闯关页判分），而学生回到这一页时
+ * `onMounted` 不会重跑 —— 于是他会看到一份**逐字节相同**的旧错题本，
+ * 误以为「这次错的题没记上」。
+ *
+ * ★ 便宜且不打扰：`loadMistakes()` 自带判据（有数据且没过期就立刻返回），
+ *   真的重取时也只换列表数据，**不重置** `ui.studyTab`、不动滚动位置（那些在组件本地状态里）。
+ * ★ 只补这一块：报告 / 地图 / 章节各自有自己的刷新入口（概览页的「刷新」按钮、
+ *   学段变化触发的重取），没必要每次回来都全量重取。
+ */
+onActivated(() => {
+  void study.loadMistakes()
 })
 
 // ★ 学段是**系统推断**的，学生不会主动改它 —— 但它会在对话进行中变化。
@@ -46,6 +69,32 @@ watch(
   }
 )
 
+/**
+ * ★ 两条判分路径各自留下一个**响应式信号** → 都把错题本标记为过期（只翻标记，不发请求）。
+ *
+ * 为什么在这里观察、而不是在判分那两个 store 里「顺手刷新错题本」：
+ *   · 判分写入发生在别的 store（`stores/chat.ts` 负责对话内题卡、`stores/quiz.ts`
+ *     负责闯关页），本页不拥有它们，**也不该在它们里面塞一条学习档案的副作用**
+ *     （判分失败/重试/登出都会连带触发）；
+ *   · 档案页在 `App.vue` 的 `<KeepAlive>` 里常驻 —— 学生正在对话页答题时，
+ *     这里的 watch 照样在跑。
+ * ★ 判对判错都翻标记：多花一次本机 HTTP 的代价，远小于「错题本停在旧快照」。
+ * ★ 只认**增长**：`quiz.gradedCount` 在换关卡/重做时会归零，那不是新的判分。
+ */
+watch(
+  () => chat.quizResults.size,
+  (size, previous) => {
+    if (size > previous) study.invalidateMistakes()
+  }
+)
+
+watch(
+  () => quiz.gradedCount,
+  (count, previous) => {
+    if (count > previous) study.invalidateMistakes()
+  }
+)
+
 // 切到历史会话时才去读 Pi 的会话目录（`list()` 要扫盘，没必要一进页面就做）
 watch(
   () => ui.studyTab,
@@ -53,6 +102,9 @@ watch(
     if (tab === 'sessions' && study.sessions.length === 0 && !study.sessionsLoading) {
       void study.loadSessions()
     }
+    // ★ 切到「错题本」分页也补一次（同一个幂等动作；学生在这一页待着时
+    //   不会有别的写入，所以这一条主要覆盖「切去闯关做题 → 切回档案 → 再点错题本」）。
+    if (tab === 'mistakes') void study.loadMistakes()
   }
 )
 </script>

@@ -21,6 +21,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ArrowUp, Cpu, Mic } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useModelStore } from '../stores/model'
+import { useViewModeStore } from '../stores/viewMode'
 
 const props = withDefaults(
   defineProps<{
@@ -34,6 +35,21 @@ const emit = defineEmits<{ (e: 'send', text: string): void }>()
 
 const chat = useChatStore()
 const model = useModelStore()
+const viewMode = useViewModeStore()
+
+/**
+ * 模型 chip 的 title（**必须随视角变**）。
+ *
+ * ★ 学生视角下弹层是只读的（换模型是老师 / 评委的事，见 `ModelPicker.vue`）——
+ *   那时还写「点这里更换」就是在承诺一件做不到的事：学生点开只会看到一个
+ *   没有可点项的清单，然后开始怀疑是不是自己点错了（一个**界面撒谎**的缺陷，
+ *   与「按钮文案指向下一个视图」那条纪律同类）。
+ */
+const modelChipTitle = computed(() =>
+  viewMode.isTeacher
+    ? `当前模型：${model.label} —— 点这里更换`
+    : `当前模型：${model.label}（想换模型请去设置里的高级设置）`
+)
 
 /** 草稿直接绑 store（见文件头的理由）。 */
 const draft = computed({
@@ -147,12 +163,13 @@ defineExpose({ fill, focus })
           <Mic :size="15" />
         </button>
 
-        <!-- 模型 chip：可点开切换（此前它是个不可点的 span，学生看到模型名却换不掉） -->
+        <!-- 模型 chip：可点开看当前模型（此前它是个不可点的 span，学生看到模型名却换不掉）
+             ★ title 随视角变：学生视角下弹层只读，写「点这里更换」就是在承诺做不到的事。 -->
         <button
           type="button"
           class="cp__model"
           data-testid="composer-model"
-          :title="`当前模型：${model.label} —— 点这里更换`"
+          :title="modelChipTitle"
           @click="model.openPicker()"
         >
           <Cpu :size="12" />

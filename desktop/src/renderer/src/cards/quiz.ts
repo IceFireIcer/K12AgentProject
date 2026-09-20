@@ -158,23 +158,103 @@ export function collectQuizResults(cards: Array<{ payload: unknown }>): Map<stri
 }
 
 /**
- * 学生作答 → 发给主 Agent 的那条消息。
+ * 提交消息的**正文部分**（学生可见的那份）。
+ *
+ * ★ 为什么拆成「正文 + 指令」两段：最后那句 `（请用 submit_quiz 提交批改…）` 是
+ *   **写给模型的指令**，不是给学生看的话 —— 它一旦落进学生自己的气泡，
+ *   与编程卡片那条求助消息是**同一个缺陷**（把内部指令摆给学生看）。
+ *   所以显示文本取正文，wire 文本取正文 + 指令（见 {@link buildQuizSubmissionMessage}
+ *   与 {@link quizSubmissionDisplayText}）。
+ * ★★ **题目编号（`qid`）也只进 wire、不进学生气泡**（与那句指令同一个道理）：
+ *   qid 的真实形状是 `gen-<kp 的 slug>-<随机>-<序号>`（如
+ *   `gen-ai-definition-jr-45238405-1`）—— **它里面嵌着一个知识点 slug**。
+ *   摆给学生等于把 `ai-definition-jr` 这种内部主键印在他自己的话旁边。
+ *   ⚠️ 这不是推测：真机扫描（`npm run ux:student`）在**恢复出来的历史气泡**里
+ *   读到了它 —— 实时路径此前也只靠 displayText 挡，而 displayText 当时把它留着。
+ *   模型仍需 qid 才能调 `submit_quiz`，所以它的位置是 wire 文本（见 `submissionWireBody`）。
+ */
+function submissionBody(question: { qid: string; stem: string }, answer: string): string {
+  const stem = question.stem.replace(/\s+/g, ' ').trim()
+  const clipped = stem.length > MAX_STEM_CHARS_IN_SUBMISSION ? `${stem.slice(0, MAX_STEM_CHARS_IN_SUBMISSION)}…` : stem
+  return (
+    `【练习作答】我做完这道题了，请帮我批改。\n` +
+    (clipped.length > 0 ? `题干：${clipped}\n` : '') +
+    `我的答案：${answer.trim()}\n`
+  )
+}
+
+/** 发给模型的正文：在学生可见正文之外**补上题目编号**（`submit_quiz` 要用它）。 */
+function submissionWireBody(question: { qid: string; stem: string }, answer: string): string {
+  // 题号插在首行之后 —— 首行是固定标记，回看时靠它认身份（见 `quizUserTextDisplay`）
+  return submissionBody(question, answer).replace('\n', `\n题目编号：${question.qid}\n`)
+}
+
+/**
+ * 学生作答 → **发给主 Agent** 的那条消息（wire 文本）。
  *
  * 为什么走对话而不是加一条 IPC 通道：`submit_quiz` 是**模型的工具**，
  * 判分链是「学生作答 → 主 Agent → submit_quiz → Python 判分」；
  * 加一条「直接提交」的 IPC 等于在主进程里再实现一遍编排（还会绕过安全终审与学习记录）。
  * 所以这里只把作答**说清楚**（qid + 作答 + 明确要求调用 submit_quiz），其余交给模型。
+ *
+ * ★★★ **最后那句与题目编号都只准进 wire**：学生气泡里显示的是
+ *   {@link quizSubmissionDisplayText}（两句必须成对使用，见 `stores/chat.ts` 的 `send`）。
  */
 export function buildQuizSubmissionMessage(question: { qid: string; stem: string }, answer: string): string {
-  const stem = question.stem.replace(/\s+/g, ' ').trim()
-  const clipped = stem.length > MAX_STEM_CHARS_IN_SUBMISSION ? `${stem.slice(0, MAX_STEM_CHARS_IN_SUBMISSION)}…` : stem
-  return (
-    `【练习作答】我做完这道题了，请帮我批改。\n` +
-    `题目编号：${question.qid}\n` +
-    (clipped.length > 0 ? `题干：${clipped}\n` : '') +
-    `我的答案：${answer.trim()}\n` +
-    `（请用 submit_quiz 提交批改，判分要以后端结果为准。）`
-  )
+  return submissionWireBody(question, answer) + '（请用 submit_quiz 提交批改，判分要以后端结果为准。）'
+}
+
+/** 提交作答时**学生气泡里**显示的那一句（= 正文；不含任何写给模型的指令）。 */
+export function quizSubmissionDisplayText(question: { qid: string; stem: string }, answer: string): string {
+  return submissionBody(question, answer).trimEnd()
+}
+
+/** 提交消息的固定开头（回看历史时靠它认出"这是本应用生成的作答"）。 */
+export const QUIZ_SUBMISSION_PREFIX = '【练习作答】'
+/** 提交消息结尾那句**写给模型的指令**（回看时必须去掉：它是内部指令，不是学生的话）。 */
+const SUBMISSION_INSTRUCTION = '（请用 submit_quiz 提交批改，判分要以后端结果为准。）'
+/**
+ * 提交消息里**题目编号那一行**的形态（回看时整行去掉）。
+ *
+ * ★ 写成「行首 + 固定字段名」而不是匹配 qid 的形状：qid 的形状是后端定的
+ *   （`gen-…` / `<kp>-q1` 都出现过），照形状匹配迟早漏；而字段名是我自己写的，
+ *   它变了这行就一起改 —— 判据与实际写入点同一个来源。
+ */
+const SUBMISSION_QID_LINE = /^\s*题目编号：/
+
+/**
+ * ★★ **回看历史**时把提交消息末尾那句内部指令去掉（其余文本原样返回）。
+ *
+ * 与 `cards/coding.ts` 的 `codingUserTextDisplay` 同一条理由：JSONL 里存的是
+ * **发给模型的原文**，学生重启后回看自己的气泡时会读到那句「请用 submit_quiz…」——
+ * 实时路径已经把它挡在气泡之外，回看这条路也得挡住，否则同一个"亮底牌"缺陷从后门回来。
+ * ★ 只认本应用生成的这一个前缀：认不出一律原样返回（绝不改写学生自己打的字）。
+ */
+/**
+ * ★★ **回看历史**时把提交消息里的「内部成分」去掉（其余文本原样返回）。
+ *
+ * 要摘掉两样东西：结尾那句写给模型的指令，以及 `题目编号：…` 那一行。
+ *   · 指令 —— 与 `cards/coding.ts` 的 `codingUserTextDisplay` 同一条理由：
+ *     JSONL 里存的是**发给模型的原文**，学生重启后回看自己的气泡会读到它；
+ *   · 题号 —— ⚠️ **这一条是实测补上的**：qid 形如 `gen-ai-definition-jr-…`，
+ *     里面嵌着知识点 slug。修掉实时路径之后，**已经是历史的那些消息**仍然带着它
+ *     （真机扫描 `npm run ux:student` 在恢复出来的气泡里读到了 `ai-definition-jr`）——
+ *     实时路径与回看路径必须同时挡，否则同一个缺陷从后门回来。
+ *
+ * ★ 只认本应用生成的这一个前缀 + 行首的固定字段名：认不出一律原样返回
+ *   （**绝不改写学生自己打的字** —— 他万一真的写了「题目编号：…」，那也是他的话）。
+ */
+export function quizUserTextDisplay(text: string): string {
+  if (!text.trimStart().startsWith(QUIZ_SUBMISSION_PREFIX)) return text
+  const withoutInstruction = text.trimEnd().endsWith(SUBMISSION_INSTRUCTION)
+    ? text.trimEnd().slice(0, -SUBMISSION_INSTRUCTION.length).trimEnd()
+    : text
+  // 逐行去掉「题目编号：…」那一行（只认行首的这四个字，且不碰其它行）
+  return withoutInstruction
+    .split('\n')
+    .filter((line) => !SUBMISSION_QID_LINE.test(line))
+    .join('\n')
+    .trimEnd()
 }
 
 /** 作答是否为空（提交按钮据此禁用；纯前端校验，不含任何判分）。 */

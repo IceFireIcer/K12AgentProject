@@ -1,0 +1,1174 @@
+/**
+ * 「学生视角不得出现开发者 / 运维信息」的**源码级守卫**。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 这一组守卫为什么存在
+ * ══════════════════════════════════════════════════════════════════════════
+ * 2026-09-20 的界面走查把 83 张真机截图交给外部评审，结论集中在同一件事上：
+ * **界面把「开发者的调试视角」当成了产品前端**。典型原句（全部来自真机截图）：
+ *
+ *   · 「检索降级链 … FTS5 关键词兜底 / 未走到」（右栏）
+ *   · 「本次仅使用「初中」及以下教材块（隔离在 SQL 层强制，模型改不了 WHERE）」
+ *   · 「路由由模型自选；学段隔离、参数校验、内容终审均在代码层强制」
+ *   · 「`t4|答题=连对10,正确率1.0`」（Python 侧 `encode_turn_raw` 的诊断串）
+ *   · 「数据层检视视图：C:\Users\<用户名>\AppData\Roaming\…\kb.sqlite」
+ *   · 「命中内容安全规则：越狱/绕过规则（regex:reveal_system_prompt）」
+ *   · 「代码经 POST /api/code/run-hint 之外的两条本地链路完成…」
+ *
+ * 这些信息对**评委**是「设计合理性」的证据（25% 那一项），对**学生**是噪音甚至是
+ * 恐吓。所以处置不是删除，而是**分视角**：学生默认看不见，教师 / 答辩视角里全留着
+ * （`components/TeacherGate.vue` + `stores/viewMode.ts`）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么是「源码级」而不是「渲染后量 DOM」
+ * ══════════════════════════════════════════════════════════════════════════
+ * 真机扫描（`scripts/ux-pages-audit.mjs` 的「没有裸露的技术词」）只能扫到**当前这一屏**
+ * —— 它看不见「点开某个下拉才出现的那段话」、也看不见「某个状态分支下才渲染的报错」。
+ * 而这类泄露恰恰大量存在于那些位置（截图里被抓到的正是在各种展开态 / 状态态下）。
+ * 源码级守卫的覆盖面是**全文**：所有字面量、所有分支，一个都跑不掉。
+ * 两者互补：源码守卫保证「没有漏网之鱼」，真机扫描保证「拼装出来的句子也干净」
+ * （例如模板字符串拼出来的技术词，源码里看不到完整句子）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ⚠️ 每条都做过变异验证
+ * ══════════════════════════════════════════════════════════════════════════
+ * 「没验过会红的守卫不算守卫」——本文件每条断言都在**修复前**的代码上跑过一次，
+ * 确认它真的变红；注释里记的是当时的原句。改动本文件时请照做。
+ */
+
+import assert from 'node:assert/strict'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const rendererRoot = join(desktopRoot, 'src', 'renderer', 'src')
+const read = (...segments: string[]): string => readFileSync(join(desktopRoot, ...segments), 'utf8')
+
+/**
+ * 递归列出渲染进程下的所有 `.vue` / `.ts`（含子目录）。
+ *
+ * ⚠️ 类型都写全：本文件是 `.ts`（不是 `.mjs`），空数组会被推断成 `never[]`，
+ *    `out.push(full)` 于是直接编译不过 —— 这个目录下已经有一批 `.mjs` 脚本
+ *    是「不参与 tsc」的，别把两者的写法混起来。
+ */
+function rendererFiles(dir: string = rendererRoot): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry)
+    if (statSync(full).isDirectory()) out.push(...rendererFiles(full))
+    else if (/\.(vue|ts)$/.test(entry)) out.push(full)
+  }
+  return out
+}
+
+/** 相对 `src/renderer/src` 的路径（报错信息里短一些）。 */
+const rel = (file: string): string => file.slice(rendererRoot.length + 1).replaceAll('\\', '/')
+
+/**
+ * 剥掉注释（**保留换行**，否则行号会整体偏移、报错指向错误的位置）。
+ *
+ * ★ 为什么必须剥：本项目的注释**刻意引用坏写法**（「原来是 `nowrap` + `overflow: hidden`」
+ *   这种说明书式注释遍布全仓），不剥的话守卫会被自己的说明绊倒 ——
+ *   `ux-pages-regression.test.ts` 里已经因为同一个原因踩过两次。
+ * ★ 三种注释形态都要处理：`/* … *\/`、`// …`、以及 .vue 模板里的 `<!-- … -->`。
+ *   （第一版只剥了前两种，结果 `.vue` 的模板注释里的 kp_id 被当成泄露报了出来。）
+ */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' ')) // 多行注释 → 等长空白，保住行号
+    .replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1') // 前面不是冒号/引号，避开 https:// 与字符串里的 //
+}
+
+/**
+ * 抽出**会渲染给用户看的文本**。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ⚠️ 这是本文件最容易写错的地方，第一版就写错了
+ * ══════════════════════════════════════════════════════════════════════════
+ * 第一版直接 `stripComments(全文).includes(词)`，结果：
+ *   · `kpId` 这个词在 `cards/coding.ts` 里出现 450 次，**全是属性名**（`record.kpId`、
+ *     `kpId: string`）—— 它们一个字都不会印到屏幕上，却全被报成「泄露」；
+ *   · 反过来真正要抓的**字符串里的**技术词被淹没在噪音里。
+ * 一个 450 条假阳性的守卫比没有守卫更糟：看两次就会有人把词表调松，然后再也没人信它。
+ * 所以这里**只抽两类东西**：
+ *   ① `.vue` 模板里的**文本节点**与**面向用户的属性**（title / placeholder / aria-label…）；
+ *   ② `.ts` / `<script>` 里的**字符串字面量**（单引号、双引号、反引号）。
+ * 其余的标识符、类名、data-* 属性一律不看 —— 它们不可见。
+ */
+function visibleText(file, source) {
+  const isVue = file.endsWith('.vue')
+  /** 抽出来的可见文本片段（类型必须显式 —— 本文件是 .ts，空数组会被推断成 never[]）。 */
+  const chunks: string[] = []
+
+  if (isVue) {
+    const template = /<template>([\s\S]*)<\/template>/.exec(source)
+    if (template) {
+      let body = stripComments(template[1])
+      // ① 先摘掉 <TeacherGate> 的**整棵子树**：它本来就是「只给老师 / 评委看」的内容，
+      //    （含它自己的 label 属性），里面的技术词是刻意的，不是泄露。
+      body = body.replace(/<TeacherGate\b[\s\S]*?<\/TeacherGate>/g, ' ').replace(/<TeacherGate\b[^>]*\/>/g, ' ')
+      // ② 摘掉 mustache 插值：`{{ nameOf(item.kpId) }}` 渲染出来的是**函数结果**，
+      //    表达式本身（含 `.kpId` 这种属性名）不会出现在屏幕上。
+      //    第一版把它当成文本，于是 `{{ levelLabel(level.kpId) }}` 被报成「泄露 kpId」。
+      body = body.replace(/\{\{[\s\S]*?\}\}/g, ' ')
+      // ③ 静态属性：可能被读到的那些。**必须排除绑定属性**（`:title="…"`）——
+      //    绑定的是表达式，同样不是字面文本。用「前面必须是空白」来排除 `:` / `v-bind:` 前缀。
+      const ATTRS =
+        'title|placeholder|aria-label|aria-description|alt|label|desc|hint|subtitle|content|confirm-text|cancel-text'
+      const attrRe = new RegExp(`(?:^|\\s)(?:${ATTRS})="([^"]*)"`, 'gm')
+      for (const match of body.matchAll(attrRe)) chunks.push(match[1])
+      // ④ 抽完属性之后，**先抹掉所有属性值**再做文本抽取。
+      //    ⚠️ 这一步是必须的：`<Badge v-if="earnedBadges.length > 0" :name="x.kpId" />`
+      //    里的 `>` 会让下面那条「去掉标签」的正则在**属性值内部**提前闭合，
+      //    剩下的 `:name="…kpId"` 就被当成文本节点了（第一版就这样误报过 ProgressCard）。
+      body = body.replace(/[\w:@.#-]+="[^"]*"/g, ' ')
+      // ⑤ 文本节点：标签之间的裸文本（去掉标签本身）
+      const textOnly = body.replace(/<[^>]*>/g, '\u0000').replace(/<[^\u0000]*$/g, '\u0000')
+      for (const run of textOnly.split('\u0000')) {
+        const trimmed = run.trim()
+        if (trimmed.length > 0) chunks.push(trimmed)
+      }
+    }
+  }
+
+  // ③ 脚本里的字符串字面量（三种引号）。
+  const script = isVue ? (/<script[^>]*>([\s\S]*?)<\/script>/.exec(source)?.[1] ?? '') : source
+  let scriptBody = stripComments(script)
+  // ⚠️ console.* 的输出**不是界面文本**（它去终端/DevTools，学生看不到）。
+  //    排障话本来就该写在 console 里，把它们算成「泄露」会逼着人删掉排障信息。
+  scriptBody = scriptBody.replace(/console\.\w+\([^;]*\)/g, ' ').replace(/console\.\w+\([\s\S]*?\)\n/g, ' ')
+  for (const match of scriptBody.matchAll(/'([^'\\\n]*(?:\\.[^'\\\n]*)*)'|"([^"\\\n]*(?:\\.[^"\\\n]*)*)"|`([^`]*)`/g)) {
+    // ⚠️ 模板字符串里 `${…}` 是**表达式**（`${item.kpId}` 渲染出来是主键的值，
+    //    而 `kpId` 这三个字符本身不显示）—— 与 `.vue` 里剥 mustache 是同一个道理。
+    //    不剥的话 `nodeLabel(node.name, node.kpId)`、缓存键 `${kpId}#${count}` 全被误报。
+    const literal = (match[1] ?? match[2] ?? match[3] ?? '').replace(/\$\{[\s\S]*?\}/g, '')
+    chunks.push(literal)
+  }
+
+  return chunks
+}
+
+/** 从 `<script setup>` 起（跳过文件头注释）到文件末尾 —— 用于「只扫渲染内容」。 */
+
+/* ================================================================== *
+ * ① 学生视角的可见文本里不得出现开发 / 运维术语
+ * ================================================================== */
+
+/**
+ * 技术词表。
+ *
+ * ★ 分两类，因为它们的「豁免方式」不同：
+ *   · `TERMS` —— 只要出现在**面向学生的渲染文件**里就要报（除非包在 TeacherGate 内，
+ *     见第 ② 条守卫：那里会按行做归属判定）。
+ *   · 这里刻意**不列**「函数 / 接口 / 数据」这类中文词：它们在正常教学文案里也会出现
+ *     （「这个函数的作用是……」是编程课的内容）。只列**只可能是技术实现**的写法。
+ *
+ * ⚠️ 加词的门槛：一个词如果学生能合理地在学习语境里读到，就**不要**加进来 ——
+ *    误报会让人开始「调松词表」，而调松一次这份守卫就废了。
+ */
+const TERMS = [
+  'SQL',
+  'FTS5',
+  'WHERE',
+  'regex',
+  'kp_id',
+  'kpId', // 变量的显示形态（模板里 {{ kpId }} 会直接印出来）
+  'kb.sqlite',
+  'learning.db',
+  'Pyodide',
+  'nonce',
+  'sandboxed',
+  'allow-scripts',
+  'embedding',
+  'Embedding',
+  'POST /api',
+  'GET /api',
+  'HTTP 200',
+  'HTTP 4',
+  'HTTP 5',
+  '端点',
+  '契约',
+  '兜底',
+  '降级链',
+  '向量维度',
+  '分块',
+  '已嵌入',
+  '进程号',
+  '端口号'
+]
+
+/**
+ * 允许出现这些词的文件（**逐条写明理由**，不是「技术面文件」这一类的笼统豁免）。
+ *
+ * ★ 为什么要有这张表而不是「凡是技术文件都跳过」：
+ *   这条守卫的价值全在**具体到文件 + 理由**上。笼统豁免等于把守卫关掉 ——
+ *   「技术面文件」这个筐一大，真正的泄露（某个视图里夹了一句运维话）就藏在里面了。
+ * ★ 每一条都必须回答同一个问题：**这个词会渲染到学生眼前吗？** 答不上来就不该豁免。
+ */
+const TERM_EXEMPT_FILES = new Set([
+  // 教师专用的数据检视页（`PAGES.knowledge.nav === 'teacher'`，学生侧栏里进不去，守卫 ③ 钉着）
+  'views/Knowledge.vue',
+  // 取数层：只把契约字段搬进 store，自己一个字都不渲染
+  'stores/knowledge.ts',
+  'stores/settings.ts',
+  'stores/sidecar.ts',
+  'api/settings.ts',
+  'api/data.ts',
+  'api/events.ts',
+  'api/http.ts'
+])
+
+/**
+ * 逐条豁免：`文件 → 词 → 理由`。
+ *
+ * ⚠️ 加一条前先问：**这个字符串真的到不了学生眼前吗？** 「大概是给模型看的」不算理由 ——
+ *    要能指出它只出现在哪条不渲染的通路上。
+ * ★ 表按**文件**算条目（同一文件的多条理由通常相同），并且**条数被断言钉住**：
+ *   这张表一旦长大，这条守卫就变成了它的豁免清单。
+ * ⚠️ **按文件豁免有一个已知的弱化**（复审指出，已补第二条守卫）：
+ *    它放行的是「这个词在这个文件里任何位置」，而理由说的往往是「它只在某一节里」。
+ *    所以凡是以「它只在 <某块区域> 里」为由豁免的文件，都必须再有一条断言钉住
+ *    **那块区域确实存在且确实把它包住**（见下面「豁免必须名副其实」那条）。
+ */
+const TERM_EXEMPT = [
+  {
+    file: 'components/rail-evidence.ts',
+    terms: ['Embedding', 'FTS5', '兜底', 'SQL', 'WHERE'],
+    why:
+      '这是**专门收教师 / 答辩证据文本**的模块（本轮新建）：四级降级链的档位名、学段隔离那句硬边界原文。' +
+      '它只被 `<TeacherGate>` 包着渲染，一个字都没删 —— 单独成文件就是为了让**本文件的扫描零豁免**：' +
+      '实测把技术原句塞进学生那一半时，豁免版的守卫照样绿（所以按文件豁免是错的，按模块归属才对）。' +
+      '凭据由「右栏的豁免必须真的有 TeacherGate 兜着」那条守卫提供。'
+  },
+  {
+    file: 'views/Settings.vue',
+    terms: ['embedding', '端点', '向量维度', 'SQLite', 'SQL', '端口号', '进程号', '降级链', '分块'],
+    why:
+      '这些串全部位于「高级设置（教师 / 答辩）」区（`v-if="advancedVisible"`）：供应商 BaseURL / APIKey、嵌入模型、隐私与本地服务。' +
+      '★ 这是**刻意的取舍**（决策记录见 `docs/report-material/decisions.md` 的「双视角」）：' +
+      '供应商可自定义是赛题硬性要求，不能删；但它不该默认摊在学生面前。' +
+      '所以判据不是「学生永远读不到」，而是「学生日常使用不会撞见」—— 开关是防误入，不是权限（本应用没有账号体系）。' +
+      '⚠️ 本条豁免**必须**配「豁免必须名副其实」那条守卫：它钉住高级区真的存在、且这些词真的落在它里面。'
+  },
+  {
+    file: 'cards/coding.ts',
+    terms: ['kpId'],
+    why:
+      '这是**发给模型的 wire 文本**（`buildHintRequestMessage` 等）。给学生看的是 `hintRequestDisplayText()`／`runRequestDisplayText()`，' +
+      '二者分离由守卫 ⑥ 钉着；回看历史也过 `codingUserTextDisplay()`。'
+  },
+  {
+    file: 'cards/quiz.ts',
+    terms: ['kpId'],
+    why: '同上：`buildQuizSubmissionMessage` 是 wire 文本，展示走 `quizSubmissionDisplayText()`'
+  },
+  {
+    file: 'sandbox/iframe-host.ts',
+    terms: ['allow-scripts'],
+    why: '沙箱属性的**取值常量**（`SANDBOX_ATTRIBUTE`），写在 iframe 的 `sandbox` 属性里，不是文案'
+  },
+  {
+    file: 'sandbox/pyodide-runner.ts',
+    terms: ['Pyodide'],
+    why:
+      '只有 console 排障话与内部错误对象（`console.error` 已被 `visibleText()` 排除，这里剩下的是带 Pyodide 字样的内部标识）。' +
+      '★ 界面上的那句已改成学生话（`failure` 变量）—— 这正是走查抓到的那条「请检查 <renderer>/pyodide/ 下的本地资源是否完整」。'
+  },
+  {
+    file: 'sandbox/pyodide.worker.ts',
+    terms: ['Pyodide'],
+    why: '同上：Worker 内部的日志与错误构造；发给界面的 `failure` 文案已改为学生话'
+  },
+  {
+    file: 'stores/ui.ts',
+    terms: ['分块'],
+    why: '教师专属页（教材知识库）的副标题**元数据**；学生视角下侧栏不渲染它（守卫 ③ 钉着 nav === \'teacher\'）'
+  }
+]
+
+test('★★ 学生视角的文件里不得出现开发者术语（源码级，全文扫描）', () => {
+  // 先钉住豁免表本身：它一旦长大，这条守卫就退化成「豁免清单」
+  assert.ok(
+    TERM_EXEMPT.length <= 8,
+    `逐条豁免已经有 ${TERM_EXEMPT.length} 个文件 —— 超过 8 个说明多半是「改文案」被换成了「加豁免」。` +
+      '正确的处置是让那些字符串真的到不了学生眼前（包 TeacherGate / 换成学生话）。'
+  )
+  for (const entry of TERM_EXEMPT) {
+    assert.ok(entry.why.length >= 40, `${entry.file} 的豁免理由太短 —— 要写清「它为什么到不了学生眼前」`)
+    assert.ok(entry.terms.length > 0, `${entry.file} 的豁免没写词`)
+  }
+
+  const hits: string[] = []
+  for (const file of rendererFiles()) {
+    const name = rel(file)
+    if (TERM_EXEMPT_FILES.has(name)) continue
+    // 教师视角专属组件自己就是放技术词的地方，跳过
+    if (name === 'components/TeacherGate.vue') continue
+
+    const source = readFileSync(file, 'utf8')
+    // ⚠️ 只看「会渲染出来的文本」（见 `visibleText()` 的说明）——
+    //    第一版扫全文，把 `record.kpId` 这种属性名报了 450 次，全是假阳性。
+    for (const text of visibleText(file, source)) {
+      for (const term of TERMS) {
+        if (!text.includes(term)) continue
+        const exempt = TERM_EXEMPT.some((entry) => entry.file === name && entry.terms.includes(term))
+        if (exempt) continue
+        hits.push(`${name} 出现「${term}」 → ${text.trim().slice(0, 110)}`)
+      }
+    }
+  }
+  assert.deepEqual(
+    hits,
+    [],
+    '这些技术词会直接渲染给学生（或它的译文）。处置方式二选一：\n' +
+      '  ① 包进 <TeacherGate>…</TeacherGate>（教师 / 答辩视角才显示）；\n' +
+      '  ② 换成学生话（例：「隔离在 SQL 层强制」→「只会用你学段和更低的教材，不会超纲」）。\n' +
+      `命中 ${hits.length} 处：\n  ${hits.join('\n  ')}`
+  )
+})
+
+test('★★ 豁免必须名副其实：被豁免的词要真的落在「只给技术视角」的那块区域里', () => {
+  // ══════════════════════════════════════════════════════════════════════
+  // 为什么必须有这一条（复审实测出来的漏洞，别删）
+  // ══════════════════════════════════════════════════════════════════════
+  // 上面那条守卫对 `views/Settings.vue` 是**按文件**豁免的，而豁免理由说的是
+  // 「这些词只在高级区里」。实测：往**学生那一节**（学段区块）塞一句
+  // 「端口号 8756，向量维度 512」，上面那条守卫**照样绿** ——
+  // 因为它的判据是「这个词在这个文件里被豁免了」，而不是「这个词在这块区域里」。
+  //
+  // 按文件豁免本身是有意的（逐词豁免会膨胀成一张 9 条 × 2 文件的表），
+  // 但**理由必须被另一条断言兑现**，所以这里做三件事：
+  //   ① 高级区真的存在，且真的是 `v-if="advancedVisible"`（不是被谁改成恒真/恒假）；
+  //   ② 那些被豁免的词**确实出现在高级区那一段源码里**（不是出现在学生那半）；
+  //   ③ 学生那半（学段 / 章节 / 主题三节）里**没有**这些词。
+  // 三条一起，才等价于「按区域豁免」——而区域是被钉住的。
+  const settings = read('src', 'renderer', 'src', 'views', 'Settings.vue')
+  const code = stripComments(settings)
+
+  // ① 高级区存在且由唯一的判据控制。⚠️ 用「不是恒真」的写法钉住：
+  //    `v-if="true || advancedVisible"` 这种「为了调试打开」的改动会让下面变红。
+  const advancedAt = code.indexOf('data-testid="settings-advanced"')
+  assert.ok(advancedAt > 0, '设置页必须有高级设置区（data-testid="settings-advanced"）')
+  const advancedOpen = code.slice(Math.max(0, advancedAt - 600), advancedAt)
+  assert.match(
+    advancedOpen,
+    /v-if="advancedVisible"/,
+    '高级区必须由 `advancedVisible` 控制 —— 写成恒真（`v-if="true || …"`）就等于把它摊给学生了'
+  )
+
+  // ② 被豁免的词确实在高级区那一段里。
+  //    ⚠️ 切法用「高级区起点 → 区域内最后一个分节的结束」，不假设它是 `<section>`：
+  //    实测它是个 `<div>`（`<section v-if="advancedVisible" class="adv">` 之外还套了一层），
+  //    写 `</section>` 会切到错误的边界（甚至切出一段空串，让断言静默通过）。
+  const advancedEnd = code.indexOf('<!-- ── 高级设置结束', advancedAt)
+  const advancedRegion =
+    advancedEnd > advancedAt
+      ? code.slice(advancedAt, advancedEnd)
+      : // 没有结束标记时退回「一直到文件末尾的最后一个 </template>」——
+        // 宁可扫多（可能把学生那半也扫进来，那样下面的断言会假红、逼着人补标记）
+        code.slice(advancedAt, code.lastIndexOf('</template>'))
+  for (const term of ['BaseURL', 'API Key', '向量维度', 'SQLite']) {
+    assert.ok(
+      advancedRegion.includes(term),
+      `「${term}」应当落在高级区里（它就是那段被豁免的内容）—— 若它搬走了，豁免理由也要跟着改`
+    )
+  }
+
+  // ③ 学生那三节（学段 / 教材章节 / 外观主题）里不许有这些词。
+  //    定位方式：分别取三个 learner 分节的 `data-section` 到它的闭合标签之间。
+  for (const section of ['grade', 'chapter', 'theme']) {
+    const at = code.indexOf(`data-section="${section}"`)
+    if (at < 0) continue
+    const end = code.indexOf('</SurfacePanel>', at)
+    const region = code.slice(at, end > at ? end : at + 4000)
+    // ⚠️ 只查「学生读到会困惑」的那几个：`SQL`/`端口号` 这类运维词
+    for (const term of ['SQL', '端口号', '进程号', '向量维度', '已嵌入', 'kb.sqlite', 'BaseURL', 'API Key']) {
+      assert.ok(
+        !region.includes(term),
+        `学生那一节「${section}」里出现了「${term}」—— 它属于高级区（豁免只覆盖高级区，不是整个文件）`
+      )
+    }
+  }
+
+  // ④ 同理钉住「教材知识库」页的整体定位：它虽然整页都是技术面，但**导入 / 重建**
+  //    这两个真功能不能因为「反正教师才看」而被删掉（删了就是 D-040 那个坑：
+  //    做了却进不去的功能等于没做）。判据落在**按钮的点击处理器**上 ——
+  //    「文件里出现过 `rebuild`」会被 store 的引用喂饱（复审实测：把两个按钮整段删掉，
+  //    旧判据照样绿，因为 store 里还有 `knowledge.rebuild()`）。
+  const kb = stripComments(read('src', 'renderer', 'src', 'views', 'Knowledge.vue'))
+  assert.match(
+    kb,
+    /@click="rebuild"/,
+    '「重建索引」必须有按钮真的接上（`@click="rebuild"`）—— 只有 store 里有这个方法不算'
+  )
+  assert.match(
+    kb,
+    /@click="fileInput\?\.click\(\)"/,
+    '「导入教材」必须有按钮真的接上（打开文件选择框）'
+  )
+  assert.match(kb, /导入教材/, '两个按钮的可见文案也要在（教师看得到才谈得上能用）')
+  assert.match(kb, /重建索引/, '「重建索引」的文案要在')
+})
+
+test('★★ 右栏的豁免必须真的有 `<TeacherGate>` 兜着（免得豁免变成后门）', () => {
+  // 上一个测试放行了 ContextRail 里的技术词，理由是「它们在 TeacherGate 里」。
+  // 这条守卫就是那个理由的凭据：**没有 gate 就不许豁免**。
+  // （改法示例：把 DEGRADE_LEVELS 搬出 gate 渲染 → 这条不会红，但上一个测试会；
+  //   把 gate 删掉而技术词留在原处 → 两个都会红。所以两条要一起看。）
+  const rail = read('src', 'renderer', 'src', 'components', 'ContextRail.vue')
+  assert.match(rail, /import TeacherGate from '\.\/TeacherGate\.vue'/, '右栏必须真的引了 TeacherGate')
+  assert.ok(
+    (rail.match(/<TeacherGate/g) ?? []).length >= 3,
+    '降级链 / 工具轨迹 / 学段原始信号 三块都必须有各自的 gate（实测至少 3 处）'
+  )
+
+  // 学生版本必须同时存在（只 gate、不给学生替代说法 = 学生那边空了一块）
+  assert.match(rail, /studentText/, '隔离说明必须有学生版本（`studentText`）')
+  assert.match(rail, /basisSentence|answer-basis/, '必须有「本次参考了…」这类学生能读懂的说明')
+
+  // Settings 的豁免同理：高级区必须真的存在，且默认与学生隔开
+  const settings = read('src', 'renderer', 'src', 'views', 'Settings.vue')
+  assert.match(settings, /advancedVisible/, '设置页必须有「高级区是否可见」这一个判据')
+  assert.match(
+    settings,
+    /viewMode\.isTeacher\s*\|\|\s*viewMode\.advancedOpen|advancedOpen\s*\|\|\s*viewMode\.isTeacher/,
+    '高级区可见性 = 教师视角，或学生主动点开（两个条件二选一）'
+  )
+})
+
+test('★★ 学生视角的可见文本里不得出现原始 kp slug（ai-definition-jr 这种）', () => {
+  // 形态：<slug>-<学段后缀>，学段后缀恰好四个 —— 这是本仓 kp_id 的构造规则
+  // （`server/scripts/import_knowledge.py` 的 SLUGS + `-pl|-ph|-jr|-sr`）。
+  const SLUG = /[a-z][a-z0-9]*(?:-[a-z0-9]+)+-(?:pl|ph|jr|sr)\b/g
+  const hits: string[] = []
+  for (const file of rendererFiles()) {
+    const name = rel(file)
+    if (TERM_EXEMPT_FILES.has(name)) continue
+    const source = readFileSync(file, 'utf8')
+    for (const text of visibleText(file, source)) {
+      const found = text.match(SLUG)
+      if (found) hits.push(`${name} → ${found.join('、')}（出现在：${text.trim().slice(0, 80)}）`)
+    }
+  }
+  assert.deepEqual(
+    hits,
+    [],
+    'kp_id 是数据库主键，学生看不懂（走查原话：「立刻隐藏所有 ID，只展示知识点的中文标题」）。\n' +
+      '取名字的唯一口径是 `study/kp-label.ts` 的 `kpLabel()`／`knowledge.kpNameOf()`；\n' +
+      '取不到名字时给中性标签或整条不渲染，**不要回落成 id**。\n' +
+      `命中 ${hits.length} 处：\n  ${hits.join('\n  ')}`
+  )
+})
+
+/* ================================================================== *
+ * ② 双视角的机制本身：默认必须是学生视角
+ * ================================================================== */
+
+test('★★ 默认视角必须是学生，且切换入口只在设置页', () => {
+  const store = read('src', 'renderer', 'src', 'stores', 'viewMode.ts')
+
+  // ① 默认值：判错方向的代价不对称 —— 判成学生视角只是评委多按一下开关，
+  //    判成教师视角则是学生直接撞见一堆运维术语。
+  //    判据是**行为**（只有明确等于 'teacher' 才走 teacher 分支），不是某一行的写法：
+  //    注释里引用了这句话、或者写成 if/else，都不该让守卫变红或变绿。
+  const readFn = store.slice(
+    store.indexOf('export function readStoredViewMode'),
+    store.indexOf('export function readStoredViewMode') + 700
+  )
+  assert.match(readFn, /===\s*'teacher'/, '必须显式比较存下来的值等不等于 teacher')
+  assert.match(readFn, /\?\s*'teacher'/, '等于 teacher 才返回 teacher')
+  assert.match(readFn, /:\s*'student'/, '其余一律 student —— 判错方向代价不对称，默认必须是学生')
+  assert.match(readFn, /catch\s*\{[\s\S]{0,120}?'student'/, 'localStorage 读失败也必须回落到学生视角')
+
+  // ② 读取要 try/catch（file:// + 沙箱组合下 localStorage 会抛，不能因此白屏）
+  assert.match(readFn, /try\s*\{[\s\S]{0,200}?localStorage/, 'localStorage 访问必须在 try 里')
+
+  // ③ 切换入口只在设置页 —— 顶栏 / 侧栏不许有开关（学生会误触，且顶栏是常驻 chrome）
+  for (const file of ['components/AppTopbar.vue', 'components/AppSidebar.vue', 'layouts/AppShell.vue']) {
+    const source = stripComments(readFileSync(join(rendererRoot, ...file.split('/')), 'utf8'))
+    assert.doesNotMatch(
+      source,
+      /viewMode\.(?:toggle|set)\(/,
+      `${file} 不得直接切换视角（入口只允许在设置页的「高级设置」区）`
+    )
+  }
+})
+
+/* ================================================================== *
+ * ③ 教师专属页必须真的进不去（且切回来时能把人带走）
+ * ================================================================== */
+
+test('★★ 教材知识库是教师专属页：侧栏判定走唯一谓词，且切回学生视角会把人带走', () => {
+  const ui = read('src', 'renderer', 'src', 'stores', 'ui.ts')
+  const sidebar = read('src', 'renderer', 'src', 'components', 'AppSidebar.vue')
+  const app = read('src', 'renderer', 'src', 'App.vue')
+
+  // ★ 判据必须是**这条页面项的 nav 字段本身**，而不是「文件里出现过 'teacher'」——
+  //   后者在文件里任何一处出现都能喂饱它。
+  const knowledgeBlock = ui.slice(ui.indexOf('  knowledge: {'), ui.indexOf('  knowledge: {') + 400)
+  assert.match(
+    knowledgeBlock,
+    /nav:\s*'teacher'/,
+    "教材知识库必须标成教师专属：`PAGES.knowledge.nav = 'teacher'`（学生侧栏里进不去）"
+  )
+  assert.match(ui, /nav:\s*boolean\s*\|\s*'teacher'/, "PageMeta.nav 必须是三态联合（true / 'teacher' / false）")
+
+  assert.match(
+    ui,
+    /export function isTeacherOnlyPage\(/,
+    '需要「切回学生视角时把停在教师页的人带走」的判据'
+  )
+
+  // 侧栏必须真的调那个谓词（只定义不调 = 页面照旧进侧栏）
+  assert.match(
+    sidebar,
+    /visibleInSidebar\(PAGES\[name\],\s*viewMode\.isTeacher\)/,
+    '侧栏的过滤必须调 visibleInSidebar，并把视角传进去'
+  )
+
+  // App.vue：切回学生视角要把人从教师专属页带回对话
+  const watchAt = app.indexOf('isTeacherOnlyPage(ui.page)')
+  assert.ok(watchAt > 0, 'App.vue 必须处理「切回学生视角时停在教师专属页」这一状态迁移')
+  const block = app.slice(Math.max(0, watchAt - 500), watchAt + 200)
+  assert.match(block, /ui\.go\('chat'\)/, '落点是对话页')
+  // 只处理「教师 → 学生」这一个方向（反过来把评委弹走是没道理的）
+  assert.match(block, /wasTeacher === true && !isTeacher/, '只在从教师切回学生时触发')
+})
+
+test('★★ 上面那些判据必须**真的按三态工作**（不是只看函数在不在）', async () => {
+  // ══════════════════════════════════════════════════════════════════════
+  // 为什么另起一条（复审实测出来的漏洞）
+  // ══════════════════════════════════════════════════════════════════════
+  // 上一条守卫全是**源码文本匹配**：它证明「函数存在」「侧栏调了它」，
+  // 但**从没执行过它**。实测：把 `visibleInSidebar` 的第一行从
+  // `if (meta.nav === true) return true` 改成 `if (meta.nav !== false) return true`
+  // —— 三态语义整个塌掉（`'teacher'` 也返回 true，知识库回到学生侧栏），
+  // 上一条守卫**照样全绿**（变异验证抓到的）。
+  // 所以这里把谓词**当函数调**，用三个代表值把三态钉死。
+  const { PAGES, visibleInSidebar, isTeacherOnlyPage } = await import('../src/renderer/src/stores/ui.ts')
+
+  // ① 普通页：两种视角都进侧栏
+  assert.equal(visibleInSidebar(PAGES.chat, false), true, '对话页在学生视角下必须可见')
+  assert.equal(visibleInSidebar(PAGES.chat, true), true, '对话页在教师视角下也必须可见')
+
+  // ② 教师专属页：**学生视角不可见、教师视角可见**（两侧都要断，少一侧就不算三态）
+  assert.equal(
+    visibleInSidebar(PAGES.knowledge, false),
+    false,
+    '学生视角下「教材知识库」**不许**进侧栏（它是数据检视页，含 kb.sqlite 路径与两个破坏性按钮）'
+  )
+  assert.equal(
+    visibleInSidebar(PAGES.knowledge, true),
+    true,
+    '教师视角下「教材知识库」必须可见（功能没被删，只是默认不给学生看）'
+  )
+
+  // ③ `isTeacherOnlyPage` 与它同源
+  assert.equal(isTeacherOnlyPage('knowledge'), true, 'knowledge 是教师专属页')
+  assert.equal(isTeacherOnlyPage('chat'), false, 'chat 不是教师专属页')
+  assert.equal(isTeacherOnlyPage('dependency'), false, '学习地图不是教师专属页（学生会用它）')
+
+  // ④ 反面对照：**没有哪一页会在两种视角下都不可见** ——
+  //    那等于做出一个谁都不用的页面（D-040 那个「做了却进不去」的坑）。
+  for (const [name, meta] of Object.entries(PAGES)) {
+    const anywhere = visibleInSidebar(meta, false) || visibleInSidebar(meta, true)
+    if (meta.nav === false) continue // `false` 的页明确不进侧栏，靠别的入口（本项目当前没有这种页）
+    assert.ok(anywhere, `「${meta.title}」（${name}）在两种视角下都进不了侧栏 —— 做了却点不到`)
+  }
+})
+
+/* ================================================================== *
+ * ④ 主行动按钮只有一套配方（走查：核心入口颜色 / 大小 / 形状全不一致）
+ * ================================================================== */
+
+test('★★ 五处核心主行动按钮必须共用 .k12-cta（而不是各写一份皮肤）', () => {
+  const base = read('src', 'renderer', 'src', 'assets', 'base.css')
+  assert.match(base, /^\.k12-cta\s*\{/m, '设计系统里必须有 .k12-cta 这一套配方')
+  // 禁用态不许用 opacity 压（会掉到不可读）；用实心灰底
+  const ctaAt = base.indexOf('.k12-cta {')
+  const ctaBlock = base.slice(ctaAt, ctaAt + 1400)
+  assert.doesNotMatch(ctaBlock, /opacity/, '禁用态不得靠降低透明度（文字会掉到不可读）')
+  assert.match(ctaBlock, /:disabled/, '必须显式给禁用态')
+  assert.match(ctaBlock, /min-height/, '高度必须是下限（固定 height 会在大字号下裁字，P-071）')
+
+  // 五处核心入口（右栏两处「去闯关检验」+ 闯关提交 + 编程运行 / 求助 + 依赖图「开始学习」）
+  //
+  // ⚠️ 判据必须是**类名令牌**，不能是 `source.includes('k12-cta')` ——
+  //   后者会被 `k12-cta--mutated` 这种子串喂饱（变异测试当场抓到：
+  //   把类名整片改掉，第一版断言照样绿）。
+  //   `(?:[^"]*\s)?` 让 `class="k12-cta"` 与 `class="reco__btn k12-cta"` 都算，
+  //   `(?![\w-])` 把 `k12-cta--mutated` / `foo-k12-cta` 排除在外。
+  const CTA_CLASS = /class="(?:[^"]*\s)?k12-cta(?![\w-])(?:\s[^"]*)?"/g
+  const sites: Array<[string, string, number]> = [
+    ['components/ContextRail.vue', '右栏「去闯关检验」', 2],
+    ['views/Quiz.vue', '闯关页「提交这题」', 1],
+    ['views/Coding.vue', '编程页「运行」', 1],
+    ['views/Dependency.vue', '依赖图「开始学习这个知识点」', 1]
+  ]
+  for (const [file, label, expected] of sites) {
+    // ⚠️ 用 join(rendererRoot, …) 而不是 read(...)：`read()` 自己会拼 desktopRoot，
+    //    再传一个绝对路径进去会拼成 `…/desktop/E:\…`（第一版就这么错的）。
+    const source = readFileSync(join(rendererRoot, ...file.split('/')), 'utf8')
+    const hits = (source.match(new RegExp(CTA_CLASS, 'g')) ?? []).length
+    assert.ok(
+      hits >= expected,
+      `${label}（${file}）必须用 .k12-cta 类（实测 ${hits} 处，至少 ${expected} 处）—— ` +
+        '走查结论是「最重要的操作入口在颜色/大小/形状上完全不一致」，新增主行动入口时抄第六份皮肤必然又漂移一次'
+    )
+  }
+})
+
+test('★★ 教师 / 答辩视角的**原始证据一个字都没丢**（反向对照）', () => {
+  // ══════════════════════════════════════════════════════════════════════
+  // 这条守卫存在的理由：上面那条「学生视角不得出现技术词」**天然有一个坏解法** ——
+  // 把技术串全删掉，字面上也能让它变绿（而且更容易）。
+  // 但那些串是「设计合理性」25% 的证据：四级降级链、工具调用轨迹、
+  // 学段判定原始信号、SQL 层隔离说明、知识库统计。删掉它们等于把答辩材料删了。
+  //
+  // 所以这里做**反向断言**：它们必须仍然存在于**教师视角能到的地方**。
+  // 两条守卫一起看，才是「分视角」而不是「删信息」：
+  //   · 学生视角出现 → 上一条变红；
+  //   · 谁都没了     → 这一条变红。
+  // ⚠️ 变异验证：把 `rail-evidence.ts` 里的档位名换成学生话，这一条会红。
+  // ══════════════════════════════════════════════════════════════════════
+  const rail = read('src', 'renderer', 'src', 'components', 'ContextRail.vue')
+  const evidence = read('src', 'renderer', 'src', 'components', 'rail-evidence.ts')
+
+  // ① 四级降级链（vector → cloud → fts → outline）四档名都在
+  for (const level of ['vector', 'cloud', 'fts', 'outline']) {
+    assert.ok(evidence.includes(`'${level}'`), `降级链少了 ${level} 这一档 —— 它是四级降级链的证据`)
+  }
+  for (const label of ['向量检索', 'Embedding', 'FTS5', '依赖图']) {
+    assert.ok(evidence.includes(label), `降级链档位名少了「${label}」（答辩要看的就是这四个词）`)
+  }
+
+  // ② 学段隔离那句**硬边界原文**（含 SQL / WHERE）仍在
+  assert.match(
+    evidence,
+    /隔离在 SQL 层强制，模型改不了 WHERE/,
+    '「隔离在 SQL 层强制」是架构边界的直接证据，必须留在教师视角可到的地方'
+  )
+
+  // ③ 工具轨迹那句「四条强制在代码层」仍在
+  assert.match(evidence, /代码层强制/, '「路由由模型自选；学段隔离、参数校验、内容终审均在代码层强制」必须保留')
+
+  // ④ 右栏确实把这三块都渲染在 gate 里（不是只定义不渲染）
+  assert.ok((rail.match(/<TeacherGate/g) ?? []).length >= 3, '降级链 / 工具轨迹 / 学段信号三块都要有 gate')
+  assert.match(rail, /degradeChain/, '降级链的数据通路仍在（只改「默认给谁看」，不改数据）')
+  assert.match(rail, /DEGRADE_LEVELS/, '档位表仍被引用')
+  assert.match(rail, /TRACE_TEACHER_NOTE/, '轨迹说明仍被引用')
+  assert.match(rail, /isolationTeacherText/, '隔离原文仍被引用')
+
+  // ⑤ 知识库页（教师专属）的统计与路径读数还在
+  const kb = read('src', 'renderer', 'src', 'views', 'Knowledge.vue')
+  const kbCode = stripComments(kb)
+  assert.match(kbCode, /kbPath|stats\.kbPath/, '知识库页仍要能读出库文件位置（数据检视的用途）')
+  assert.match(kbCode, /knowledge\.rebuild|rebuild/, '「重建索引」能力不能被删（它是真实功能）')
+  assert.match(kbCode, /knowledge\.import|importKnowledge|import.*file/, '「导入教材」能力不能被删')
+  assert.match(kbCode, /kpId|kp_id/, '知识点表仍要有 id 列（教师排障要看）')
+  assert.match(kbCode, /embedded|已嵌入|未嵌入/, '向量索引状态仍要能看到')
+})
+
+/* ================================================================== *
+ * ⑤ 内容安全提示不得把规则细节印给学生
+ * ================================================================== */
+
+test('★★ 安全拦截提示只给学生一句人话，规则 id / 正则不进界面', () => {
+  const notice = read('src', 'renderer', 'src', 'components', 'BlockedNotice.vue')
+
+  // 后端 reason 的形态是「命中内容安全规则：越狱/绕过规则（regex:reveal_system_prompt）」——
+  // 它既吓学生（「越狱」），又把防御策略交代给试图绕过的人。
+  assert.match(
+    notice,
+    /BLOCKED_STUDENT_NOTICE/,
+    '学生看到的那句必须取自 labels.ts 的 BLOCKED_STUDENT_NOTICE（唯一来源）'
+  )
+  const reasonAt = notice.indexOf('{{ notice.reason }}')
+  assert.ok(reasonAt > 0, 'reason 仍然要展示（给老师 / 评委），只是不该在学生视角')
+  const around = notice.slice(Math.max(0, reasonAt - 400), reasonAt + 120)
+  assert.match(
+    around,
+    /TeacherGate/,
+    'reason 必须包在教师视角里 —— 否则「regex:reveal_system_prompt」会直接印给学生'
+  )
+  // ⚠️ 判据取 `{{ notice.reason }}`（模板里的渲染点）而不是裸 `notice.reason`：
+  //    后者第一次出现在**文件头的注释**里（讲这段为什么不能给学生看），
+  //    拿它当锚点会让「注释在 template 之前」这件事决定断言方向（第一版就这么写错了）。
+  assert.doesNotMatch(
+    notice.slice(0, reasonAt).split('</script>').pop() ?? '',
+    /\{\{\s*notice\.reason/,
+    '学生那一半不许再出现第二处 reason 渲染',
+  )
+
+  // labels.ts 里那句人话不许自带技术词
+  const labels = read('src', 'renderer', 'src', 'labels.ts')
+  const constAt = labels.indexOf('BLOCKED_STUDENT_NOTICE')
+  const line = labels.slice(constAt, constAt + 220)
+  for (const bad of ['regex', '规则', '命中', '拦截', '越狱']) {
+    assert.ok(!line.includes(bad), `BLOCKED_STUDENT_NOTICE 里不得出现「${bad}」`)
+  }
+})
+
+/* ================================================================== *
+ * ⑥ 求助指令与用户气泡必须分离（走查：把 AI 的「底牌」印在学生自己的气泡里）
+ * ================================================================== */
+
+test('★★ 发给模型的指令不得原样渲染成学生气泡', () => {
+  const coding = read('src', 'renderer', 'src', 'cards', 'coding.ts')
+
+  // wire 文本必须一字不动地保留（模型行为不能因为「界面好看」而变弱）
+  assert.match(
+    coding,
+    /不要直接给我完整答案/,
+    'buildHintRequestMessage 仍必须把「不要直接给答案」的约束交给模型'
+  )
+  assert.match(coding, /get_coding_hint/, '仍然要指名 Tool（否则模型可能自己写答案）')
+
+  // 显示文本必须另有其人
+  assert.match(
+    coding,
+    /export function hintRequestDisplayText\(/,
+    '必须有一个「给学生看的那句话」的函数 —— 否则学生气泡里就是那句内部指令'
+  )
+  // 显示文本里不许带 Tool 名 / 内部 kp_id
+  const at = coding.indexOf('export function hintRequestDisplayText(')
+  const body = coding.slice(at, at + 400)
+  assert.doesNotMatch(body, /get_coding_hint/, '学生那句话里不许出现 Tool 名')
+  assert.doesNotMatch(body, /kpId|kp_id/, '也不许带上内部知识点 id')
+
+  // store 的发送口必须能分别收到两段文本
+  const store = read('src', 'renderer', 'src', 'stores', 'chat.ts')
+  assert.match(
+    store,
+    /studentFacingMessages|studentFacingUserText/,
+    '恢复历史时也要过一遍翻译（JSONL 里存的是 wire 原文，回看会重新印出来）'
+  )
+})
+
+/* ================================================================== *
+ * ⑦ 导出必须走原生保存对话框，且文件名是人话
+ * ================================================================== */
+
+test('★★ 导出文件名用品牌名 + 日期，不含 slug / 开发者词；且走主进程的保存对话框', () => {
+  const dep = read('src', 'renderer', 'src', 'views', 'Dependency.vue')
+  // ⚠️ 先剥注释：文件里**刻意**引用了旧名字（「之前是 `dependency-edges-junior.csv`，
+  //    界面语言是中文，文件名却是英文 slug」）—— 那是决策记录，不该让断言变红。
+  const depCode = stripComments(dep)
+
+  // 走查原句：文件名 `dependency-edges-junior.csv` 暴露了内部的命名法
+  assert.doesNotMatch(
+    depCode,
+    /dependency-edges/,
+    '导出文件名不得再出现 dependency-edges（学生会拿去 Excel 却不知道那是什么）'
+  )
+  assert.match(depCode, /BRAND_NAME/, '文件名要带品牌名（唯一来源 @shared/brand，不要写字面量）')
+  assert.match(depCode, /学习地图/, '文件名要能自解释')
+
+  // 不许再走 blob + <a download>（Electron 里会冒出 blob:http://localhost… 的原生保存框）
+  assert.doesNotMatch(
+    depCode,
+    /createObjectURL/,
+    '不得再用 URL.createObjectURL 走浏览器下载（截图里那个 blob: 保存框就是它）'
+  )
+  assert.match(
+    depCode,
+    /exportMarkdown|file:export|fileExport/,
+    '必须复用已有的 file:export 通道（主进程 dialog.showSaveDialog）'
+  )
+
+  // 主进程侧：扩展名白名单，且 .md 的既有行为一个都不能变
+  const naming = read('src', 'main', 'study', 'export-naming.ts')
+  assert.match(naming, /EXPORT_EXTENSIONS/, '扩展名必须走白名单（不能由渲染进程随便指定）')
+  assert.match(naming, /'\.csv'/, '要允许 .csv')
+  assert.match(
+    naming,
+    /DEFAULT_EXPORT_EXTENSION:\s*ExportExtension\s*=\s*'\.md'/,
+    '默认扩展名必须仍是 .md（`study-bridge.test.ts` 的 20 条都按 .md 钉着）'
+  )
+
+  // 编程页的「下载代码」也一样（它原来也是 Blob + <a download>）
+  const coding = stripComments(read('src', 'renderer', 'src', 'views', 'Coding.vue'))
+  assert.doesNotMatch(coding, /createObjectURL/, '编程页下载代码也不得走 blob')
+  assert.match(coding, /exportMarkdown/, '编程页下载要走同一条 file:export 通道')
+})
+
+/* ================================================================== *
+ * ⑧ 错题本必须会刷新（走查：答错之后错题本还是空的）
+ * ================================================================== */
+
+test('★★ 判分之后错题本必须失效重拉（缺陷根因是「读侧只拉一次」）', () => {
+  const store = read('src', 'renderer', 'src', 'stores', 'study.ts')
+  const view = read('src', 'renderer', 'src', 'views', 'Study.vue')
+
+  // 根因：写侧一直是好的（每次判分都往 learning_history 写一行），
+  // 是读侧只在 onMounted 拉一次，而页面被 KeepAlive 缓存 → 回来后还是旧快照。
+  assert.match(
+    store,
+    /export function invalidateMistakes|function invalidateMistakes|invalidateMistakes\(\)/,
+    '必须有一个「把错题本标记为过期」的入口'
+  )
+  assert.match(store, /mistakesStale/, '过期要有一个真的标记（不是靠调用方记得传 force）')
+  assert.match(
+    view,
+    /^onActivated\(/m,
+    'Study.vue 必须在 onActivated 重新取数 —— KeepAlive 下组件不会重挂，onMounted 只跑一次'
+  )
+  // ⚠️ 锚点用 `^onActivated(`（真正的调用）而不是裸 `onActivated` ——
+  //    后者第一次出现在文件头的注释里（讲这件事为什么重要），
+  //    拿注释当锚点会让断言在校验一段说明文字（第一版就这么写错了）。
+  const activated = view.slice(view.indexOf('\nonActivated('), view.indexOf('\nonActivated(') + 400)
+  assert.match(activated, /loadMistakes|loadAll/, 'onActivated 里要真的去取错题本')
+  // 判分信号要能触发失效（否则「答完就切回档案页」仍然看到旧快照）
+  assert.match(
+    view,
+    /invalidateMistakes\(\)/,
+    'Study.vue 要监听判分信号并失效（只在 onActivated 拉还不够：留在本页时不会触发）'
+  )
+})
+
+/* ================================================================== *
+ * ⑨ 答对之后不许再劝学生「再提交一次」
+ * ================================================================== */
+
+test('★★ 答对后提交键必须是禁用的「已完成」；答错才可重试', () => {
+  const card = read('src', 'renderer', 'src', 'cards', 'QuizCard.vue')
+  const page = read('src', 'renderer', 'src', 'views', 'Quiz.vue')
+
+  for (const [name, source] of [
+    ['cards/QuizCard.vue', card],
+    ['views/Quiz.vue', page]
+  ]) {
+    assert.match(source, /function submitLabel\(/, `${name} 必须有单独的「提交键文案」函数（不能挤在一行三元里）`)
+    assert.match(source, /function submitDisabled\(/, `${name} 必须有一处禁用判定`)
+    const labelAt = source.indexOf('function submitLabel(')
+    const disabledAt = source.indexOf('function submitDisabled(')
+    const block = source.slice(labelAt, disabledAt + 500)
+    assert.match(block, /已完成/, `${name} 答对后按钮文案应是「已完成」`)
+    assert.match(
+      block,
+      /correct/,
+      `${name} 禁用判定必须读判分结果的 correct（前端不自己判对错 —— 判分只在后端）`
+    )
+    // ★ 判据是**「禁用的依据是 correct」**（`submitDisabled` 这个名字里就有 Disabled），
+    //   不是字面量 `/disabled/` —— 第一版按字面量断言，被 `submitDisabled` 的大写 D
+    //   绊倒，报了一个不存在的缺陷。
+    assert.match(
+      block,
+      /result\??\.?correct\s*===\s*true|correct\s*===\s*true/,
+      `${name} 「答对」必须被判成**终态**（=== true），而不是只要答过就禁用`
+    )
+    // 模板上真的绑上去了（只定义不绑 = 学生还是能连点）
+    assert.match(
+      stripComments(source),
+      /:disabled="submitDisabled\(/,
+      `${name} 模板上必须把禁用判定绑到提交键上`
+    )
+  }
+
+  // 前端不得自己算对错（判分口径只在后端）
+  assert.doesNotMatch(
+    stripComments(card),
+    /answer\s*===|=== \s*question\.answer/,
+    '前端不得拿 answer 比对（答案根本不下发；判分只走后端 /api/quiz/grade）'
+  )
+})
+
+/* ================================================================== *
+ * ⑩ 动画模板必须装进自己的 viewBox（走查外还查出的真实缺陷）
+ * ================================================================== */
+
+/**
+ * 模板几何检查：**画在 viewBox 外面 = 学生看到被裁掉一半的图**。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么是「坐标本身越界」这一条判据（而不是「坐标 ± 半径」）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 第一版拿固定半宽（±48 / ±20）去套所有模板的 `x:` / `y:`，结果误报了两个：
+ *    · `python-variable` 的 `x: 40`、`train-predict` 的 `x: 24` 是**盒子的左边沿**，
+ *      不是中心 —— 它们离左边界 24~40px，而盒子只有几十像素宽，其实完全放得下；
+ *    · 而真正的缺陷（决策树 `y: 232` + 半高 15，viewBox 高只有 230）是**中心点本身就在画布外**。
+ * 所以「固定半宽」这个判据既会误报（左沿当中心）又会漏报（盒子比固定半宽更宽）。
+ * 真正无假阳性的判据是**坐标本身是否落在画布内** —— 中心点在画布外的元素不可能被看见。
+ * 元素外沿的溢出由第二条判据覆盖：模板自己声明了节点高度（`h = … ? A : B`）时，
+ * 要求「最外沿 + 半高」也在画布内。两条都不依赖任何硬编码的半宽。
+ *
+ * ★ 这个函数被单元测试**直接喂合成模板**验证（见下面那条 `变异验证`）——
+ *   不靠「希望它有用」，而是证明「把决策树那个 bug 塞回去，它真的会红」。
+ */
+function templateGeometryProblems(templates) {
+  /** 几何问题（每条都是「哪个模板、哪个坐标、超出多少」）。 */
+  const problems: string[] = []
+  for (const { name, body, script } of templates) {
+    const viewBox = /viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(body ?? '')
+    if (!viewBox) continue // 纯 DOM 动画（不走 SVG）不适用
+    const width = Number(viewBox[1])
+    const height = Number(viewBox[2])
+
+    // ① 坐标本身必须在画布内（中心点在画布外 = 一定看不见）
+    const points: Array<{ axis: string; value: number }> = []
+    for (const match of (script ?? '').matchAll(/\b([xy]):\s*(-?[\d.]+)/g)) {
+      points.push({ axis: match[1], value: Number(match[2]) })
+    }
+    for (const match of (script ?? '').matchAll(/setAttribute\('(cx|cy)',\s*'?(-?[\d.]+)/g)) {
+      points.push({ axis: match[1] === 'cx' ? 'x' : 'y', value: Number(match[2]) })
+    }
+    for (const point of points) {
+      const limit = point.axis === 'x' ? width : height
+      if (point.value < -0.5 || point.value > limit + 0.5) {
+        problems.push(`${name}: ${point.axis}=${point.value} 落在 viewBox 0 0 ${width} ${height} 之外`)
+      }
+    }
+
+    // ② 模板自己给了节点高/宽（`h = … ? A : B`）时，连外沿一起算
+    const sizeMatch = /var\s+(w|h)\s*=\s*[^;]*?\?\s*(\d+)\s*:\s*(\d+)/.exec(script ?? '')
+    if (sizeMatch) {
+      const half = Math.max(Number(sizeMatch[2]), Number(sizeMatch[3])) / 2
+      const axis = sizeMatch[1] === 'w' ? 'x' : 'y'
+      const limit = axis === 'x' ? width : height
+      const onAxis = points.filter((point) => point.axis === axis).map((point) => point.value)
+      if (onAxis.length > 0) {
+        const min = Math.min(...onAxis)
+        const max = Math.max(...onAxis)
+        if (min - half < -0.5 || max + half > limit + 0.5) {
+          problems.push(
+            `${name}: ${axis} 范围 ${min - half}…${max + half} 超出 viewBox（半${axis === 'x' ? '宽' : '高'} ${half}）`
+          )
+        }
+      }
+    }
+  }
+  return problems
+}
+
+test('★★ 动画模板画的内容必须全部落在自己声明的 viewBox 内', () => {
+  const dir = join(desktopRoot, '..', 'server', 'resources', 'templates')
+  const files = readdirSync(dir).filter((name) => name.endsWith('.json'))
+  assert.ok(files.length >= 8, `模板数量应当至少 8 份（实测 ${files.length}）`)
+
+  const templates = files.map((name) => {
+    const raw = JSON.parse(readFileSync(join(dir, name), 'utf8'))
+    return { name, body: String(raw.body ?? ''), script: String(raw.script ?? '') }
+  })
+
+  const problems = templateGeometryProblems(templates)
+  assert.deepEqual(
+    problems,
+    [],
+    '模板内容超出 viewBox = 学生在默认视图下看到被裁掉一半的图（点「全屏」才看得全，而学生不会去点）。\n' +
+      '走查截图里决策树的底部叶子就是这样被切掉的。\n' +
+      `命中 ${problems.length} 处：\n  ${problems.join('\n  ')}`
+  )
+})
+
+test('★★ 上面那条几何检查**真的会红**（变异验证）', () => {
+  // 守卫自己也要被验证：把决策树当时的坏几何原样塞进来，检查必须报出来。
+  // 没有这一条，一个「永远返回空数组」的实现也能让上一条测试通过。
+  const brokenTree = {
+    name: 'synthetic-broken-tree',
+    body: '<svg viewBox="0 0 460 230"></svg>',
+    // 与修复前的 decision-tree 一致：根在 y=34，而**叶子画在 y=232**（画布只有 230 高）
+    script:
+      "var ROOT = { x: 230, y: 34, yes: { x: 110, y: 110 }, no: { x: 340, y: 188, yes: { x: 190, y: 232 }, no: { x: 350, y: 232 } } };\n" +
+      'var h = node.leaf ? 30 : 32;'
+  }
+  const problems = templateGeometryProblems([brokenTree])
+  assert.ok(
+    problems.length > 0,
+    '把决策树的坏几何塞回去之后检查必须报出来（否则这个守卫形同虚设）'
+  )
+  assert.match(problems[0], /y=232|超出 viewBox/, `报了但理由不对：${problems[0]}`)
+
+  // 反向对照：修好之后必须放行（防「把判据调成永远报错」）
+  const fixedTree = { ...brokenTree, body: '<svg viewBox="0 0 460 268"></svg>' }
+  assert.deepEqual(
+    templateGeometryProblems([fixedTree]),
+    [],
+    '修好之后的几何不该再被报出来'
+  )
+})
+
+
+/* ================================================================== *
+ * ⑫ 「不会上传」这类承诺必须与**同一屏上的按钮**一致（复审抓到的假承诺）
+ * ================================================================== */
+
+test('★★ 编程卡片的「不会上传」不许与它自己的「求助」按钮打脸', () => {
+  // ══════════════════════════════════════════════════════════════════════
+  // 为什么要有这一条（真机上会让学生理解错的一句话）
+  // ══════════════════════════════════════════════════════════════════════
+  // 编程卡片底下原来写着：「代码在你电脑上的浏览器沙箱里运行，不会上传、
+  // 也碰不到学习数据。卡住就点「求助」。」
+  // 而**同一张卡片上的「求助」按钮**会把学生代码的前 400 字发给模型
+  // （`buildHintRequestMessage` 里的 `codePreview(code)`）。
+  // 一个把字面意思当真的 10 岁学生，刚读完「不会上传」就去点「求助」，
+  // 会以为求助也是本地的 —— 这是我们**主动写进界面**的误解。
+  //
+  // ★ 判据不是「不许出现『不会上传』」（那句话本身没错：运行确实只在本机），
+  //   而是**它必须与「求助会发代码」这件事同时被说清楚**。
+  const card = read('src', 'renderer', 'src', 'cards', 'CodingCard.vue')
+  const code = stripComments(card)
+
+  if (/不会上传|不上传/.test(code)) {
+    assert.match(
+      code,
+      /求助[^。]{0,40}(发|上传|看到|看)|(发|上传)[^。]{0,30}团团/,
+      '既然写了「不会上传」，就**必须**在同一段里说明「求助会把代码发给团团」——\n' +
+        '否则学生读完那句、再点同屏的「求助」，会对「代码有没有离开这台电脑」形成错误认知。\n' +
+        '（这是承诺与按钮的一致性，不是措辞偏好。）'
+    )
+  }
+
+  // 另一半：wire 文本里那个 `codePreview` 是否真的在（判据的来源）。
+  // 若哪天求助不带代码了，上面那句话就该改回去 —— 这条断言是那个改动的提醒。
+  const coding = read('src', 'renderer', 'src', 'cards', 'coding.ts')
+  assert.match(
+    coding,
+    /buildHintRequestMessage[\s\S]{0,400}?codePreview\(/,
+    '「求助带代码」这条事实来自 buildHintRequestMessage 里的 codePreview —— 若它变了，界面文案要跟着改'
+  )
+})
+
+/* ================================================================== *
+ * ⑬ 三张在对话里渲染的卡片：不许把 kp_id / qid 当文字印出来
+ * ================================================================== */
+
+test('★★ 对话里的卡片（编程 / 练习 / 进度）不得直接渲染 kp_id 或 qid', () => {
+  // ══════════════════════════════════════════════════════════════════════
+  // 为什么单列一条：上面那条 slug 扫描**看不见插值**
+  // ══════════════════════════════════════════════════════════════════════
+  // `visibleText()` 抽的是「静态文本 + 静态属性」，而 `{{ view.kpId }}` 这类
+  // **mustache 插值**渲染出来的才是 slug —— 它在源码里是表达式，扫描器把它当表达式剥掉了。
+  // 所以凡是「把 id 直接插值出来」的地方，都得靠这一条专门盯住
+  // （复审正是这样找到三处漏网的：编程卡的 kp 芯片、练习卡的 qid 芯片、进度卡的关卡名）。
+  const cards = [
+    ['cards/CodingCard.vue', '编程卡'],
+    ['cards/QuizCard.vue', '练习卡'],
+    ['cards/ProgressCard.vue', '进度卡']
+  ]
+  for (const [file, label] of cards) {
+    const code = stripComments(readFileSync(join(rendererRoot, ...file.split('/')), 'utf8'))
+    // ① 不许有 `{{ xxx.kpId }}` / `{{ xxx.qid }}` 这类「把内部 id 直接渲染出来」的模板。
+    //    ⚠️ 判据必须精确到「**这个插值的输出就是 id 本身**」：
+    //       · `{{ view.kpId }}`          → 输出就是 slug，**报**；
+    //       · `{{ levelName(level.kpId) }}` → 输出是解析后的中文名，**不报**
+    //         （第一版用 `[^}]*\.kpId` 宽匹配，把后者也报出来了 —— 假阳性，白排查一轮）。
+    //       所以正则要求花括号里**除了那个属性访问什么都没有**。
+    //    ⚠️ 教师视角里的插值不算（那是分视角的落点：原始 id 正是给老师 / 评委看的）。
+    const direct: string[] = []
+    const lines = code.split('\n')
+    for (const [index, line] of lines.entries()) {
+      if (!/\{\{\s*[A-Za-z_$][\w$]*\.(?:kpId|qid)\s*\}\}/.test(line)) continue
+      const context = lines.slice(Math.max(0, index - 4), index + 1).join('\n')
+      if (/viewMode\.isTeacher|<TeacherGate/.test(context)) continue
+      direct.push(line.trim())
+    }
+    assert.deepEqual(
+      direct,
+      [],
+      `${label}（${file}）把内部 id 直接渲染出来了：${direct.join('、')}\n` +
+        '学生看到的是数据库主键（`ai-definition-jr` / `gen-ai-definition-jr-…`）。\n' +
+        '改用 `study/kp-label.ts` 的中文名；取不到就不渲染那一格，**绝不回落成 id**。'
+    )
+    // ② 名字必须走共用口径（有 `kpLabel` 就说明取了名字；三张卡都该有）
+    assert.match(
+      code,
+      /kpLabel/,
+      `${label} 必须用 \`study/kp-label.ts\` 的共用口径取名字（别在本组件另写一份兜底）`
+    )
+  }
+})
+
+/* ================================================================== *
+ * ⑭ 历史回看的**三条路**都要过学生版译文
+ * ================================================================== */
+
+test('★★ 回看历史的三条路都必须过学生版译文（漏一条就从后门漏出内部指令）', () => {
+  // JSONL 里存的是**发给模型的原文**（它本来就该存原文），所以任何「把历史正文渲染出来」
+  // 的地方都要过一遍翻译，否则学生会在自己的气泡里读到内部指令与嵌着 slug 的题目编号。
+  // 已知的三条路：① 对话页冷启动恢复 ② 对话页切换/分叉 ③ 学习档案 →「历史会话」回看。
+  // ⚠️ ③ 曾经漏着（复审实测）：那条路直接渲染主进程投影的 `message.text`。
+  const chat = read('src', 'renderer', 'src', 'stores', 'chat.ts')
+  assert.match(
+    chat,
+    /function studentFacingUserText\(/,
+    '翻译的实现必须在（唯一一份）'
+  )
+  assert.match(
+    chat,
+    /export[\s\S]{0,40}studentFacingUserText|studentFacingUserText\s*\n?\s*[,}]/,
+    '翻译函数要**导出**给别的回看路径用（否则每条路都得自己再写一份）'
+  )
+  // ① ② 对话页内部两处恢复：`session:state`（冷启动）与 `openSession`/`startNewSession`/`branchSession`。
+  //    ⚠️ 数的是**调用**（`studentFacingMessages(`），不含定义那一行
+  //    （定义写作 `function studentFacingMessages<T extends …>(`，带泛型参数，不该被算进来）。
+  const restoreCalls = (chat.match(/[^a-zA-Z]studentFacingMessages\(/g) ?? []).length
+  assert.ok(
+    restoreCalls >= 2,
+    `对话 store 里两处恢复都要过翻译（冷启动 + 切换/分叉），实测 ${restoreCalls} 处`
+  )
+
+  // ③ 档案页的历史会话回看
+  //
+  // ⚠️ **必须剥注释再断言**：那个文件的注释里**刻意**引用了 `studentFacingUserText`
+  //   （「翻译的唯一实现是 stores/chat.ts 的 studentFacingUserText」）——
+  //   不剥的话，把真正的调用删掉、注释留着，守卫照样绿（变异验证当场抓到这个假绿）。
+  //   而且判据要落在**调用形状**上，不是「文件里出现过这个名字」。
+  const sessions = stripComments(read('src', 'renderer', 'src', 'study', 'SessionsTab.vue'))
+  assert.match(
+    sessions,
+    /chat\.studentFacingUserText\(/,
+    '「历史会话」回看必须**真的调用**译文 —— 这条路漏过：' +
+      '学生在档案页又能读到「请用 submit_quiz…」与 gen-* 题号（只留注释不算修好）'
+  )
+})
+
+/* ================================================================== *
+ * ⑮ 存疑的失败文案：交给学生前必须过面向学生的翻译
+ * ================================================================== */
+
+test('★★ 关卡进度这类后端失败文案不得直出（HTTP 状态码会印到学生页面上）', () => {
+  // 走查原句：「界面文案不得包含服务器路径 / HTTP 状态码」。
+  // `stores/quiz.ts` 的 `progressError` 曾经直出 wire 层的
+  // `读取失败（HTTP 503）：<detail>`，而它与 `bankError` 不同，**没有**过翻译 ——
+  // 于是编程页左侧的关卡列表与闯关页都会把 HTTP 状态码印给学生。
+  const quiz = stripComments(read('src', 'renderer', 'src', 'stores', 'quiz.ts'))
+  const assignments = [...quiz.matchAll(/progressError\.value\s*=\s*([^\n]+)/g)].map((m) => m[1].trim())
+  assert.ok(assignments.length > 0, 'progressError 应当有赋值点（改了字段名就同步这条守卫）')
+  for (const rhs of assignments) {
+    if (rhs === 'null') continue
+    assert.match(
+      rhs,
+      /toStudentFacingMessage|describeClientError/,
+      `progressError 的赋值没有过面向学生的翻译：${rhs}\n` +
+        'wire 层的文案形如「读取失败（HTTP 503）：…」，它会直接出现在编程页与闯关页上'
+    )
+  }
+})
+
+test('★★ 空态必须是引导 / 高光，不是系统占位', () => {
+  const mistakes = read('src', 'renderer', 'src', 'study', 'MistakesTab.vue')
+  const empty = read('src', 'renderer', 'src', 'components', 'EmptyState.vue')
+
+  // 「没有错题」对学生是**好事**，要用高光态而不是灰色占位
+  assert.match(
+    mistakes,
+    /tone="success"/,
+    '错题本空态必须用 success 色调 —— 它是一份「全对」的成绩，不是加载失败'
+  )
+  // 空态组件必须支持这一档（否则上面的 tone 会被忽略、静默退化成普通空态）
+  assert.match(empty, /'empty' \| 'loading' \| 'error' \| 'success'/, 'EmptyState 必须支持 success 档')
+  assert.match(empty, /data-tone='success'|\[data-tone='success'\]/, 'success 档要有自己的视觉（不能与 empty 同款）')
+
+  // 导出成 Markdown 的那一份也要跟着改（它是同一个空态的另一种出口）
+  const md = read('src', 'renderer', 'src', 'study', 'report-markdown.ts')
+  assert.match(md, /还没有错题记录/, 'Markdown 里的那句仍要含「还没有错题记录」（既有断言按它匹配）')
+  // ⚠️ 剥注释再断言：文件里**刻意**引用了旧句子（讲为什么它太冷），那是决策记录
+  assert.doesNotMatch(
+    stripComments(md),
+    /保持住/,
+    '但语气要与界面同步改暖（「保持住」是命令式，冷）'
+  )
+})

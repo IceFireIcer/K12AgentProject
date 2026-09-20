@@ -621,27 +621,77 @@ async function main() {
       '线宽与缩进不一致时，连接线会落在错误的列上（看起来「挂在错误的父下面」）')
 
     // D12：折叠「有子分支」的那一行，它的**整枝**都要消失
+    //
+    // ★★ 还要**挑对要收的那一行**：必须优先收一个**有孙辈**的节点。
+    //    只收「孩子是叶子」的节点抓不到「只藏直接子级」这个缺陷 ——
+    //    那种节点收起来两种情况看起来一模一样（孩子本来就没有孩子）。
+    //    实测：初版收的是列表里第一个有箭头的行（子树只有 1 层），
+    //    把折叠逻辑改成「只藏直接子级」之后 D12 **照样绿**（变异验证抓到）。
+    //    所以这里按「子树里是否存在 depth > ownerDepth + 1 的行」挑，
+    //    挑不到有孙辈的才退回任意一个。
     const collapse = await cdp.evaluate(`(() => {
-      const fold = document.querySelector('[data-testid="session-fold"]')
-      if (!fold) return { skipped: true }
-      const before = document.querySelectorAll('[data-testid^="session-row-"]').length
-      fold.click()
-      return { skipped: false, before }
+      const rows = () => Array.from(document.querySelectorAll('[data-testid^="session-row-"]'))
+      const all = rows()
+      const folds = all
+        .map((r, index) => ({ r, index, fold: r.querySelector('[data-testid="session-fold"]') }))
+        .filter((x) => x.fold)
+      if (folds.length === 0) return { skipped: true }
+
+      /** 某一行自己的子树（深度优先展开 → 紧跟其后、深度更大的那些）与其中的最深深度。 */
+      const subtreeOf = (index) => {
+        const ownerDepth = Number(all[index].getAttribute('data-depth'))
+        const ids = []
+        let maxDepth = ownerDepth
+        for (let i = index + 1; i < all.length; i += 1) {
+          const d = Number(all[i].getAttribute('data-depth'))
+          if (d <= ownerDepth) break
+          ids.push(all[i].getAttribute('data-testid'))
+          if (d > maxDepth) maxDepth = d
+        }
+        return { ownerDepth, ids, maxDepth }
+      }
+
+      // 优先「子树里还有孙辈」的那一个；没有再退而求其次
+      const chosen =
+        folds.find((x) => subtreeOf(x.index).maxDepth > subtreeOf(x.index).ownerDepth + 1) ?? folds[0]
+      const info = subtreeOf(chosen.index)
+      chosen.fold.click()
+      return {
+        skipped: false,
+        before: all.length,
+        ownerDepth: info.ownerDepth,
+        subtree: info.ids,
+        hasGrandchild: info.maxDepth > info.ownerDepth + 1,
+        ownerId: chosen.r.getAttribute('data-testid')
+      }
     })()`)
     if (!collapse.skipped) {
       await sleep(500)
       const after = await cdp.evaluate(`(() => {
         const rows = Array.from(document.querySelectorAll('[data-testid^="session-row-"]'))
+        const ids = rows.map((r) => r.getAttribute('data-testid'))
         return {
           count: rows.length,
-          // ★ 只有**最深的那些**该消失；判据用「还有没有比被收起点更深的行」
-          deeperLeft: rows.some((r) => Number(r.getAttribute('data-depth')) > 0),
-          expanded: document.querySelector('[data-testid="session-fold"]')?.getAttribute('aria-expanded')
+          ids,
+          ownerStillThere: ids.includes(${JSON.stringify(collapse.ownerId)}),
+          // ⚠️ aria 必须读**被点的那一行自己的**箭头，不能拿全列表第一个
+          //   （querySelector 取的是 DOM 里第一个 fold，而上面刻意挑的是
+          //    「有孙辈」的那一个 —— 两者常常不是同一行。实测因此报了一条假红。）
+          //   ⚠️ 本段在模板字符串里：注释中不能出现反引号（会提前结束字符串）
+          expanded: (() => {
+            const owner = rows.find((r) => r.getAttribute('data-testid') === ${JSON.stringify(collapse.ownerId)})
+            const fold = owner && owner.querySelector('[data-testid="session-fold"]')
+            return fold ? fold.getAttribute('aria-expanded') : null
+          })()
         }
       })()`)
+      const leftover = collapse.subtree.filter((id) => after.ids.includes(id))
       check('D12', '收起一个节点会把**整枝**藏掉（不是只藏直接子级）',
-        after.count < collapse.before && !after.deeperLeft && after.expanded === 'false',
-        `${collapse.before} 行 → 收起后 ${after.count} 行；仍有更深行=${after.deeperLeft}；aria-expanded=${after.expanded}`,
+        // 三条：整枝行不见了、**被收起的那一行自己还在**（否则是收没了不是收起了）、aria 如实反映
+        leftover.length === 0 && after.ownerStillThere && after.expanded === 'false',
+        `${collapse.before} 行 → 收起后 ${after.count} 行；` +
+          `该消失的子树 ${collapse.subtree.length} 行（含孙辈=${collapse.hasGrandchild}）、仍残留 ${leftover.length} 行；` +
+          `被收起的那行还在=${after.ownerStillThere}；aria-expanded=${after.expanded}`,
         '只藏直接子级的话，展开根节点下面的孙辈会**孤零零露出来**（学生看到一条没有父的行）')
       // 收回去，别让后续检查跑在一个被折叠的列表上
       await cdp.evaluate(`document.querySelector('[data-testid="session-fold"]')?.click()`)

@@ -38,7 +38,14 @@ import {
   normalizeChapterState,
   resolveChapterBridge
 } from '../api/chapter'
-import { buildQuizSubmissionMessage, collectQuizResults, type QuizResultView } from '../cards/quiz'
+import {
+  buildQuizSubmissionMessage,
+  collectQuizResults,
+  quizSubmissionDisplayText,
+  quizUserTextDisplay,
+  type QuizResultView
+} from '../cards/quiz'
+import { codingUserTextDisplay } from '../cards/coding'
 import {
   applyChatEvent,
   emptyConversation,
@@ -425,7 +432,9 @@ export const useChatStore = defineStore('chat', () => {
         // ★ 只在**渲染进程手里还没有任何消息**时才铺历史：
         //   挂载与「首条消息发出」可能竞态（学生手快），那时用历史覆盖会把他刚发的那轮抹掉。
         if (conversation.value.turns.length === 0 && result.messages.length > 0) {
-          conversation.value = restoreConversation(result.messages, null)
+          // ★ 与 `applySwitchResult` 同一个出口的纪律：历史里的学生消息也要过翻译
+          //   （JSONL 存的是发给模型的原文，见 `studentFacingMessages`）。
+          conversation.value = restoreConversation(studentFacingMessages(result.messages), null)
         }
         opening.value = result.opening
         openingKpId.value = result.openingKpId
@@ -563,7 +572,9 @@ export const useChatStore = defineStore('chat', () => {
     // ★ 打上「这一轮回答时系统判出的学段」：历史消息的学段是**当时**的，不是现在的 ——
     //   但我们手里没有「当时」这个值（它没进 JSONL），所以按当前学段标注。
     //   标错比不标更坏，所以历史消息**一律不标**（传 null）。
-    conversation.value = restoreConversation(result.messages, null)
+    // ★★ 历史里的学生消息过一遍 `studentFacingMessages`：JSONL 存的是**发给模型的原文**
+    //   （卡片请求里带着内部指令），不翻译的话学生重启后会在气泡里再读到一次（见该函数）。
+    conversation.value = restoreConversation(studentFacingMessages(result.messages), null)
     // 清掉与「上一段对话」绑定的临时状态（与新会话同一套清理，见 resetConversation）
     localNotice.value = null
     queuedText.value = null
@@ -579,6 +590,9 @@ export const useChatStore = defineStore('chat', () => {
     // ★ 清掉超前缓冲：那些条目 id 属于**上一条会话** —— 留着它们会在新会话里
     //   命中同一个 requestId（理论上不会，但那是一个不该存在的巧合依赖）。
     pendingTurnEntries.clear()
+    // ★ 显示→wire 的映射同样属于**上一条会话**：清掉，免得同一句显示文本在新会话里
+    //   被翻译成上一段对话留下的 wire 文本（而且它本来就没必要跨会话活着）。
+    wireTextByDisplay.clear()
   }
 
   /**
@@ -606,6 +620,9 @@ export const useChatStore = defineStore('chat', () => {
     opening.value = ''
     openingKpId.value = ''
     openingDismissed.value = false
+    // ★ 清掉「显示 → wire」映射（与 `applySwitchResult` 同一条纪律：它是本地翻译表，
+    //   属于这段对话；留着会让同一句显示文本被翻译成上一段对话的 wire 文本）。
+    wireTextByDisplay.clear()
   }
 
   /**
@@ -843,14 +860,89 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * ★★ 「学生看到的那一句 → 真正发给模型的那一段」的**渲染进程本地**映射。
+   *
+   * 为什么需要它（评审抓到的缺陷）：卡片发起的求助/运行请求，正文里必须写着
+   * 「请用 get_coding_hint」「不要直接给我完整答案」这类**写给模型的指令**
+   * （模型靠它才选对 Tool）；而 `ChatSendRequest` 只有 `text` 一个字段（守卫 G6c），
+   * 于是那段文本必然原样变成**学生自己的气泡内容** —— 底牌亮给了学生。
+   * 解法：把「显示」与「wire」在**渲染进程内部**分开承载，契约与 IPC 一个字段都不动。
+   *
+   * ★ 方向是「显示 → wire」而不是反过来：排队条、取消排队还回输入框、气泡三处
+   *   读到的都是**显示文本**，于是三处都不会漏出内部指令。
+   * ★ 只由卡片发起的消息写入；学生自己打的字（显示 = wire）不进表。
+   * ★ 代价（明说）：**排队**那条消息的 wire 文本会在表里留一条 —— 学生取消排队时它
+   *   不会被清掉（最多留 32 条，同一条显示文本下次发送会覆盖它）。它不构成泄漏
+   *   （表只增不减地记着"这句话发给模型时该长什么样"），所以不做额外清理。
+   */
+  const wireTextByDisplay = new Map<string, string>()
+  /** 映射表的容量上限（与 `pendingTurnEntries` 同量级）：防伪造调用把它撑成泄漏。 */
+  const WIRE_TEXT_MAP_LIMIT = 32
+
+  function rememberWireText(display: string, wire: string): void {
+    if (wire === display) return
+    if (wireTextByDisplay.size >= WIRE_TEXT_MAP_LIMIT) {
+      const oldest = wireTextByDisplay.keys().next().value
+      if (oldest !== undefined) wireTextByDisplay.delete(oldest)
+    }
+    wireTextByDisplay.set(display, wire)
+  }
+
+  /** 取这次要发给模型的文本（没登记过就是显示文本本身）。 */
+  function wireTextFor(display: string): string {
+    return wireTextByDisplay.get(display) ?? display
+  }
+
+  /**
+   * ★★ **回看历史**时把「卡片写给模型的内部指令」还原成学生语言。
+   *
+   * 为什么回看这条路也要管：Pi 的 JSONL 里存的是**发给模型的原文**（它本来就该存原文），
+   * 所以不翻译的话，学生重启应用后会在自己的气泡里**再一次**读到那段内部指令 ——
+   * 与实时路径上被修掉的是同一个缺陷。渲染进程显示前过一遍翻译即可关掉它，
+   * 磁盘上的会话文件一个字不动（模型续聊时仍看到完整原文）。
+   * ★ 两个卡片模块各管自己的消息格式（`codingUserTextDisplay` / `quizUserTextDisplay`），
+   *   这里只做分发 —— 文案格式跟着它的产出者走，不集中抄一份。
+   * ★ 只动 `role === 'user'`，且两个翻译都只认本应用自己的前缀：
+   *   认不出一律原样返回 —— 绝不改写学生自己打的字。
+   */
+  function studentFacingUserText(text: string): string {
+    const coding = codingUserTextDisplay(text)
+    return coding === text ? quizUserTextDisplay(text) : coding
+  }
+
+  function studentFacingMessages<T extends { role: 'user' | 'assistant'; text: string }>(
+    messages: readonly T[]
+  ): T[] {
+    return messages.map((message) =>
+      message.role === 'user' ? { ...message, text: studentFacingUserText(message.text) } : message
+    )
+  }
+
+  /**
    * 发一轮对话：本地先落学生消息，拿到 `requestId` 后建立本轮（事件可能已在前头到达，会被回放）。
+   *
+   * ★★ 两个参数是这件事的全部要点（也决定了它为什么长这样）：
+   *   - `rawText` = **显示文本**：学生气泡里出现的那一句，也是排队条里、
+   *     取消排队还回输入框时看到的那一句；
+   *   - `wireText`（可选）= **真正发给模型的那一段**，缺省 = 显示文本。
+   *   卡片发起的消息必须同时给两个（见 `wireTextByDisplay` 的说明）；普通打字只给一个。
+   *   ⚠️ 第二个参数**刻意做成位置参数、而不是可选属性的参数对象**：
+   *   `desktop/tests/ux-queue-and-scroll.test.ts` 用「按花括号配平取本函数函数体」的
+   *   源码级守卫钉住忙时排队行为，而参数里的 `{` 会先于函数体出现，
+   *   让那个守卫切出来的是一段极短的文本（守卫会假红）。改签名前先看那条守卫。
    *
    * ★ **忙的时候不再静默丢弃**（见 {@link queuedText}）：回答还在生成时再次发送 = 排队，
    *   并立刻给出可见反馈（输入框清空 + 界面上出现「待发送」条）。
    */
-  async function send(rawText: string): Promise<void> {
+  async function send(rawText: string, wireText?: string): Promise<void> {
     const text = rawText.trim()
     if (text.length === 0) return
+
+    // wire 文本：卡片发起的消息登记一次，之后（含排队后自动发出那一次）都按显示文本取回
+    const explicitWire = wireText?.trim()
+    if (explicitWire !== undefined && explicitWire.length > 0) rememberWireText(text, explicitWire)
+    const outgoing =
+      explicitWire !== undefined && explicitWire.length > 0 ? explicitWire : wireTextFor(text)
 
     // ★ 正在回答：**排队**而不是丢掉。旧实现这里直接 `return` —— 学生按了回车却什么都没发生，
     //   只会以为键盘坏了（`scripts/ux-probe-busy-send.mjs` 实测）。
@@ -894,7 +986,9 @@ export const useChatStore = defineStore('chat', () => {
       // ★ 不传学段：`ChatSendRequest` 里没有 `gradeLevel`。为什么手动学段也不能从这里走 ——
       //   那样「发一条消息」会顺带写一次学段（重发同一句话、清空重打都会再写一遍），
       //   而且没有回执告诉学生冷却还剩几轮（`grade:set` 才有）。
-      const result = await window.api.sendChat({ text })
+      // ★ 发出去的是 **wire 文本**（卡片消息里带着写给模型的指令）；
+      //   落到轮次上的是**显示文本**（学生气泡里那一句）—— 两者只在这里分开一次。
+      const result = await window.api.sendChat({ text: outgoing })
       if (!result.ok) {
         localNotice.value = result.message
         return
@@ -916,9 +1010,12 @@ export const useChatStore = defineStore('chat', () => {
    *
    * ★ **前端不判分**：这里只把「题目编号 + 学生的作答」说清楚，交给主 Agent 调 `submit_quiz`，
    *   判分与掌握度更新都在 Python 侧（§6.3 答案泄漏防护）。渲染进程拿不到答案，也不需要。
+   * ★★ **两个文本分开给**（与编程卡片同一条纪律）：气泡里显示
+   *   `quizSubmissionDisplayText`（不含"请用 submit_quiz…"那句写给模型的指令），
+   *   发给模型的是 `buildQuizSubmissionMessage`（正文 + 指令，逐字节与原来一致）。
    */
   async function submitQuizAnswer(question: { qid: string; stem: string }, answer: string): Promise<void> {
-    await send(buildQuizSubmissionMessage(question, answer))
+    await send(quizSubmissionDisplayText(question, answer), buildQuizSubmissionMessage(question, answer))
   }
 
   /**
@@ -1012,6 +1109,21 @@ export const useChatStore = defineStore('chat', () => {
     /** 重新读一次当前章节（学段变化后由 store 自己调；不抛异常）。 */
     refreshChapter,
     send,
-    submitQuizAnswer
+    submitQuizAnswer,
+    /* ── 回看历史的译文（**唯一的实现**，别再写第二份）────────────────── */
+    /**
+     * ★★ 把一条**用户消息**的 wire 原文翻成学生能读的那一版。
+     *
+     * 为什么必须共享：同样的翻译在**三条**回看路径上都需要 ——
+     *   ① 对话页切换/恢复会话（本 store 内部，已在用）；
+     *   ② 学习档案 →「历史会话」页里点开回看（`study/SessionsTab.vue`）；
+     *   ③ 将来任何「把历史正文渲染出来」的地方。
+     * ② 曾经漏掉：那条路直接渲染主进程项目的 `message.text`（= JSONL 里的 wire 原文），
+     * 于是学生在**档案页**又能读到 `题目编号：gen-ai-definition-jr-…` 与
+     * 「请用 submit_quiz 提交批改」那句内部指令 —— 实时路径与对话页都挡住了，
+     * 只有这条路漏着。现在导出这一个函数，谁渲染历史谁调它。
+     * ★ 只动用户消息；两个卡片模块各认自己的前缀，认不出一律原样返回。
+     */
+    studentFacingUserText
   }
 })

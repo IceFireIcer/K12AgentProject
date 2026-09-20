@@ -100,7 +100,12 @@ import {
   type SessionTranscript
 } from '../study/sessions.ts'
 // 导出的文件名清理（纯函数，安全边界）
-import { normalizeExportContent, sanitizeFileName } from '../study/export-naming.ts'
+import {
+  EXPORT_DIALOG_SPEC,
+  normalizeExportContent,
+  readExportExtension,
+  sanitizeFileName
+} from '../study/export-naming.ts'
 // ★ 候选合并的实现放在 `@shared/provider-catalog`：渲染进程要在切换预设时就地重算，
 //   两处各写一份的话规则会悄悄分叉（见那个文件的注释）。这里直接 import 共用。
 import { mergeModelCandidates } from '@shared/provider-catalog'
@@ -1474,7 +1479,14 @@ function registerWindowHandlers(): void {
 }
 
 /* ------------------------------------------------------------------ *
- * 导出（报告 / 错题本 → Markdown 文件）
+ * 导出（报告 / 错题本 → Markdown；学习地图 → CSV）
+ *
+ * ★ 一条通道承载两种导出物：后缀由 `readExportExtension` 收口到白名单
+ *   （渲染进程只能挑 `.md` / `.csv`，挑不出来回落 `.md`）——
+ *   理由见 `study/export-naming.ts` 的 `EXPORT_EXTENSIONS` 说明。
+ * ★ 这条通道本来就在用 `dialog.showSaveDialog`，所以 CSV 走它
+ *   天然拿到**原生保存对话框**（不再是 Chromium 的下载流，界面上不会出现
+ *   `blob:http://localhost:5173/...` 那种看着像坏了的来源文字）。
  * ------------------------------------------------------------------ */
 function registerExportHandler(): void {
   ipcMain.handle(IPC.fileExport, async (event, payload: unknown): Promise<FileExportResult> => {
@@ -1485,15 +1497,19 @@ function registerExportHandler(): void {
     if (clean.content.length > MAX_EXPORT_CHARS) {
       return { ok: false, message: `导出失败：内容过长（上限 ${MAX_EXPORT_CHARS} 字）。` }
     }
+    // ★ 后缀先过白名单（前端说了不算），再让文件名清理用它收尾 ——
+    //   `sanitizeFileName` 只接受这两个值，所以「.exe 当文件名递进来」仍然被替换掉。
+    const extension = readExportExtension(clean.extension)
     // ★ 文件名在**主进程**清理（纯函数，有单测）：渲染进程只能建议一个名字，不能指定路径。
-    const fileName = sanitizeFileName(clean.fileName)
+    const fileName = sanitizeFileName(clean.fileName, extension)
     const content = normalizeExportContent(clean.content)
+    const spec = EXPORT_DIALOG_SPEC[extension]
 
     const window = BrowserWindow.fromWebContents(event.sender)
     const options = {
-      title: '导出学习档案',
+      title: spec.title,
       defaultPath: fileName,
-      filters: [{ name: 'Markdown', extensions: ['md'] }]
+      filters: [{ name: spec.filterName, extensions: [spec.filterExtension] }]
     }
     const picked = window
       ? await dialog.showSaveDialog(window, options)

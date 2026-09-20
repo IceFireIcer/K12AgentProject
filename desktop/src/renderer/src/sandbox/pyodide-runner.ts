@@ -222,7 +222,14 @@ export function createPyodideRunner(
       const guard = setTimeout(() => {
         if (settled) return
         settled = true
-        const failure = `Pyodide 加载超时（${LOAD_TIMEOUT_MS}ms 内没有就绪）。请检查 <renderer>/pyodide/ 下的本地资源是否完整。`
+        // ★ 这句会**原样印到学生的编程页上**（`phase: 'failed'` 的 `failure`），
+        //   所以只能是学生话。原来的「请检查 <renderer>/pyodide/ 下的本地资源是否完整」
+        //   把安装路径与目录结构摆给了 10 岁学生 —— 他既看不懂、也无从下手。
+        //   那句排障话现在只进 console（开发与打包排障照常能看）。
+        console.error(
+          `[pyodide] 加载超时（${LOAD_TIMEOUT_MS}ms 内没有就绪）；请检查 <renderer>/pyodide/ 下的本地资源是否完整`
+        )
+        const failure = '代码运行器起得有点慢，没能准备好。稍后再试一次，或者先让团团用文字讲讲。'
         if (isCurrent()) {
           // ★ 不能只有 reject：一个**永不 settle** 的 reject 会让界面无限转圈，
           //   所以 readyPromise 的失败要同时把状态改成 failed 并给可读文案。

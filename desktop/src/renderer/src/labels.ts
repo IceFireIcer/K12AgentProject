@@ -91,6 +91,34 @@ export function gradeManualNotice(grade: GradeLevel): string {
   return `已按你选的${GRADE_LABELS[grade]}来讲。`
 }
 
+/**
+ * 学生手动切换学段后的**第二句**（场景说明），与 `gradeManualNotice` 一起给。
+ *
+ * ★ 走查结论：原提示「已按你选的初中来讲」对 K12 学生太短、太机械 ——
+ *   切换学段会改变整站配色、教材难度与讲话方式，学生看到界面变了却只得到
+ *   一句 9 个字的回执，会困惑「那我之前学的记录还在吗」。
+ * ★ 所以这里补的**只回答那一个问题**：记录在不在。不解释冷却轮数、
+ *   不说「系统判定」—— 那些是规则细节，不是学生这一刻的疑问。
+ */
+export function gradeSwitchDetail(grade: GradeLevel): string {
+  return `团团会换成${GRADE_LABELS[grade]}的说法和你聊，之前学过的东西都还在哦。`
+}
+
+/**
+ * 内容被安全规则拦下时，学生看到的**唯一**一句话。
+ *
+ * ★★ 为什么必须收口、且**不渲染后端给的 reason**：
+ *   后端 `SafetyVerdict.to_payload()` 的 `reason` 是给排障用的诊断串，
+ *   实测形态是「命中内容安全规则：越狱/绕过规则（regex:reveal_system_prompt）」。
+ *   把它摆给学生有三重问题：
+ *     ① 学生看不懂「regex」「越狱」，只会以为自己犯了错；
+ *     ② 它把防御策略（用正则匹配哪几类词）交代给了试图绕过的人 ——
+ *        这类细节不该出现在任何面向使用者的界面上（后端日志与教师视角除外）；
+ *     ③ 它和团团那句得体的回复并排出现，等于把 AI 的「底牌」摊开。
+ *   `reason` 本身**不删**：它仍进轨迹（教师视角）与主进程日志，排障能力不变。
+ */
+export const BLOCKED_STUDENT_NOTICE = '这句话我没法照着答，换个说法我们接着聊。'
+
 /** 没选章节时的说法（指示器与设置页共用**同一句**，两处不一致学生会以为没生效）。 */
 export const CHAPTER_NONE_LABEL = '未选择章节（自由问答）'
 
@@ -112,6 +140,21 @@ export const TURN_STATUS_LABELS: Record<TurnStatus, string> = {
   done: '回答完成',
   blocked: '已撤回',
   error: '能力受限'
+}
+
+/**
+ * 需要显示轮次状态角标的那几个状态（**`done` 不在其中**）。
+ *
+ * ★★ 为什么 `done` 不显示：走查结论原话是「『回复完成』状态标签极其多余且令人困惑 ——
+ *   文字显示出来了就代表回复完成了」。聊天界面里「内容已经出现在屏幕上」本身就是完成信号，
+ *   再挂一个角标只会让学生想「完成？那还有什么没完成？」。
+ * ★ 其余三个**必须保留**，它们说的是「你看到的这些字不是最终答案」：
+ *   `streaming` 还在写、`blocked` 内容被换过、`error` 这轮没正常结束。
+ * ★ 这个判断必须收口成函数：三处渲染（气泡、卡片、导出）各写一遍 `!== 'done'`
+ *   迟早会有一处漏掉 `done`，表现是「有的地方还挂着『回答完成』」。
+ */
+export function showsStatusChip(status: TurnStatus): boolean {
+  return status !== 'done'
 }
 
 /** 三种题型的中文名（`QuizQuestionType`，契约里的三个字面量）。 */

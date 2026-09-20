@@ -44,6 +44,8 @@ import {
   masteryLabel,
   summaryLine
 } from './report-markdown'
+import { kpLabel, UNKNOWN_KP_LABEL } from './kp-label'
+import TeacherGate from '../components/TeacherGate.vue'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL, gradeOriginLabel } from '../labels'
 // `GradeOrigin` 的唯一来源是 `main/ipc/channels.ts`，由 `api/grade.ts` re-export
 // （与 labels.ts 同一写法）；`GradeSignalsView` 是生成物别名，在 `api/data.ts`。
@@ -196,9 +198,27 @@ function barHeight(value: number): string {
   return `${Math.round((value / max) * 100)}%`
 }
 
-/** 柱子上的悬停说明：三个真实数字都写出来（图上只画高度）。 */
+/**
+ * 柱子上的悬停说明：**三个真实数字都写出来**（图上只画高度）。
+ *
+ * ★ 口径只能是端点真有的三个数（`count` / `quizCount` / `correctCount`）。
+ *   这里此前写的是「活动 N 次 · 练习 N 次（答对 N 次）」—— 对着数还得自己换算。
+ *   现在换成一句人话：「17日：8 次活动，其中 5 道练习题，答对 4 道」。
+ *   ⚠️ **不许编出「阅读 N 篇」**这类字段：端点的日聚合里没有内容分类，
+ *      数据里没有的东西不能在悬停文字里出现（那就是假统计）。
+ */
 function barTitle(bar: DayBar): string {
-  return `${bar.day}：活动 ${bar.total} 次 · 练习 ${bar.quiz} 次（答对 ${bar.correct} 次）`
+  const parts = [`${friendlyDay(bar.day)}：${bar.total} 次活动`]
+  if (bar.quiz > 0) parts.push(`其中 ${bar.quiz} 道练习题，答对 ${bar.correct} 道`)
+  else parts.push('这天没有做练习题')
+  return parts.join('，')
+}
+
+/** `2026-09-17` → `9月17日`（悬停文字里写完整年份只会让人多读四个字，跨月时又不歧义）。 */
+function friendlyDay(day: string): string {
+  const parts = day.split('-')
+  if (parts.length !== 3) return day
+  return `${Number(parts[1])}月${Number(parts[2])}日`
 }
 
 /** 日期标签只留「日」：14/30 天的窗口下，完整日期会把柱子挤没。 */
@@ -223,8 +243,10 @@ const recommended = computed(() => insight.recommended)
  * 推荐知识点的显示名。
  *
  * 服务端取不到名字时会**回落成 kp_id**（`entry_names.get(kp_id, kp_id)`）——
- * 那种情况下再试教材清单里的中文名；两边都没有就原样显示 kp_id
- * （与错题本、闯关页同一条口径：**不编一个名字出来**，也不把标识藏掉）。
+ * 那种情况下再试教材清单里的中文名。
+ * ★ 两边都没有时给**中性标签**（`未命名知识点`）而不是 slug：推荐位是学生一眼要读的地方，
+ *   一串 `jr-py-data-features` 摆在那儿看起来就像报错；原始 id 仍进 `title`。
+ *   口径与唯一实现在 `study/kp-label.ts`（错题本、地图、章节进度共用同一份）。
  */
 const recommendedName = computed(() => {
   const item = recommended.value
@@ -354,8 +376,11 @@ function stageTag(stage: string): TagType {
  * kp_id → 知识点中文名。
  *
  * ⚠️ 闯关进度与掌握度都只给 `kpId`，而界面上不该只摆 `jr-py-data-features` 这种标识。
- *    名字来自**教材知识点清单**（与闯关页 `views/Quiz.vue` 同一个来源、同一个 `kb.sqlite`），
- *    取不到就原样显示 `kpId` —— **不编一个名字出来**。
+ *    名字来自**教材知识点清单**（与闯关页 `views/Quiz.vue` 同一个来源、同一个 `kb.sqlite`）。
+ * ★ 取不到名字时给**中性标签**（`未命名知识点`）而不是 slug —— 那多半是上一代教材
+ *   留下的残留行（`learning.db` 按学生长期保留），把 slug 摆给学生看像报错。
+ *   原始 id 仍然进 `title`（悬停可见），所以排障/答辩一点信息都没少。
+ *   完整口径与唯一实现在 `study/kp-label.ts`。
  */
 const kpNames = computed(() => {
   const map = new Map<string, string>()
@@ -364,7 +389,12 @@ const kpNames = computed(() => {
 })
 
 function nameOf(kpId: string): string {
-  return kpNames.value.get(kpId) ?? kpId
+  return kpLabel(kpId, null, (id) => kpNames.value.get(id) ?? null)
+}
+
+/** 名字是否真的取到了（取不到时把原始 id 放进 `title`，见 `study/kp-label.ts`）。 */
+function nameResolved(kpId: string): boolean {
+  return nameOf(kpId) !== UNKNOWN_KP_LABEL
 }
 
 /* ------------------------------------------------------------------ *
@@ -592,16 +622,25 @@ onMounted(() => {
             </div>
           </div>
           <div class="legend">
-            <!-- 图例顺序 = 柱子里从上到下的分段顺序（对不上会让人以为读到别的色块） -->
-            <span class="legend__i"><i class="dot dot--other"></i>其他活动</span>
-            <span class="legend__i"><i class="dot dot--wrong"></i>练习未答对</span>
-            <span class="legend__i"><i class="dot dot--ok"></i>练习答对</span>
+            <!-- 图例顺序 = 柱子里从上到下的分段顺序（对不上会让人以为读到别的色块）。
+                 ★ 每段的色块与柱子里那一段**同款**（含「练习没答对」的斜纹）：
+                   颜色不是唯一的区分手段，灰度打印或色觉差异下三段照样分得开。 -->
+            <span class="legend__i"><i class="dot dot--other" aria-hidden="true"></i>其他活动</span>
+            <span class="legend__i"><i class="dot dot--wrong" aria-hidden="true"></i>练习没答对</span>
+            <span class="legend__i"><i class="dot dot--ok" aria-hidden="true"></i>练习答对</span>
           </div>
-          <!-- 口径写在这里，而不是让人猜：端点只有活动总量与练习数，没有活动分类 -->
-          <p class="chart__note">
-            端点只给「活动总量 / 练习数 / 答对数」三个数，所以图上只分这三段；
-            问答、动画、编程在数据里没有分开，不做拆分。悬停柱子可看当天确切数字。
-          </p>
+          <!-- 给学生的一句话（原来这里是一段解释后端字段的「开发笔记」：
+               「端点只给…三个数…不做拆分」—— 那是设计说明，不该出现在学生眼前）。
+               口径本身没丢：它移进了下面的教师视角块。 -->
+          <p class="chart__note">把鼠标停在柱子上，就能看到当天的具体数字。</p>
+          <TeacherGate label="为什么图上只有这三段">
+            <p class="chart__note">
+              学习报告端点（<code>LearningReport.daily</code>）每天只回三个数：
+              活动总量 <code>count</code> / 练习数 <code>quizCount</code> / 答对数
+              <code>correctCount</code>，没有「问答 / 动画 / 编程」的分类维度，
+              所以图上只分这三段 —— 数据里没有的色块不画（画出来就是假统计）。
+            </p>
+          </TeacherGate>
         </div>
 
         <h4 class="subsection">每日明细</h4>
@@ -630,8 +669,9 @@ onMounted(() => {
       <p v-if="report.mastery.length === 0" class="state">还没有掌握度记录。</p>
       <ul v-else class="list" data-testid="report-mastery">
         <li v-for="item in report.mastery" :key="item.kpId" class="row">
-          <!-- 知识点名优先（与闯关 / 错题本同一来源）；取不到就退回 kp_id，
-               并把标识放进 title —— 不编名字，也不把标识藏掉 -->
+          <!-- 知识点名优先（与闯关 / 错题本同一来源）；取不到时显示中性标签、
+               原始标识只进 title —— 不编名字，也不把 slug 摆到学生眼前
+               （口径见 `study/kp-label.ts`：`learning.db` 里可能有上一代教材的残留行） -->
           <span class="row__name" :title="item.kpId">{{ nameOf(item.kpId) }}</span>
           <span class="bar"><span class="bar__fill" :style="{ width: barWidth(item.score) }"></span></span>
           <span class="row__score">{{ item.score.toFixed(2) }}</span>
@@ -694,7 +734,10 @@ onMounted(() => {
           :data-testid="`report-quiz-level-${level.kpId}`"
           :data-stage="level.stage"
         >
-          <span class="row__name">{{ nameOf(level.kpId) }}</span>
+          <span
+            class="row__name"
+            :title="nameResolved(level.kpId) ? undefined : level.kpId"
+          >{{ nameOf(level.kpId) }}</span>
           <el-tag size="small" effect="plain" :type="stageTag(level.stage)">
             {{ stageLabel(level.stage) }}
           </el-tag>
@@ -1050,12 +1093,28 @@ onMounted(() => {
   width: 100%;
 }
 
+/* ── 三段的配色：都是**既有令牌**，没有新增色值 ───────────────────────────
+ * 走查结论（原话）：「像财务报表」—— 原来三段是 border-strong（灰）/ warn（褐）/
+ * good（墨绿），三个低饱和色堆在一起确实像一张财务图。现在换成更明快的三个：
+ *   · 其他活动  → `--k12-cyan`（中性、信息性的青）
+ *   · 练习没答对 → `--k12-accent`（随学段变的活色，橙 / 蓝 / 靛 / 青绿）
+ *   · 练习答对  → `--k12-good`（绿 = 好，语义与其它地方一致）
+ * ★ **颜色不是唯一的区分手段**（本项目的明文规则）：中间那段用「斜纹」纹理，
+ *   灰度打印或色觉差异下三段仍分得开；图例里的色块与柱子用**同一套**配方。
+ * ⚠️ 斜纹的底色用 `--k12-surface`（卡片自身底色），不引入新的灰 ——
+ *   换成任何硬编码的 rgba 都是「新色值」。
+ */
 .chart__seg--other {
-  background: var(--k12-border-strong);
+  background: var(--k12-cyan);
 }
 
 .chart__seg--wrong {
-  background: var(--k12-warn);
+  background-color: var(--k12-accent);
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--k12-surface) 0 2px,
+    transparent 2px 5px
+  );
 }
 
 .chart__seg--ok {
@@ -1097,16 +1156,22 @@ onMounted(() => {
   border-radius: var(--k12-r-flat);
 }
 
+/* 图例色块 = 柱子里那一段的**同一套配方**（含斜纹），不是「差不多的一块颜色」 */
 .dot--ok {
   background: var(--k12-good);
 }
 
 .dot--wrong {
-  background: var(--k12-warn);
+  background-color: var(--k12-accent);
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--k12-surface) 0 2px,
+    transparent 2px 5px
+  );
 }
 
 .dot--other {
-  background: var(--k12-border-strong);
+  background: var(--k12-cyan);
 }
 
 /* ── 逐关进度 / 掌握度 / 章节：同一套「名称 + 条 + 数字」行 ───────────── */

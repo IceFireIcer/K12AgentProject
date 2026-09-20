@@ -45,11 +45,33 @@ export interface PageMeta {
   subtitle?: string
   /** 侧栏分组名；空串 = 独占一组且不渲染组标题。 */
   section: string
-  /** 是否出现在侧栏。`false` 的页面**必须有别的入口** —— 本项目没有 router，
-   *  没有入口就等于点不到（`knowledge` / `dependency` 曾因此变成死页面，见 D-040 的补记）。 */
-  nav: boolean
+  /**
+   * 侧栏可见性：
+   *   `true`      —— 学生与教师视角都显示；
+   *   `'teacher'` —— **只在教师 / 答辩视角显示**（数据检视 / 破坏性运维类页面）；
+   *   `false`     —— 不进侧栏，**必须有别的入口**（本项目没有 router，
+   *                  没有入口就等于点不到，见 D-040 的补记）。
+   *
+   * ★ `'teacher'` 与 `false` 的区别是**故意的**：前者「功能仍在、只是默认不给学生看」
+   *   （入口在设置页的高级区里说清怎么打开），后者「本来就不该出现在导航里」。
+   *   判据见 `visibleInSidebar()` —— 侧栏不要自己比较这个字段。
+   */
+  nav: boolean | 'teacher'
   /** 侧栏图标名（`lucide-vue-next` 的组件名）。 */
   icon?: string
+}
+
+/**
+ * 某一页在当前视角下是否进侧栏（**唯一判据**，侧栏组件不要自己比较 `nav`）。
+ *
+ * ★ 收口成一个函数的原因：`nav` 现在是三态联合，`nav === true` 与 `nav !== false`
+ *   这两种「差不多」的写法在 `'teacher'` 上给出相反结果，而写错的表现是
+ *   「教师视角下知识库页不见了」—— 一个只有评委才会发现、且会被当成功能没做的错误。
+ */
+export function visibleInSidebar(meta: PageMeta, isTeacher: boolean): boolean {
+  if (meta.nav === true) return true
+  if (meta.nav === 'teacher') return isTeacher
+  return false
 }
 
 /**
@@ -71,29 +93,33 @@ export const PAGES: Record<PageName, PageMeta> = {
   },
   settings: {
     title: '设置',
-    subtitle: '模型接入 · 本地服务 · 隐私',
+    subtitle: '学段 · 教材章节 · 外观',
     section: '学习数据',
     nav: true,
     icon: 'Settings'
   },
-  // 数据层检视页：**挂进侧栏**。
+  // 数据层检视页：**挂进侧栏，但只在教师 / 答辩视角可见**。
   //
-  // ★ 设计原型把它们标成 `nav: false`（「开发/数据检视」页，不进学生日常导航），
-  //   但原型是 **router 驱动**的 —— 那时可以直接改哈希进得去。
-  //   本项目没有 router（见 D-040），`nav: false` 于是等于**这两页点不到**：
-  //   实测确认全仓没有任何一处导航到它们，而「教材知识库」里恰恰有
-  //   **导入教材 / 重建索引**这两个真实功能（`knowledge:import` / `knowledge:rebuild`）。
-  //   做了却进不去的功能等于没做，所以这里改成进侧栏、放在「学习数据」组末尾。
+  // ★ 历史（两次都是实测踩出来的，改这一段前先读完）：
+  //   ① 设计原型把它们标成 `nav: false`，而原型是 router 驱动的（可以直接改哈希进去）；
+  //      本项目没有 router（见 D-040），`nav: false` 于是等于**这两页点不到** ——
+  //      而「教材知识库」里恰恰有**导入教材 / 重建索引**两个真实功能。
+  //      做了却进不去的功能等于没做，所以当时改成进侧栏。
+  //   ② 2026-09-20 走查发现另一端的问题：这一页会把 `kb.sqlite` 的**完整路径**
+  //      （含 Windows 用户名）、`kp_id`、`已嵌入` 状态、以及两个破坏性按钮
+  //      直接摆到学生面前 —— 一个 10 岁学生既看不懂，也不该有能力重建索引。
+  //   现在的落点 = 「入口还在、只是不在学生视角的侧栏里」（`nav: 'teacher'`）：
+  //   功能没被删，评委打开教师视角就能用；学生视角下侧栏不渲染它。
   knowledge: {
     title: '教材知识库',
     subtitle: '四学段分块 · 向量索引状态 · 导入与重建',
     section: '学习数据',
-    nav: true,
+    nav: 'teacher',
     icon: 'Library'
   },
   dependency: {
-    title: '依赖图谱',
-    subtitle: '知识点前置关系（from 是前置）',
+    title: '学习地图',
+    subtitle: '知识点的先后关系',
     section: '学习数据',
     nav: true,
     icon: 'GitBranch'
@@ -111,6 +137,18 @@ export const PAGE_ORDER: readonly PageName[] = [
   'dependency',
   'settings'
 ]
+
+/**
+ * 这一页是否**只属于教师 / 答辩视角**（见 `PAGES` 里 `nav: 'teacher'` 的那些）。
+ *
+ * ★ 为什么需要它：教师视角下学生可以进「教材知识库」，切回学生视角时**得有人把他带走** ——
+ *   否则界面会停在一个侧栏里已经没有入口的页面上（学生看到自己在看一个
+ *   「进得来、退不出、也说不清为什么在这儿」的运维页面）。这不是渲染问题，
+ *   是**状态迁移**问题，所以判据放在 store 里、由 `App.vue` 监听视角变化时执行。
+ */
+export function isTeacherOnlyPage(page: PageName): boolean {
+  return PAGES[page].nav === 'teacher'
+}
 
 /* ------------------------------------------------------------------ *
  * 兼容层：顶栏的三步循环与 `studyTab`
