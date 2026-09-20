@@ -577,6 +577,22 @@ npm run check:server:packaged     # 查**已装进安装包**的那一份
 4. **不要在 artifact 里列不会产出的文件**：`latest.yml` 只在开了 publish provider 时才有，
    列了它会让 `upload-artifact` 整步失败。
 
+### ★ 怎么读 CI 的日志（两条「看着吓人其实没事」，别白查）
+
+1. **`Traceback` ≠ 失败。** 后端测试里有若干**故意制造错误**的用例
+   （`test_broken_database_is_503_not_500` 真的 `DROP TABLE student`、
+   动画模板故意插一行 `throw new Error`、`test_broken_template_is_skipped_not_fatal` …），
+   而 `logger.exception` 把堆栈打到 stderr **正是要验的行为**（生产里也要留档）。
+   实测：一次全量跑会在日志里留下 **3 条 Traceback**，而结论是 `OK`。
+   ★ **唯一的判据是最后两行**：`Ran N tests in Xs` + `OK` / `FAILED (...)`。
+   退出码由 `unittest` 决定（`uv run` 原样透传），真实失败一定非零。
+2. **被取消的 run 显示 `X`，那不是失败。** `ci.yml` 的
+   `concurrency: {group: ci-<ref>, cancel-in-progress: true}` 会在**同一分支
+   又来一次 push** 时取消上一轮 —— 于是你看到「X + 日志里一堆报错 + 结尾
+   `KeyboardInterrupt` / `The operation was canceled`」。
+   那种日志里**没有** `Ran N tests` 那一行（它根本没跑完）。
+   想避免的话：一次把改动推完，或在 Actions 页只认最新的那条 run。
+
 **发 Release 的三条（nightly 独有）**：
 5. **`permissions` 要 `contents: write`**（CI 是 `read`）。不写的话 `gh release create`
    被 403 挡下，而报错在**最后一步**才出现 —— 前面十几分钟构建全白跑。
