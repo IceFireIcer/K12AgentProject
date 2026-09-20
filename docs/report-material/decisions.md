@@ -1527,3 +1527,54 @@
 
 **服务哪条评分**：用户体验 15%（「我重新问过的那几条」一眼可辨，不用逐条点开确认）
 + 设计合理性 25%（排序退化性质、断环、坏数据降级 —— 三条都是「不写就会静默出错」）。
+
+---
+
+## D-062 · Nightly 产物发 GitHub Releases（说明取最近 20 条提交标题）
+
+**日期**：2026-09-20
+**背景**：nightly 原先只把产物传成 **artifact**（挂在单次 run 上、14 天过期）。
+需求是把**安装包 / 绿色压缩包 / 便携版**发到 **Releases**，发布说明读
+**最近 20 条提交的标题**。
+
+**决策**：
+
+1. **标签按日期 `nightly-YYYYMMDD`，标成 `--prerelease`**。
+   nightly 的语义是「一天一份」，日期标签最贴切；`--prerelease` 让它**不抢 Latest**
+   —— 正式交付版本（演示 / 答辩用的那个）要留给人手动发布的 release。
+2. **同日重复触发 = 更新那一份**（`gh release view` 命中则
+   `release upload --clobber` + `release edit`），而不是报「标签已存在」失败。
+   手动触发与定时任务撞车是常态，失败一次要人手动清理标签，成本高得多。
+3. **artifact 保留**（不是被 Release 取代）：两者用途不同 ——
+   artifact 挂在 run 上（排查时从 Actions 页直接下、14 天自动过期）；
+   Release 给的是**稳定下载页与直链**（发给别人、写进文档、贴进报告）。
+4. **发布说明只取提交标题**（`git log -20 --pretty=format:'- %s'`，按需求口径），
+   另加构建时间 / commit / 触发方式，以及一段「下载哪个」——三个产物都是免安装或安装，
+   学生/评审看一眼就知道该点哪个。
+5. **加一条条数自检**：说明里不足 2 条就 `::warning::` 点名 `fetch-depth`。
+   它防的是下面那条静默降级。
+
+**★★ 三个必须一起改的地方（少一个就白跑或不报错）**：
+
+| 改动 | 不改的后果 |
+| --- | --- |
+| `permissions: contents: write` | `gh release create` 被 403 挡下，**在最后一步才报**——十几分钟构建全白跑 |
+| `checkout` 的 `fetch-depth: 30` | 默认只取 **1 条**提交，`git log -20` 只输出一条**且不报错**（静默降级） |
+| `shell: bash` | Windows runner 默认 pwsh，`--pretty=format:` / `shopt` / 数组语法都不同 |
+
+**被否决的方案**：
+
+- **用 `electron-builder` 的 `publish` provider 自动发 Release**：
+  那要求配 `GH_TOKEN` 环境变量并让 electron-builder 接管上传与 tag 生成。
+  而我们要的说明文案（提交标题列表 + 下载指引）是 electron-builder 生成不了的，
+  它只会发一个 `latest.yml` 驱动的更新清单。用 `gh` 显式控制更直白，也少一处配置。
+- **标签用递增序号 `nightly-6`**：与 artifact 的 `run_number` 一样是「第几次构建」，
+  但 release 是给人看的，**日期**比序号好认（「我要上周那版」→ 直接找日期）。
+- **每次触发都新建 release**：一天可能触发好几次，会堆出一串同名日期的 release。
+  同日更新那一份更干净。
+
+**代价**：nightly 现在会写仓库（创建 release）—— 权限从 `read` 提到 `write`。
+这是**必要**的：不发 release 就不需要写权限；既然要发，就绕不过去。
+
+**服务哪条评分**：交付物（可运行的 .exe + 本地运行说明）——
+Release 页就是「拿到安装包」这条路径的最短入口，也是报告里可以直接引用的链接。

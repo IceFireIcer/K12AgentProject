@@ -564,7 +564,7 @@ npm run check:server:packaged     # 查**已装进安装包**的那一份
 | 文件 | 触发 | 干什么 | 多久 |
 | --- | --- | --- | --- |
 | `ci.yml` | push master / PR / 手动 | 后端测试 + 桌面 typecheck/测试/三项自检 + 令牌漂移 | ~3 min |
-| `nightly.yml` | 每天 UTC 18:00 / 手动 | **真打包**：取模型 → 建带向量 kb → 双端全量测试 → PyInstaller → electron-builder（nsis/zip/portable）→ 校验包内后端新鲜度 → 上传 artifact（保留 14 天） | ~15 min |
+| `nightly.yml` | 每天 UTC 18:00 / 手动 | **真打包**：取模型 → 建带向量 kb → 双端全量测试 → PyInstaller → electron-builder（nsis/zip/portable）→ 校验包内后端新鲜度 → **发 GitHub Release** + 传 artifact（保留 14 天） | ~19 min |
 
 **四条纪律（都是云端首跑踩出来的，见 P-107）**：
 1. **中文输出必须自己保证 stdio 是 UTF-8**：任何会打印中文的入口（含被 PyInstaller
@@ -576,6 +576,17 @@ npm run check:server:packaged     # 查**已装进安装包**的那一份
    `spec` 与 `fetch_embedding_model.py` 都会 `materialize_symlinks()` 并断言残留为 0。
 4. **不要在 artifact 里列不会产出的文件**：`latest.yml` 只在开了 publish provider 时才有，
    列了它会让 `upload-artifact` 整步失败。
+
+**发 Release 的三条（nightly 独有）**：
+5. **`permissions` 要 `contents: write`**（CI 是 `read`）。不写的话 `gh release create`
+   被 403 挡下，而报错在**最后一步**才出现 —— 前面十几分钟构建全白跑。
+6. ★★ **`checkout` 要 `fetch-depth: 30`**：默认只取 **1 条**提交，而发布说明要读
+   最近 20 条标题 —— 默认值下 `git log -20` 只输出一条**且不报错**（静默降级）。
+   发布说明那一步另有**条数自检**（不足 2 条就 `::warning::` 点名 fetch-depth）。
+7. **`shell: bash`**（Windows runner 默认 pwsh）：`git log --pretty=format:`、
+   `shopt`、数组这些在 pwsh 里语法不同。★ 脚本里的 `shopt -s nullglob` 是**必须**的
+   （实测：不开的话没匹配到的通配符会变成一个原样的文件名，最后报「文件找不到」
+   而不是「没构建出产物」）。
 
 **纪律**：关卡不过不进下一阶段；每天结束做一次 git 提交（写清「票号 + 产出」）；
 每完成一步跑一次 `npm run typecheck`（契约漂移的第一道防线，不要攒到最后修）；
