@@ -58,13 +58,13 @@ export const CONNECTION_FAILURE_TEXT =
  *   不是「这个知识点还没有预置内容」这件事本身 —— 学生要靠它决定
  *   「换个知识点」还是「等一会儿重试」。
  * ★ `template`（代码模板）**不在这里**：那句话带编程页特有的下一步
- *   （「换一个知识点试试，或者先让团团用文字讲讲」），由
+ *   （「换一个知识点试试，或者先让智团团用文字讲讲」），由
  *   `stores/code.ts` 的 `studentFacingTemplateError()` 给 —— 一处一句，不两处都写。
  */
 const TOPIC_FALLBACK: Record<Exclude<StudentFacingTopic, 'template'>, string> = {
-  hint: '这道题还没有分级提示。先按现在的思路自己试一下，或者回对话里让团团讲讲思路。',
-  quiz: '这一关还没有题目。换一关试试，或者先让团团讲讲这个知识点。',
-  animation: '这个知识点还没有配套的动画。换个知识点试试，或者让团团用文字讲讲。',
+  hint: '这道题还没有分级提示。先按现在的思路自己试一下，或者回对话里让智团团讲讲思路。',
+  quiz: '这一关还没有题目。换一关试试，或者先让智团团讲讲这个知识点。',
+  animation: '这个知识点还没有配套的动画。换个知识点试试，或者让智团团用文字讲讲。',
   analyze: '这次的运行结果暂时没能分析出来。上面的运行输出是真的，不受影响 —— 稍后再试一次。',
   connection: CONNECTION_FAILURE_TEXT,
   generic: '这一步暂时没走通 —— 稍等一会儿再试，或者换一个知识点。'

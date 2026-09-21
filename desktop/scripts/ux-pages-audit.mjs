@@ -2,8 +2,8 @@
  * 逐页 UX 体检：把侧栏八个页面**逐个走一遍**，量「人用起来顺不顺」。
  *
  * 为什么需要它：`ux-audit.mjs` 只覆盖对话页（最高频，但不是全部）。
- * 动画 / 编程 / 闯关 / 学习档案 / 学习地图 / 设置 这六页（学生视角；
- * 教材知识库是教师专属页，不在学生侧栏里）
+ * 动画 / 编程 / 闯关 / 学习记录 / 知识图谱 / 设置 这六页（学生视角；
+ * 参考资料库是教师专属页，不在学生侧栏里）
  * 各有各的交互形态 —— 编辑器能不能打字、列表空态有没有说明、按钮点下去有没有反馈，
  * 这些在对话页的量法里都体现不出来。
  *
@@ -25,6 +25,41 @@ class Cdp {
     await cdp.#connect(page.webSocketDebuggerUrl)
     return cdp
   }
+  /**
+   * ★★ 让渲染器**真的在渲染**（2026-09-21 实测补，不然后面一半的断言都是假的）。
+   *
+   * 背景：CDP 连上的窗口如果处于 `document.visibilityState === 'hidden'`
+   * （后台窗口 / 无人操作时的常见状态），Chromium 会**停掉渲染生命周期** ——
+   * 实测 `requestAnimationFrame` 一秒 0 次，而 `setInterval` 照常（2 次/秒）。
+   * 后果：`ResizeObserver` **一次都不回调**，于是
+   *   · 「内容长高后是否自动滚到底」测不到（B1/B2 永远红，而代码是对的）；
+   *   · 「容器变化驱动重排」这类断言全部失真。
+   * 实测指纹：`roFires: 0` 而 `dist` 单调递增。
+   * ★ 修法：`Page.bringToFront` + `Emulation.setFocusEmulationEnabled` ——
+   *   之后 `visibilityState` 变 `visible`、rAF 回到 ~240/秒（实测）。
+   * ⚠️ 这两条只影响**测量环境**，不改产品行为；少了它们，探针会给出**看起来像产品缺陷**的红。
+   */
+  async ensureRendering() {
+    // ★★ 让窗口**真的可见**：hidden 状态下 Chromium 停掉渲染生命周期，
+    //    rAF 实测 0 次/秒（而 setInterval 正常）→ ResizeObserver 一次都不回调。
+    //    实测里 `Page.bringToFront` 单独用**不管用**（窗口在后台时它不顶事），
+    //    必须连 `Emulation.setFocusEmulationEnabled` 一起上；两者都调完之后
+    //    `visibilityState` 变 visible、rAF 回到 ~240/秒（实测）。
+    // ⚠️ 幂等：重复调用无副作用。
+    for (const [method, params] of [
+      ['Page.bringToFront', {}],
+      ['Emulation.setFocusEmulationEnabled', { enabled: true }],
+      ['Emulation.setPageVisibility', { visibility: 'visible' }]
+    ]) {
+      try {
+        await this.send(method, params)
+      } catch {
+        // 某个方法在旧 CDP 上不存在：继续试下一个（三个里中一个就够）
+      }
+    }
+    return this.evaluate('document.visibilityState')
+  }
+
   async #connect(url) {
     this.#ws = new WebSocket(url)
     await new Promise((res, rej) => {
@@ -204,15 +239,21 @@ async function auditPage(cdp, label) {
 
 async function main() {
   const cdp = await Cdp.attach()
-  // ★★ 学生视角的侧栏里**没有**「教材知识库」：它现在是教师 / 答辩专属页
+  // ★★ 先让渲染器真的在渲染：hidden 窗口下 ResizeObserver 一次都不触发，
+  //    「内容长高后有没有跟随」这类测量会**全部失真**（实测踩到，见 ensureRendering 的说明）。
+  const visibility = await cdp.ensureRendering()
+  if (visibility !== 'visible') {
+    console.log(`[33m⚠️ 窗口仍是 ${visibility}：与渲染时序相关的断言可能失真（见 ensureRendering 的说明）[0m`)
+  }
+  // ★★ 学生视角的侧栏里**没有**「参考资料库」：它现在是教师 / 答辩专属页
   //    （`PAGES.knowledge.nav === 'teacher'`）。这个体检脚本跑的是**学生视角**
   //    （应用默认就是学生视角，且脚本不改视角），所以清单里不能有它 ——
   //    列了它会红成「侧栏找不到这个入口」，那是**跑法不对**而不是产品坏了。
   //    （那一页的教师侧体检由 `ux-layout-audit.mjs` 或人工走查看；它不进学生路径。）
-  const pages = ['动画讲解', '编程环境', '闯关练习', '学习档案', '学习地图', '设置']
+  const pages = ['动画讲解', '编程环境', '闯关挑战', '学习记录', '知识图谱', '设置']
 
   // 起点：先回对话页，保证每次切换都从同一状态出发
-  await goto(cdp, '对话课堂')
+  await goto(cdp, '问问智团团')
 
   const summary = []
   for (const label of pages) {

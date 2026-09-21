@@ -322,7 +322,7 @@ export function buildJudgePrompt(
   const recent = turns.slice(-LAYER2_WINDOW_TURNS)
   const lines = recent.map((turn) => `${turn.turn}. ${turn.text}`)
   return [
-    '你是 K12 人工智能通识课的分级助手。下面是一名学生最近的提问（按时间先后）。',
+    '你是 K12 场景下的学段分级助手。下面是一名学生最近的提问（按时间先后）。',
     `系统当前按「${currentGrade}」跟他对话。`,
     '请判断他更像哪个学段的学生，只依据提问用词与问题深度，不要猜测他的身份。',
     '四个取值：primary_low（小学低年级）/ primary_high（小学高年级）/ junior（初中）/ senior（高中）。',
@@ -436,17 +436,28 @@ export function stripCwdTail(prompt: string): string {
 export function buildGradeSystemPrompt(params: {
   incoming: string | undefined
   inferredGrade: GradeLevel
+  /**
+   * 这个学段是不是**学生自己选的**（权威段据此换一种说法）。
+   *
+   * ⚠️ **不改权威段的标题**（{@link GRADE_OVERRIDE_HEADING}）：那个字面量同时是
+   * `stripGradeOverride` 的识别标志，改了等于让历史 prompt 里的旧段再也清不掉。
+   * 所以来源只体现在**正文**里（见 {@link withGradeOverride}）。
+   */
+  explicit?: boolean
 }): string {
   const target = gradePromptFor(params.inferredGrade)
   const incoming = params.incoming
+  const explicit = params.explicit === true
   if (typeof incoming !== 'string' || incoming.trim() === '') {
-    return stripCwdTail(withGradeOverride(target, params.inferredGrade, false))
+    return stripCwdTail(withGradeOverride(target, params.inferredGrade, false, explicit))
   }
   // ★ 先剥尾巴再比模板：不然「尾巴」会跟着模板一起被 swap 带走或留在原地
   const bare = stripCwdTail(stripGradeOverride(incoming))
   const merged = bare.includes(target) ? bare : (swapKnownGradeTemplate(bare, target) ?? bare)
   // ★ 输出侧再剥一次（**最后防线**）：即便上游漏了，尾巴也不会到达模型
-  return stripCwdTail(withGradeOverride(merged, params.inferredGrade, !merged.includes(target)))
+  return stripCwdTail(
+    withGradeOverride(merged, params.inferredGrade, !merged.includes(target), explicit)
+  )
 }
 
 /**
@@ -464,15 +475,27 @@ export function stripGradeOverride(prompt: string): string {
 /**
  * 追加权威段（**幂等**：先剥掉旧的再追加，链式调用不会叠出多段）。
  *
- * 段落用中文写清「这是系统自动推断的结果」并点名学段与语言风格 ——
+ * 段落用中文写清「这一轮按哪个学段作答」并点名语言风格 ——
  * 模型一眼认出这段是权威指令；`includeTemplate` 为真时再补上模板全文
  * （只在基座里认不出目标模板时才需要）。
+ *
+ * ★ `explicit`（2026-09-21 新增）：学段是**学生自己选的**时，正文里如实说明。
+ *   此前无论自动还是手选都写「系统自动推断」——学生手选之后那句话是假的，
+ *   而它排在最末尾、是模型眼里最权威的一句。
+ *   ⚠️ 标题（{@link GRADE_OVERRIDE_HEADING}）**不动**：它是幂等清理的识别标志。
  */
-function withGradeOverride(prompt: string, grade: GradeLevel, includeTemplate: boolean): string {
+function withGradeOverride(
+  prompt: string,
+  grade: GradeLevel,
+  includeTemplate: boolean,
+  explicit = false
+): string {
   const base = stripGradeOverride(prompt).trim()
   const lines = [
     GRADE_OVERRIDE_HEADING,
-    `- 本轮按「${GRADE_LABELS[grade] ?? grade}」作答（更高学段的问题按该学段的处置办法回答）。`,
+    explicit
+      ? `- 本轮按「${GRADE_LABELS[grade] ?? grade}」作答（**这个学段是学生自己选的**，请按它作答）。`
+      : `- 本轮按「${GRADE_LABELS[grade] ?? grade}」作答（更高学段的问题按该学段的处置办法回答）。`,
     `- 语言风格：${GRADE_STYLES[grade] ?? ''}`
   ]
   const overlay = includeTemplate ? `${lines.join('\n')}\n\n${gradePromptFor(grade)}` : lines.join('\n')
@@ -596,6 +619,16 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
   let submitted = 0
   let failed = 0
   let lastReason = ''
+  /**
+   * 当前学段是**学生自己选的**吗（`adoptOverride` 置真；自动路径与 `state:` 刷新置假）。
+   *
+   * ★ 只为**权威段的措辞**服务：自动推断与学生手动选定，对模型的意义不同 ——
+   *   前者是「系统按证据猜的」，后者是「学生明确要求的」，后者不该被轻描淡写地带过。
+   *   此前权威段一律写「系统自动推断」，于是学生手选之后那句话是**假的**，
+   *   而它恰好排在最末尾、是模型眼里最权威的一句（D-064）。
+   * ⚠️ 它**不参与任何判定**（不改阈值、不改方向），只改一句话的说法。
+   */
+  let explicitChoice = false
   let lastChangedAtTurn: number | null = null
   let lastError: string | undefined
   let warnedNoJudge = false
@@ -649,6 +682,7 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     submitted = 0
     failed = 0
     lastReason = ''
+    explicitChoice = false
     lastChangedAtTurn = null
     // ★ 手动设定的冷却也是**学生级**状态：换学生时一起归零，绝不把上一个学生的冷却
     //   显示到下一个学生的界面上（与 appliedGrade 必须一起重置是同一条纪律）。
@@ -665,6 +699,9 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     if (pendingGrade && pendingGrade !== appliedGrade) {
       log(`[grade] 本轮按推断出的新学段作答：${appliedGrade} → ${pendingGrade}（学生无感）`)
       appliedGrade = pendingGrade
+      // ★ 这是**推断**出来的新学段 → 权威段的措辞不再是「学生自己选的」（见 explicitChoice）。
+      //   不重置的话，学生手选过一次初中、之后被自动调到高中，权威段仍写着「学生自己选的」。
+      explicitChoice = false
     }
     pendingGrade = null
   }
@@ -941,7 +978,14 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
   /** 本轮 system prompt（**同步纯逻辑**，`runtime.ts` 的 `before_agent_start` 调它）。 */
   const currentSystemPrompt = (incoming: string | undefined): string => {
     try {
-      return buildGradeSystemPrompt({ incoming, inferredGrade: appliedGrade })
+      return buildGradeSystemPrompt({
+        incoming,
+        inferredGrade: appliedGrade,
+        // ★ 2026-09-21 新增：把「这个学段**是学生自己选的**」带进权威段。
+        //   此前权威段一律写「系统自动推断，以此段为准」——学生手动选过之后那句话就是假的，
+        //   而它恰好是模型眼里**最权威的一句**（排在最末尾、离生成最近）。见 D-064。
+        explicit: explicitChoice
+      })
     } catch (error) {
       // 兜底：出任何意外也要给出学段模板（绝不放行 Pi 的默认 prompt）
       log(`[grade] 学段 prompt 组装失败，退回默认模板：${error instanceof Error ? error.message : String(error)}`, 'warn')
@@ -969,6 +1013,7 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     pendingGrade = null
     epoch += 1
     lastReason = 'override'
+    explicitChoice = true
     overrideCooldownRemaining = Number.isFinite(cooldownRemainingTurns)
       ? Math.max(0, Math.trunc(cooldownRemainingTurns))
       : 0
@@ -1050,6 +1095,10 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
         appliedGrade = grade
       }
       lastReason = `state:${state.source}`
+      // ★ 服务端的 `source` 是权威：`explicit` = 学生手选过（还在冷却里），其余是推断。
+      //   重启后靠这一句把「这个学段是谁定的」恢复正确 —— 否则冷启动后
+      //   学生手选的学段会被权威段说成「系统自动推断」（D-064）。
+      explicitChoice = state.source === 'explicit'
       return grade
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error)

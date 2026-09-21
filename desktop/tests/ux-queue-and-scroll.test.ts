@@ -221,21 +221,49 @@ test('★★ 程序性滚动不得被当成「学生翻上去了」（竞态防�
   // 若内容恰好在这中间又长高（流式输出时是常态），事件里量到的
   // `distanceFromBottom` 就是「刚长出来的那段高度」→ 可能超过容差 →
   // 把 stick 误判成 false → **从此停止跟随**（表现正是「视图停在旧消息上」）。
+  //
+  // ★★ 判据从「布尔标记」改成「位置比对」（2026-09-21 实测改）
+  //    原来断言的是 `selfScrolled.value = true` + `onColScroll` 里消费一次。
+  //    那套写法**有一个实测的洞**：流式输出时 `scrollToBottom()` 会被连续调用多次，
+  //    而浏览器会**合并** scroll 事件 → 多出来的事件看到 `false` → 按「学生滚的」重算 →
+  //    跟随被**永久**关掉。实测指纹：`npm run ux:attribute` 里离底部的距离
+  //    **单调递增且不回落**（37→143→…→759px）——「单调递增」正是「跟随被关掉」的指纹
+  //    （只是慢的话距离会上下浮动）。所以这里改断言「记位置 + 按位置放过」。
   const scroller = functionBodyIn(chatView, 'scrollToBottom')
-  assert.match(scroller, /selfScrolled\.value = true/, '程序性滚动前要打标记')
+  assert.match(
+    scroller,
+    /selfScrollTop\.value = el\.scrollTop/,
+    '程序性滚动后要**读回实际位置**并记下来（赋值会被夹到 maxScroll，记 scrollHeight 等于没防）'
+  )
 
   const onScroll = functionBodyIn(chatView, 'onColScroll')
   assert.match(
     onScroll,
-    /if \(selfScrolled\.value\)[\s\S]{0,80}?return/,
-    'onColScroll 必须先消费标记并提前返回，不能拿这次事件去重算 stick'
+    /Math\.abs\(el\.scrollTop - selfScrollTop\.value\) <= 1/,
+    'onColScroll 必须按**位置**判断「这次是不是我们自己滚的」（这样才扛得住事件合并）'
   )
   // 提前返回必须发生在**重算之前**：否则标记就白打了
-  const markCheck = onScroll.indexOf('selfScrolled.value')
+  const markCheck = onScroll.indexOf('selfScrollTop.value')
   const recompute = onScroll.indexOf('stick.value = distanceFromBottom')
   assert.ok(
     markCheck >= 0 && markCheck < recompute,
     '「自己滚的」判断必须在重算 stick **之前** —— 反了就等于没防'
+  )
+  // 学生真滚走之后要清掉标记：否则之后长内容时，那个陈旧位置会继续被放过
+  assert.match(
+    onScroll,
+    /selfScrollTop\.value = -1/,
+    '学生真的滚动过之后必须清掉标记（否则陈旧位置会一直放过事件）'
+  )
+  // ⚠️ 反向对照：不许改回布尔标记 —— 那正是被实测证伪的写法。
+  //    必须先**剥注释**：`Chat.vue` 里刻意写了「原来是一个 selfScrolled: boolean …」
+  //    来解释为什么换掉它，不剥的话这条断言会被自己的说明书绊倒（实测踩到）。
+  const chatCode = chatView
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:'"\\])\/\/[^\n]*/g, '$1')
+  assert.ok(
+    !/selfScrolled/.test(chatCode),
+    '不许改回布尔标记（`selfScrolled`）——它在「事件合并」下会漏放，让跟随被永久关掉'
   )
 })
 

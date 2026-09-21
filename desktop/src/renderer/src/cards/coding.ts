@@ -71,7 +71,7 @@ export interface CodingUnknownView {
   text: string
   /** 载荷里还能读出来的知识点 id（空串 = 读不出）。
    *
-   * ★ 有它的唯一目的：让「让团团再出一遍」这个按钮**知道要重取哪个知识点**；
+   * ★ 有它的唯一目的：让「让智团团再出一遍」这个按钮**知道要重取哪个知识点**；
    *   读不出时按钮不渲染（点了也不知道要干嘛 = 假按钮）。 */
   kpId: string
   /**
@@ -285,7 +285,7 @@ export const RUN_REQUEST_PREFIX = '【编程练习】'
  *   但每一次发送本就在卡片旁边，学生自己知道刚点的是哪一张。
  */
 export function hintRequestDisplayText(): string {
-  return '团团，这道题我卡住了，给我一点提示吧。'
+  return '智团团，这道题我卡住了，给我一点提示吧。'
 }
 
 /**
@@ -308,7 +308,7 @@ export function buildRunRequestMessage(kpId: string, code: string): string {
 
 /** 运行后请模型看一看时，学生气泡里显示的那一句（与上面成对，理由见 {@link hintRequestDisplayText}）。 */
 export function runRequestDisplayText(): string {
-  return '团团，我写完代码了，帮我看看对不对。'
+  return '智团团，我写完代码了，帮我看看对不对。'
 }
 
 /** 卡片没画出来时「再出一遍」的固定开头（回看历史时靠它认出这一类）。
@@ -328,7 +328,7 @@ export function retryRequestWireText(kpId: string): string {
 
 /** 「再出一遍」时**学生气泡里**显示的那一句（与 {@link retryRequestWireText} 成对）。 */
 export function retryCardDisplayText(): string {
-  return '团团，刚才那张编程卡片没显示出来，请再取一次模板吧。'
+  return '智团团，刚才那张编程卡片没显示出来，请再取一次模板吧。'
 }
 
 /** 从「…「kp-id」…」里抠出知识点 id（认不出回空串）。 */

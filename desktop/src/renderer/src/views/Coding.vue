@@ -179,7 +179,7 @@ const editorStage = computed<'loading' | 'error' | 'empty'>(() => {
 /** 空态里那句「下一步做什么」——按「有没有可做的关卡」分开写，不硬凑一句万能话。 */
 const editorEmptyDesc = computed(() => {
   if (levels.value.length === 0) {
-    return '左边还没读到学习路径。先回对话里问几句，让团团把学段判出来，这里就会有第一关。'
+    return '左边还没读到学习路径。先回对话里问几句，让智团团把学段判出来，这里就会有第一关。'
   }
   if (openLevels.value.length === 0) {
     return '左边的关卡都还没解锁。先把正在学的那一关通过，后面会一关一关打开。'
@@ -832,7 +832,7 @@ watch(editorVisible, (visible) => {
         <!-- ── 还没有题目可做时的引导态 ────────────────────────────────────
              ★ 缺陷现场：这一页的默认状态（没选题目 / 这一关没有模板）右边是一个
              **空的编辑器框**，旁边一行小字 —— 学生不知道下一步该动哪里。
-             现在编辑器区给一条明确的下一步，「团团」也在（空态是引导，不是情绪）。
+             现在编辑器区给一条明确的下一步，「智团团」也在（空态是引导，不是情绪）。
              · `data-testid="coding-view-editor-empty"` 落在这个空态上；
              · 取数失败那一支保持原有的两个 testid 不动
                （左栏的 `coding-view-template-error`、编辑器框里的 `coding-view-editor-failure`），
@@ -999,7 +999,7 @@ watch(editorVisible, (visible) => {
              ③ 「结果只用来给你中文解释」= 本页的运行结果只走 `code:run-hint` →
                 `/api/code/run-hint`，那个端点只做报错归一与提示挑选，**不调用任何 LLM**
                 （`server/app/routes/code.py` 连 `exec` / `subprocess` 都不 import）。
-           ⚠️ **刻意不写「不会发给团团」**：那句话在**本页**成立（本页的「求助」只送
+           ⚠️ **刻意不写「不会发给智团团」**：那句话在**本页**成立（本页的「求助」只送
               `kpId + level`，见 `stores/code.ts` 的 `askForHint`），但学生在对话里
               点编程卡的「求助」时走的是另一条路（`buildHintRequestMessage` 会带上
               代码前 400 字）—— 同一句话在一个地方成立、在另一个地方不成立，

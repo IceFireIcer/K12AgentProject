@@ -191,7 +191,7 @@ export type FragmentPromptInput = Omit<AnimationGenerateRequest, 'payloadId'>
  */
 export function buildFragmentPrompt(request: FragmentPromptInput): string {
   const lines = [
-    '你在为一个 K12 人工智能通识课的动画沙箱生成一段**页面片段与脚本**（不是完整 HTML）。',
+    '你在为一个面向 K12 学生的 AI 学习应用的动画沙箱生成一段**页面片段与脚本**（不是完整 HTML）。',
     `概念：${request.concept}`,
     `学段：${request.gradeLevel}（小学低/高、初中、高中；语言与深度要贴这个学段）。`
   ]

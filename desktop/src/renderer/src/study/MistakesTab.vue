@@ -151,7 +151,7 @@ function retrySameKind(item: { kpId: string }): void {
 
     <template v-else-if="mistakes">
       <!-- ★★ 「没有错题」是**做得好**，不是「没有数据」：用 success 调性的空态给一次
-           正向反馈（mascot = 吉祥物团团）。这里以前是一句平铺直叙的灰字，
+           正向反馈（mascot = 吉祥物智团团）。这里以前是一句平铺直叙的灰字，
            学生会读成「功能坏了 / 还没加载出来」。 -->
       <EmptyState
         v-if="mistakes.items.length === 0"

@@ -296,7 +296,7 @@ function askForHint(): void {
 }
 
 /**
- * 卡片没画出来时的出口：请团团**重新取一次**这个知识点的模板。
+ * 卡片没画出来时的出口：请智团团**重新取一次**这个知识点的模板。
  *
  * ★ 这是学生自己能走的一条路（旧版只有一句"老师重新来一遍就好"，而他没有任何按钮）。
  * ★ wire 文本还是走同一条纪律（见 `buildHintRequestMessage` 的说明）：
@@ -488,16 +488,16 @@ const interruptNotice = computed(() => {
     <p v-if="localHint" class="coding__hint" data-testid="coding-hint-local">{{ localHint }}</p>
     <!-- ★★ 这句话必须与**同一张卡片上的「求助」按钮**保持一致（走查后修正）。
          原来写的是「…运行，不会上传、也碰不到学习数据。卡住就点「求助」」——
-         两句互相打脸：点「求助」会把**学生代码的前 400 字**发给团团
+         两句互相打脸：点「求助」会把**学生代码的前 400 字**发给智团团
          （见 `cards/coding.ts` 的 `buildHintRequestMessage` + `codePreview`）。
          一个把字面意思当真、刚读完「不会上传」就去点求助的 10 岁学生，
          会以为求助也是本地的。
          现在拆成两件**各自都成立**的事：
            · 运行 / 执行 —— 只在这台电脑的沙箱里，不联网；
-           · 求助 —— 会把你写的那几行发给团团（它要靠这个才能帮你找问题）。
+           · 求助 —— 会把你写的那几行发给智团团（它要靠这个才能帮你找问题）。
          ⚠️ 改这句话之前先读 `buildHintRequestMessage`：它带 `codePreview(code)`。 -->
     <p class="coding__foot">
-      代码在你电脑上的沙箱里运行，不会上传。点「求助」时，会把你写的那几行发给团团看 ——
+      代码在你电脑上的沙箱里运行，不会上传。点「求助」时，会把你写的那几行发给智团团看 ——
       它是靠这个帮你找问题的。
     </p>
   </article>
@@ -528,7 +528,7 @@ const interruptNotice = computed(() => {
          （例如「取代码模板需要知识点 id…请先确认要练哪个知识点」），
          照搬进学生气泡就是又一份"开发者视角"。原文只进上面的 `data-detail`。 -->
     <p class="coding__fallback" data-testid="coding-unknown-notice">
-      卡片里原来的代码框和运行按钮这次没能准备好。你可以点下面的按钮让团团重出一遍，也可以直接问它「这道题用中文讲讲怎么做」。
+      卡片里原来的代码框和运行按钮这次没能准备好。你可以点下面的按钮让智团团重出一遍，也可以直接问它「这道题用中文讲讲怎么做」。
     </p>
     <div class="coding__actions">
       <!-- ★ 读不出知识点 id 时不渲染（点了也不知道要重取哪道题 —— 那是假按钮） -->
@@ -540,7 +540,7 @@ const interruptNotice = computed(() => {
         :disabled="chat.streaming"
         @click="retryCard"
       >
-        让团团再出一遍
+        让智团团再出一遍
       </button>
     </div>
   </article>

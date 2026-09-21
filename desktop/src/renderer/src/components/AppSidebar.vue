@@ -16,7 +16,7 @@
  * ★ 图标名也是**数据**（`PAGES[name].icon` 存的是 lucide 的组件名），所以要用一张
  *   名字 → 组件的表来解析；没有这张表就只能按页面写死 import。
  *
- * ★ 左上角品牌标是**真实素材**（`resources/brand/*.png`，吉祥物「团团」），不是字母方块：
+ * ★ 左上角品牌标是**真实素材**（`resources/brand/*.png`，吉祥物「智团团」），不是字母方块：
  *   默认 `main.png`，判出学段之后随学段换图（`theme.displayGrade` → 四学段四张）。
  *   素材由 `server/scripts/make_brand_icons.py` 从仓库根 `logos/` 生成，改了 logo 重跑脚本。
  *

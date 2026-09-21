@@ -130,7 +130,7 @@ export const useCodeStore = defineStore('code', () => {
    *   三处都有，各写一份必然漂移。
    * ★ 命中技术信息 → 换成可读一句话，且**原文只进控制台**（`console.warn(...)`，
    *   老师与开发者排障要看），界面上给的是：
-   *   「这道题还没有配套的代码模板。换一个知识点试试，或者先让团团用文字讲讲。」
+   *   「这道题还没有配套的代码模板。换一个知识点试试，或者先让智团团用文字讲讲。」
    *   （这句下一步动作是编程页特有的，所以留在本文件，不放共享的兜底表里。）
    */
   function studentFacingTemplateError(raw: unknown): string {
@@ -147,7 +147,7 @@ export const useCodeStore = defineStore('code', () => {
     if (!looksLikeTroubleshooting(text)) return text
     // 原文只进控制台（老师/开发者排障要看），界面上不出现
     console.warn('[coding] 模板读取失败（原始原因，仅排查用）：', text)
-    return '这道题还没有配套的代码模板。换一个知识点试试，或者先让团团用文字讲讲。'
+    return '这道题还没有配套的代码模板。换一个知识点试试，或者先让智团团用文字讲讲。'
   }
 
   /**

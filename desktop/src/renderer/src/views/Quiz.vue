@@ -169,14 +169,14 @@ const questionRows = computed(() =>
  *
  * ★ 说人话：`本地题库` / `模型生成` 是我们这边的实现语言（学生不知道什么叫"题库"、
  *   也不该关心它在哪、更不知道"模型生成"意味着什么）。对学生有意义的是
- *   「这是教材配的题」还是「这是团团现给你出的题」。
+ *   「这是教材配的题」还是「这是智团团现给你出的题」。
  *   ⚠️ 文案与对话内练习卡片（`cards/QuizCard.vue` 的 `sourceLabel`）**必须一字不差** ——
  *   同一件事在两条路径上说法不同，读起来就像两个不同的功能。
  */
 const sourceLabel = computed(() => {
   const source = quiz.bank?.source
   if (source === 'bank') return '教材配套题'
-  if (source === 'generated') return '团团出的题'
+  if (source === 'generated') return '智团团出的题'
   return ''
 })
 

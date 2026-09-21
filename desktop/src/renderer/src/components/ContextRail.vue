@@ -21,7 +21,7 @@
  *    降级链档位名、毫秒耗时、`degraded` 原值、Python 诊断串（`t4|答题=连对10`）、
  *    「隔离在 SQL 层强制，模型改不了 WHERE」全都摆在学生面前。
  *    现在分两层（机制见 `stores/viewMode.ts`）：
- *      · **学生**看到的是人话：这次参考了什么、团团这轮做了什么、当前学段与掌握度；
+ *      · **学生**看到的是人话：这次参考了什么、智团团这轮做了什么、当前学段与掌握度；
  *      · **教师 / 答辩**（`<TeacherGate>`）看到上面那批**原始证据** —— 一条都没删，
  *        因为那正是「设计合理性」25% 的材料。
  *    ⚠️ 分层只改「默认给谁看」，**不改任何数据通路**：降级档位仍原样读 Python。
@@ -81,7 +81,7 @@ const tab = ref<TabKey>('context')
  * ★ 文案刻意**压到 4/2/2 字**（「上下文 / 工具 / 学段」而不是「学习上下文 / 工具调用 / 学段」）：
  *   右栏只有 288px，三个等宽段各约 88px —— 五字标签会被截成「学习…」，
  *   看起来像排版坏了（实测截图里就是这样）。三段的语义在各自页内已由小标题说清
- *   （「这段回答的依据」「团团这轮做了什么」「当前学段」），这里只需要能区分。
+ *   （「这段回答的依据」「智团团这轮做了什么」「当前学段」），这里只需要能区分。
  */
 /** 页签的取值（与 `TabKey` 同一联合，`satisfies` 让漏项在编译期报出来）。 */
 const TABS = [
@@ -149,7 +149,7 @@ const latestCitationTurn = computed(() => {
  */
 const basisSentence = computed(() => {
   const turn = latestCitationTurn.value
-  if (turn === null) return '这次回答没查教材，团团用的是自己会的知识。'
+  if (turn === null) return '这次回答没查教材，智团团用的是自己会的知识。'
   const count = turn.citations.length
   const first = turn.citations[0]
   if (first !== undefined && turn.citations.every((item) => item.gradeLevel === first.gradeLevel)) {
@@ -174,8 +174,8 @@ const isolationNotice = computed(() => {
     gradeLabel: label,
     studentText:
       chat.currentGradeLabel === null
-        ? '团团只用了你当前学段的教材，不会超纲。'
-        : `团团这次只用了「${label}」和更低学段的教材，不会超纲。`,
+        ? '智团团只用了你当前学段的教材，不会超纲。'
+        : `智团团这次只用了「${label}」和更低学段的教材，不会超纲。`,
     teacherText: isolationTeacherText(label)
   }
 })
@@ -265,9 +265,9 @@ function toolLabel(toolName: string): string {
 }
 
 /**
- * ★★ **学生视角**：这一轮团团做了什么（「团团这轮做了：查教材、出题」）。
+ * ★★ **学生视角**：这一轮智团团做了什么（「智团团这轮做了：查教材、出题」）。
  *
- * ★ 只取**最后一轮**：这一页的标题就是「团团这轮做了什么」，把前面几轮也堆上来
+ * ★ 只取**最后一轮**：这一页的标题就是「智团团这轮做了什么」，把前面几轮也堆上来
  *   等于把「刚才发生了什么」混进「现在发生了什么」。
  * ★ 同一个 Tool 调了多次只报一次（学生关心「用了哪几种本领」，不是调用条数）。
  * ★ 名字来自 {@link TOOL_LABELS} 这一处映射 —— 与轨迹导出用的是同一份中文说法。
@@ -280,7 +280,7 @@ const traceSummary = computed(() => {
     const label = toolLabel(entry.toolName)
     if (!actions.includes(label)) actions.push(label)
   }
-  return `团团这轮做了：${actions.join('、')}`
+  return `智团团这轮做了：${actions.join('、')}`
 })
 
 /* ------------------------------------------------------------------ *
@@ -476,9 +476,9 @@ watch(tab, () => {
           <div class="sec__head">
             <Route :size="14" />
             <!-- 标题也用学生的话：它原本是「本轮工具调用」——「调用」是工程动词，
-                 而这一页在两种视角下说的都是**同一件事**（团团这轮做了什么），
+                 而这一页在两种视角下说的都是**同一件事**（智团团这轮做了什么），
                  只是教师视角里多给了原始轨迹。 -->
-            <h3 class="sec__title">团团这轮做了什么</h3>
+            <h3 class="sec__title">智团团这轮做了什么</h3>
             <!-- 「有降级 / N 次未成功」是运维量：学生看不懂「降级」，教师看它是证据。
                  `v-if` 放在 gate 上：两个都为空时不留一个空元素占 `sec__head` 的 `gap`。 -->
             <TeacherGate v-if="trace.hasDegraded || trace.failureCount > 0" class="tags">
@@ -495,8 +495,8 @@ watch(tab, () => {
           <EmptyState
             v-else-if="traceGroups.length === 0"
             tone="empty"
-            title="团团还没动手"
-            desc="问一个需要查教材、出题或做动画的问题，这里会显示团团用到了哪些本领。"
+            title="智团团还没动手"
+            desc="问一个需要查教材、出题或做动画的问题，这里会显示智团团用到了哪些本领。"
           />
 
           <!-- 学生视角：一句人话（取代毫秒耗时 / degraded 原值 / 参数摘要）。
@@ -788,7 +788,7 @@ watch(tab, () => {
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
-/* ★★ 学生视角的两句人话（「本次参考了…」/「团团这轮做了：…」）。
+/* ★★ 学生视角的两句人话（「本次参考了…」/「智团团这轮做了：…」）。
  * 它们取代了降级链与毫秒轨迹，所以在这一栏里是**正文**（`sm` 14px），
  * 不再是那一堆 `xs` 的运维小字 —— 这两句是学生唯一要读的东西。 */
 .basis,

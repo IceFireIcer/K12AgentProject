@@ -2458,3 +2458,44 @@ README 里那句「假阳性会让人白改一轮」在这里是字面意义的�
 而「永远通过」最常见的成因不是写错判据，是**判据选错了锚点**。
 （与 P-109 / `AGENTS.md §7` 的「量法本身也会有 bug，先怀疑量法」是同一条纪律的延伸：
 上次怀疑的是**量**，这次怀疑的是**断言**。）
+
+## P-112 「窗口不可见时，探针量到的是一具尸体」（根因：hidden 窗口停掉渲染生命周期）
+
+**现象**：`npm run ux` 报 8 条红，其中最刺眼的是
+`B1 回答流式输出时视图一直跟着新内容走`（实测掉队 205→759px）与
+`A2b/A3/A5`「按 Enter 发不出去、输入框不清空」。
+看起来像**产品坏了**，而且掉的都是「用户点名要测」的那几条。
+
+**根因**：**窗口处于 `document.visibilityState === 'hidden'`**（后台窗口 / 无人操作时的常态），
+而 Chromium 在 hidden 状态下**停掉渲染生命周期**。实测数据（同一时刻、同一页面）：
+
+| 测量 | hidden | 调 `Page.bringToFront` + `Emulation.setFocusEmulationEnabled` 之后 |
+| --- | --- | --- |
+| `document.visibilityState` | `hidden` | `visible` |
+| 1 秒内 `requestAnimationFrame` 次数 | **0** | **239** |
+| 1 秒内 `setInterval` 次数 | 2 | 2（不受影响） |
+| `ResizeObserver` 回调次数 | **0** | 正常 |
+
+★ 关键推论链（缺一环就看错方向）：
+1. 应用的自动跟随**全靠 `ResizeObserver`**（内容变高 → 滚到底）；
+2. RO 回调在**渲染生命周期**里派发 → hidden 时**一次都不触发**；
+3. 于是「内容长高却不跟随」——**代码是对的，测量环境是死的**；
+4. 而 `setInterval` 照常，所以「轮询式」的断言（轮次数、输入框内容）看起来也"部分正常"，
+   进一步把方向带偏（A2b/A3/A5 正是被这条带偏的）。
+
+**解决**：探针在 attach 之后统一调 `ensureRendering()`
+（`ux-audit` / `ux-scroll-attribution` / `ux-pages-audit` / `ux-layout-audit` / `ux-student-view-scan` 五处），
+依次尝试 `Page.bringToFront` → `Emulation.setFocusEmulationEnabled` → `Emulation.setPageVisibility`，
+并把**实际的 `visibilityState` 打印出来**；仍不是 `visible` 就显式警告
+「与渲染时序相关的断言可能失真」，而不是让它静默地红成产品缺陷。
+实测效果：同一轮体检的红条从 **8 条降到 1 条**（剩下的那条正是依赖渲染的那一条）。
+
+**防呆**：`ensureRendering()` 在各探针里（含函数头的完整说明）；
+告警文案里点名「可能失真」，让人先怀疑环境再怀疑代码。
+
+**报告用法**：这是「量法本身也会有 bug」的第 **四** 次实例
+（前三次：`depth×12` 假红 / radio 量到小圆点 / 两维都 ≥28px 过严）。
+它的价值在于**这次错的是环境而不是判据** ——
+前三次是「判据写错」，这次是「被测对象根本没在运行」，
+而两者在报告里长得一模一样（都是一条红）。可以配一句总结：
+**调试探针时，先确认被测的东西真的在跑，再去读它的数字。**

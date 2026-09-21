@@ -22,8 +22,11 @@ import { computed, ref } from 'vue'
 /**
  * 全部页面（**侧栏可见与否都在这里**）。
  *
- * ★「能力」与「学习数据」两个分组是设计稿的分组；`section: ''` 的项独占一组、
- *   不渲染组标题（对话是主入口，不该被塞进某个分组里）。
+ * ★ 三个分组（2026-09-21 起）：`跟团团聊` / `动手试试` / `我的记录`。
+ *   原来两组叫「能力」与「学习数据」—— 前者对学生没有意义（什么能力？），
+ *   后者把「设置」也算了进去（设置不是学习数据）。
+ *   ⚠️ 现在**没有页面再用空串 section**（空串 = 独占一组且不渲染组标题；
+ *   对话页原来用它，2026-09-21 起归入「跟团团聊」，因为那一组就是它的入口）。
  */
 export type PageName =
   | 'chat'
@@ -78,23 +81,35 @@ export function visibleInSidebar(meta: PageMeta, isTeacher: boolean): boolean {
  * 页面清单（**唯一来源**）。
  *
  * 侧栏、顶栏标题、`document.title` 的副标题都读它；新增页面只改这一处。
+ *
+ * ★★ 2026-09-21 重命名 + 重新分组（D-064）。两件事：
+ *   ① **标题去课程色彩**：产品定位是「7×24 在线的 AI 老师」，我们没有「课程」——
+ *      教材与知识点只是回答时的**参考**。所以「对话课堂 → 问问智团团」、
+ *      「闯关练习 → 闯关挑战」、「学习档案 → 学习记录」、「教材知识库 → 参考资料库」、
+ *      「学习地图 → 知识图谱」。动画讲解 / 编程环境 / 设置三个功能名本来就没有课程色，不动。
+ *   ② **侧栏重分三组**：跟团团聊 / 动手试试 / 我的记录
+ *      （原来是「能力 / 学习数据」两组 —— 「能力」这个词对学生没有意义）。
+ *
+ * ⚠️ **`PageName` 内部 id 一个都没改**（`chat` / `quiz` / `knowledge` / `dependency`…）：
+ *   改名会牵动 `ui.go('quiz')`、`data-testid="coding-view-*"`、探针的页清单、
+ *   架构守卫与文档计数 —— 而学生**看不见** id。所以这轮只动给人看的 `title` / `section`。
  */
 export const PAGES: Record<PageName, PageMeta> = {
-  chat: { title: '对话课堂', section: '', nav: true, icon: 'MessageCircle' },
-  animation: { title: '动画讲解', section: '能力', nav: true, icon: 'Clapperboard' },
-  coding: { title: '编程环境', section: '能力', nav: true, icon: 'Code' },
-  quiz: { title: '闯关练习', section: '能力', nav: true, icon: 'Trophy' },
+  chat: { title: '问问智团团', section: '跟团团聊', nav: true, icon: 'MessageCircle' },
+  animation: { title: '动画讲解', section: '动手试试', nav: true, icon: 'Clapperboard' },
+  coding: { title: '编程环境', section: '动手试试', nav: true, icon: 'Code' },
+  quiz: { title: '闯关挑战', section: '动手试试', nav: true, icon: 'Trophy' },
   study: {
-    title: '学习档案',
-    subtitle: '掌握度 · 学段轨迹 · 学习记录',
-    section: '学习数据',
+    title: '学习记录',
+    subtitle: '掌握度 · 学段轨迹 · 学习历史',
+    section: '我的记录',
     nav: true,
     icon: 'Radar'
   },
   settings: {
     title: '设置',
-    subtitle: '学段 · 教材章节 · 外观',
-    section: '学习数据',
+    subtitle: '学段 · 章节 · 外观',
+    section: '我的记录',
     nav: true,
     icon: 'Settings'
   },
@@ -103,7 +118,7 @@ export const PAGES: Record<PageName, PageMeta> = {
   // ★ 历史（两次都是实测踩出来的，改这一段前先读完）：
   //   ① 设计原型把它们标成 `nav: false`，而原型是 router 驱动的（可以直接改哈希进去）；
   //      本项目没有 router（见 D-040），`nav: false` 于是等于**这两页点不到** ——
-  //      而「教材知识库」里恰恰有**导入教材 / 重建索引**两个真实功能。
+  //      而这一页里恰恰有**导入教材 / 重建索引**两个真实功能。
   //      做了却进不去的功能等于没做，所以当时改成进侧栏。
   //   ② 2026-09-20 走查发现另一端的问题：这一页会把 `kb.sqlite` 的**完整路径**
   //      （含 Windows 用户名）、`kp_id`、`已嵌入` 状态、以及两个破坏性按钮
@@ -111,37 +126,42 @@ export const PAGES: Record<PageName, PageMeta> = {
   //   现在的落点 = 「入口还在、只是不在学生视角的侧栏里」（`nav: 'teacher'`）：
   //   功能没被删，评委打开教师视角就能用；学生视角下侧栏不渲染它。
   knowledge: {
-    title: '教材知识库',
+    title: '参考资料库',
     subtitle: '四学段分块 · 向量索引状态 · 导入与重建',
-    section: '学习数据',
+    section: '我的记录',
     nav: 'teacher',
     icon: 'Library'
   },
   dependency: {
-    title: '学习地图',
+    title: '知识图谱',
     subtitle: '知识点的先后关系',
-    section: '学习数据',
+    section: '我的记录',
     nav: true,
     icon: 'GitBranch'
   }
 }
 
-/** 侧栏渲染顺序（分组顺序 = 数组顺序，组内 = 数组顺序）。 */
+/**
+ * 侧栏渲染顺序（分组顺序 = 数组顺序，组内 = 数组顺序）。
+ *
+ * ★ 组顺序**由首次出现的顺序决定**（`AppSidebar.vue` 的 `sections` 就是这么分的），
+ *   所以三组的排列只体现在这个数组里：跟团团聊 → 动手试试 → 我的记录。
+ */
 export const PAGE_ORDER: readonly PageName[] = [
   'chat',
   'animation',
   'coding',
   'quiz',
   'study',
-  'knowledge',
   'dependency',
+  'knowledge',
   'settings'
 ]
 
 /**
  * 这一页是否**只属于教师 / 答辩视角**（见 `PAGES` 里 `nav: 'teacher'` 的那些）。
  *
- * ★ 为什么需要它：教师视角下学生可以进「教材知识库」，切回学生视角时**得有人把他带走** ——
+ * ★ 为什么需要它：教师视角下学生可以进「参考资料库」，切回学生视角时**得有人把他带走** ——
  *   否则界面会停在一个侧栏里已经没有入口的页面上（学生看到自己在看一个
  *   「进得来、退不出、也说不清为什么在这儿」的运维页面）。这不是渲染问题，
  *   是**状态迁移**问题，所以判据放在 store 里、由 `App.vue` 监听视角变化时执行。
@@ -154,17 +174,17 @@ export function isTeacherOnlyPage(page: PageName): boolean {
  * 兼容层：顶栏的三步循环与 `studyTab`
  * ------------------------------------------------------------------ */
 
-/** 三个「主视图」（对话 / 学习档案 / 设置）—— 顶栏按钮按它循环。 */
+/** 三个「主视图」（对话 / 学习记录 / 设置）—— 顶栏按钮按它循环。 */
 export type ViewName = 'chat' | 'study' | 'settings'
 
-/** 三个主视图对应的页面名（学习档案是 `study`，其余同名）。 */
+/** 三个主视图对应的页面名（学习记录是 `study`，其余同名）。 */
 const VIEW_TO_PAGE: Record<ViewName, PageName> = {
   chat: 'chat',
   study: 'study',
   settings: 'settings'
 }
 
-/** 页面名 → 主视图；非主视图（动画/编程/闯关/知识库/依赖图）返回 `null`。 */
+/** 页面名 → 主视图；非主视图（动画/编程/闯关/参考资料/知识图谱）返回 `null`。 */
 export function viewOfPage(page: PageName): ViewName | null {
   return page === 'chat' || page === 'study' || page === 'settings' ? page : null
 }
@@ -217,7 +237,7 @@ export const VIEW_ORDER: readonly ViewName[] = ['chat', 'study', 'settings']
 
 /** 每个视图上顶栏按钮显示的文案（指向**下一个**视图）。 */
 export const VIEW_LABELS: Record<ViewName, string> = {
-  chat: '学习档案',
+  chat: '学习记录',
   study: '设置',
   settings: '返回对话'
 }
@@ -225,7 +245,7 @@ export const VIEW_LABELS: Record<ViewName, string> = {
 /** 视图的中文名（面包屑 / 断言用）。 */
 export const VIEW_TITLES: Record<ViewName, string> = {
   chat: '对话',
-  study: '学习档案',
+  study: '学习记录',
   settings: '设置'
 }
 

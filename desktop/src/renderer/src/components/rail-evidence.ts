@@ -53,6 +53,6 @@ export function isolationTeacherText(gradeLabel: string): string {
 
 /**
  * 工具轨迹那一行说明（教师 / 答辩视角）：这条讲的是**代码层的四条强制**，
- * 学生视角该看到的是「团团这轮做了什么」（`TOOL_LABELS` 拼出来的那句）。
+ * 学生视角该看到的是「智团团这轮做了什么」（`TOOL_LABELS` 拼出来的那句）。
  */
 export const TRACE_TEACHER_NOTE = '路由由模型自选；学段隔离、参数校验、内容终审均在代码层强制。'

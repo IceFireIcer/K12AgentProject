@@ -133,7 +133,7 @@ export function buildSubjectiveGradingPrompt(input: {
   answer: string
 }): string {
   return [
-    `你是一名${GRADE_LABEL_FOR_PROMPT[input.gradeLevel] ?? '中小学'}的人工智能通识课老师，` +
+    `你是一名面向${GRADE_LABEL_FOR_PROMPT[input.gradeLevel] ?? '中小学'}的 AI 老师，` +
       '正在批改一道开放式问答题。请**严格按评分细则**打分。',
     '',
     '【题目】',
@@ -440,7 +440,7 @@ export function buildVariantPrompt(input: {
   previousError?: string
 }): string {
   return [
-    `你是一名${GRADE_LABEL_FOR_PROMPT[input.gradeLevel] ?? '中小学'}的人工智能通识课老师，` +
+    `你是一名面向${GRADE_LABEL_FOR_PROMPT[input.gradeLevel] ?? '中小学'}的 AI 老师，` +
       `请为知识点「${input.kpId}」出 ${input.count} 道**新题**（换数字、换问法、换情境），` +
       '用于让学生多练几遍。',
     '',

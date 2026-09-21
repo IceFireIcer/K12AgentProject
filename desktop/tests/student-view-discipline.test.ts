@@ -501,7 +501,7 @@ test('★★ 默认视角必须是学生，且切换入口只在设置页', () =
  * ③ 教师专属页必须真的进不去（且切回来时能把人带走）
  * ================================================================== */
 
-test('★★ 教材知识库是教师专属页：侧栏判定走唯一谓词，且切回学生视角会把人带走', () => {
+test('★★ 参考资料库是教师专属页：侧栏判定走唯一谓词，且切回学生视角会把人带走', () => {
   const ui = read('src', 'renderer', 'src', 'stores', 'ui.ts')
   const sidebar = read('src', 'renderer', 'src', 'components', 'AppSidebar.vue')
   const app = read('src', 'renderer', 'src', 'App.vue')
@@ -512,7 +512,7 @@ test('★★ 教材知识库是教师专属页：侧栏判定走唯一谓词，�
   assert.match(
     knowledgeBlock,
     /nav:\s*'teacher'/,
-    "教材知识库必须标成教师专属：`PAGES.knowledge.nav = 'teacher'`（学生侧栏里进不去）"
+    "参考资料库必须标成教师专属：`PAGES.knowledge.nav = 'teacher'`（学生侧栏里进不去）"
   )
   assert.match(ui, /nav:\s*boolean\s*\|\s*'teacher'/, "PageMeta.nav 必须是三态联合（true / 'teacher' / false）")
 
@@ -558,12 +558,12 @@ test('★★ 上面那些判据必须**真的按三态工作**（不是只看函
   assert.equal(
     visibleInSidebar(PAGES.knowledge, false),
     false,
-    '学生视角下「教材知识库」**不许**进侧栏（它是数据检视页，含 kb.sqlite 路径与两个破坏性按钮）'
+    '学生视角下「参考资料库」**不许**进侧栏（它是数据检视页，含 kb.sqlite 路径与两个破坏性按钮）'
   )
   assert.equal(
     visibleInSidebar(PAGES.knowledge, true),
     true,
-    '教师视角下「教材知识库」必须可见（功能没被删，只是默认不给学生看）'
+    '教师视角下「参考资料库」必须可见（功能没被删，只是默认不给学生看）'
   )
 
   // ③ `isTeacherOnlyPage` 与它同源
@@ -1171,4 +1171,155 @@ test('★★ 空态必须是引导 / 高光，不是系统占位', () => {
     /保持住/,
     '但语气要与界面同步改暖（「保持住」是命令式，冷）'
   )
+})
+
+/* ================================================================== *
+ * ⑯ 人设定位（2026-09-21 微调，D-064）
+ * ================================================================== */
+
+test('★★ 四个学段 + baseline + 挡话里的**自称统一**是「智团团」', () => {
+  // ══════════════════════════════════════════════════════════════════════
+  // 为什么要有这一条：改之前自称有**三套** ——
+  //   · `primary-low.ts`：「小 AI 老师」
+  //   · 另外三份：「AI 通识课老师」
+  //   · `rules.ts` / `baseline.ts` 被追问时：「老师为你配置的学习助手」
+  // 而产品名（`@shared/brand` 的 BRAND_NAME）、开场白（`profile.py`）又是「智团团」/「团团」。
+  // 五处不一致 → 学生问「你是谁」会得到四个不同答案。这是**人格分裂**，不是措辞问题。
+  // ══════════════════════════════════════════════════════════════════════
+  const files = [
+    ['prompts/primary-low.ts', '小学低年级'],
+    ['prompts/primary-high.ts', '小学高年级'],
+    ['prompts/junior.ts', '初中'],
+    ['prompts/senior.ts', '高中'],
+    ['prompts/baseline.ts', '基线（冒烟）']
+  ] as const
+  for (const [file, label] of files) {
+    const src = read('src', 'main', 'agent', ...file.split('/'))
+    assert.match(src, /智团团/, `${label}模板里必须出现「智团团」（自称与产品名统一）`)
+    for (const stale of ['小 AI 老师', 'AI 通识课老师', '人工智能通识课', '老师为你配置的学习助手', '老师配置的教学工具']) {
+      assert.ok(
+        !src.includes(stale),
+        `${label}模板里还残留旧自称／旧定位「${stale}」—— 五处不一致会让学生问「你是谁」得到不同答案`
+      )
+    }
+  }
+
+  // 提示词（发给模型的那份）里必须有名字：`composePrompt` 的 `name` 参数
+  for (const file of ['primary-low.ts', 'primary-high.ts', 'junior.ts', 'senior.ts']) {
+    const src = read('src', 'main', 'agent', 'prompts', file)
+    assert.match(src, /name:\s*\w*NAME/, `${file} 必须把自称传给 composePrompt（否则 mood 段里没有名字）`)
+  }
+
+  // 品牌定位语也去掉「通识课」，对齐需求原文的「7×24 小时在线 AI 教师」
+  // ⚠️ **剥注释再断言**：`brand.ts` 的注释里**刻意**写了旧值「陪你学 AI 的通识课小老师」
+  //   （作为「不要再改回去」的警示）—— 不剥的话，那条警示会把守卫自己绊倒（实测踩到）。
+  const brand = stripComments(read('src', 'shared', 'brand.ts'))
+  assert.match(brand, /BRAND_TAGLINE\s*=\s*'[^']*7×24/, '定位语要含需求原文的「7×24」')
+  assert.ok(!brand.includes('通识课'), '定位语里不要「通识课」（我们已经没有课程这个概念了）')
+})
+
+test('★★ 「按需调用」与「闲聊／情绪」两节必须在，且措辞是「不必」而不是「禁止」', () => {
+  const rules = read('src', 'main', 'agent', 'prompts', 'rules.ts')
+
+  // ① 「什么时候不必用工具」—— 这一节原来**完全不存在**
+  assert.match(rules, /need:\s*'# 什么时候要用工具，什么时候不用'/, '必须有这一节（原来只写了「该用」）')
+  assert.match(rules, /不必检索/, '必须写明哪些情形**不必**检索（否则模型会每轮都查一遍）')
+  assert.match(rules, /值得检索/, '也要写明什么时候值得检索（只写「不必」会走到另一个极端）')
+  // 反向：不许把「不必」写成「从不」—— 必须保留「要查」的情形
+  assert.match(rules, /需要原话、出处/, '必须保留「需要教材原话 / 出处时要查」这一半')
+  // 也不许假装查了（防走过头）
+  assert.match(rules, /不要假装查了/, '「不假装查了」这条反向要求必须保留')
+
+  // ② 「闲聊、跑题与情绪」—— 这一类策略原来**一条都没有**
+  assert.match(rules, /mood:\s*'# 闲聊、跑题与学生的情绪'/, '必须有这一节（原来没有任何情绪／跑题策略）')
+  assert.match(rules, /不要硬拽/, '跑题时要「不要硬拽」')
+  assert.match(rules, /先把情绪接住/, '受挫时要先接住情绪')
+  // ★ 关键：它必须是「允许接话」，**不是**「禁止跑题」——两者的产品含义相反
+  assert.ok(
+    !/禁止(跑题|闲聊)|不许(跑题|闲聊)|拒绝回答(跑题|闲聊)/.test(rules),
+    '这一节不能写成「禁止跑题 / 拒绝闲聊」（那是把学生挡回去）'
+  )
+  // 「你是谁」这类正常问题要**正常回答**，不能一律用挡话
+  assert.match(rules, /这是正常的问题/, '要明确「你是谁」这类问题正常回答，而不是拿挡话顶回去')
+})
+
+test('★★ 不得再有「先查教材再讲」这类硬绑定（去课程中心化）', () => {
+  const rules = read('src', 'main', 'agent', 'prompts', 'rules.ts')
+  const code = stripComments(rules)
+
+  // 原句：「回答教材里的知识点**前，先**用检索工具取回教材原文再讲」——「先…再」把它写成了前置条件
+  assert.ok(
+    !/回答教材里的知识点前，先用检索工具取回教材原文再讲/.test(code),
+    '硬绑定措辞必须已经软化（教材是**参考**，不是每轮的前置条件）'
+  )
+  assert.match(code, /教材是\*\*参考\*\*/, '要明确写出「教材是参考」这个口径')
+
+  // 工具自述里同样的硬绑定
+  const rag = stripComments(read('src', 'main', 'agent', 'extensions', 'rag-search.ts'))
+  assert.ok(
+    !/需要教材依据时先调用/.test(rag),
+    '`rag-search.ts` 的 promptGuidelines 不许再写「需要教材依据时**先调用**」'
+  )
+  assert.match(rag, /不要.*说「我查一下」却不去查/, '但「不假装查了」要保留')
+
+  // 画像块里的路径压力
+  const profile = stripComments(read('src', 'main', 'agent', 'extensions', 'profile.ts'))
+  assert.ok(
+    !/照这个意思用学生能听懂的话说/.test(profile),
+    '推荐不再是命令式（「照这个意思说」→「想带方向时可以说」）'
+  )
+  assert.ok(
+    !/优先顺着这条线引导，不要跳到更后面的内容/.test(profile),
+    '不许再要求模型「不要跳到更后面」——学生想聊什么就聊什么'
+  )
+})
+
+test('★★ 章节在提示词里是**纯背景**，不给行动指引', () => {
+  const profile = stripComments(read('src', 'main', 'agent', 'extensions', 'profile.ts'))
+  assert.ok(
+    !/回答与检索优先围绕本章/.test(profile),
+    '章节行不许再有「优先围绕本章」这种行动指引（它是背景，不是任务）'
+  )
+  assert.match(profile, /学生当前在看/, '章节行的口径是「学生当前在看」')
+  assert.match(profile, /只是背景，不必刻意围绕它/, '要明说它只是背景')
+})
+
+test('★★ 页面标题与分组：去课程色彩 + 三组（只改给人看的，内部 id 不动）', () => {
+  const ui = read('src', 'renderer', 'src', 'stores', 'ui.ts')
+
+  // ① 标题：五处改名（D-064）
+  assert.match(ui, /title: '问问智团团'/, '对话页标题改成「问问智团团」')
+  assert.match(ui, /title: '闯关挑战'/, '闯关页标题改成「闯关挑战」')
+  assert.match(ui, /title: '学习记录'/, '学习档案改成「学习记录」')
+  assert.match(ui, /title: '参考资料库'/, '教材知识库改成「参考资料库」')
+  assert.match(ui, /title: '知识图谱'/, '学习地图改成「知识图谱」')
+  // 三个功能名本来就没有课程色，**不许**跟着乱改
+  for (const keep of ["title: '动画讲解'", "title: '编程环境'", "title: '设置'"]) {
+    assert.ok(ui.includes(keep), `${keep} 不该被改（它没有课程色彩）`)
+  }
+  // 课程色彩词不许再出现在标题里
+  for (const banned of ['对话课堂', '闯关练习', '学习档案', '教材知识库', '学习地图']) {
+    assert.ok(!ui.includes(`title: '${banned}'`), `标题里还有课程色彩的旧名「${banned}」`)
+  }
+
+  // ② 分组：恰好三组（跟团团聊 / 动手试试 / 我的记录），且没有空串分组
+  const sections = [...ui.matchAll(/section: '([^']*)'/g)].map((m) => m[1])
+  assert.ok(sections.length >= 8, `应当能解析出每个页面的 section（实测 ${sections.length}）`)
+  const unique = [...new Set(sections)]
+  assert.deepEqual(
+    [...unique].sort(),
+    ['动手试试', '我的记录', '跟团团聊'].sort(),
+    `分组必须恰好是这三组（实测 ${JSON.stringify(unique)}）`
+  )
+  assert.ok(!unique.includes(''), '不该再有「空串 = 独占一组」的页面（三组都有名字）')
+
+  // ③ 顶栏按钮文案与页面标题一致（否则「按钮写着去 A，点下去到了 B」）
+  assert.match(ui, /chat: '学习记录'/, '`VIEW_LABELS.chat` 必须跟着改成新名')
+  assert.match(ui, /study: '学习记录'/, '`VIEW_TITLES.study` 必须跟着改')
+
+  // ④ 内部 id 一个都没动（改 id 会牵动探针 / testid / 文档计数，而学生看不见它）
+  assert.match(ui, /export type PageName =/, 'PageName 联合必须还在')
+  for (const id of ["'chat'", "'animation'", "'coding'", "'quiz'", "'study'", "'settings'", "'knowledge'", "'dependency'"]) {
+    assert.ok(ui.includes(id), `内部 id ${id} 必须保留（改名会牵动一大片，且学生看不见）`)
+  }
 })

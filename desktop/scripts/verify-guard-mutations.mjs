@@ -23,7 +23,9 @@ const MUTATIONS = [
   {
     name: '① 术语扫描：把运维话塞回学生可见文案',
     file: 'src/renderer/src/components/ContextRail.vue',
-    find: `        : \`团团这次只用了「\${label}」和更低学段的教材，不会超纲。\`,`,
+    // ⚠️ 锚点跟着 2026-09-21 的自称统一走了（「团团」→「智团团」）——
+    //    改名后这里没同步过一次，变异直接「找不到锚点」而**静默失效**（脚本会报出来）。
+    find: `        : \`智团团这次只用了「\${label}」和更低学段的教材，不会超纲。\`,`,
     replace: `        : \`本次仅使用「\${label}」及以下教材块（隔离在 SQL 层强制，模型改不了 WHERE）\`,`,
     expect: '出现开发者术语'
   },
@@ -46,7 +48,7 @@ const MUTATIONS = [
     file: 'src/renderer/src/stores/ui.ts',
     find: "    nav: 'teacher',",
     replace: '    nav: true,',
-    expect: '教材知识库是教师专属页'
+    expect: '参考资料库是教师专属页'
   },
   {
     name: '⑤ CTA：把闯关页主提交键的类名换成本地皮肤',
@@ -140,6 +142,41 @@ const MUTATIONS = [
     replace: '@click="void 0"',
     all: true,
     expect: '豁免必须名副其实'
+  },
+  {
+    name: '⑳ 人设名：把某一学段的自称改回旧的「小 AI 老师」',
+    file: 'src/main/agent/prompts/primary-low.ts',
+    find: "你是「${PRIMARY_LOW_NAME}」，一位会讲故事的老师",
+    replace: "你是「小 AI 老师」，一位会讲故事的老师",
+    expect: '自称统一'
+  },
+  {
+    name: '㉑ 按需调用：删掉「什么时候不必用工具」那一节',
+    file: 'src/main/agent/prompts/rules.ts',
+    find: "  need: '# 什么时候要用工具，什么时候不用'",
+    replace: "  need: '# 工具使用'",
+    expect: '按需调用'
+  },
+  {
+    name: '㉒ 硬绑定：把「先查教材再讲」塞回去',
+    file: 'src/main/agent/prompts/rules.ts',
+    find: '- 教材是**参考**：需要原话、出处，或学生明确问「书上怎么说的」时，才用检索工具取回原文；',
+    replace: '- 回答教材里的知识点前，先用检索工具取回教材原文再讲；',
+    expect: '硬绑定'
+  },
+  {
+    name: '㉓ 章节口径：改回「优先围绕本章」',
+    file: 'src/main/agent/extensions/profile.ts',
+    find: '`- 学生当前在看：${chapter}（只是背景，不必刻意围绕它）`',
+    replace: '`- 学生当前在看：${chapter}（回答与检索优先围绕本章）`',
+    expect: '纯背景'
+  },
+  {
+    name: '㉔ 页面标题：改回「学习档案」，并把分组改回两组',
+    file: 'src/renderer/src/stores/ui.ts',
+    find: "    title: '学习记录',",
+    replace: "    title: '学习档案',",
+    expect: '页面标题与分组'
   },
   {
     name: '⑰ 卡片又把 kp_id 直接印出来（复审找到的三处漏网）',

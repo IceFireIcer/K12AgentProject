@@ -121,23 +121,38 @@ function distanceFromBottom(el: HTMLElement): number {
 }
 
 /**
- * 「这次滚动是我们自己发起的」标记。
+ * 「这次滚动是我们自己发起的」——记的是**我们设到的位置**，不是一个布尔标记。
  *
- * ★ 为什么必须有（消除一类**竞态**）：程序性赋值 `scrollTop` 也会派发 `scroll` 事件，
+ * ★ 为什么必须有这个机制（消除一类**竞态**）：程序性赋值 `scrollTop` 也会派发 `scroll` 事件，
  *   而它派发时机在**布局之后** —— 如果内容恰好在这中间又长高了（正在流式输出，
  *   这是常态），`onColScroll` 量到的 `distanceFromBottom` 就是「新长出来的那段高度」，
  *   可能超过容差 → 把 `stick` 误判成 false → **从此停止跟随**，
- *   表现就是「视图停在旧消息上不动了」（正是要修的那个现象）。
- *   这份标记让「我们自己滚的」事件不参与判定，只认学生**主动**滚的那次。
+ *   表现就是「视图停在旧消息上不动了」。
+ *
+ * ★★ 为什么从布尔标记改成**位置比对**（2026-09-21 实测改，别改回去）：
+ *   原来是一个 `selfScrolled: boolean` —— `scrollToBottom()` 置真、`onColScroll()` 消费一次。
+ *   但流式输出时 `scrollToBottom()` 会被 ResizeObserver **连续调用多次**，而浏览器会
+ *   **合并** scroll 事件：置真三次、事件只来一次（或来得比下一次赋值晚）→
+ *   多出来的事件看到的是 `false` → 按「学生滚的」重算 → `stick=false` → 掉队且**不会恢复**。
+ *   实测证据：`npm run ux:attribute` 报「正文增长 16 次没跟上」，离底部距离**单调递增**
+ *   （37→143→239→…→759px）—— 「单调递增且不回落」正是「跟随被永久关掉」的指纹
+ *   （若只是慢，距离会上下浮动）。
+ *   ⚠️ 触发条件与**回答长度/速度**有关：回答越长、文本块来得越密，越容易撞上
+ *   （D-064 之后回答变长，这条就浮出来了）。
+ * ★ 新判据是**位置**：我们设完之后把实际值读回来（会被夹到 maxScroll），
+ *   之后凡是 `scrollTop` 仍等于它的 scroll 事件都算「我们自己滚的」——
+ *   合并多少次事件都成立，而且学生真滚走之后位置必然不同，不会误吞。
  */
-const selfScrolled = ref(false)
+const selfScrollTop = ref(-1)
 
 async function scrollToBottom(): Promise<void> {
   await nextTick()
   const el = colRef.value
   if (!el) return
-  selfScrolled.value = true
   el.scrollTop = el.scrollHeight
+  // ★ 读回**实际**位置（赋值会被夹到 `scrollHeight - clientHeight`）——
+  //   记 `scrollHeight` 本身的话，比对永远差一个视口高度，等于没防。
+  selfScrollTop.value = el.scrollTop
   // 到底了就等于「学生又回到最新」，恢复跟随
   stick.value = true
   showJump.value = false
@@ -153,11 +168,12 @@ async function scrollToBottom(): Promise<void> {
 function onColScroll(): void {
   const el = colRef.value
   if (!el) return
-  // 我们自己发起的滚动事件不参与判定（见 selfScrolled 的说明：它量到的是「刚长出来的那段高度」）
-  if (selfScrolled.value) {
-    selfScrolled.value = false
+  // 我们自己滚的那次（见 selfScrollTop 的说明：位置比对，能扛住事件合并）
+  if (selfScrollTop.value >= 0 && Math.abs(el.scrollTop - selfScrollTop.value) <= 1) {
     return
   }
+  // 学生真的滚动了 → 清掉标记，之后再长内容也不该按「我们滚的」对待
+  selfScrollTop.value = -1
   stick.value = distanceFromBottom(el) <= STICK_TOLERANCE_PX
   // 翻上去了才给「回到最新」；贴着底时它没有意义（那里就是最新）
   showJump.value = !stick.value
@@ -335,7 +351,7 @@ const branchingEntryId = ref<string | null>(null)
  * （虽然原会话不动，但「屏幕上的对话忽然换了一段」本身足够让人困惑）。
  * 确认文案里**明说原对话不会丢**，因为那正是学生最担心的事。
  *
- * ★★ 文案（2026-09-20 走查）：原句「会把你和团团聊到这里的这段内容复制成
+ * ★★ 文案（2026-09-20 走查）：原句「会把你和智团团聊到这里的这段内容复制成
  *   一条新的对话线」是在讲**实现**（「复制」）。学生只关心两件事：
  *   从这里往下接着问、刚才那段还在。所以改成这两句 ——
  *   `不会丢` 与 `confirmText: '另开一条'` 都是守卫钉住的，换说法时不许动。
@@ -347,7 +363,7 @@ async function onBranch(entryId: string): Promise<void> {
     // ★ 确认框的正文是**纯文本**（`ConfirmDialog` 不解析 Markdown）——
     //   这里写 `**加粗**` 会原样显示成星号（实测截图里就是「复制成**一条新的对话线**」）。
     //   加重语气靠**措辞**而不是标记：与 P-076（模型输出里的 `**` 直接露给学生）同一条纪律。
-    body: '团团会从这句话开始，陪你换一种问法接着往下聊。现在这段对话不会丢，随时能回到左边的历史列表里。',
+    body: '智团团会从这句话开始，陪你换一种问法接着往下聊。现在这段对话不会丢，随时能回到左边的历史列表里。',
     confirmText: '另开一条'
   })
   if (!ok) return
@@ -402,7 +418,9 @@ const entries: EntryItem[] = [
   { key: 'chat', label: '直接提问', desc: '随时问，按你的学段讲', icon: MessageCircle, to: null },
   { key: 'animation', label: '动画讲解', desc: '把过程画出来看', icon: Clapperboard, to: 'animation' },
   { key: 'coding', label: '编程环境', desc: '在本地跑一段 Python', icon: Code, to: 'coding' },
-  { key: 'quiz', label: '闯关练习', desc: '几道题检验一下', icon: Trophy, to: 'quiz' }
+  // ★ 2026-09-21：与 `PAGES.quiz.title` 保持一致（「闯关练习」→「闯关挑战」）。
+  //   这四张卡是同一批入口的另一种呈现，名字与侧栏不一致学生会以为是两个功能。
+  { key: 'quiz', label: '闯关挑战', desc: '几道题检验一下', icon: Trophy, to: 'quiz' }
 ]
 
 function onEntry(to: PageName | null): void {
@@ -521,7 +539,7 @@ const gradeSourceSentence = computed(() => {
             <!-- AI 主动开口：有开场语时用它替代那句静态问候（两句「你好」叠着是重复的）。
                  没有开场语（无推荐依据 / 刚清空）就退回原来的静态问候。 -->
             <div v-if="chat.showOpening" class="chat__opening" data-testid="chat-opening">
-              <!-- 标记用品牌 logo（吉祥物团团）——与空态问候同一个品牌位，**
+              <!-- 标记用品牌 logo（吉祥物智团团）——与空态问候同一个品牌位，**
                    这里也不跟学段换图**（那是顶栏学段指示器的事） -->
               <img
                 class="chat__opening-mark"
@@ -558,14 +576,14 @@ const gradeSourceSentence = computed(() => {
             </div>
 
             <div v-else class="chat__hello">
-              <!-- 空态问候的标记：用品牌 logo（吉祥物团团）。
+              <!-- 空态问候的标记：用品牌 logo（吉祥物智团团）。
                    ★ 这里**不跟学段换图** —— 它是「这个应用是谁」的品牌位，
                      与「这一轮按哪个年级讲」无关（那是顶栏学段指示器的事）。
                      学段换图只在侧栏品牌标那一处（见 `brand-logo.ts` 的说明）。 -->
               <img class="chat__hello-mark" :src="DEFAULT_LOGO_URL" :alt="''" aria-hidden="true" draggable="false" />
               <h2 class="chat__hello-title">你好，{{ student.nickname }}</h2>
               <p class="chat__hello-sub">
-                我是团团。你可以直接提问，也可以让我换个方式讲 —— 我会按你的学段来回答。
+                我是智团团。你可以直接提问，也可以让我换个方式讲 —— 我会按你的学段来回答。
               </p>
             </div>
 

@@ -101,7 +101,7 @@ export function gradeManualNotice(grade: GradeLevel): string {
  *   不说「系统判定」—— 那些是规则细节，不是学生这一刻的疑问。
  */
 export function gradeSwitchDetail(grade: GradeLevel): string {
-  return `团团会换成${GRADE_LABELS[grade]}的说法和你聊，之前学过的东西都还在哦。`
+  return `智团团会换成${GRADE_LABELS[grade]}的说法和你聊，之前学过的东西都还在哦。`
 }
 
 /**
@@ -114,7 +114,7 @@ export function gradeSwitchDetail(grade: GradeLevel): string {
  *     ① 学生看不懂「regex」「越狱」，只会以为自己犯了错；
  *     ② 它把防御策略（用正则匹配哪几类词）交代给了试图绕过的人 ——
  *        这类细节不该出现在任何面向使用者的界面上（后端日志与教师视角除外）；
- *     ③ 它和团团那句得体的回复并排出现，等于把 AI 的「底牌」摊开。
+ *     ③ 它和智团团那句得体的回复并排出现，等于把 AI 的「底牌」摊开。
  *   `reason` 本身**不删**：它仍进轨迹（教师视角）与主进程日志，排障能力不变。
  */
 export const BLOCKED_STUDENT_NOTICE = '这句话我没法照着答，换个说法我们接着聊。'

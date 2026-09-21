@@ -30,6 +30,41 @@ class Cdp {
     await cdp.#connect(page.webSocketDebuggerUrl)
     return cdp
   }
+  /**
+   * ★★ 让渲染器**真的在渲染**（2026-09-21 实测补，不然后面一半的断言都是假的）。
+   *
+   * 背景：CDP 连上的窗口如果处于 `document.visibilityState === 'hidden'`
+   * （后台窗口 / 无人操作时的常见状态），Chromium 会**停掉渲染生命周期** ——
+   * 实测 `requestAnimationFrame` 一秒 0 次，而 `setInterval` 照常（2 次/秒）。
+   * 后果：`ResizeObserver` **一次都不回调**，于是
+   *   · 「内容长高后是否自动滚到底」测不到（B1/B2 永远红，而代码是对的）；
+   *   · 「容器变化驱动重排」这类断言全部失真。
+   * 实测指纹：`roFires: 0` 而 `dist` 单调递增。
+   * ★ 修法：`Page.bringToFront` + `Emulation.setFocusEmulationEnabled` ——
+   *   之后 `visibilityState` 变 `visible`、rAF 回到 ~240/秒（实测）。
+   * ⚠️ 这两条只影响**测量环境**，不改产品行为；少了它们，探针会给出**看起来像产品缺陷**的红。
+   */
+  async ensureRendering() {
+    // ★★ 让窗口**真的可见**：hidden 状态下 Chromium 停掉渲染生命周期，
+    //    rAF 实测 0 次/秒（而 setInterval 正常）→ ResizeObserver 一次都不回调。
+    //    实测里 `Page.bringToFront` 单独用**不管用**（窗口在后台时它不顶事），
+    //    必须连 `Emulation.setFocusEmulationEnabled` 一起上；两者都调完之后
+    //    `visibilityState` 变 visible、rAF 回到 ~240/秒（实测）。
+    // ⚠️ 幂等：重复调用无副作用。
+    for (const [method, params] of [
+      ['Page.bringToFront', {}],
+      ['Emulation.setFocusEmulationEnabled', { enabled: true }],
+      ['Emulation.setPageVisibility', { visibility: 'visible' }]
+    ]) {
+      try {
+        await this.send(method, params)
+      } catch {
+        // 某个方法在旧 CDP 上不存在：继续试下一个（三个里中一个就够）
+      }
+    }
+    return this.evaluate('document.visibilityState')
+  }
+
   async #connect(url) {
     // Node ≥ 22 的内置 WebSocket 是 WHATWG 风格（addEventListener），没有 .once()
     this.#ws = new WebSocket(url)
@@ -163,6 +198,12 @@ const send = async (cdp, text) => {
 
 async function main() {
   const cdp = await Cdp.attach()
+  // ★★ 先让渲染器真的在渲染：hidden 窗口下 ResizeObserver 一次都不触发，
+  //    「内容长高后有没有跟随」这类测量会**全部失真**（实测踩到，见 ensureRendering 的说明）。
+  const visibility = await cdp.ensureRendering()
+  if (visibility !== 'visible') {
+    console.log(`[33m⚠️ 窗口仍是 ${visibility}：与渲染时序相关的断言可能失真（见 ensureRendering 的说明）[0m`)
+  }
 
   /**
    * ★★ F2 的监听器**必须在这里装**（attach 之后的第一件事），不能挪回 F 段。
@@ -722,7 +763,7 @@ async function main() {
   })()`)
   await sleep(700)
   await cdp.evaluate(`(() => {
-    const b = Array.from(document.querySelectorAll('button')).find((x) => (x.innerText || '').includes('对话课堂'))
+    const b = Array.from(document.querySelectorAll('button')).find((x) => (x.innerText || '').includes('问问智团团'))
     if (b) b.click()
     return true
   })()`)

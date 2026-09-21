@@ -82,7 +82,7 @@ const sourceLabel = computed(() => {
   // ★ 说人话：`本地题库` 是实现细节（学生不知道什么叫"题库"，也不该关心它在哪）。
   //   对学生的意义是「这题是教材配套的、断网也能做」，那句话才是他需要的。
   if (view.value.source === 'bank') return '教材配套题'
-  if (view.value.source === 'generated') return '团团出的题'
+  if (view.value.source === 'generated') return '智团团出的题'
   return ''
 })
 
@@ -323,7 +323,7 @@ function submit(question: QuizQuestionView): void {
          `SUBJECTIVE_UNAVAILABLE_TEXT`）—— 那种情况下以它为准，它比泛泛的兜底有用；
          没有才用兜底那句（旧实现把兜底写成「内容格式不对」，那是开发者视角）。 -->
     <p class="item__stem" data-testid="quiz-unknown-notice">
-      {{ view.text || '题库这次没把题目准备好。跟团团说一句「再出两道题练一练」就能重新来一遍。' }}
+      {{ view.text || '题库这次没把题目准备好。跟智团团说一句「再出两道题练一练」就能重新来一遍。' }}
     </p>
   </article>
 </template>

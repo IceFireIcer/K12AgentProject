@@ -320,9 +320,11 @@ export function renderProfileText(
   //     **不新增 HTTP**）—— 见 `fetchStudentContext`。
   const chapter = typeof student.currentChapter === 'string' ? student.currentChapter.trim() : ''
   if (chapter) {
-    lines.push(
-      `- 当前教材章节：${chapter}（回答与检索优先围绕本章；学生若问其他章节，照常回答）`
-    )
+    // ★★ 2026-09-21：从「查询偏好」降为**纯背景**（D-064）。
+    //   原文是「回答与检索**优先围绕本章**；学生若问其他章节，照常回答」——
+    //   后半句虽然在，但前半句把章节写成了**行动指引**，模型会往本章上拽。
+    //   产品口径：教材与知识点只是回答的**参考**，学生问什么就聊什么。
+    lines.push(`- 学生当前在看：${chapter}（只是背景，不必刻意围绕它）`)
   }
 
   const mastery = [...(profile.mastery ?? [])]
@@ -410,15 +412,15 @@ function renderRecommendationLines(
     return [
       `- 推荐下一步（${why}）：${listed}`,
       recommendation?.summary
-        ? `- 推荐口径（照这个意思用学生能听懂的话说）：${recommendation.summary}`
-        : '- 优先顺着这条线引导，不要跳到更后面的内容。'
+        ? `- 想带一下方向时，可以用类似的意思说（不必逐字照搬）：${recommendation.summary}`
+        : '- 需要时可以顺着这条线带一带；学生想聊别的就跟着他聊。'
     ]
   }
 
   const recommended = (profile.recommendedKpIds ?? []).slice(0, 6)
   return [
     recommended.length > 0
-      ? `- 依赖图推荐的下一个知识点：${recommended.join(', ')}（优先顺着这条线引导）`
+      ? `- 依赖图推荐的下一个知识点：${recommended.join(', ')}（需要时可以提一句）`
       : '- 依赖图推荐：暂无（掌握度不足或依赖图未命中，按当前问题本身作答即可）'
   ]
 }
@@ -632,8 +634,13 @@ export default function profileExtension(pi: AgentExtensionApi): void {
           const snippet = await readSnippet(response)
           if (response.status === 404) {
             return toolFailure(
-              `还没有这个学生的画像记录（${session.studentId}）。按「第一次对话」处理：先问清楚年级与想学什么。` +
-                (snippet ? `（服务端：${snippet}）` : '')
+              // ★ 2026-09-21 改：原文写「先问清楚年级与想学什么」——
+              //   两处都错：① 学段是**系统自动推断**的（学生会话里已经带着学段，
+              //   不需要问）；② 问年级属于「索取个人信息」那一类（隐私段的明文禁止）。
+              //   没有画像时的正确动作是「按第一次对话处理」，不是去问身份。
+              `还没有这个学生的画像记录（${session.studentId}）。按「第一次对话」处理：`
+                + '从他刚问的这个问题本身讲起，别去追问他的年级或身份。'
+                + (snippet ? `（服务端：${snippet}）` : '')
             )
           }
           return toolFailure(

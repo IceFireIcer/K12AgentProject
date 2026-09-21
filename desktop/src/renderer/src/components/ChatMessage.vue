@@ -220,7 +220,7 @@ function pickBranch(): void {
 
     <!-- 助手回答：头像 + 正文纸面 + 引用 + 卡片 -->
     <div class="turn__ai">
-      <!-- 「团团」的头像：用品牌 logo（与侧栏、空态同一张）。
+      <!-- 「智团团」的头像：用品牌 logo（与侧栏、空态同一张）。
            ★ 这里**不跟学段换图** —— 头像标的是「谁在说」，不是「按哪个年级讲」；
              同一个说话人每条回答换一副面孔是反直觉的。
              学段换图只在侧栏品牌标那一处（见 `brand-logo.ts`）。 -->
@@ -234,7 +234,7 @@ function pickBranch(): void {
 
       <div class="ai-col">
         <div class="meta">
-          <span class="who">团团</span>
+          <span class="who">智团团</span>
           <span
             v-if="gradeLabel"
             class="chip chip--accent"
@@ -431,7 +431,7 @@ function pickBranch(): void {
             <p v-if="activeSource && activeSource.text" class="src__text">{{ activeSource.text }}</p>
             <p v-else class="src__missing">
               这一条引用的原文没有随事件送达（可能是本地服务版本较旧）。
-              你可以直接按上面那句话去问团团。
+              你可以直接按上面那句话去问智团团。
             </p>
           </div>
 

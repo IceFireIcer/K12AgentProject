@@ -499,7 +499,7 @@ const paramNote = computed(() => {
           v-else-if="stageState === 'empty'"
           tone="empty"
           title="这里还没有能放的动画"
-          :desc="`${gradeLabel ?? '你的学段'}这一档暂时没有配好的动画。先去对话里问问团团，或者换一档学段再回来看看。`"
+          :desc="`${gradeLabel ?? '你的学段'}这一档暂时没有配好的动画。先去对话里问问智团团，或者换一档学段再回来看看。`"
         />
         <EmptyState
           v-else
@@ -623,7 +623,7 @@ const paramNote = computed(() => {
         </button>
 
         <p v-if="anim.matched.length === 0" class="strip__empty">
-          这里还没有能放的动画 —— 先去对话里问问团团，或者换一档学段再回来看看。
+          这里还没有能放的动画 —— 先去对话里问问智团团，或者换一档学段再回来看看。
         </p>
       </div>
 

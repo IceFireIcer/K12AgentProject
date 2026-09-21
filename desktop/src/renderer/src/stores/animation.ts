@@ -203,7 +203,7 @@ export const useAnimationStore = defineStore('animation', () => {
     if (!kpId) {
       // 「按学生托管」「没有关联的知识点」是**实现侧口径**（会原样显示给学生）：
       // 学生的处境是「这段动画这次放不出来」，不是「nonce 绑不上 kp_id」。
-      hostError.value = '这段动画这次放不出来 —— 换一段，或者先去对话里问问团团。'
+      hostError.value = '这段动画这次放不出来 —— 换一段，或者先去对话里问问智团团。'
       return null
     }
     const lookup = resolveDataBridge()

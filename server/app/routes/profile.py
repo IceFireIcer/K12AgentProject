@@ -474,8 +474,10 @@ def _opening_text(source: RecommendationSource, items: list[RecommendationItem])
         # cold_start（以及任何未登记的来源：按「起步」说 —— 它是最保守的一种说法，
         # 不含任何关于学生历史的主张）
         body = f"我们从{name}开始吧，这是这条学习路线的起点。"
-    # 「你好，我是团团。」让学生知道**是谁**在开口，而不是凭空冒出一个没有主语的建议。
-    return f"你好，我是团团。{body}"
+    # 「你好，我是智团团。」让学生知道**是谁**在开口，而不是凭空冒出一个没有主语的建议。
+    # ★ 2026-09-21：自称与产品名（`@shared/brand` 的 `BRAND_NAME`）统一成「智团团」，
+    #   此前这里是「团团」、提示词里又是「小 AI 老师 / AI 通识课老师」—— 三处不一致。
+    return f"你好，我是智团团。{body}"
 
 
 def _recommendation_summary(source: RecommendationSource, items: list[RecommendationItem]) -> str:

@@ -62,6 +62,41 @@ class Cdp {
     await cdp.#connect(page.webSocketDebuggerUrl)
     return cdp
   }
+  /**
+   * ★★ 让渲染器**真的在渲染**（2026-09-21 实测补，不然后面一半的断言都是假的）。
+   *
+   * 背景：CDP 连上的窗口如果处于 `document.visibilityState === 'hidden'`
+   * （后台窗口 / 无人操作时的常见状态），Chromium 会**停掉渲染生命周期** ——
+   * 实测 `requestAnimationFrame` 一秒 0 次，而 `setInterval` 照常（2 次/秒）。
+   * 后果：`ResizeObserver` **一次都不回调**，于是
+   *   · 「内容长高后是否自动滚到底」测不到（B1/B2 永远红，而代码是对的）；
+   *   · 「容器变化驱动重排」这类断言全部失真。
+   * 实测指纹：`roFires: 0` 而 `dist` 单调递增。
+   * ★ 修法：`Page.bringToFront` + `Emulation.setFocusEmulationEnabled` ——
+   *   之后 `visibilityState` 变 `visible`、rAF 回到 ~240/秒（实测）。
+   * ⚠️ 这两条只影响**测量环境**，不改产品行为；少了它们，探针会给出**看起来像产品缺陷**的红。
+   */
+  async ensureRendering() {
+    // ★★ 让窗口**真的可见**：hidden 状态下 Chromium 停掉渲染生命周期，
+    //    rAF 实测 0 次/秒（而 setInterval 正常）→ ResizeObserver 一次都不回调。
+    //    实测里 `Page.bringToFront` 单独用**不管用**（窗口在后台时它不顶事），
+    //    必须连 `Emulation.setFocusEmulationEnabled` 一起上；两者都调完之后
+    //    `visibilityState` 变 visible、rAF 回到 ~240/秒（实测）。
+    // ⚠️ 幂等：重复调用无副作用。
+    for (const [method, params] of [
+      ['Page.bringToFront', {}],
+      ['Emulation.setFocusEmulationEnabled', { enabled: true }],
+      ['Emulation.setPageVisibility', { visibility: 'visible' }]
+    ]) {
+      try {
+        await this.send(method, params)
+      } catch {
+        // 某个方法在旧 CDP 上不存在：继续试下一个（三个里中一个就够）
+      }
+    }
+    return this.evaluate('document.visibilityState')
+  }
+
   async #connect(url) {
     this.#ws = new WebSocket(url)
     await new Promise((res, rej) => {
@@ -144,6 +179,12 @@ const READ_STATE = (selector) => `(() => {
 
 async function main() {
   const cdp = await Cdp.attach()
+  // ★★ 先让渲染器真的在渲染：hidden 窗口下 ResizeObserver 一次都不触发，
+  //    「内容长高后有没有跟随」这类测量会**全部失真**（实测踩到，见 ensureRendering 的说明）。
+  const visibility = await cdp.ensureRendering()
+  if (visibility !== 'visible') {
+    console.log(`[33m⚠️ 窗口仍是 ${visibility}：与渲染时序相关的断言可能失真（见 ensureRendering 的说明）[0m`)
+  }
   cdpForRestore = cdp // 出错时也要用它把视角恢复成学生（见文件末尾）
   console.log('\u001b[1m【学生视角】技术与运维信息扫描\u001b[0m')
 
@@ -286,11 +327,11 @@ async function main() {
   const teacherSidebar = await cdp.evaluate(`(() => {
     const items = Array.from(document.querySelectorAll('nav a, nav button, aside button'))
       .map((el) => (el.textContent || '').trim())
-    return { hasKnowledge: items.some((t) => t.includes('教材知识库')), count: items.length }
+    return { hasKnowledge: items.some((t) => t.includes('参考资料库')), count: items.length }
   })()`)
   check(
     '教师视角 · 侧栏',
-    '★ 「教材知识库」入口出现（教师专属页）',
+    '★ 「参考资料库」入口出现（教师专属页）',
     teacherSidebar?.hasKnowledge === true,
     `侧栏项 ${teacherSidebar?.count ?? 0} 个`
   )

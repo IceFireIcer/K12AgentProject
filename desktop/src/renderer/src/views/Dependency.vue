@@ -689,7 +689,7 @@ async function exportCsv(): Promise<void> {
         <EmptyState
           tone="empty"
           title="这个学段还没有知识点依赖"
-          desc="这一册教材的知识结构还没来得及编进来 —— 先问问团团别的内容吧。"
+          desc="这一册教材的知识结构还没来得及编进来 —— 先问问智团团别的内容吧。"
         />
         <TeacherGate label="处置">
           <p class="dg__tech">到「教材知识库」页导入教材并重建索引，这一页就会有内容。</p>
@@ -1087,7 +1087,7 @@ async function exportCsv(): Promise<void> {
               <h3 class="appendix__h">点了能做什么</h3>
               <ul class="notes">
                 <li>点任意知识点卡片：右侧浮层显示它的前置、后继与掌握度。</li>
-                <li>浮层里的「开始学习这个知识点 →」会带着它去对话页找团团。</li>
+                <li>浮层里的「开始学习这个知识点 →」会带着它去对话页找智团团。</li>
                 <li>「快速定位」按章节分组，找不到就用「展开全部」。</li>
               </ul>
             </section>

@@ -171,7 +171,12 @@ test('G20-4 内容：掌握度分档 / 学习偏好 / 推荐下一步都在块�
   assert.ok(block.includes('学习偏好'), '偏好行必须在（`remember_preference` 写的就是它）')
   assert.ok(block.includes('explain_style=喜欢用生活中的例子'), '偏好的 key=value 必须原样进块')
   assert.ok(block.includes('推荐下一步'), '推荐行必须在（个性化闭环的「读」这一端）')
-  assert.ok(block.includes('推荐口径') || block.includes('优先顺着这条线引导'), '推荐口径或退路提示必须有一句')
+  // ★ 2026-09-21 改（D-064）：口径从「照这个意思说」松成「想带方向时可以说」——
+  //   原来那半句是**命令式**，模型会把它当成每轮必做的引导任务；现在它只是可选建议。
+  assert.ok(
+    block.includes('想带一下方向时') || block.includes('需要时可以顺着这条线带一带'),
+    '推荐建议或退路提示必须有一句（但不再是命令式）'
+  )
   // 掌握度按分数降序：0.9 那条排在 0.35 前面（prompt 预算先给最重要的）
   assert.ok(block.indexOf('prog-loop-jr') < block.indexOf('prog-variable-jr'))
 })
@@ -738,7 +743,9 @@ const CHAPTER_PROFILE: ProfileResponse = {
   student: { ...FAKE_PROFILE.student, currentChapter: '第4章 大模型与AI智能体Agent' }
 }
 
-const CHAPTER_LINE_HEAD = '- 当前教材章节：'
+// ★ 2026-09-21 改（D-064）：章节从「查询偏好」降为**纯背景**——
+//   前缀与括号里那句都换了口径，见 `extensions/profile.ts` 的 `renderProfileText`。
+const CHAPTER_LINE_HEAD = '- 学生当前在看：'
 const TITLE_LINE_HEAD = '【学习画像 · 内部数据，不要整段念给学生听】学生：'
 
 test('G23-1 ★ 章节行的位置固定：在标题行之后、掌握度之前', () => {
@@ -760,7 +767,7 @@ test('G23-1 ★ 章节行的位置固定：在标题行之后、掌握度之前'
   assert.ok(titleLine >= 0, `块里找不到画像标题行：\n${block}`)
   assert.equal(
     lines[titleLine + 1],
-    `${CHAPTER_LINE_HEAD}第4章 大模型与AI智能体Agent（回答与检索优先围绕本章；学生若问其他章节，照常回答）`,
+    `${CHAPTER_LINE_HEAD}第4章 大模型与AI智能体Agent（只是背景，不必刻意围绕它）`,
     `★ 章节行必须是**紧跟标题行的那一行**（它是块的第二行正文），实际下一行是：${lines[titleLine + 1]}`
   )
 })
@@ -827,7 +834,7 @@ test('★ G23-5 章节行里没有日期 / 时刻 / 长数字串（防有人把�
   const chapterLine = block.split('\n').find((line) => line.startsWith(CHAPTER_LINE_HEAD)) ?? ''
   assert.equal(
     chapterLine,
-    `${CHAPTER_LINE_HEAD}第4章 大模型与AI智能体Agent（回答与检索优先围绕本章；学生若问其他章节，照常回答）`,
+    `${CHAPTER_LINE_HEAD}第4章 大模型与AI智能体Agent（只是背景，不必刻意围绕它）`,
     '章节行的文本模板是冻结的（改它等于换一种口径交给模型）'
   )
   assert.ok(!chapterLine.includes('学段'), '章标题已含学段语境，不要在章节行后面重复学段标签')
