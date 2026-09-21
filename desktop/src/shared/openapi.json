@@ -728,6 +728,17 @@
             "title": "Confidence",
             "type": "number"
           },
+          "decidedBy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decidedby"
+          },
           "fromLevel": {
             "anyOf": [
               {
@@ -822,7 +833,7 @@
       },
       "GradeOverrideRequest": {
         "additionalProperties": false,
-        "description": "``POST /api/grade/override/{student_id}`` 的请求体。\n\n★★ **刻意不提供 ``note``（留痕说明）字段** —— 这是取舍，不是省事：\n``grade_history`` 只有 ``(ts, turn, from_level, to_level, source, confidence)``\n这几列（\"不许新增表或列\" 是硬约束），多出来的文本**没有地方落盘**；\n退而求其次写进日志又违反「日志里不出现学生文本」的合规要求。\n收下一个**写不进去**的字段等于让接口撒谎：调用方以为自己留了痕，其实内容被静默丢弃，\n之后排查时还会以为「日志里没有是因为没填」。宁可不提供。",
+        "description": "``POST /api/grade/override/{student_id}`` 的请求体。\n\n★★ **刻意不提供 ``note``（留痕说明）字段** —— 这是取舍，不是省事：\n``grade_history`` 只存结构化字段，没有放**任意文本**的列；多出来的说明\n**没有地方落盘**；退而求其次写进日志又违反「日志里不出现学生文本」的合规要求。\n收下一个**写不进去**的字段等于让接口撒谎：调用方以为自己留了痕，其实内容被静默丢弃，\n之后排查时还会以为「日志里没有是因为没填」。宁可不提供。\n\n★ 请求体里**也不需要会话 id**：冷却锚点记的是 ``grade_signals`` 的**信号位标**\n（全局单调、跨会话可比），不是某个会话里的轮次号 —— 服务端写这一行时自己就能取到。\n详见 ``app/grade/rules.py`` 的 ``_cooldown_remaining``。",
         "properties": {
           "gradeLevel": {
             "enum": [
@@ -1071,6 +1082,22 @@
             "title": "Cooldownremainingturns",
             "type": "integer"
           },
+          "cumulativeTurns": {
+            "default": 0,
+            "title": "Cumulativeturns",
+            "type": "integer"
+          },
+          "decidedBy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decidedby"
+          },
           "direction": {
             "default": 0,
             "title": "Direction",
@@ -1098,6 +1125,7 @@
             "title": "Lastchangeturn"
           },
           "lastTurn": {
+            "default": 0,
             "title": "Lastturn",
             "type": "integer"
           },
@@ -1135,30 +1163,31 @@
         "required": [
           "studentId",
           "grade",
-          "source",
-          "lastTurn"
+          "source"
         ],
         "title": "GradeStateOut",
         "type": "object"
       },
       "GradeTurnInput": {
         "additionalProperties": false,
-        "description": "**一轮**证据：轮次号 + 学生原话 + （可选）答题表现与第二层提议。",
+        "description": "**一轮**证据：轮次号 + 学生原话 + （可选）第二层提议与其**通道状态**。\n\n★ 2026-09-21：原先还有一个 ``quiz``（答题表现）。已随那条信号一起移除 ——\n答题表现不该改学段（那是 ``mastery`` 的事），而且它会从原文里捡「太难了」\n与元认知重复计数。见 ``app/grade/signals.py`` 的模块 docstring。\n⚠️ 不要再把它加回来：契约收下一个字段，就等于承诺它会参与判定。",
         "properties": {
-          "proposal": {
+          "layer2Status": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/GradeProposalInput"
+                "maxLength": 32,
+                "type": "string"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Layer2Status"
           },
-          "quiz": {
+          "proposal": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/QuizPerformanceInput"
+                "$ref": "#/components/schemas/GradeProposalInput"
               },
               {
                 "type": "null"
@@ -1211,6 +1240,17 @@
           "cooldownRemainingTurns": {
             "title": "Cooldownremainingturns",
             "type": "integer"
+          },
+          "decidedBy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decidedby"
           },
           "degraded": {
             "anyOf": [
@@ -2509,47 +2549,6 @@
         "title": "QuizPayload",
         "type": "object"
       },
-      "QuizPerformanceInput": {
-        "additionalProperties": false,
-        "description": "答题表现（从 ``learning.db`` 读出来的结构化摘要，由桌面端带上来）。\n\n**不带题干与作答正文**，只有数字 —— 与 ``learning_history`` 的口径一致。",
-        "properties": {
-          "attempts": {
-            "default": 0,
-            "maximum": 1000.0,
-            "minimum": 0.0,
-            "title": "Attempts",
-            "type": "integer"
-          },
-          "correct": {
-            "default": 0,
-            "maximum": 1000.0,
-            "minimum": 0.0,
-            "title": "Correct",
-            "type": "integer"
-          },
-          "currentStreak": {
-            "default": 0,
-            "maximum": 100.0,
-            "minimum": -100.0,
-            "title": "Currentstreak",
-            "type": "integer"
-          },
-          "hintsRequested": {
-            "default": 0,
-            "maximum": 1000.0,
-            "minimum": 0.0,
-            "title": "Hintsrequested",
-            "type": "integer"
-          },
-          "tooHard": {
-            "default": false,
-            "title": "Toohard",
-            "type": "boolean"
-          }
-        },
-        "title": "QuizPerformanceInput",
-        "type": "object"
-      },
       "QuizQuestionOut": {
         "additionalProperties": false,
         "description": "★ **对外模型**：没有 ``answer``、也**没有** ``explanation``，发给 TS 与前端。\n\n判分所需的标准答案只留在 Python 侧：``POST /api/quiz/grade`` 按 ``qid`` 查库判分，\n前端与 TS 都不需要答案。\n\n★★ **为什么连 ``explanation`` 也不下发**（2026-09-19 定案，它本来是契约字段）：\n  ``explanation`` 是**解析**，而它的话术经常把答案直接写进去 ——\n  实测 **295/684 道真题（约 43%）** 的解析含标准答案原文\n  （形如「选 B。因为 range 是含头不含尾的……」）。发出去就等于把题做废：\n  学生（或模型）只要读题面载荷就能白拿答案，``mastery`` 随之失去意义。\n\n  ⚠️ 这个比例**有可复现的出处**：``tests/test_quizbank_coverage.py`` 的\n  ``test_explanation_usually_contains_the_answer`` 每次运行都会打印它\n  （不是从别处抄来的数字，题库改了它会跟着变）。\n\n  而这与闯关页界面上的白纸黑字一致 —— ``views/Quiz.vue`` 写着\n  「答案与解析都不下发到界面」。此前是契约与承诺不符：界面不渲染，\n  但载荷一直带着它走完了 HTTP。\n\n★ **解析的教学价值一个字没丢**：它仍然在 ``feedback_for()`` 里，\n  只在**判分之后**经 ``QuizResult.feedback`` 回传给学生 ——\n  「答完再讲为什么」正是有教育意义的那一步，而「答前先看到为什么」只是送答案。\n\n⚠️ 不要为「前端想提前显示解析」把它加回来：那需要先答过一次，\n  也就是说要先有一条判分记录（``store.question_attempt``），\n  而那件事的完整形态是「判分后从 ``feedback`` 取」—— 不是第二条下发通道。",
@@ -3486,7 +3485,7 @@
     },
     "/api/grade/override/{student_id}": {
       "post": {
-        "description": "★ **唯一的人工写路径**：学生选定学段 → 立即生效 + 进入 :data:`MANUAL_COOLDOWN_TURNS` 冷却。\n\n与 ``POST /grade/turns`` 的分工：那条路径收的是**证据**（可能改变学段，也可能不），\n这条路径收的是**决定**（一定按学生的意思生效）。两者写的是同一张 ``grade_history``，\n区别只有 ``source`` 与冷却窗口长度 —— 冷却期一过，自动推断照常接管。",
+        "description": "★ **唯一的人工写路径**：学生选定学段 → 立即生效 + 进入 :data:`MANUAL_COOLDOWN_TURNS` 冷却。\n\n与 ``POST /grade/turns`` 的分工：那条路径收的是**证据**（可能改变学段，也可能不），\n这条路径收的是**决定**（一定按学生的意思生效）。两者写的是同一张 ``grade_history``，\n区别只有 ``source`` 与冷却窗口长度 —— 冷却期一过，自动推断照常接管。\n\n★ 冷却锚点（``signal_mark``）**由服务端自己取**：它是「写这一行时 ``grade_signals``\n的最大 id」，全局单调、跨会话可比 —— 所以请求体里不需要会话参数，\n而「手动后 10 轮内不再自动调整」这条验收仍在字面上成立（跨会话照数）。",
         "operationId": "override_grade_api_grade_override__student_id__post",
         "parameters": [
           {
@@ -3582,7 +3581,7 @@
     },
     "/api/grade/state/{student_id}": {
       "get": {
-        "description": "桌面端每轮取「当前学段」的入口（不含信号列表，载荷最小）。\n\n当前学段可能是**推断引擎自动写入**的，也可能是**学生手动设定**的\n（后者 ``source=\"explicit\"``、``cooldownRemainingTurns`` 更长）。\n\n学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，\n而不是 404 —— 学段推断从第一轮就要开始工作。",
+        "description": "桌面端每轮取「当前学段」的入口（不含信号列表，载荷最小）。\n\n当前学段可能是**推断引擎自动写入**的，也可能是**学生手动设定**的\n（后者 ``source=\"explicit\"``、``cooldownRemainingTurns`` 更长）。\n\n★ 冷却不需要会话参数：锚点记的是 ``grade_signals`` 的**信号位标**（全局单调、\n跨会话可比），所以「还剩几轮」在任何会话里读都是同一个真实轮数\n—— 与 ``POST /grade/turns`` 报出的值也必然一致（P-094 的形态不会重现）。\n\n学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，\n而不是 404 —— 学段推断从第一轮就要开始工作。",
         "operationId": "grade_state_api_grade_state__student_id__get",
         "parameters": [
           {

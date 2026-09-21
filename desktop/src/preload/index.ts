@@ -586,16 +586,25 @@ const api: K12Api = {
 
 /**
  * 学段状态的最小形状检查（`origin` 缺省按 `default` 处理：宁可显示待判定）。
- * ★ 三态都要认（`explicit` = 学生手动选的）—— 漏掉它会让「刚点完学段」的推送被整条丢掉，
- *   界面停在上一个状态，看起来像「点了没反应」。
+ * ★ 五态都要认（`explicit` = 学生手动选的）—— 漏掉任何一态都会让对应的推送被**整条丢掉**：
+ *   漏 `explicit` → 「刚点完学段」的推送没了，看起来像「点了没反应」；
+ *   漏 `rules` / `llm`（D-066 新增）→ 「本地规则判定」「AI 引擎判定」两条推送没了，
+ *   界面永远停在「待判定」，学生以为系统一直没判（同一个病的另一种表现）。
+ *   `inferred` 是历史值，保留以兜住极旧的推送。
  */
 function isGradeState(value: unknown): value is GradeState {
   if (typeof value !== 'object' || value === null) return false
   const record = value as { gradeLevel?: unknown; origin?: unknown }
+  const knownOrigin =
+    record.origin === 'explicit' ||
+    record.origin === 'rules' ||
+    record.origin === 'llm' ||
+    record.origin === 'inferred' ||
+    record.origin === 'default'
   return (
     typeof record.gradeLevel === 'string' &&
     (GRADE_LEVELS as readonly string[]).includes(record.gradeLevel) &&
-    (record.origin === 'inferred' || record.origin === 'explicit' || record.origin === 'default')
+    knownOrigin
   )
 }
 

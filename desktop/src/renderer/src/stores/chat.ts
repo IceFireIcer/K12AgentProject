@@ -66,12 +66,13 @@ export const useChatStore = defineStore('chat', () => {
   /**
    * 当前学段：`null` = 系统还没判出来、学生也还没选过。
    *
-   * ★ 只认「有依据」的两态：`inferred`（系统判过）与 `explicit`（学生选的）。
+   * ★ 只认「有依据」的四态（D-066）：`rules`（本地规则判定）/ `llm`（AI 引擎判定）/
+   *   `inferred`（历史值 = rules）/ `explicit`（学生选的）。
    *   冷启动默认值（`default`）不是判定结果，也不是学生的选择 ——
    *   拿它上屏等于用默认值冒充一个结论（在演示里就是撒谎）。
    */
   const currentGrade = ref<GradeLevel | null>(null)
-  /** 学段来源（三态；`null` = 还没收到任何推送）。 */
+  /** 学段来源（五态；`null` = 还没收到任何推送）。 */
   const gradeOrigin = ref<GradeOrigin | null>(null)
   /** 学段**变化**时的一次性提示（下一个问题发出时清掉）。 */
   const gradeNotice = ref<string | null>(null)
@@ -681,9 +682,15 @@ export const useChatStore = defineStore('chat', () => {
 
     // ★ 冷启动默认值**整条**丢掉（不只丢学段名，也不写 `gradeOrigin`）：
     //   `gradeOrigin` 的含义是「这个学段是怎么定下来的」。还没定下来的时候往里写
-    //   `default`，会让来源标签悄悄变成「AI 引擎推算」—— 学生刚手动选完时，
+    //   `default`，会让来源标签悄悄变成判定结果 —— 学生刚手动选完时，
     //   一条过期的冷启动推送就能把他那句「手动选中」顶掉（同一个谎，换了个字段）。
-    if (next.origin !== 'inferred' && next.origin !== 'explicit') return
+    //
+    // ★★ 2026-09-21（D-066）：判过的态从两种变四种 ——
+    //   `rules`（本地规则判定）/ `llm`（AI 引擎判定）/ `inferred`（历史值= rules）/
+    //   `explicit`（手动选中）。**都要放行**，否则「本地规则判定」这条推送会被整条丢掉，
+    //   界面永远停在「待判定」，学生看不出系统到底判了没有。
+    const accepted: GradeOrigin[] = ['rules', 'llm', 'inferred', 'explicit']
+    if (!accepted.includes(next.origin)) return
 
     const previous = currentGrade.value
     gradeOrigin.value = next.origin
@@ -700,7 +707,12 @@ export const useChatStore = defineStore('chat', () => {
       void refreshChapter()
     }
 
-    if (next.origin === 'inferred' && previous !== next.gradeLevel) {
+    // ★ 只有**系统判出来的**（规则或 LLM）才给那句「我按XX的说法来讲」，
+    //   而且只在学段真的变了时给 —— 学生自己刚选完有更贴切的回执（见 `setGrade`）。
+    if (
+      (next.origin === 'rules' || next.origin === 'llm' || next.origin === 'inferred') &&
+      previous !== next.gradeLevel
+    ) {
       gradeNotice.value = gradeAdaptNotice(next.gradeLevel)
     }
   }

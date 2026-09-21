@@ -37,6 +37,7 @@ import {
 import {
   GRADE_OVERRIDE_HEADING,
   LAYER2_FIRST_TURN,
+  LLM_DECIDES_FROM_TURN,
   LAYER2_MIN_TURNS,
   LAYER2_RETRY_TURN,
   MAX_TURN_CHARS,
@@ -45,13 +46,15 @@ import {
   clampTurnText,
   countUsableTurns,
   createGradeExtension,
+  isDegradedLayer2,
   parseProposal,
   shouldRequestLayer2,
   stripGradeOverride,
   swapKnownGradeTemplate,
   type GradeProposal,
   type GradeTurnResponse,
-  type GradeStateSnapshot
+  type GradeStateSnapshot,
+  type Layer2Status
 } from '../src/main/agent/extensions/grade.ts'
 import { AGENT_EXTENSION_SPECS } from '../src/main/agent/extensions/index.ts'
 
@@ -97,6 +100,67 @@ test('G1a 第二层触发轮次与阈值和 server 侧逐字一致', () => {
   assert.equal(pyNumber(rulesSource, 'SIGNALS_REQUIRED_FOR_CHANGE'), 3)
   assert.equal(pyNumber(rulesSource, 'COOLDOWN_TURNS'), 5)
   assert.equal(pyNumber(rulesSource, 'MAX_STEP_LEVELS'), 1)
+})
+
+test('G1a-2 ★★ 「哪些第二层状态算降级」两边必须一致（否则 degraded 又会说谎）', () => {
+  /**
+   * 这条盯的是一个**已经发生过**的缺陷：服务端原先按「没有提议 + 第 3 轮起」
+   * 就报 `degraded="no_llm"`，把 `already_proposed`（本窗口早提过议，
+   * 属**正常工作**）也算成了「没有模型」。实测 436 次判定里 218 次被这么标，
+   * 而 63 次第 3 轮判定里 **48 次真的带上了提议** —— 标注与实际相反。
+   *
+   * 现在两边各有一份白名单（服务端 `DEGRADED_LAYER2_STATUSES`、
+   * 桌面端 `isDegradedLayer2()`）。**改一边不改另一边 = 同一个谎换一种形式**，
+   * 所以这里逐值对照。
+   */
+  const ALL_STATUSES: Layer2Status[] = [
+    'not_due',
+    'no_llm',
+    'judge_error',
+    'due',
+    'retry',
+    'insufficient_evidence',
+    'already_proposed',
+    'used'
+  ]
+
+  // 从 Python 源码里把 frozenset 的字面量抠出来。
+  // ⚠️ 集合里既可能直接写字符串（`"judge_error"`），也可能引用常量
+  //    （`DEGRADED_NO_LLM`）—— 两种写法都要认，否则这条守卫会因为「写法不同」
+  //    而误报，最后被人当成噪音删掉（那就等于没守）。
+  const matched = /DEGRADED_LAYER2_STATUSES[^=]*=\s*frozenset\(\{([^}]*)\}\)/.exec(rulesSource)
+  assert.ok(matched, 'server 侧找不到 DEGRADED_LAYER2_STATUSES 的字面量')
+  const pyDegraded = new Set<Layer2Status>()
+  for (const raw of matched[1].split(',')) {
+    const item = raw.trim()
+    if (!item) continue
+    const literal = /^"([a-z_]+)"$/.exec(item)
+    if (literal) {
+      pyDegraded.add(literal[1] as Layer2Status)
+      continue
+    }
+    // 引用了常量：回源码里查它的值（`DEGRADED_NO_LLM = "no_llm"`）
+    const constMatch = new RegExp(`^${item}\\s*=\\s*"([a-z_]+)"`, 'm').exec(rulesSource)
+    assert.ok(constMatch, `server 侧的 ${item} 找不到字符串定义`)
+    pyDegraded.add(constMatch[1] as Layer2Status)
+  }
+  assert.equal(pyDegraded.size, 2, '白名单恰好两个状态（多了就是把正常工作也当降级）')
+
+  const tsDegraded = new Set(ALL_STATUSES.filter((status) => isDegradedLayer2(status)))
+  assert.deepEqual(
+    [...tsDegraded].sort(),
+    [...pyDegraded].sort(),
+    '两边的「降级状态白名单」必须逐一相同'
+  )
+
+  // ★ 正向断言：真降级恰好这两个（多一个会让标注重新失真）
+  assert.deepEqual([...tsDegraded].sort(), ['judge_error', 'no_llm'])
+
+  // ★★ 反向对照：这几个**都不算**降级 —— 它们描述的是「第二层工作正常」。
+  //    漏掉这条，白名单就可能被写成「除了 used 都算降级」（那等于没修）。
+  for (const ok of ['used', 'due', 'retry', 'already_proposed', 'not_due', 'insufficient_evidence'] as Layer2Status[]) {
+    assert.equal(isDegradedLayer2(ok), false, `${ok} 不该被标成降级（它不是「第二层没工作」）`)
+  }
 })
 
 test('G1b 单轮文本上限与 server 侧一致，且远大于入库证据摘要的上限', () => {
@@ -159,42 +223,47 @@ test('G1e 本扩展导出 runtime.ts 需要的两个显式入口（返回 Promis
  * G2 第二层的触发与降级
  * ------------------------------------------------------------------ */
 
-test('G2a 第二层在第 3 轮触发；未到轮次不触发', () => {
+test('G2a ★★ 累计第 5 轮起才请 LLM 出场（D-066）；前 4 轮只有规则判', () => {
+  // 前 4 个累计轮次：一律不触发 —— 这一段由**规则引擎**全权判定
+  for (const cumulativeTurns of [1, 2, 3, 4]) {
+    assert.deepEqual(
+      shouldRequestLayer2({ cumulativeTurns, usableTurns: 8, windowHasProposal: false, judgeAvailable: true }),
+      { run: false, status: 'not_due' },
+      `累计第 ${cumulativeTurns} 轮不该请 LLM（前 4 轮是规则的地盘）`
+    )
+  }
+  // 第 5 个累计轮次：到点，LLM 出场（此后它**直接定方向**，不再只是提议）
   assert.deepEqual(
-    shouldRequestLayer2({ turn: 1, usableTurns: 1, windowHasProposal: false, judgeAvailable: true }),
-    { run: false, status: 'not_due' }
-  )
-  assert.deepEqual(
-    shouldRequestLayer2({ turn: 2, usableTurns: 2, windowHasProposal: false, judgeAvailable: true }),
-    { run: false, status: 'not_due' }
-  )
-  assert.deepEqual(
-    shouldRequestLayer2({ turn: 3, usableTurns: 3, windowHasProposal: false, judgeAvailable: true }),
+    shouldRequestLayer2({ cumulativeTurns: 5, usableTurns: 5, windowHasProposal: false, judgeAvailable: true }),
     { run: true, status: 'due' }
   )
+  assert.equal(LLM_DECIDES_FROM_TURN, 5, '「前五轮用本地规则」是用户裁决的冻结口径')
 })
 
-test('G2b 证据不足等到第 5 轮再试（执行文档 §10.3）', () => {
-  const thin = { usableTurns: 1, windowHasProposal: false, judgeAvailable: true }
-  assert.deepEqual(shouldRequestLayer2({ turn: 3, ...thin }), {
-    run: false,
-    status: 'insufficient_evidence'
+test('G2b ★ 计数单位是**累计轮次**（跨会话），不是本地那个每会话计数器', () => {
+  // ★ 这是本票最容易写错的一处：拿 `turn`（每会话计数器）判断，会让每个新会话
+  //   都从头等 5 轮 —— 而实测会话普遍只有 3–8 轮，很多会话永远等不到 LLM。
+  //   所以入参是 `cumulativeTurns`，且**它来自服务端**（`GET /api/grade/state`）。
+  const same = shouldRequestLayer2({
+    cumulativeTurns: 5, usableTurns: 5, windowHasProposal: false, judgeAvailable: true
   })
-  assert.deepEqual(shouldRequestLayer2({ turn: 4, ...thin }), {
-    run: false,
-    status: 'insufficient_evidence'
-  })
-  assert.deepEqual(shouldRequestLayer2({ turn: 5, ...thin }), { run: true, status: 'retry' })
+  assert.deepEqual(same, { run: true, status: 'due' })
+  // 累计到第 5 轮、但本轮是新会话的第 1 轮 —— **照常触发**（累计轮次不看会话）
+  assert.deepEqual(
+    shouldRequestLayer2({ cumulativeTurns: 5, usableTurns: 1, windowHasProposal: false, judgeAvailable: true }),
+    { run: false, status: 'insufficient_evidence' },
+    '到点了但本轮可用证据太少 → 等攒够（不硬判）'
+  )
   assert.equal(LAYER2_MIN_TURNS, 3, '至少 3 轮可用证据才算「够料」')
 })
 
 test('G2c 一个窗口只判定一次，且没有通道时显式 no_llm', () => {
   assert.deepEqual(
-    shouldRequestLayer2({ turn: 6, usableTurns: 6, windowHasProposal: true, judgeAvailable: true }),
+    shouldRequestLayer2({ cumulativeTurns: 6, usableTurns: 6, windowHasProposal: true, judgeAvailable: true }),
     { run: false, status: 'already_proposed' }
   )
   assert.deepEqual(
-    shouldRequestLayer2({ turn: 9, usableTurns: 9, windowHasProposal: false, judgeAvailable: false }),
+    shouldRequestLayer2({ cumulativeTurns: 9, usableTurns: 9, windowHasProposal: false, judgeAvailable: false }),
     { run: false, status: 'no_llm' },
     '没有 API Key / 没接线时要看得见，不能静默跳过'
   )
@@ -442,11 +511,18 @@ test('G4a observeTurn 上交本轮证据，且不含任何服务端算好的信�
 
   assert.equal(harness.submitted.length, 1)
   const body = harness.submitted[0].turns[0]
-  assert.deepEqual(Object.keys(body).sort(), ['sessionId', 'text', 'turn'])
+  // ★ `layer2Status` 是 2026-09-21 新加的：把**通道状态**上报给服务端，
+  //   好让它别再把 `already_proposed`（正常工作）标成 `degraded="no_llm"`。
+  assert.deepEqual(Object.keys(body).sort(), ['layer2Status', 'sessionId', 'text', 'turn'])
   assert.equal(body.turn, 1)
   assert.equal(body.text, '电脑怎么认图片呀？')
   assert.equal(body.sessionId, 'sess-1')
   assert.equal(harness.submitted[0].studentId, 'student_001')
+  // ★ 仍然不含任何**服务端算好的信号**（方向/强度/置信度一概不上交）——
+  //   这是契约纪律：提取与判定只在 Python 发生一次。
+  assert.equal('signals' in body, false)
+  assert.equal('confidence' in body, false)
+  assert.equal('direction' in body, false)
   // ★ 工厂本身是空实现（不再订阅 Pi 事件）：不订阅也是「已注册」，注册器照常把它算作就位
   assert.deepEqual(Object.keys(harness.pi.handlers), [], '本扩展不得订阅任何 Pi 事件')
 })

@@ -569,9 +569,12 @@ test('G5a ★ 学段来源以服务端 source 为准：explicit 必须映射成 
   )
 })
 
-test('G5b preload 的边界校验认三态 origin（漏掉 explicit 会让刚点完的推送被整条丢掉）', () => {
+test('G5b ★★ preload 的边界校验认**五态** origin（漏任何一态都会让对应推送被整条丢掉）', () => {
   const body = functionBody(join(desktopRoot, 'src', 'preload', 'index.ts'), 'function isGradeState')
-  for (const origin of ['inferred', 'explicit', 'default']) {
+  // ★ 漏 `explicit` → 「刚点完学段」的推送没了，看起来像「点了没反应」；
+  //   漏 `rules` / `llm`（D-066 新增）→ 「本地规则判定」「AI 引擎判定」两条推送没了，
+  //   界面永远停在「待判定」—— 同一个病的另一种表现，所以逐态钉死。
+  for (const origin of ['explicit', 'rules', 'llm', 'inferred', 'default']) {
     assert.ok(body.includes(`'${origin}'`), `isGradeState 必须认 origin === '${origin}'`)
   }
 })

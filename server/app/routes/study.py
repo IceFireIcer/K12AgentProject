@@ -423,6 +423,7 @@ def _grade_history_entries(rows: list[GradeHistoryRecord], to_ms) -> list[GradeH
             from_level=as_grade_level(row.from_level) if row.from_level else None,
             to_level=as_grade_level(row.to_level),
             source=row.source,
+            decided_by=row.decided_by,
             confidence=row.confidence,
         )
         for row in rows

@@ -268,17 +268,18 @@ class TestMigrations(SqliteCase):
         ensure_migrated(conn, KB_MIGRATIONS, set_name=KB, vec_ready=True)
         ensure_migrated(conn, LEARNING_MIGRATIONS, set_name=LEARNING, vec_ready=False)
         # ★ 按 (set_name, version) 逐行看**账本**（不是「每个 set 取一行」）：
-        #   同一组里多版本并存是正常的 —— learning 的 v2 是「学生当前教材章节列」，
-        #   它**不该**让 kb 的账本多出一行（那才是本用例真正防的事）。
+        #   同一组里多版本并存是正常的 —— learning 的 v2 是「学生当前教材章节列」、
+        #   v3 是「学段轨迹的信号位标」，它们**不该**让 kb 的账本多出一行
+        #   （那才是本用例真正防的事）。
         rows = {
             (str(r["set_name"]), int(r["version"]))
             for r in conn.execute("SELECT set_name, version FROM schema_version")
         }
-        self.assertEqual(rows, {(KB, 1), (LEARNING, 1), (LEARNING, 2)})
+        self.assertEqual(rows, {(KB, 1), (LEARNING, 1), (LEARNING, 2), (LEARNING, 3), (LEARNING, 4)})
         self.assertEqual(
             {str(r["set_name"]) for r in conn.execute("SELECT set_name FROM schema_version WHERE version > 1")},
             {LEARNING},
-            "只有 learning 组有 v2；kb 组不该出现多版本",
+            "只有 learning 组有多版本（v2 章节列 / v3 学段信号位标）；kb 组不该出现多版本",
         )
         self.assertTrue(kb_repo.table_exists(conn, "student"))
 
@@ -410,7 +411,8 @@ class TestMigrations(SqliteCase):
 
         from app.store.migrations import LEARNING_MIGRATIONS
 
-        # 造一个「老库」：只跑到 v1，把 v2（章节列）留成待应用 —— 竞争就发生在这一版上。
+        # 造一个「老库」：只跑到 v1，把 v2（章节列）与 v3（学段信号位标）留成待应用 ——
+        # 竞争就发生在这些待应用的版本上。
         path = self.tmp / "learning.db"
         seed = connect(path, load_vec=False)
         try:
@@ -431,21 +433,26 @@ class TestMigrations(SqliteCase):
                 versions = [f.result() for f in [pool.submit(open_and_migrate, i) for i in range(3)]]
             self.assertEqual(
                 versions,
-                [2, 2, 2],
-                f"第 {round_index + 1} 轮：并发首迁必须全部成功且都到 v2，实际 {versions}",
+                [4, 4, 4],
+                f"第 {round_index + 1} 轮：并发首迁必须全部成功且都到最新版，实际 {versions}",
             )
 
-        # 收尾：账本上这一版**只有一行**（落选连接不许重复记账）
+        # 收尾：待应用的每一版**只有一行**（落选连接不许重复记账）
         check = connect(path, load_vec=False)
         try:
             rows = check.execute(
-                "SELECT COUNT(*) FROM schema_version WHERE set_name=? AND version=2", (LEARNING,)
+                "SELECT COUNT(*) FROM schema_version WHERE set_name=? AND version=4",
+                (LEARNING,),
             ).fetchone()[0]
             columns = {str(r["name"]) for r in check.execute("PRAGMA table_info(student)")}
+            history_columns = {
+                str(r["name"]) for r in check.execute("PRAGMA table_info(grade_history)")
+            }
         finally:
             check.close()
         self.assertEqual(rows, 1, "并发迁移不该把同一版记两次")
         self.assertIn("current_chapter", columns)
+        self.assertIn("signal_mark", history_columns)
 
     def test_execute_script_splits_on_real_statement_boundaries(self) -> None:
         """★ 逐条执行：同一行的两条语句也要拆开，注释与字符串里的分号不能当边界。

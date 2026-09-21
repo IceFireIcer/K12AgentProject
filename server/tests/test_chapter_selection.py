@@ -77,10 +77,13 @@ def _chapter_number(title: str) -> int:
 #: 三句童言 → 连续 3 轮同向（向下）的**够格证据**：实测能在第 3 轮把学段从
 #: ``primary_high`` 调到 ``primary_low``（见 ``tests/test_grade.py``）。这里复用同一组句子：
 #: 「学段变更 → 章节清空」这条断言必须是**真的自动推断路径**触发的学段变更。
+#:
+#: ★ 2026-09-21：改为**受挫表达**。原先那三句靠「日常口语 → 下调」凑向下证据，
+#: 而那条已改成「只上不下」（用词日常不是学段低的证据）—— 向下的证据现在只能来自元认知。
 CHILD_TURNS = (
-    "我家的小猫很可爱，电脑是怎么认图片的呀？",
-    "它会不会把我的小猫认成小狗呀？",
-    "我有点听不明白，再讲一遍好不好？",
+    "我有点听不明白，能再讲一遍吗？",
+    "这个我真的听不懂，太难了。",
+    "我还是跟不上，讲慢一点好吗？",
 )
 
 
@@ -566,12 +569,16 @@ class TestChapterMigration(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.student_id = "student_001"
 
-    def test_schema_version_is_exactly_learning_2_and_idempotent(self) -> None:
-        """★ 重复开库不报错、不重复记账：``schema_version`` 恰为 ``[("learning", 2)]``。
+    def test_schema_version_is_exactly_learning_3_and_idempotent(self) -> None:
+        """★ 重复开库不报错、不重复记账：``schema_version`` 恰为 ``[("learning", 1..3)]``。
 
-        ⚠️ 这里断言的是**整张账本**：v1 与 v2 **各一行** ——
-        「learning 这一组当前的最高版本是 2」是 ``current_version`` 的事，
-        而账本里同时留着 v1 是**正确**的（它是已发布过的迁移，不许被抹掉）。
+        ⚠️ 这里断言的是**整张账本**：v1 / v2 / v3 **各一行** ——
+        「learning 这一组当前的最高版本是 N」是 ``current_version`` 的事，
+        而账本里同时留着旧版本是**正确**的（它们是已发布过的迁移，不许被抹掉）。
+
+        v3 = ``grade_history.signal_mark``（冷却锚点在信号序列里的位置）——
+        加它是为了让冷却按**真实发生的轮数**算，而不是拿两个会话的轮次号相减
+        （那样会算出一把永不释放的锁，见 ``app/grade/rules.py`` 的 ``_cooldown_remaining``）。
         """
         path = student_learning_db_path(self.tmp, self.student_id)
         for _ in range(3):
@@ -585,10 +592,14 @@ class TestChapterMigration(unittest.TestCase):
             (str(r["set_name"]), int(r["version"]))
             for r in conn.execute("SELECT set_name, version FROM schema_version ORDER BY 1, 2")
         ]
-        self.assertEqual(rows, [("learning", 1), ("learning", 2)])
-        self.assertEqual(dict(rows)["learning"], 2, "learning 组当前版本必须是 2")
+        self.assertEqual(rows, [("learning", 1), ("learning", 2), ("learning", 3), ("learning", 4)])
+        self.assertEqual(dict(rows)["learning"], 4, "learning 组当前版本必须是 4")
         columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(student)")}
         self.assertIn("current_chapter", columns)
+        history_columns = {
+            str(r["name"]) for r in conn.execute("PRAGMA table_info(grade_history)")
+        }
+        self.assertIn("signal_mark", history_columns, "v3 给学段轨迹补了信号位标列")
 
     def test_old_database_gains_the_column(self) -> None:
         """★ 老库（v1 已记账、**没有** current_chapter）打开后自动补列，且数据不丢。"""

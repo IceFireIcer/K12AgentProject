@@ -44,6 +44,7 @@ from app.grade.rules import (  # noqa: E402
     COOLDOWN_TURNS,
     MANUAL_COOLDOWN_TURNS,
     REASON_COOLDOWN,
+    REASON_NO_DIRECTION,
     SOURCE_EXPLICIT,
     SOURCE_INFERRED,
 )
@@ -53,15 +54,20 @@ from app.routes.students import student_learning_db_path  # noqa: E402
 
 TOKEN = "test-token-grade-override"
 
-#: 三句童言 → 三路同向（向下）的**够格证据**：连续 3 轮同方向、规则置信度 0.75 ≥ 0.6。
+#: 三句**受挫表达** → 三路同向（向下）的**够格证据**：连续 3 轮同方向、规则置信度 0.75 ≥ 0.6。
 #: 与 ``tests/test_grade.py`` 用的是同一组句子（那边已验证它能在第 3 轮把学段调下去）。
+#:
+#: ★ 2026-09-21 重定义：原先这三句是「童言 + 日常口语」，靠「日常口语 → 下调」与
+#: 「问得浅 → 下调」凑出向下证据；那两条已改成**只上不下**，所以向下证据现在只能来自
+#: **元认知**（受挫表达）—— 这也正是执行文档 §10.3 的演示口径
+#: 「连说『听不懂』三轮 → 自动下调一级」。
 CHILD_TURNS = (
-    "我家的小猫很可爱，电脑是怎么认图片的呀？",
-    "它会不会把我的小猫认成小狗呀？",
-    "我有点听不明白，再讲一遍好不好？",
+    "我有点听不明白，能再讲一遍吗？",
+    "这个我真的听不懂，太难了。",
+    "我还是跟不上，讲慢一点好吗？",
 )
 
-#: 四路全空的轮次（M-10 之后每轮也会留一行读数，但方向恒为 0）——
+#: 三路全空的轮次（M-10 之后每轮也会留一行读数，但方向恒为 0）——
 #: 用来把**轮次水位**推到指定轮次而不产生任何证据。
 NEUTRAL_TEXT = "我们继续吧"
 
@@ -280,12 +286,24 @@ class GradeOverrideRoutes(unittest.TestCase):
             self.state()["lastChangeTurn"], 3, "展示字段不变：真正变更过学段的仍是第 3 轮"
         )
 
-        # ① 两个出口对同一状态给出**一致**的冷却值；② 时长按**手动窗口**从 12 起算
-        #    ⚠️ 只用 21 及之前的轮次：第 22 轮是「冷却满期」那一格，留给下面那一步（它会推进水位）
-        for turn in (13, 15, 19, 21):
-            submitted = self.submit({"turn": turn, "text": NEUTRAL_TEXT, "sessionId": "sess-2"})
+        # ① 第 13..21 轮（**连续 9 个真实轮次**）：
+        #    a) 两个出口对同一状态给出**一致**的冷却值；
+        #    b) 窗口按**真实发生的轮数**递减（不是按轮次号相减）。
+        #
+        #    ★ 2026-09-21：冷却的度量从「两个轮次号相减」改成「锚点之后**真实发生了几轮**」
+        #      （见 rules.py 的 _cooldown_remaining）。所以这里必须**连续**上交 ——
+        #      原版跳着交（13、15、19、21）之所以算得对，靠的正是那个坏算法；
+        #      按真实轮数算，**跳过的轮次没有发生过**，不该计入冷却（这正是修复的本意）。
+        sync_expected = MANUAL_COOLDOWN_TURNS
+        reasons: list[str] = []
+        for turn in range(13, 22):
+            submitted = self.submit(
+                {"turn": turn, "text": CHILD_TURNS[0], "sessionId": "sess-2"}
+            )
             self.assertEqual(submitted.status_code, 200, submitted.text)
             body = submitted.json()
+            sync_expected -= 1
+            reasons.append(body["reason"])
             with self.subTest(turn=turn):
                 self.assertEqual(
                     body["cooldownRemainingTurns"],
@@ -294,43 +312,40 @@ class GradeOverrideRoutes(unittest.TestCase):
                 )
                 self.assertEqual(
                     body["cooldownRemainingTurns"],
-                    max(0, MANUAL_COOLDOWN_TURNS - (turn - 12)),
-                    f"第 {turn} 轮：手动窗口必须从**确认的那一刻（12）**起算 10 轮",
+                    max(0, sync_expected),
+                    f"第 {turn} 轮：手动窗口按**真实轮数**从确认那一刻起算 10 轮",
+                )
+                self.assertEqual(
+                    self.state()["grade"], "primary_low", f"第 {turn} 轮在冷却内，不许改学段"
                 )
 
-        # ③ 冷却期内的**够格证据**照样改不动学段：第 13..21 轮（连续 9 轮同向）一次性上交，
-        #    从第 3 轮起证据就够格了（方向一致、置信度 0.75 ≥ 0.6），挡住它的必须是**冷却**。
-        batch = self.submit(*self.child_evidence_upto(first=13, last=21, session_id="sess-3"))
-        self.assertEqual(batch.status_code, 200, batch.text)
-        body = batch.json()
-        self.assertFalse(body["changed"], "冷却期内不许改学段")
+        # ③ 冷却期内的**够格证据**照样改不动学段：第 13、14 轮轮数还不够（连续 3 轮才够），
+        #    第 15 轮起连续同向已达标 —— 拦住它的**只能**是冷却。
         self.assertEqual(
-            [item["reason"] for item in body["evaluations"][2:]], [REASON_COOLDOWN] * 7,
-            "第 15 轮起证据已连续 3 轮同向 → 拦住它的只能是冷却（前两轮是「轮数还不够」）",
+            reasons[:2],
+            [REASON_NO_DIRECTION, REASON_NO_DIRECTION],
+            "前两轮是「轮数还不够」，与冷却无关",
         )
-        self.assertEqual(self.state()["grade"], "primary_low", "整批上交后学段纹丝不动")
         self.assertEqual(
-            body["cooldownRemainingTurns"], self.state()["cooldownRemainingTurns"],
-            "整批上交之后两个出口仍然一致（第 21 轮 → 剩 1 轮）",
+            reasons[2:], [REASON_COOLDOWN] * 7, "第 15 轮起证据够格 → 拦住它的只能是冷却"
         )
-        self.assertEqual(body["cooldownRemainingTurns"], 1)
 
-        # ③-b ★ `state()` 这一侧的锚点也必须成对读（H-1 的另一半）：
+        # ③-b ★ `state()` 这一侧的锚点也必须成组读（H-1 的另一半）：
         #    证据够格 + 被冷却挡住 → **待生效学段必须给出**（`suggested_level` 只在
         #    ``reason in (low_confidence, cooldown)`` 时才有值）。若 `state()` 拿「上一次
-        #    真变更的轮次（3）」去算冷却，它算出来的剩余是 0 → 既不是 cooldown 也不是
+        #    真变更的轮次」去算冷却，它算出来的剩余是 0 → 既不是 cooldown 也不是
         #    low_confidence → `suggestedLevel` 变 null，界面上「待生效：小学高年级」凭空消失。
         state = self.state()
-        self.assertGreater(state["cooldownRemainingTurns"], 0, "此刻真的还在冷却里")
+        self.assertEqual(state["cooldownRemainingTurns"], 1, "9 个真实轮次走完，只剩 1 轮")
         self.assertEqual(state["streak"], 9, "证据已经连续 9 轮同向（够格）")
         self.assertEqual(
             state["suggestedLevel"], "primary_high",
             "够格但被**冷却**挡住 → 待生效学段必须给出（锚点取错行时这里会是 null）",
         )
 
-        # ④ 第 22 轮 = 12 + 10：冷却刚好期满 → 自动推断重新接管（不是被永久停用）
+        # ④ 第 22 轮 = 确认之后的第 10 个真实轮次：冷却刚好期满 → 自动推断重新接管
         released = self.submit(
-            {"turn": 22, "text": CHILD_TURNS[0], "sessionId": "sess-3"}
+            {"turn": 22, "text": CHILD_TURNS[0], "sessionId": "sess-2"}
         )
         self.assertEqual(released.status_code, 200, released.text)
         self.assertEqual(
@@ -342,10 +357,13 @@ class GradeOverrideRoutes(unittest.TestCase):
     def test_h1_repeating_the_same_level_restarts_the_cooldown_window(self) -> None:
         """★ H-1 的另一半：**重复选择同一学段 = 重新计时**（文档承诺原话）。
 
-        真变更 @6（手动切到 junior）+ 再次确认 @9：冷却必须从 **9** 起算（@19 满期），
-        而不是从 6 起算（@16 满期）。修复前 ``observe_turn`` 读的是 ``last_change_turn``
-        （还是 6），所以「我再点一次」在**判定侧**等于白点 —— ``state()`` 那一侧是正确的，
-        两个出口于是互相矛盾。
+        真变更 @6（手动切到 junior）+ 再次确认 @9：冷却必须从**确认那一刻**重新起算 10 个
+        真实轮次（@19 满期），而不是从第 6 轮的变更起算。修复前 ``observe_turn`` 读的是
+        ``last_change_turn``（还是 6），所以「我再点一次」在**判定侧**等于白点 ——
+        ``state()`` 那一侧是正确的，两个出口于是互相矛盾。
+
+        ★ 2026-09-21：冷却的度量已改成「锚点之后**真实发生了几轮**」（不再是两个轮次号相减），
+        所以轮次必须**连续**上交 —— 跳着交的轮次不曾发生，自然不计入冷却。
         """
         self.advance_to(6)
         override = self.override("junior")
@@ -353,9 +371,14 @@ class GradeOverrideRoutes(unittest.TestCase):
         self.assertTrue(override.json()["changed"], "第 6 轮：小学高年级 → 初中，真变更")
         self.assertEqual(override.json()["turn"], 6)
 
-        # 确认之前：从 6 起算
-        before = self.submit({"turn": 8, "text": NEUTRAL_TEXT, "sessionId": "sess-1"}).json()
-        self.assertEqual(before["cooldownRemainingTurns"], MANUAL_COOLDOWN_TURNS - (8 - 6))
+        # 确认之前：锚点在真变更那一刻。走过第 7、8 两个真实轮次 → 剩 10 - 2 = 8
+        for turn in (7, 8):
+            body = self.submit({"turn": turn, "text": NEUTRAL_TEXT, "sessionId": "sess-1"}).json()
+            self.assertEqual(
+                body["cooldownRemainingTurns"],
+                MANUAL_COOLDOWN_TURNS - (turn - 6),
+                f"第 {turn} 轮：从真变更（第 6 轮）起算",
+            )
 
         # 学生**再点一次**同一个学段：不改学段，但重新计时
         self.advance_to(9, session_id="sess-1")
@@ -364,13 +387,16 @@ class GradeOverrideRoutes(unittest.TestCase):
         self.assertFalse(again.json()["changed"], "重复选择不改学段，但**是**一次新的冷却锚点")
         self.assertEqual(again.json()["turn"], 9)
 
-        for turn in (11, 15, 18, 19):
+        # 从第 9 轮的确认起算：连续走过 10 个真实轮次（10..19），冷却同步递减到 0
+        expected = MANUAL_COOLDOWN_TURNS
+        for turn in range(10, 20):
             body = self.submit({"turn": turn, "text": NEUTRAL_TEXT, "sessionId": "sess-1"}).json()
+            expected -= 1
             with self.subTest(turn=turn):
                 self.assertEqual(
                     body["cooldownRemainingTurns"],
-                    max(0, MANUAL_COOLDOWN_TURNS - (turn - 9)),
-                    f"第 {turn} 轮：冷却必须从**再次确认的第 9 轮**起算（而不是真变更的第 6 轮）",
+                    max(0, expected),
+                    f"第 {turn} 轮：冷却必须从**再次确认的第 9 轮**重新起算（而不是真变更的第 6 轮）",
                 )
                 self.assertEqual(body["cooldownRemainingTurns"], self.state()["cooldownRemainingTurns"])
 
@@ -509,8 +535,11 @@ class GradeOverrideRoutes(unittest.TestCase):
             conn.close()
         self.assertEqual(
             columns,
-            {"id", "ts", "turn", "from_level", "to_level", "source", "confidence"},
-            "grade_history 的列是冻结的；新增列必须同步放开契约里的 note 字段",
+            {
+                "id", "ts", "turn", "from_level", "to_level", "source", "confidence",
+                "signal_mark", "decided_by",
+            },
+            "grade_history 的列是冻结的；新增列必须同步更新这条断言与契约说明",
         )
         self.assertNotIn("note", columns)
 

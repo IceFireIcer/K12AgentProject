@@ -16,7 +16,45 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const repoRoot = resolve(desktopRoot, '..')
 const TEST = 'tests/student-view-discipline.test.ts'
+
+/**
+ * 跑一次测试，返回「是否变红」。
+ *
+ * ★ 学段那几条守卫**在服务端的 Python 测试里**（`server/tests/test_grade.py`），
+ *   所以每条变异可以自带 `runner`：
+ *   - 缺省（不写 `runner`）：桌面端 `node --test --test-name-pattern <expect> tests/student-view-discipline.test.ts`；
+ *   - `runner: 'server'`：`uv run python -m unittest tests.test_grade`（`expect` 用作子串匹配的红条名）。
+ */
+function runExpect(mutation) {
+  const isServer = mutation.runner === 'server'
+  const command = isServer ? 'uv' : 'node'
+  const args = isServer
+    ? ['run', 'python', '-m', 'unittest', 'tests.test_grade']
+    : ['--test', '--test-name-pattern', mutation.expect, TEST]
+  const cwd = isServer ? join(repoRoot, 'server') : desktopRoot
+  let output = ''
+  let threw = false
+  try {
+    output = execFileSync(command, args, {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+  } catch (error) {
+    threw = true
+    output = String(error.stdout ?? '') + String(error.stderr ?? '')
+  }
+  // `node --test` 报 `fail N`；`unittest` 报 `FAILED (failures=N)`。
+  // ★ 服务端那一侧还要确认**红的是我们期望的那条**（`unittest` 里别的用例红了也算红，
+  //   那会让变异验证变成「只要有任何失败就通过」）。所以额外要求 expect 出现在输出里。
+  const failed = isServer
+    ? /FAILED \((failures|errors)=[1-9]/.test(output)
+    : threw || /fail [1-9]/.test(output)
+  const matchedExpect = isServer ? output.includes(mutation.expect) : true
+  return { red: failed && matchedExpect, output }
+}
 
 /** 每条变异：改哪个文件、把什么改成什么、期望哪条用例变红。 */
 const MUTATIONS = [
@@ -198,6 +236,49 @@ const MUTATIONS = [
     find: "else progressError.value = toStudentFacingMessage(result.message, { topic: 'quiz' })",
     replace: 'else progressError.value = result.message',
     expect: '不得直出'
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 学段判定机制（2026-09-21 / D-065）—— 守卫在**服务端**的 test_grade.py
+   * ------------------------------------------------------------------ */
+  {
+    name: '㉕ 冷却：改回「两个会话的轮次号相减」（活锁原形）',
+    runner: 'server',
+    file: '../server/app/grade/rules.py',
+    // 把「按真实轮数算」改回「拿两个轮次号相减」——那正是 P-113 的活锁做法。
+    find: `    if elapsed_turns is not None:
+        return max(0, window - max(0, int(elapsed_turns)))`,
+    replace: `    if elapsed_turns is not None:
+        return max(0, window - max(0, int(turn) - int(anchor_turn or 0)))`,
+    expect: 'test_cooldown_releases_across_sessions'
+  },
+  {
+    name: '㉖ 深度：撤掉「只上不下」（问得浅又能降级）',
+    runner: 'server',
+    file: '../server/app/grade/signals.py',
+    find: 'return _reading("depth", current_level, level, raw, only_up=True)',
+    replace: 'return _reading("depth", current_level, level, raw)',
+    expect: 'test_depth_never_pulls_the_grade_down'
+  },
+  {
+    name: '㉗ 词汇：撤掉日常口语的「只上不下」（用词日常又能降级）',
+    runner: 'server',
+    file: '../server/app/grade/signals.py',
+    find: `            "vocab", current_level, "primary_low", "口语=" + ",".join(daily[:6]), only_up=True`,
+    replace: `            "vocab", current_level, "primary_low", "口语=" + ",".join(daily[:6])`,
+    expect: 'test_daily_terms_are_neutral_not_downgrading'
+  },
+  {
+    name: '㉘ 降级标注：改回「没提议就报 no_llm」（把正常工作说成坏了）',
+    runner: 'server',
+    file: '../server/app/grade/rules.py',
+    find: `    if layer2_status is not None:
+        degraded = layer2_status if layer2_status in DEGRADED_LAYER2_STATUSES else None
+    else:`,
+    replace: `    if False:
+        degraded = None
+    else:`,
+    expect: 'test_degraded_reports_the_real_channel_status'
   }
 ]
 
@@ -222,19 +303,7 @@ for (const mutation of MUTATIONS) {
     writeFileSync(path, mutated, 'utf8')
 
     // 跑测试：期望它变红
-    let output = ''
-    let threw = false
-    try {
-      output = execFileSync('node', ['--test', '--test-name-pattern', mutation.expect, TEST], {
-        cwd: desktopRoot,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
-    } catch (error) {
-      threw = true
-      output = String(error.stdout ?? '') + String(error.stderr ?? '')
-    }
-    const red = threw || /fail [1-9]/.test(output)
+    const { red } = runExpect(mutation)
     if (red) {
       console.log(`✅ ${mutation.name} → 守卫变红（${mutation.expect}）`)
     } else {

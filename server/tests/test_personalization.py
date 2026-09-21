@@ -618,7 +618,13 @@ class TestProfileBehaviour(PersonalizationCase):
                                   "question", "is_correct", "detail"},
             "progress": {"kp_id", "stage", "badge", "updated_at"},
             "profile_pref": {"key", "value"},
-            "grade_history": {"id", "ts", "turn", "from_level", "to_level", "source", "confidence"},
+            # ★ ``signal_mark`` 是「写这一行时 ``grade_signals`` 的最大 id」——
+            #   一个**我们自己生成的自增序号**，不是任何学生信息：它不指向人、不含内容，
+            #   只为让冷却按「真实发生的轮数」计算（见 app/grade/rules.py 的
+            #   ``_cooldown_remaining``）。最小化原则不受影响。
+            # ★ ``decided_by`` 是「这一档是哪层判的」（rules / llm / NULL），不指向任何学生信息。
+            "grade_history": {"id", "ts", "turn", "from_level", "to_level", "source", "confidence",
+                              "signal_mark", "decided_by"},
             "grade_signals": {"id", "ts", "session_id", "signal_type", "value", "raw"},
             "generated_question": {"qid", "kp_id", "grade_level", "type", "stem", "options",
                                    "reference_answer", "explanation", "rubric", "source",

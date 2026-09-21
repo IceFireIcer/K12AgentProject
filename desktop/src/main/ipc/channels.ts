@@ -353,12 +353,25 @@ export const PUSH_CHANNELS: readonly IpcChannel[] = [
 ]
 
 /**
- * 学段来源（三态）：
- *   - `inferred` = 系统判定过（推断引擎写过库，或已经攒够信号判出结论）；
- *   - `explicit` = 学生手动选择（显式设定，`grade:set` 那条通道写进去的）；
- *   - `default`  = 冷启动默认值 —— 还没判出来、也没人选过。
+ * 「这个学段是谁定的」——**两个轴合起来**的一个展示用枚举（D-066）。
+ *
+ * | 取值 | 含义 | 界面上写 |
+ * | --- | --- | --- |
+ * | `explicit` | 学生手动选的 | 手动选中 |
+ * | `llm` | 从累计第 5 轮起，**LLM 判的**（决策者） | AI 引擎判定 |
+ * | `rules` | 前 4 轮 / LLM 不可用时，**规则引擎判的** | 本地规则判定 |
+ * | `default` | 冷启动基线值，**还一次都没判过** | 待判定 |
+ *
+ * ★★ 为什么要拆出 `rules` 与 `llm`（2026-09-21 D-066）：此前的枚举只有
+ * 「手动的」与「引擎的」两种，于是**冷启动默认值也被写成「AI 引擎推算」**——
+ * 学生发一句「你好」就看到「当前：小学高年级（AI 引擎推算）」，
+ * 而那一刻**一次推断都没发生过**。用户点名说这「过于粗暴」，指的就是这个。
+ * 现在：「哪一层判的」如实显示，没判过就老实写「待判定」。
+ *
+ * ⚠️ `inferred` 保留给**历史调用方**（它等价于 `rules`，读取端会折过去）——
+ * 不要新增代码再用它，用 `rules` / `llm` 说清是哪一层。
  */
-export type GradeOrigin = 'inferred' | 'explicit' | 'default'
+export type GradeOrigin = 'inferred' | 'explicit' | 'default' | 'rules' | 'llm'
 
 /**
  * 学段状态（展示用）。
@@ -380,6 +393,11 @@ export interface GradeState {
   origin: GradeOrigin
   /** 后端 `GradeStateOut.source`（写入来源，如 `inferred` / `explicit`）；取不到时为 `null`。 */
   source?: string | null
+  /**
+   * 后端 `GradeStateOut.decidedBy`（**哪一层判的**：`rules` / `llm` / `null`）。
+   * 与 `source`（**谁写的**）是两个轴 —— 界面标签由两者共同决定（D-066）。
+   */
+  decidedBy?: string | null
 }
 
 /** 学段读取的回执（与 `SettingsCallResult` 同形，便于前端统一处理）。 */

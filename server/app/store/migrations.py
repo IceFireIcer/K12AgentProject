@@ -299,6 +299,77 @@ def _apply_chapter_v2(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE student ADD COLUMN current_chapter TEXT")
 
 
+def _apply_grade_signal_mark_v3(conn: sqlite3.Connection) -> None:
+    """v3：给 ``grade_history`` 补 ``signal_mark`` 列（这一行是**信号序列里的第几位**）。
+
+    ★ **为什么需要它（实测缺陷，不是预防性设计）**：冷却原先算
+      ``elapsed = turn - anchor_turn``，而 ``turn`` 是**每会话**计数器
+      （桌面端换一个会话就从 1 重来），``anchor_turn`` 却是上一会话写进库里、长期保留的号 ——
+      **两个数来自不同的轮次空间**，相减没有意义：新会话里 ``turn`` 常小于 ``anchor_turn``，
+      ``max(0, …)`` 把它钳成 0，``remaining`` 于是**恒等于整个窗口**，
+      每次判定都报 ``cooldown`` —— 那把锁**永不释放**。
+
+      实测（``logs/sidecar.log`` 5 天）：450 次判定里 ``reason=cooldown`` **226 次（50%）**，
+      其中 ``连续=4 / 置信度 0.90`` 的**达标证据**照样不生效；锚点 ``turn=22``（手动设定）
+      让随后每个会话的第 1–8 轮全部卡死 —— 唯一出路是**在同一个会话里聊到第 23 轮**
+      （实测会话上限 8 轮）。
+
+    ★ **修法是换一个单调的量**：不改「轮次」这个概念，而是记下锚点写下去时
+      **``grade_signals`` 的最大 id**。``id`` 是 AUTOINCREMENT，全局单调、跨会话连续，
+      而且每个轮次至少写一行（M-10 的占位读数）—— 于是
+      「锚点之后又过了几轮」= 「id 大于这个 mark 的轮次桶数」，**不需要跨会话相减**。
+      这样「调整后 5 轮 / 手动后 10 轮」仍然是**字面成立的真实轮数**，
+      既解掉活锁，也不把冷却缩成 0。
+
+    ★ 与 ``_apply_chapter_v2`` 同一模板（**幂等 ALTER**）：先 ``PRAGMA table_info`` 看列在不在。
+      SQLite 的 ``ADD COLUMN`` 没有 ``IF NOT EXISTS``，直接写会在重复执行时报
+      ``duplicate column name``；已建过 v1/v2 的库必须靠这条补列。
+
+    ★ **不改 v1**（本模块的纪律：不要改已发布的那条）：v1 是「新学生建表」的基线，
+      老学生走 v3 补列 —— 两条一起跑出新库，老库只跑 v3，结果一致。
+
+    ⚠️ **只加列、不填默认值**：历史行的 ``NULL`` 表示「不知道它在信号序列里的位置」，
+      由 ``_cooldown_remaining`` 走**保守兜底**（沿用旧的钳位算法，绝不拉长、绝不崩）。
+      不要在这里回填任何猜测值 —— 那个位置已经不可考了。
+    """
+    columns = {
+        str(row["name"]) for row in conn.execute("PRAGMA table_info(grade_history)").fetchall()
+    }
+    if "signal_mark" not in columns:
+        conn.execute("ALTER TABLE grade_history ADD COLUMN signal_mark INTEGER")
+
+
+def _apply_grade_decided_by_v4(conn: sqlite3.Connection) -> None:
+    """v4：给 ``grade_history`` 补 ``decided_by`` 列（当前学段是**哪一层**产出的）。
+
+    ★ 为什么要这一列（D-066，2026-09-21；用户裁决）：学段的**决策权**从规则引擎
+      移交给了 LLM —— 前 4 个累计轮次只由规则判（标签「本地规则判定」），
+      第 5 个累计轮次起由 LLM 判（标签「AI 引擎判定」），LLM 不可用时规则照常接管。
+
+      界面标签必须**如实**反映「这一档是哪层说的」：
+      - 修复前只有 ``source``（inferred / explicit），于是
+        「发一句『你好』就被标成 AI 引擎推算·小学高年级」—— 那是**冷启动默认值**，
+        一次推断都没发生过，标签却在替 AI 认领。这是用户点名要修的「过于粗暴」。
+      - 现在 ``decided_by`` 回答「**哪一层判的**」，与 ``source``（「谁写的」）是两个轴；
+        都取不到（冷启动基线行）→ 界面显示「待判定」。
+
+    ★ 与 ``_apply_chapter_v2`` / v3 同一模板（**幂等 ALTER**）：先 ``PRAGMA table_info``
+      看列在不在。SQLite 的 ``ADD COLUMN`` 没有 ``IF NOT EXISTS``，直接写会在重复执行时
+      报 ``duplicate column name``；已建过 v1~v3 的库必须靠这条补列。
+
+    ★ **不改已发布的版本**（本模块的纪律）：老库只跑 v4，新库 v1~v4 一起跑，结果一致。
+
+    ⚠️ **只加列、不填默认值**：历史行的 ``NULL`` 表示「那一行没有这个概念」，
+      读取端把 ``NULL`` 折算成「按 ``source`` 显示」—— 不要在这里回填猜测值
+      （把旧行猜成 ``rules`` 看似合理，实则是在替过去的数据编造出处）。
+    """
+    columns = {
+        str(row["name"]) for row in conn.execute("PRAGMA table_info(grade_history)").fetchall()
+    }
+    if "decided_by" not in columns:
+        conn.execute("ALTER TABLE grade_history ADD COLUMN decided_by TEXT")
+
+
 KB_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="kb 核心表 + FTS5(trigram)", apply=_apply_kb_v1),
     # 后续新增教材相关表在此追加（version 递增），不要改已发布的那条
@@ -307,6 +378,16 @@ KB_MIGRATIONS: tuple[Migration, ...] = (
 LEARNING_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="学生画像 / 掌握度 / 学习历史 / 进度 / 学段信号", apply=_apply_learning_v1),
     Migration(version=2, name="学生当前教材章节列（current_chapter）", apply=_apply_chapter_v2),
+    Migration(
+        version=3,
+        name="学段轨迹的信号位标（grade_history.signal_mark，冷却按真实轮数算）",
+        apply=_apply_grade_signal_mark_v3,
+    ),
+    Migration(
+        version=4,
+        name="学段轨迹的判定层（grade_history.decided_by，规则 / LLM）",
+        apply=_apply_grade_decided_by_v4,
+    ),
 )
 
 

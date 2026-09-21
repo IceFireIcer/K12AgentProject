@@ -87,7 +87,14 @@ DepRelation = Literal["prerequisite", "related"]
 #: 取值与 `app/knowledge/deps.py` 的用法逐字一致（`prerequisite` 不缩写，避免两套写法）。
 DepDirection = Literal["successor", "prerequisite"]
 
-#: 学段判定信号四类（§10.2）。
+#: 学段判定信号（§10.2）。★ 2026-09-21（D-065）起是**三路**：词汇 / 深度 / 元认知，
+#: 「答题表现」已整体移除（概念错位 + 与元认知重复计数，见 ``app/grade/signals.py``）。
+#:
+#: ⚠️ **``quiz_perf`` 这个取值刻意保留在联合类型里**：它已经不是任何提取器的输出，
+#: 但**历史 ``learning.db`` 里存着**这类行，而 ``recent_signals()`` 会把库里的
+#: ``signal_type`` 原样灌进 :class:`GradeSignal` —— 从联合类型里删掉它，
+#: 会让「读一个升级前建立的库」直接校验失败（500）。
+#: 所以删除信号 ≠ 删除取值：**库里的历史取值要留着能被读出来**。
 GradeSignalType = Literal["vocab", "depth", "quiz_perf", "meta_cognition"]
 
 #: ★ 允许写入的学习偏好键（**固定词表，不接受自由键**），对应 ``profile_pref.key``。
@@ -793,11 +800,14 @@ class GradeOverrideRequest(CamelModel):
     """``POST /api/grade/override/{student_id}`` 的请求体。
 
     ★★ **刻意不提供 ``note``（留痕说明）字段** —— 这是取舍，不是省事：
-    ``grade_history`` 只有 ``(ts, turn, from_level, to_level, source, confidence)``
-    这几列（"不许新增表或列" 是硬约束），多出来的文本**没有地方落盘**；
-    退而求其次写进日志又违反「日志里不出现学生文本」的合规要求。
+    ``grade_history`` 只存结构化字段，没有放**任意文本**的列；多出来的说明
+    **没有地方落盘**；退而求其次写进日志又违反「日志里不出现学生文本」的合规要求。
     收下一个**写不进去**的字段等于让接口撒谎：调用方以为自己留了痕，其实内容被静默丢弃，
     之后排查时还会以为「日志里没有是因为没填」。宁可不提供。
+
+    ★ 请求体里**也不需要会话 id**：冷却锚点记的是 ``grade_signals`` 的**信号位标**
+    （全局单调、跨会话可比），不是某个会话里的轮次号 —— 服务端写这一行时自己就能取到。
+    详见 ``app/grade/rules.py`` 的 ``_cooldown_remaining``。
     """
 
     grade_level: GradeLevel
@@ -842,6 +852,12 @@ class GradeHistoryEntry(CamelModel):
     #: ★ 这里**刻意不收窄成 Literal**：库里可能已有更早版本写入的其它取值，
     #: 收窄会让一行旧数据把整条轨迹接口打成 500（读接口不该被历史脏值拖垮）。
     source: str
+    #: **哪一层判的**（D-066）：``rules``（本地规则判定）/ ``llm``（AI 引擎判定）/
+    #: ``None``（D-066 之前写入的历史行，或学生手动指定的行 —— 手动谈不上哪层引擎）。
+    #: ★ 与 ``source``（**谁写的**：系统 / 学生）是两个轴，报告叙事两个都要用到：
+    #: 「第 3 轮系统判定为初中（inferred, 本地规则判定）」与
+    #: 「第 12 轮系统改判为高中（inferred, AI 引擎判定）」是两种不同的证据。
+    decided_by: str | None = None
     confidence: float = 0.0
 
 

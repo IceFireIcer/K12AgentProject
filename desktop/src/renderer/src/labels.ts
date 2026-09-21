@@ -38,30 +38,45 @@ export const GRADE_UNKNOWN_LABEL = '待判定'
 /**
  * 「学段是怎么定下来的」这件事的说法（指示器上必须能看出来，否则手动选完看不出生效）。
  *
- * ★ 为什么 `default` 也映射成「AI 引擎推算」：冷启动的默认值走的就是引擎那条线 ——
- *   系统还没判出来，随时会改写它。而「还没判出来」这一档在界面上已经由
- *   {@link GRADE_UNKNOWN_LABEL}（「待判定」）表达，且指示器在未判定时**不显示**这一句，
- *   所以这里不需要第三种说法（也不需要「默认」这种对学生毫无意义的字眼）。
+ * ★★ **2026-09-21（D-066）改口径**：原先 `default` 被映射成「AI 引擎推算」，
+ *   于是学生发一句「你好」就看到「当前：小学高年级（AI 引擎推算）」——
+ *   而那一刻**一次推断都没发生过**（那只是冷启动基线值）。用户点名说这「过于粗暴」。
+ *
+ * 现在按**决策权**如实分档（与 `rules.py` 的 `LLM_DECIDES_FROM_TURN = 5` 一致）：
+ *
+ * | origin | 谁判的 | 界面 |
+ * | --- | --- | --- |
+ * | `explicit` | 学生手动选的 | 手动选中 |
+ * | `llm` | 累计第 5 轮起，LLM（**决策者**） | AI 引擎判定 |
+ * | `rules` | 前 4 轮 / LLM 不可用，规则引擎 | 本地规则判定 |
+ * | `default` | **还没判过**（冷启动基线） | 待判定 |
+ *
+ * ★ 学生看得见的词都是人话：「本地规则判定」「AI 引擎判定」说的是**判断方式**，
+ *   不暴露 `rules.py` / `LAYER2` 这类实现名词（双视角纪律 D-063）。
+ * ★ `inferred` 是历史值，等价于 `rules` —— 读取端（`ipc/handlers.ts`）已经折过去了，
+ *   这里保留映射只为兜住极旧的推送。
  */
 export const GRADE_ORIGIN_LABELS: Record<GradeOrigin, string> = {
   explicit: '手动选中',
-  inferred: 'AI 引擎推算',
-  default: 'AI 引擎推算'
+  llm: 'AI 引擎判定',
+  rules: '本地规则判定',
+  inferred: '本地规则判定',
+  default: GRADE_UNKNOWN_LABEL
 }
 
 /**
  * ★ **唯一**的「学段来源 → 中文」实现（指示器与设置页都调它）。
  *
  * 为什么必须收口成一个函数：两个入口各写一份映射，改一处忘另一处时
- * 表现是「同一个学段，指示器说『手动选中』、设置页说『AI 引擎推算』」——
+ * 表现是「同一个学段，指示器说『手动选中』、设置页说『本地规则判定』」——
  * 学生据此判断自己刚才那一下有没有生效，两处不一致等于告诉他没生效。
  *
- * `null`（还没收到任何推送）显示「AI 引擎推算」，与 `default` 同口径：
- * 那时 `currentGrade` 也是 `null`，界面已经写着「待判定」，
- * 括号里再写一遍「待判定」会变成「当前：待判定（待判定）」。
+ * `null`（还没收到任何推送）与 `default` 同口径（「待判定」）：
+ * 那时 `currentGrade` 也是 `null`，界面本来就在说「等系统看几轮」——
+ * 这一档**不是**「AI 判过了」，如实写「待判定」。
  */
 export function gradeOriginLabel(origin: GradeOrigin | null): string {
-  return origin === null ? GRADE_ORIGIN_LABELS.default : GRADE_ORIGIN_LABELS[origin]
+  return origin === null ? GRADE_UNKNOWN_LABEL : GRADE_ORIGIN_LABELS[origin]
 }
 
 /**

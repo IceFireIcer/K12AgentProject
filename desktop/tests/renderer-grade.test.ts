@@ -60,7 +60,18 @@ const { useChatStore } = await import('../src/renderer/src/stores/chat.ts')
  * 1. 归一化：三态
  * ------------------------------------------------------------------ */
 
-test('normalizeGradeState：三态都认（inferred / explicit / 其它 → default）', () => {
+test('normalizeGradeState：★ 五态都认（explicit / llm / rules / inferred / 其它 → default）', () => {
+  // ★ 2026-09-21（D-066）：`rules`（本地规则判定）与 `llm`（AI 引擎判定）是**新增**的两种 ——
+  //   漏掉它们，「本地规则判定」这条推送会被整条丢掉，界面永远停在「待判定」。
+  assert.deepEqual(normalizeGradeState({ gradeLevel: 'junior', origin: 'rules' }), {
+    gradeLevel: 'junior',
+    origin: 'rules'
+  })
+  assert.deepEqual(normalizeGradeState({ gradeLevel: 'junior', origin: 'llm' }), {
+    gradeLevel: 'junior',
+    origin: 'llm'
+  })
+  // 历史值（D-066 之前推来的）
   assert.deepEqual(normalizeGradeState({ gradeLevel: 'junior', origin: 'inferred' }), {
     gradeLevel: 'junior',
     origin: 'inferred'
@@ -98,13 +109,27 @@ test('normalizeGradeState：三态都认（inferred / explicit / 其它 → defa
  * 2. 文案：来源说法与两句话的区别
  * ------------------------------------------------------------------ */
 
-test('gradeOriginLabel：四档都有可读中文，且「学生选的」与「引擎推的」分得清', () => {
+test('gradeOriginLabel：★ 每一档都说清「谁定的」，且不拿冷启动默认值冒充判定', () => {
   assert.equal(gradeOriginLabel('explicit'), '手动选中')
-  assert.equal(gradeOriginLabel('inferred'), 'AI 引擎推算')
-  assert.equal(gradeOriginLabel('default'), 'AI 引擎推算')
-  // `null` = 还没收到任何推送：那时学段本身显示「待判定」，
-  // 来源这一格跟 `default` 同口径（写「待判定」会变成「待判定（待判定）」）。
-  assert.equal(gradeOriginLabel(null), 'AI 引擎推算')
+  // ★★ 2026-09-21（D-066）：这一条是本次修复的**核心验收** ——
+  //   `default`（冷启动基线）以前被映射成「AI 引擎推算」，于是学生发一句「你好」
+  //   就看到「当前：小学高年级（AI 引擎推算）」，而那一刻一次推断都没发生过。
+  assert.equal(
+    gradeOriginLabel('default'),
+    GRADE_UNKNOWN_LABEL,
+    '还没判过就必须说「待判定」，不许替 AI 认领'
+  )
+  assert.equal(gradeOriginLabel(null), GRADE_UNKNOWN_LABEL, '没收到推送时同理')
+  // 两个引擎层级分得清（报告要讲「第 3 轮本地规则判定 → 第 12 轮 AI 引擎判定」）
+  assert.equal(gradeOriginLabel('rules'), '本地规则判定')
+  assert.equal(gradeOriginLabel('llm'), 'AI 引擎判定')
+  assert.notEqual(
+    gradeOriginLabel('rules'),
+    gradeOriginLabel('llm'),
+    '两层如果写同一个词，来源标签就白做了'
+  )
+  // 历史值折算：`inferred` = 规则判过
+  assert.equal(gradeOriginLabel('inferred'), '本地规则判定')
   // 与「还没判出来」的说法不撞车（那句只用于学段本身）
   assert.equal(GRADE_UNKNOWN_LABEL, '待判定')
   assert.ok(!Object.values(GRADE_LABELS).includes(gradeOriginLabel(null)))
@@ -269,14 +294,21 @@ test('★★ 手动设置后：系统后来真的判出来了会被采纳，冷�
   assert.equal(chat.currentGrade, 'junior', '默认值不许覆盖学生的手动选择')
   assert.equal(chat.gradeOrigin, 'explicit', '来源也不许被默认值改成「引擎推算」')
 
-  // ② 系统真的判出来了（`inferred`）：**采纳**。
+  // ② 系统真的判出来了（`rules`）：**采纳**。
   //    为什么该采纳：手动设定只是给系统一个起点（服务端那条冷却 10 轮），
   //    不是永久锁死 —— 10 轮之后系统照旧按学生的实际水平自动调整，
   //    所以「后来判出来的结论」当然要能上屏，否则学段会永远停在学生当时随手点的那一档。
-  bridge.emitGrade({ gradeLevel: 'primary_low', origin: 'inferred' })
+  bridge.emitGrade({ gradeLevel: 'primary_low', origin: 'rules' })
   assert.equal(chat.currentGrade, 'primary_low', '系统真判出来的结论该被采纳（手动不是永久锁死）')
-  assert.equal(chat.gradeOrigin, 'inferred', '来源要跟着改回「AI 引擎推算」')
+  assert.equal(chat.gradeOrigin, 'rules', '来源要跟着改成「本地规则判定」')
   assert.equal(chat.gradeNotice, gradeAdaptNotice('primary_low'), '系统适配了要说一声（主语是系统）')
+
+  // ③ ★★ D-066 新增的第二层：累计第 5 轮起 LLM 判定 —— **同样要上屏**。
+  //    漏掉这一态，「AI 引擎判定」这条推送会被整条丢掉（与漏掉 `explicit` 同一个病）。
+  bridge.emitGrade({ gradeLevel: 'senior', origin: 'llm' })
+  assert.equal(chat.currentGrade, 'senior', 'AI 引擎判定也必须上屏')
+  assert.equal(chat.gradeOrigin, 'llm', '来源要显示「AI 引擎判定」')
+  assert.equal(chat.gradeNotice, gradeAdaptNotice('senior'), '换了个说法也要说一声')
 })
 
 /* ------------------------------------------------------------------ *
@@ -340,11 +372,14 @@ test('★ 两个入口（指示器 + 设置页）都走同一个 store action ch
     )
     // 手动设定只走 grade:set 独立通道：这两个视图**不**发对话（学段更不该混进对话请求）
     assert.ok(!/sendChat\s*\(/.test(code), `${name} 不该碰 sendChat（学段与对话请求是两条路径）`)
-    // 来源说法只有 labels.ts 那一处实现：视图里不许再写一遍「手动选中 / AI 引擎推算」
-    assert.ok(
-      !code.includes('手动选中') && !code.includes('AI 引擎推算'),
-      `${name} 里又写了一遍来源文案 —— 唯一实现是 labels.ts 的 gradeOriginLabel()`
-    )
+    // 来源说法只有 labels.ts 那一处实现：视图里不许再写一遍那些来源文案。
+    // ★ D-066 起来源词表是这五个（改标签时必须同步这里，否则守卫会**放过**重复文案）
+    for (const word of ['手动选中', 'AI 引擎判定', '本地规则判定', 'AI 引擎推算']) {
+      assert.ok(
+        !code.includes(word),
+        `${name} 里又写了一遍来源文案「${word}」—— 唯一实现是 labels.ts 的 gradeOriginLabel()`
+      )
+    }
     assert.ok(
       /gradeOriginLabel\s*\(/.test(code),
       `${name} 必须调 labels.ts 的 gradeOriginLabel()（两处各写一份映射迟早对不上）`

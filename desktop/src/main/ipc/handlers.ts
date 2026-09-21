@@ -184,6 +184,7 @@ async function readGradeState(instance: ChatRuntime): Promise<GradeState | null>
       grade?: unknown
       lastTurn?: unknown
       source?: unknown
+      decidedBy?: unknown
     }
     // ★ 四学段**白名单**（不是「非空字符串就算数」）：同一边界的另外三处（`preload/index.ts`、
     //   `renderer/src/api/grade.ts`、`renderer/src/api/events.ts`）都做了白名单，主进程这一侧
@@ -197,12 +198,50 @@ async function readGradeState(instance: ChatRuntime): Promise<GradeState | null>
     //   `/api/grade/turns` 的响应里），所以那个字段**恒为 null**，是个死字段。
     const source =
       typeof body.source === 'string' && body.source.trim().length > 0 ? body.source.trim() : null
+    // ★ `decidedBy` = **哪一层判的**（`rules` / `llm` / `null`）—— 与 `source`（谁写的）是两个轴。
+    const decidedBy =
+      typeof body.decidedBy === 'string' && body.decidedBy.trim().length > 0
+        ? body.decidedBy.trim()
+        : null
+
+    /**
+     * ★★ **origin 的推导必须如实**（D-066，2026-09-21）。
+     *
+     * 旧口径：`source === 'explicit' ? 'explicit' : lastTurn > 0 ? 'inferred' : 'default'`
+     * —— 两个问题：
+     *   ① 学生第 1 轮说完话，`lastTurn > 0` 成立 → origin 变 `inferred` →
+     *      界面写「AI 引擎推算」，可**一次推断都没发生**（只是规则读了几个词）；
+     *   ② 连 `default`（冷启动基线）都被 `GRADE_ORIGIN_LABELS` 映射成「AI 引擎推算」。
+     *   合起来就是用户点名的那个现象：**发一句「你好」→「当前：小学高年级（AI 引擎推算）」**。
+     *
+     * 新口径按**决策权**分档（与 `rules.py` 的 `LLM_DECIDES_FROM_TURN` 一致）：
+     *   - `explicit` → 学生手动选的（**最高优先**，与判定层无关）；
+     *   - `llm`      → 累计第 5 轮起 LLM 判的 → 「AI 引擎判定」；
+     *   - `rules`    → 前 4 轮 / LLM 不可用时规则判的 → 「本地规则判定」；
+     *   - `default`  → 还没判过（`decidedBy` 为空且最后一次写入是基线）→ 「待判定」。
+     *
+     * ⚠️ `lastTurn > 0` **不再**参与推导：它只说明「聊过几句」，不说明「判过」——
+     *    拿它冒充「引擎判过」正是这个缺陷的根源。
+     */
+    let origin: GradeState['origin']
+    if (source === 'explicit') {
+      origin = 'explicit'
+    } else if (decidedBy === 'llm') {
+      origin = 'llm'
+    } else if (decidedBy === 'rules' || source === 'inferred') {
+      // `inferred` 是历史值（等价于「规则判过」）；`decidedBy` 缺失时按它兜底。
+      origin = 'rules'
+    } else {
+      // 冷启动基线：`decided_by` 为空、`source` 也是空 —— **还没判过**，老实说。
+      origin = lastTurn > 0 ? 'rules' : 'default'
+    }
     // ★ 来源一律**透传服务端**，主进程不自己猜：猜错的唯一方向是把「学生手动选的」
     //   显示成「AI 推的」，那会让唯一的人工入口在界面上隐身。
     return {
       gradeLevel,
-      origin: source === 'explicit' ? 'explicit' : lastTurn > 0 ? 'inferred' : 'default',
-      source
+      origin,
+      source,
+      decidedBy
     }
   } catch {
     return null

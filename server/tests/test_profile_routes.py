@@ -292,10 +292,14 @@ class TestLearningEvents(ProfileCase):
             store = LearningDbStudentStore(self.tmp)
             self.assertIsNotNone(store.get_student(student_id))
         rows = self.query(student_id, "SELECT set_name, version FROM schema_version ORDER BY version")
-        # ★ 账本里 v1 / v2 各一行：v2 是「学生当前教材章节列」（current_chapter）。
+        # ★ 账本里 v1 / v2 / v3 各一行：v2 =「学生当前教材章节列」（current_chapter）、
+        #   v3 =「学段轨迹的信号位标」（grade_history.signal_mark，冷却按真实轮数计算要用它）。
         #   断言的是**整张账本**（重复开库不许把任何一行写第二遍），
         #   而不是「只剩最新一条」—— 已发布过的迁移行不许被抹掉。
-        self.assertEqual([(r["set_name"], r["version"]) for r in rows], [("learning", 1), ("learning", 2)])
+        self.assertEqual(
+            [(r["set_name"], r["version"]) for r in rows],
+            [("learning", 1), ("learning", 2), ("learning", 3), ("learning", 4)],
+        )
         tables = {
             r["name"]
             for r in self.query(
@@ -304,6 +308,13 @@ class TestLearningEvents(ProfileCase):
         }
         for expected in ("student", "mastery", "learning_history", "progress", "profile_pref", "grade_signals"):
             self.assertIn(expected, tables)
+        # ★ v3 只加列：老库补列后 ``grade_history`` 必须有 signal_mark
+        history_columns = {
+            r["name"] for r in self.query(student_id, "PRAGMA table_info(grade_history)")
+        }
+        self.assertIn("signal_mark", history_columns)
+        # ★ v4 只加列：``decided_by`` 记「这一档是哪层判的」（rules / llm）
+        self.assertIn("decided_by", history_columns)
 
     def test_last_active_at_is_refreshed(self) -> None:
         """`student.last_active_at` 随写入刷新（「重启后数据仍在」这条验收要看它）。"""

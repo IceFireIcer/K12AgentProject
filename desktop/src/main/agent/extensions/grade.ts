@@ -1,14 +1,21 @@
 /**
- * 学段 Extension（票 21）—— **学段由系统推断并自动生效，没有人工选择**。
+ * 学段 Extension（票 21）—— **默认由系统推断并自动生效；学生也可以手动指定**。
  *
- * 设计（旧设计「学生手选 + 推断只给建议」已废止）：
+ * ★ 头两行曾经写「没有人工选择」——那是 **D-020 的旧口径**，已被 **D-037** 推翻：
+ *   学生点指示器或设置页即可**立即**改学段（`grade:set` 独立通道 → `POST /api/grade/override`），
+ *   之后进入更长的冷却（10 轮）再平滑回归自动。见 `adoptOverride()`。
+ *
+ * 设计：
  *
  * ```text
- * 每轮开始 ──▶ 上交本轮证据 ──▶ Python：signals.py 提取四类信号（不调 LLM）
+ * 每轮开始 ──▶ 上交本轮证据 ──▶ Python：signals.py 提取三路信号（不调 LLM）
  *                                  └─▶ rules.py 规则引擎（最终决策者）
  *                                        └─▶ 必要时原子改 learning.db 的 student.grade_level
- *   同一轮拼 prompt ──▶ 用**已交接的**学段拼 system prompt（学生无感）
+ *   同一轮拼 prompt ──▶ 用**已交接的**学段拼 system prompt（自动调整学生无感）
  * ```
+ *
+ * ★ 三路信号 = 词汇复杂度 / 问题深度 / 元认知表达（2026-09-21 起；「答题表现」那一路
+ *   已移除 —— 它把「知识点没掌握」误当成「学段更低」，还会与元认知重复计数）。
  *
  * ★★ **本扩展不再订阅任何 Pi 事件**（票 21 的返工，2026-09-16 实测结论）。
  *
@@ -77,7 +84,16 @@ export const LAYER2_FIRST_TURN = 3
 /** 第 3 轮证据不足时的重试轮次（`rules.py` 的 `LAYER2_RETRY_TURN`）。 */
 export const LAYER2_RETRY_TURN = 5
 
-/** 第二层判定至少要有几轮可用证据（不足则等到 `LAYER2_RETRY_TURN`）。 */
+/**
+ * ★★ **LLM 从第几个「累计轮次」起成为决策者**（D-066，`rules.py` 的 `LLM_DECIDES_FROM_TURN`）。
+ *
+ * 前 4 个累计轮次只有规则判（标签「本地规则判定」）；第 5 个累计轮次起 LLM 直接定方向
+ * （标签「AI 引擎判定」）。计数单位是**累计轮次**（跨会话连续，来自服务端
+ * `GET /api/grade/state` 的 `cumulativeTurns`）。
+ */
+export const LLM_DECIDES_FROM_TURN = 5
+
+/** 第二层判定至少要有几轮可用证据（不足则等到累计第 5 轮）。 */
 export const LAYER2_MIN_TURNS = 3
 
 /** 最近多少轮进第二层判定的上下文（Prompt 预算；判学段不需要整段对话史）。 */
@@ -138,6 +154,15 @@ export interface TurnEvidence {
   text: string
   sessionId?: string
   proposal?: GradeProposal
+  /**
+   * ★ 第二层通道的本轮状态（服务端据此决定 `degraded` 要不要置位）。
+   *
+   * 为什么必须由我们上报：服务端只看得到「这一轮有没有提议」，看不到**为什么没有** ——
+   * 于是它把 `already_proposed`（本窗口早就提过议，属**正常工作**）也标成
+   * `degraded="no_llm"`。实测 436 次判定里 218 次被这么标，而 63 次第 3 轮里有
+   * 48 次真的带上了提议。见 `isDegradedLayer2()`。
+   */
+  layer2Status?: Layer2Status
 }
 
 /** `POST /api/grade/turns/{studentId}` 的出参（只声明本扩展用得到的字段）。 */
@@ -159,6 +184,10 @@ export interface GradeTurnResponse {
 export interface GradeStateSnapshot {
   grade: GradeLevel
   source: string
+  /** 哪一层产出了当前学段（D-066）：`rules` / `llm` / `null`（冷启动基线或手动指定）。 */
+  decidedBy?: string | null
+  /** **累计轮次**（跨会话连续）：`≥ LLM_DECIDES_FROM_TURN` 时才请 LLM 出场。 */
+  cumulativeTurns?: number
   lastTurn: number
   lastChangeTurn?: number | null
   cooldownRemainingTurns: number
@@ -212,6 +241,10 @@ export interface GradeExtensionStats {
   pendingGrade: GradeLevel | null
   /** 第二层最近一次的状态（`used` = 真的用上了 LLM 提议）。 */
   layer2: Layer2Status
+  /** **累计轮次**（跨会话连续；服务端 `GET /api/grade/state` 同步下来，D-066）。 */
+  cumulativeTurns: number
+  /** 当前学段是**哪一层**判的（`rules` / `llm` / `null`）—— 界面标签据此显示「本地规则判定」/「AI 引擎判定」。 */
+  decidedBy: string | null
   /** 成功上交的轮数 / 失败次数（失败只影响下一轮生效的时机，不影响本轮对话）。 */
   submitted: number
   failed: number
@@ -290,23 +323,50 @@ export function countUsableTurns(turns: Array<{ text: string }>): number {
 }
 
 /**
- * ★ 第二层何时触发（执行文档 §10.3：「第 3 轮触发，不足则第 5 轮」）。
+ * ★ 第二层何时触发（D-066：**累计轮次 ≥ 5 起，LLM 成为决策者**）。
+ *
+ * 旧口径是「第 3 轮触发、不足退第 5 轮」，而且 LLM 只是提议（反向被规则否决）。
+ * 2026-09-21（D-066，用户裁决）改为：**前 4 个累计轮次只有规则判；第 5 个累计轮次起
+ * LLM 直接定方向**（规则退居安全网）。计数单位是**累计轮次**（跨会话连续，
+ * 从服务端 `GET /api/grade/state` 的 `cumulativeTurns` 来），因为实测会话普遍只有 3–8 轮，
+ * 按会话重数会让很多会话永远等不到 LLM。
  *
  * 返回 `run=true` 时调用方才去跑一次轻量 LLM 判定。**没有判定通道时返回 `no_llm`**
  * （不是静默跳过：调用方据此打日志、服务端据此回 `degraded`）。
  */
 export function shouldRequestLayer2(input: {
-  turn: number
+  cumulativeTurns: number
   usableTurns: number
   windowHasProposal: boolean
   judgeAvailable: boolean
 }): { run: boolean; status: Layer2Status } {
   if (!input.judgeAvailable) return { run: false, status: 'no_llm' }
   if (input.windowHasProposal) return { run: false, status: 'already_proposed' }
-  if (input.turn < LAYER2_FIRST_TURN) return { run: false, status: 'not_due' }
+  if (input.cumulativeTurns < LLM_DECIDES_FROM_TURN) return { run: false, status: 'not_due' }
   if (input.usableTurns >= LAYER2_MIN_TURNS) return { run: true, status: 'due' }
-  if (input.turn >= LAYER2_RETRY_TURN) return { run: true, status: 'retry' }
   return { run: false, status: 'insufficient_evidence' }
+}
+
+/**
+ * ★★ 这个状态算不算**真降级**（服务端据此决定 `degraded` 要不要置位）。
+ *
+ * `Layer2Status` 有 8 个取值，但只有两个是「第二层没工作」：
+ *
+ * - `no_llm`      —— 根本没接上模型通道（无 Key / 启动期降级）；
+ * - `judge_error` —— 接上了但调用失败（超时 / 解析不出 JSON）。
+ *
+ * 其余**都不是**降级。最典型的是 `already_proposed`：一个窗口只判一次是**设计**，
+ * 它恰恰说明第二层正常工作过；`not_due` 是还没到第 3 轮。
+ *
+ * ★ 服务端原先的口径是「没有提议 + 第 3 轮起 → `no_llm`」，于是把 `already_proposed`
+ * 也报成「没模型」——实测 436 次判定里 218 次被这么标，而 63 次第 3 轮判定里
+ * **48 次真的带上了提议**。标注与实际相反，「双层判定」这条创新性叙事因此拿不出可信证据。
+ *
+ * ⚠️ 这份白名单必须与服务端 `rules.py` 的 `DEGRADED_LAYER2_STATUSES` **保持一致**，
+ * 由 `desktop/tests/grade-inference.test.ts` 的跨语言断言钉住（改一边必须改另一边）。
+ */
+export function isDegradedLayer2(status: Layer2Status): boolean {
+  return status === 'no_llm' || status === 'judge_error'
 }
 
 /**
@@ -611,6 +671,19 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
   let overrideCooldownRemaining = 0
 
   let turn = 0
+  /**
+   * **累计轮次**（跨会话连续）—— 服务端 `GET /api/grade/state` 的 `cumulativeTurns` 同步下来。
+   *
+   * ★ 它是「第 5 轮起 LLM 接管」的计数单位（D-066）。**不能**用本地那个每会话计数器
+   *   `turn`：实测会话普遍只有 3–8 轮，按会话重数会让很多会话永远等不到 LLM，
+   *   而学段是跟着**学生这个人**走的，不是跟着某一次对话。
+   */
+  let serverCumulativeTurns = 0
+  /**
+   * 当前学段是**哪一层**判的（`rules` / `llm` / `null`）—— 服务端同一行读出来的。
+   * 界面标签据此显示「本地规则判定」/「AI 引擎判定」/「待判定」。
+   */
+  let decidedBy: string | null = null
   let currentSessionId = ''
   let currentStudentId = ''
   let buffer: Array<{ turn: number; text: string }> = []
@@ -662,6 +735,8 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     appliedGrade,
     pendingGrade,
     layer2,
+    cumulativeTurns: serverCumulativeTurns,
+    decidedBy,
     submitted,
     failed,
     lastReason,
@@ -684,6 +759,12 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     lastReason = ''
     explicitChoice = false
     lastChangedAtTurn = null
+    // ★ 累计轮次与判定层也是**学生级**状态（D-066）：换学生时一起归零 ——
+    //   否则新学生会继承上一个学生的累计轮数（可能一上来就 ≥ 5）而直接请 LLM 出场。
+    //   换会话**不**归零（累计轮次本就跨会话，见 serverCumulativeTurns 的说明）——
+    //   那条路径在 `trackBoundary` 里只调 `resetWindow()`。
+    serverCumulativeTurns = 0
+    decidedBy = null
     // ★ 手动设定的冷却也是**学生级**状态：换学生时一起归零，绝不把上一个学生的冷却
     //   显示到下一个学生的界面上（与 appliedGrade 必须一起重置是同一条纪律）。
     overrideCooldownRemaining = 0
@@ -808,7 +889,11 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     const epochAtSubmit = epoch
 
     const decision = shouldRequestLayer2({
-      turn: item.turn,
+      // ★ 累计轮次（跨会话连续）—— 由服务端 `GET /api/grade/state` 的
+      //   `cumulativeTurns` 同步下来（见 `refresh()`），本地只做**乐观 +1**：
+      //   本轮的证据马上要上交，服务端那边会把它算进去。
+      //   ⚠️ 不要退回用本地的 `turn`（每会话计数器）——那正是 D-066 要修的口径。
+      cumulativeTurns: serverCumulativeTurns + 1,
       usableTurns: countUsableTurns(buffer),
       windowHasProposal,
       judgeAvailable: judge !== null
@@ -842,7 +927,7 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
       log(
         '[grade] 第二层 LLM 判定通道未接线（无 API Key 或 runtime 未调用 useJudge）：' +
           '本轮起只用第一层规则信号判定学段，服务端会在出参里标 degraded="no_llm"。' +
-          '第一层是完整的（四类信号照常提取、照常能调整学段）。',
+          '第一层是完整的（三路信号照常提取、照常能调整学段）。',
         'warn'
       )
     }
@@ -854,7 +939,14 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
             turn: item.turn,
             text: clampTurnText(item.text),
             sessionId: sessionId || '',
-            ...(proposal ? { proposal } : {})
+            ...(proposal ? { proposal } : {}),
+            // ★★ 把**本轮的通道状态**一并上报（2026-09-21）。
+            //   服务端只能看到「有没有提议」，看不到「为什么没有」—— 于是它把
+            //   `already_proposed`（本窗口早提过议，属**正常工作**）也标成
+            //   `degraded="no_llm"`。实测 436 次判定里 218 次被这么标，而其中
+            //   63 次第 3 轮里 48 次真的带上了提议 —— 标注与实际相反。
+            //   只有这一侧知道真相：由我们告诉它，它只负责归类。
+            layer2Status: layer2
           }
         ]
       })
@@ -1095,6 +1187,16 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
         appliedGrade = grade
       }
       lastReason = `state:${state.source}`
+      // ★★ **累计轮次**（D-066）：服务端是权威 —— 它数的是 `grade_signals` 里
+      //   `(session_id, turn)` 的**去重桶数**（跨会话连续）。本地那份 `turn` 只是
+      //   每会话计数器，拿它判断「该不该请 LLM 出场」会让每个新会话都从头等 5 轮，
+      //   而实测会话普遍只有 3–8 轮。
+      if (typeof state.cumulativeTurns === 'number' && state.cumulativeTurns >= 0) {
+        serverCumulativeTurns = state.cumulativeTurns
+      }
+      // ★ 判定层（`rules` / `llm` / `NULL`）也以服务端为准，界面标签据此显示
+      //   「本地规则判定」还是「AI 引擎判定」。
+      decidedBy = state.decidedBy ?? null
       // ★ 服务端的 `source` 是权威：`explicit` = 学生手选过（还在冷却里），其余是推断。
       //   重启后靠这一句把「这个学段是谁定的」恢复正确 —— 否则冷启动后
       //   学生手选的学段会被权威段说成「系统自动推断」（D-064）。

@@ -267,7 +267,7 @@ async function main() {
         // 兜底：按 aria-expanded + 文案（不同窗口宽度下组件形态不同）
         const byExpanded = candidates.filter((el) => el.hasAttribute('aria-expanded'))
         return '${kind}' === 'grade'
-          ? byExpanded.find((el) => /学段|手动选中|AI 引擎推算|待判定/.test(el.textContent || ''))
+          ? byExpanded.find((el) => /学段|手动选中|AI 引擎判定|本地规则判定|待判定/.test(el.textContent || ''))
           : byExpanded.find((el) => /章节|不限章节|正在学/.test(el.textContent || ''))
       })()
       if (!trigger) return 'no-trigger'

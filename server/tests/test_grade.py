@@ -68,21 +68,18 @@ from app.grade.rules import (  # noqa: E402
     GradeProposal,
     TurnVerdict,
     decide,
-    quiz_performance_from_history,
 )
 from app.grade import rules as rules_module  # noqa: E402
 from app.grade.signals import (  # noqa: E402
     DEFAULT_QUESTION_LEVEL,
     MIN_QUESTION_CONTENT_CHARS,
     SIGNAL_TYPES,
-    QuizPerformance,
     classify_depth,
     consecutive_same_direction,
     decode_turn_raw,
     encode_turn_raw,
     extract_depth_signal,
     extract_meta_cognition_signal,
-    extract_quiz_perf_signal,
     extract_turn_signals,
     extract_vocab_signal,
     has_question_content,
@@ -98,9 +95,21 @@ TOKEN = "test-token-grade"
 RULES_SOURCE = (ROOT / "app" / "grade" / "rules.py").read_text(encoding="utf-8")
 
 #: 学生原话（测试专属的句子，便于在整库字节里搜「有没有被写进 SQLite」）。
-CHILD_TURN_1 = "我家的小猫很可爱，电脑是怎么认图片的呀？"
-CHILD_TURN_2 = "它会不会把我的小猫认成小狗呀？"
-CHILD_TURN_3 = "我有点听不明白，再讲一遍好不好？"
+#:
+#: ★★ 2026-09-21 重定义：三句**真实的受挫表达**。
+#: 原先这三句是「童言 + 日常口语」（小猫 / 电脑 / 图片）—— 靠「日常口语 → 下调」
+#: 和「问得浅 → 下调」凑出三路向下的证据。那两条已改成**只上不下**
+#: （问得浅 / 用词日常都不是「学段低」的证据），所以向下的够格证据现在只能来自
+#: **元认知**（「听不懂 / 太难了 / 跟不上」）—— 这恰好也是执行文档 §10.3
+#: 写的那条演示：「连说『听不懂』三轮 → 自动下调一级」。
+CHILD_TURN_1 = "我有点听不明白，能再讲一遍吗？"
+CHILD_TURN_2 = "这个我真的听不懂，太难了。"
+CHILD_TURN_3 = "我还是跟不上，讲慢一点好吗？"
+
+#: 只命中**日常口语**、不含任何深度词或受挫表达的句子。
+#: 用来验证「日常口语是中性证据」：仍然落库（``has_evidence`` 为真），但方向为 0。
+DAILY_TERM_TURN = "我家的小猫很可爱，电脑是怎么认图片的呀？"
+
 ADVANCED_TURN_1 = "梯度下降的链式法则怎么推导？"
 ADVANCED_TURN_2 = "损失函数和过拟合是什么关系？"
 ADVANCED_TURN_3 = "正则化怎么证明能防止过拟合？"
@@ -132,10 +141,21 @@ class TestSignalExtraction(unittest.TestCase):
         self.assertIn("梯度下降", reading.raw)
         self.assertIn("min_grade=senior", reading.raw)
 
-    def test_vocab_daily_terms_pull_down(self) -> None:
-        reading = extract_vocab_signal(CHILD_TURN_1, "primary_high")
-        self.assertEqual(reading.level_hint, "primary_low")
-        self.assertAlmostEqual(reading.value, -0.5)
+    def test_vocab_daily_terms_are_neutral_at_higher_grades(self) -> None:
+        """★ 回归（2026-09-21）：日常口语**不再下调** —— 它只是一条中性证据。
+
+        修复前这里断言 ``value == -0.5``：命中 ``DAILY_TERMS`` 即产生一条到
+        ``primary_low`` 的下调。可这些词（电脑 / 图片 / 小猫）在四个学段的教材里
+        到处都是，初、高中生聊「机器人」连提三轮就够「连续 3 轮同向 + 0.75 ≥ 0.6」，
+        把学段降级。**用词日常 ≠ 学段低**。
+
+        ⚠️ 注意读数是**按当前学段**算的：对 ``primary_low`` 的学生，这个档位与他
+        **同档** → 本来也是 0。所以这条断言对四个学段都成立。
+        """
+        reading = extract_vocab_signal(DAILY_TERM_TURN, "primary_high")
+        self.assertEqual(reading.level_hint, "primary_low", "档位信息保留（可审计）")
+        self.assertEqual(reading.value, 0.0, "日常用语不再产生下调")
+        self.assertTrue(reading.has_evidence, "仍然是一条证据（要落库）")
         self.assertIn("口语=", reading.raw)
 
     def test_vocab_term_at_current_level_is_neutral_but_recorded(self) -> None:
@@ -249,37 +269,116 @@ class TestSignalExtraction(unittest.TestCase):
         self.assertGreaterEqual(MIN_QUESTION_CONTENT_CHARS, 2, "太低等于没有门槛")
         self.assertLessEqual(MIN_QUESTION_CONTENT_CHARS, 8, "太高会漏掉真问题")
 
-    def test_quiz_streak_up_and_down(self) -> None:
-        up = extract_quiz_perf_signal(QuizPerformance(attempts=3, correct=3, current_streak=3), "", "junior")
-        self.assertEqual(up.level_hint, "senior")
-        self.assertGreater(up.value, 0)
-        down = extract_quiz_perf_signal(QuizPerformance(attempts=3, correct=0, current_streak=-2), "", "junior")
-        self.assertEqual(down.level_hint, "primary_high")
-        self.assertLess(down.value, 0)
+    # ------------------------------------------------- 只上不下（2026-09-21）--
+    def test_depth_never_pulls_the_grade_down(self) -> None:
+        """★ 回归：**问得浅不是「学段低」的证据** —— 深度信号只上不下。
 
-    def test_quiz_hints_and_too_hard_pull_down(self) -> None:
-        reading = extract_quiz_perf_signal(
-            QuizPerformance(attempts=4, correct=3, hints_requested=3), "", "junior"
-        )
+        修复前：``classify_depth`` 返回**绝对档位**（``什么是X`` → ``primary_high``、
+        普通疑问句兜底 → ``primary_high``），再对**当前学段**求差 —— 初中生问
+        「什么是矩阵」就得到一条 ``-0.5``；连问三句（``0.5 × 3`` → 置信度 0.75 ≥ 0.6）
+        就把学段**自动降级**。实测日志里那条
+        ``第 [8] 轮 → primary_high（changed=True reason=changed 置信度=0.75 连续=4）``
+        正是这种单路下调。
+
+        而「任何学段的学生都会用『什么是…』问一个自己刚接触的概念」——
+        那是好奇心的常态。下调由元认知那一路负责（它说的是「刚才讲深了」）。
+        """
+        for text in ("什么是矩阵", "什么是公式", "电脑怎么认图片呀？"):
+            with self.subTest(text=text):
+                # 对**比判出档位更高**的学生来说，这条证据一律是中性
+                reading = extract_depth_signal(text, "junior")
+                self.assertTrue(reading.has_evidence, "证据照记（要落库、要能审计）")
+                self.assertEqual(
+                    reading.value, 0.0, f"{text!r} 不该产生下调信号（只上不下）"
+                )
+                self.assertEqual(reading.level_hint, DEFAULT_QUESTION_LEVEL, "档位信息仍保留")
+
+        # 整轮聚合：初中生连问三句「什么是 X」，方向必须是 0（不再凑出「连续 3 轮同向」）
+        for index, text in enumerate(("什么是矩阵", "什么是公式", "什么是循环"), start=1):
+            signals = extract_turn_signals(text=text, turn=index, current_level="junior")
+            self.assertEqual(signals.direction, 0, f"第 {index} 轮（{text!r}）不许向下")
+
+    def test_depth_still_raises_the_grade(self) -> None:
+        """反向对照：**别把「只上不下」修成「什么都不做」** —— 向上照常。"""
+        reading = extract_depth_signal("链式法则怎么推导", "junior")
+        self.assertEqual(reading.level_hint, "senior")
+        self.assertGreater(reading.value, 0, "真的在问推导，仍然上调")
+
+    def test_daily_terms_are_neutral_not_downgrading(self) -> None:
+        """★ 回归：**用词日常 ≠ 学段低** —— 日常口语只记证据、不下调。
+
+        修复前：``DAILY_TERMS``（电脑 / 动画 / 图片 / 机器人 / 手机…）命中即产生
+        一条到 ``primary_low`` 的 ``-0.5``。可这些词在**四个学段**的教材里都到处都是 ——
+        初、高中生聊「机器人」很自然，连提三轮就凑够「连续 3 轮同向 + 0.75 ≥ 0.6」，
+        把学段降级。这与深度信号是同一类错误。
+        """
+        reading = extract_vocab_signal(DAILY_TERM_TURN, "junior")
+        self.assertTrue(reading.has_evidence, "证据照记（``口语=`` 仍写进 raw）")
+        self.assertEqual(reading.value, 0.0, "日常用语不该产生下调")
+        self.assertEqual(reading.level_hint, "primary_low", "档位信息仍保留")
+        self.assertIn("口语=", reading.raw)
+
+        signals = extract_turn_signals(text=DAILY_TERM_TURN, turn=1, current_level="junior")
+        self.assertEqual(signals.direction, 0, "整轮方向为 0")
+
+    def test_professional_terms_still_raise_the_grade(self) -> None:
+        """反向对照：术语那一路照旧往上（只上不下**没有**顺手把它也废掉）。"""
+        reading = extract_vocab_signal("梯度下降是怎么做到的", "primary_high")
+        self.assertGreater(reading.value, 0)
+        self.assertEqual(reading.level_hint, "senior")
+
+    def test_struggle_words_are_the_only_downward_route(self) -> None:
+        """向下的证据**只剩元认知**这一条路（这是「只上不下」的直接推论）。"""
+        reading = extract_meta_cognition_signal("老师我真的听不懂", "junior")
         self.assertLess(reading.value, 0)
-        self.assertIn("要提示", reading.raw)
+        self.assertIn("受挫=", reading.raw)
+        # 而这三路对同一个学生都不向下
+        for text in ("什么是循环", DAILY_TERM_TURN, "这道题怎么做呀"):
+            with self.subTest(text=text):
+                signals = extract_turn_signals(text=text, turn=1, current_level="junior")
+                self.assertGreaterEqual(signals.total_value, 0.0, f"{text!r} 不该向下")
 
-        from_text = extract_quiz_perf_signal(None, "这道题太难了", "junior")
-        self.assertLess(from_text.value, 0)
-        self.assertIn("太难了", from_text.raw)
+    def test_curiosity_words_are_not_struggle_signals(self) -> None:
+        """★「举个例子」「详细一点」是**好奇心**，不是「听不懂」（2026-09-21 移除）。
 
-    def test_quiz_conflict_prefers_downgrade(self) -> None:
-        """证据一半朝上一半朝下时**下调优先**（不把受挫的学生往上推）。"""
-        reading = extract_quiz_perf_signal(
-            QuizPerformance(attempts=4, correct=4, current_streak=4, too_hard=True), "", "junior"
+        它们原先在 ``META_REPHRASE`` 里 → 产生下调。可「能举个例子吗」是听懂了、
+        想更深一层；把它当受挫信号，会让**积极提问的学生被降级**，
+        而且这类话在低学段尤其常见，方向恰好是反的。
+        """
+        for text in ("能举个例子吗", "详细一点好吗", "讲详细一点"):
+            with self.subTest(text=text):
+                reading = extract_meta_cognition_signal(text, "junior")
+                self.assertEqual(reading.value, 0.0, f"{text!r} 不该产生下调")
+                self.assertFalse(reading.has_evidence, f"{text!r} 不算受挫证据")
+
+    def test_real_struggle_words_still_downgrade(self) -> None:
+        """反向对照：真正表达受挫的词照旧下调（别把词表删秃了）。"""
+        for text in ("我听不懂", "太难了", "讲慢一点好吗"):
+            with self.subTest(text=text):
+                self.assertLess(
+                    extract_meta_cognition_signal(text, "junior").value,
+                    0,
+                    f"{text!r} 仍然是一条下调证据",
+                )
+
+    def test_conflicting_evidence_cancels_within_a_turn(self) -> None:
+        """一轮里既有向上又有向下的证据 → 各自抵消（``TurnSignals.total_value`` 是求和）。
+
+        ★ 「冲突时下调优先」那条规则原先属于**答题表现**那一路（它一次就能同时
+        列出 up/down 两个理由）。那一路移除后，冲突发生在**不同路之间**，
+        由聚合层的求和天然处理 —— 无需额外规则，但要钉住「同轮抵消」这个行为。
+        """
+        # 一句「什么是梯度下降」（深度向上 + 术语向上）叠加一句受挫表达 → 本轮仍有方向
+        strong_up = extract_turn_signals(
+            text="梯度下降怎么推导？", turn=1, current_level="primary_low"
         )
-        self.assertLess(reading.value, 0)
-
-    def test_quiz_at_ceiling_and_floor_has_no_direction(self) -> None:
-        senior = extract_quiz_perf_signal(QuizPerformance(current_streak=5), "", "senior")
-        self.assertEqual(senior.value, 0.0)
-        lowest = extract_quiz_perf_signal(QuizPerformance(current_streak=-3), "", "primary_low")
-        self.assertEqual(lowest.value, 0.0)
+        self.assertGreater(strong_up.total_value, 0)
+        # 受挫单独一句话：向下、强度恰好是单路的 0.5
+        only_down = extract_turn_signals(
+            text="我听不懂，太难了", turn=1, current_level="primary_high"
+        )
+        self.assertLess(only_down.total_value, 0)
+        self.assertAlmostEqual(only_down.strength, 0.5, "单路证据 = 0.5")
 
     def test_meta_cognition_struggle_and_rephrase_pull_down(self) -> None:
         struggle = extract_meta_cognition_signal("老师我听不懂", "junior")
@@ -296,15 +395,47 @@ class TestSignalExtraction(unittest.TestCase):
         self.assertEqual(reading.value, 0.0)
         self.assertTrue(reading.has_evidence)
 
-    def test_turn_aggregates_four_classes(self) -> None:
+    def test_turn_aggregates_three_classes(self) -> None:
+        """一轮 → 三路读数（2026-09-21 起；「答题表现」那一路已移除）。
+
+        ★ 移除理由见 ``signals.py`` 模块 docstring：它把「知识点没掌握」误当成
+        「学段更低」，还会从对话原文里捡「太难了」与元认知**重复计数**
+        （一句「太难了」曾同时产生两条 ``-0.5``、该轮强度直接封顶）。
+        """
         signals = extract_turn_signals(text=CHILD_TURN_3, turn=3, current_level="primary_high")
-        self.assertEqual(len(signals.readings), 4, "四类读数每轮都要有（哪怕没有证据）")
+        self.assertEqual(len(signals.readings), 3, "三路读数每轮都要有（哪怕没有证据）")
         self.assertEqual(signals.direction, -1)
         self.assertAlmostEqual(signals.strength, 0.5)
-        self.assertTrue(all(reading.signal_type in ("vocab", "depth", "quiz_perf", "meta_cognition") for reading in signals.readings))
+        self.assertEqual(
+            {reading.signal_type for reading in signals.readings},
+            {"vocab", "depth", "meta_cognition"},
+            "信号词表恰好这三路（quiz_perf 已移除）",
+        )
+        self.assertNotIn(
+            "quiz_perf",
+            SIGNAL_TYPES,
+            "不许把「答题表现」加回来 —— 见 signals.py 模块 docstring 的两条理由",
+        )
+
+    def test_same_turn_evidence_is_counted_once(self) -> None:
+        """★ 一句话的受挫只算**一条**证据（原先「太难了」被元认知与答题各计一次）。
+
+        ``TOO_HARD_TERMS`` 与 ``META_STRUGGLE`` 本来就重叠，而「答题表现」那一路
+        **也会读学生原话**去找它们 —— 于是「太难了」一条话产生两条 ``-0.5``，
+        该轮合并值顶到 ``-1.0``（强度封顶），三句就能推得更狠。
+        移除那一路之后，该轮强度必须回到单路的 ``0.5``。
+        """
+        signals = extract_turn_signals(
+            text="这个我真的听不懂，太难了。", turn=1, current_level="primary_high"
+        )
+        self.assertAlmostEqual(
+            signals.strength, 0.5, "单路证据 = 0.5（不是被重复计到 1.0）"
+        )
+        struggle_routes = [r for r in signals.readings if r.value < 0]
+        self.assertEqual(len(struggle_routes), 1, "只有元认知那一路向下")
 
     def test_raw_never_contains_the_students_sentence(self) -> None:
-        signals = extract_turn_signals(text=CHILD_TURN_1, turn=1, current_level="primary_high")
+        signals = extract_turn_signals(text=DAILY_TERM_TURN, turn=1, current_level="primary_high")
         for reading in signals.readings:
             self.assertNotIn("小猫很可爱", reading.raw, "raw 只放自有词表的命中项，不放原话")
 
@@ -425,36 +556,76 @@ class TestDecisionRules(unittest.TestCase):
         self.assertEqual(floor.reason, REASON_AT_BOUNDARY)
 
     # ------------------------------------------------------------------ D1 --
-    def test_d1_cooldown_never_exceeds_the_designed_window(self) -> None:
-        """★ D1 回归：``turn`` 小于锚点轮次时冷却**不得超过** ``COOLDOWN_TURNS``。
+    def test_d1_cooldown_is_measured_in_real_turns_not_turn_numbers(self) -> None:
+        """★★ D1 的真正修复（2026-09-21）：冷却按**真实发生的轮数**算。
 
-        修复前：``elapsed = 1 - 8 = -7`` → ``remaining = 5 - (-7) = 12``，
-        冷却期从设计的 5 轮被**跨会话拉长**到 12 轮（轮次号是每会话计数器，
-        换会话就从 1 重来，而上一次的变更号长期留在 ``learning.db`` 里）。
+        缺陷现场：``elapsed = turn - anchor_turn`` 是拿**两个不同轮次空间**的数相减 ——
+        ``turn`` 是每会话计数器（换会话从 1 重来），锚点却是上一会话写进库里的号。
+        新会话里 ``turn``（1、2、3…）常小于 ``anchor_turn``（两位数），钳到 0 之后
+        ``remaining`` **恒等于整个窗口**，冷却成了**一把永不释放的锁**。
+
+        实测（``logs/sidecar.log`` 5 天）：450 次判定里 ``reason=cooldown`` **226 次（50%）**，
+        其中 ``连续=4 / 置信度 0.90`` 的**达标证据**照样不生效；锚点 ``turn=22`` 让随后
+        每个会话的第 1–8 轮全部卡死 —— 唯一出路是**在同一个会话里聊到第 23 轮**
+        （实测会话上限 8 轮）。学生端表现是「学段永远不跟着我调」。
+
+        现在 ``elapsed_turns`` 数的是**真实轮数**（跨会话连续累计）：
+        锚点之后每走过一轮就减 1，走满窗口就放行 —— 与轮次号是多少无关。
+        """
+        # 锚点在第 3 轮：其后每多一轮，剩余冷却就少一
+        for elapsed, expected in ((0, COOLDOWN_TURNS), (1, COOLDOWN_TURNS - 1), (4, 1)):
+            with self.subTest(elapsed=elapsed):
+                decision = decide(
+                    current_level="primary_low",
+                    turn=3 + elapsed,
+                    verdicts=self.up,
+                    elapsed_turns=elapsed,
+                )
+                self.assertEqual(
+                    decision.cooldown_remaining,
+                    expected,
+                    f"锚点之后走过 {elapsed} 轮 → 剩 {expected}",
+                )
+
+        # 走满窗口 → 放行（这是「锁永不释放」的反面）；这次调整又开启一个新窗口
+        released = decide(
+            current_level="primary_low", turn=8, verdicts=self.up, elapsed_turns=COOLDOWN_TURNS
+        )
+        self.assertTrue(released.changed, "满 5 个真实轮次就该放行")
+        self.assertEqual(released.cooldown_remaining, COOLDOWN_TURNS, "这次调整又开启新窗口")
+
+    def test_d1_old_anchor_without_mark_falls_back_and_never_stretches(self) -> None:
+        """兜底：历史锚点没有信号位标（v3 迁移前写入）→ 退回旧的轮次钳位。
+
+        ★ 兜底的意义是「**不比修复前更糟**」：旧锚点最多再挡一个**窗口**，
+        绝不会被跨会话拉长成 12 轮（那是修复前就有的症状，不能再回来）。
         """
         for turn in (1, 3, 7, 8):
             remaining = decide(
                 current_level="primary_low",
                 turn=turn,
                 verdicts=self.up,
-                anchor_turn=8,
+                anchor_turn=8,  # 没有 elapsed_turns → 走兜底
             ).cooldown_remaining
             with self.subTest(turn=turn):
-                self.assertLessEqual(remaining, COOLDOWN_TURNS)
+                self.assertLessEqual(remaining, COOLDOWN_TURNS, "兜底也不许超过窗口")
                 self.assertGreaterEqual(remaining, 0)
 
     def test_d1_cooldown_still_counts_down_after_the_change_turn(self) -> None:
-        """钳位不改变正常方向：改在 8，第 9..12 轮仍在冷却、第 13 轮放行。"""
-        for turn in (9, 12):
+        """正常方向不变：锚点之后第 1..4 轮仍在冷却、第 5 轮放行。"""
+        for elapsed in (1, 4):
             blocked = decide(
-                current_level="primary_low", turn=turn, verdicts=self.up, anchor_turn=8
+                current_level="primary_low",
+                turn=8 + elapsed,
+                verdicts=self.up,
+                elapsed_turns=elapsed,
             )
-            self.assertEqual(blocked.reason, REASON_COOLDOWN, f"第 {turn} 轮")
+            self.assertEqual(blocked.reason, REASON_COOLDOWN, f"锚点后第 {elapsed} 轮")
             self.assertGreater(blocked.cooldown_remaining, 0)
         allowed = decide(
-            current_level="primary_low", turn=13, verdicts=self.up, anchor_turn=8
+            current_level="primary_low", turn=13, verdicts=self.up, elapsed_turns=COOLDOWN_TURNS
         )
-        self.assertTrue(allowed.changed, "第 8 + 5 = 13 轮刚好满冷却")
+        self.assertTrue(allowed.changed, "走满 5 个真实轮次刚好满冷却")
 
     def test_h1_manual_window_reads_the_anchor_source_and_turn_from_one_row(self) -> None:
         """★ H-1（纯函数层）：窗口长度取自 ``anchor_source``、已过轮次取自 ``anchor_turn``。
@@ -524,15 +695,37 @@ class TestDecisionRules(unittest.TestCase):
         )
 
         body = RULES_SOURCE.split("def decide(", 1)[1].split("\ndef ", 1)[0]
-        # 源码里写的是常量名（``REASON_LLM_CONFLICT``）→ 用 rules 模块把它解析成字面值比对
-        actual = [
-            getattr(rules_module, name)
-            for name in re.findall(r"return outcome\(\s*(REASON_[A-Z_]+)", body)
-        ]
+        # 源码里写的是常量名（``REASON_LLM_CONFLICT``）→ 用 rules 模块把它解析成字面值比对。
+        #
+        # ★★ 2026-09-21（D-066）起 ``decide()`` 有**两个分支**，它们的判定顺序**刻意不同**：
+        #   - 【规则分支】：完整五条（这是 DECISION_ORDER 冻结的那份）；
+        #   - 【LLM 分支】：**没有 ``llm_conflict``** —— 它本来就是对「LLM 只是提议」设计的
+        #     （「提议与规则方向打架 → 否决」），而 LLM 分支里**提议就是方向**，没有可打架的对象。
+        #   两个分支以源码里的锚点注释分界（``【LLM 分支】`` / ``【规则分支】``），
+        #   各自的 ``outcome(...)`` 顺序都必须是 DECISION_ORDER 的子序列。
+        llm_part, rules_part = body.split("【规则分支】", 1)
+
+        def outcomes(source: str) -> list[str]:
+            return [
+                getattr(rules_module, name)
+                for name in re.findall(r"return outcome\(\s*(REASON_[A-Z_]+)", source)
+            ]
+
+        # ① 规则分支：与冻结顺序**逐字一致**
         self.assertEqual(
-            actual,
+            outcomes(rules_part),
             printed,
-            "DECISION_ORDER 与 decide() 里的实际检查顺序漂移了（报告与演示脚本按它解释现象）",
+            "DECISION_ORDER 与 decide() 规则分支的检查顺序漂移了（报告与演示脚本按它解释现象）",
+        )
+        # ② LLM 分支：同序，但**不许**出现 llm_conflict（它没有「反向可否决」这回事）
+        llm_actual = outcomes(llm_part)
+        self.assertNotIn(
+            REASON_LLM_CONFLICT, llm_actual, "LLM 分支不该有 llm_conflict —— 那条是为「提议可被否决」设计的"
+        )
+        self.assertEqual(
+            llm_actual,
+            [reason for reason in printed if reason != REASON_LLM_CONFLICT],
+            "LLM 分支的判定顺序必须是 DECISION_ORDER 去掉 llm_conflict（其余相对顺序不变）",
         )
 
     def test_d8_conflict_still_beats_low_confidence_in_practice(self) -> None:
@@ -583,6 +776,7 @@ class TestDecisionRules(unittest.TestCase):
         self.assertEqual(conflict.target_level, "primary_high")
 
     def test_missing_layer2_is_visible_not_silent(self) -> None:
+        """没提议时**默认**报降级（旧客户端不带状态时的兜底口径）。"""
         early = decide(current_level="primary_high", turn=2, verdicts=self.down[:2])
         self.assertIsNone(early.degraded, "第 3 轮之前第二层本来就还没到触发点")
 
@@ -596,6 +790,57 @@ class TestDecisionRules(unittest.TestCase):
             proposal=GradeProposal("primary_low", 0.72),
         )
         self.assertIsNone(with_proposal.degraded)
+
+    def test_degraded_reports_the_real_channel_status(self) -> None:
+        """★★ 回归（2026-09-21）：``degraded`` 必须**诚实**报通道状态，不能一律说 ``no_llm``。
+
+        缺陷现场：旧口径是「没提议 + 第 3 轮起 → ``no_llm``」，把
+        ``already_proposed``（本窗口早就提过议了，一个窗口只判一次是**设计**）
+        也报成「没有模型」。实测 436 次判定里 218 次被这么标，
+        而 63 次第 3 轮判定里 **48 次真的带上了提议** —— 标注与实际相反，
+        「学段信号双层判定」这条创新性叙事因此**拿不出可信证据**。
+
+        现在由桌面端上报真实的 ``Layer2Status``，服务端只做归类。
+        """
+        # ① 真降级：没通道 / 调用失败 → 置位（这两个才是「第二层没工作」）
+        for status in ("no_llm", "judge_error"):
+            with self.subTest(status=status):
+                decision = decide(
+                    current_level="primary_high",
+                    turn=5,
+                    verdicts=self.down,
+                    layer2_status=status,
+                )
+                self.assertEqual(decision.degraded, status)
+
+        # ② ★★ 不是降级：这些状态描述的是「第二层工作正常」或「本来就还没到点」
+        for status in ("used", "due", "retry", "already_proposed", "not_due", "insufficient_evidence"):
+            with self.subTest(status=status):
+                decision = decide(
+                    current_level="primary_high",
+                    turn=5,
+                    verdicts=self.down,
+                    layer2_status=status,
+                )
+                self.assertIsNone(
+                    decision.degraded,
+                    f"{status} 不是降级 —— 报成 no_llm 就是让标注说谎",
+                )
+
+        # ③ 桌面端报了什么就信什么：即便这一轮**带着提议**，报了 no_llm 也照实报
+        #    （上游比我们更清楚通道状态；服务端不去猜）
+        overt = decide(
+            current_level="primary_high",
+            turn=5,
+            verdicts=self.down,
+            proposal=GradeProposal("primary_low", 0.9),
+            layer2_status="judge_error",
+        )
+        self.assertEqual(overt.degraded, "judge_error")
+
+        # ④ 旧客户端（不带状态）退回老口径 —— 宁可多报，不要漏报降级
+        legacy = decide(current_level="primary_high", turn=5, verdicts=self.down)
+        self.assertEqual(legacy.degraded, DEGRADED_NO_LLM, "没带状态时保守报降级")
 
     def test_low_confidence_is_reported_before_cooldown(self) -> None:
         """判定顺序冻结：置信度不足 + 冷却期未过 → 报 ``low_confidence``。"""
@@ -679,16 +924,100 @@ class TestEnginePersistence(GradeEngineCase):
         self.assertEqual(change[0]["source"], "inferred", "来源必须记 inferred")
         self.assertAlmostEqual(change[0]["confidence"], 0.75)
 
+    def test_cooldown_releases_across_sessions(self) -> None:
+        """★★ 整条链路（本次修复的核心验收）：**换会话也要能走完冷却**。
+
+        这是实测抓到的「活锁」现场。会话 A 第 3 轮受挫表达把学段下调一级之后，
+        学生**换了一个会话**继续聊（桌面端的轮次号从 1 重来）：
+
+        - 修复前：``elapsed = max(0, 1 - 3) = 0`` → ``remaining`` 恒等于整个窗口，
+          每一轮都报 ``reason=cooldown``。**证据再够也不会生效** ——
+          学生必须在一个会话里聊到第 23 轮才解的开（实测会话上限 8 轮）。
+          实测 450 次判定里 226 次（50%）卡在这里。
+        - 现在：冷却按**真实发生的轮数**算（跨会话连续累计），走满窗口就放行。
+        """
+        # 会话 A：第 1..3 轮受挫表达 → 第 3 轮自动下调一级
+        for turn, text in enumerate((CHILD_TURN_1, CHILD_TURN_2, CHILD_TURN_3), start=1):
+            self.engine.observe_turn(
+                student_id=self.student_id, turn=turn, text=text, session_id="sess-A"
+            )
+        self.assertEqual(self.engine.current_level(self.student_id), "primary_low", "第 3 轮改过")
+        self.assertEqual(
+            self.engine.state(self.student_id).cooldown_remaining,
+            COOLDOWN_TURNS,
+            "刚改过 → 一个完整窗口",
+        )
+
+        # 会话 B：轮次号从 1 重来。上交**向上**的够格证据（高中味道的提问）。
+        # 冷却应当逐轮递减，并在走满窗口的那一轮真的放行 —— 这就是「活锁」的反面。
+        seen: list[int] = []
+        reasons: list[str] = []
+        for turn in range(1, COOLDOWN_TURNS + 2):
+            decision = self.engine.observe_turn(
+                student_id=self.student_id,
+                turn=turn,
+                text=ADVANCED_TURN_1,
+                session_id="sess-B",
+            )
+            seen.append(decision.decision.cooldown_remaining)
+            reasons.append(decision.decision.reason)
+
+        # 前两轮：还没攒够「连续 3 轮同向」（换会话后轮次重新开始，但**证据仍跨会话累计**）
+        # 之后：证据够格，一律被冷却挡住 → 报 cooldown，直到走满窗口
+        self.assertEqual(
+            reasons[:2], [REASON_NO_DIRECTION, REASON_NO_DIRECTION], f"实际 {reasons}"
+        )
+        self.assertEqual(
+            reasons[2:4], [REASON_COOLDOWN] * 2, f"证据够格后被冷却挡住；实际 {reasons}"
+        )
+        # 冷却逐轮递减（从 4 走到 1），这是「活锁」消失的直接证据
+        self.assertEqual(seen[:4], [4, 3, 2, 1], f"冷却必须逐轮递减；实际 {seen}")
+        # 第 5 轮：走满窗口 → 真的放行（报告的是一个**新**窗口）
+        self.assertEqual(reasons[4], REASON_CHANGED, f"第 5 轮就该放行；实际 {reasons}")
+        self.assertEqual(
+            self.engine.current_level(self.student_id),
+            "primary_high",
+            "冷却期满 + 证据够格 → 学段真的动了（这才是「自适应」）",
+        )
+        # ★ 且**只动一级**：证据是高中味道的提问（差两级），单次最多动 1 级 —— 这是体验保护
+        self.assertNotEqual(
+            self.engine.current_level(self.student_id),
+            "junior",
+            "MAX_STEP_LEVELS=1：一次不能跨两级",
+        )
+        # ★ 两个出口报同一个数（H-1 的回声）
+        self.assertEqual(
+            self.engine.state(self.student_id).cooldown_remaining,
+            seen[-1],
+            "state() 与 observe_turn() 必须一致",
+        )
+
     def test_signals_are_written_per_class_with_turn_anchor(self) -> None:
-        self.engine.observe_turn(student_id=self.student_id, turn=1, text=CHILD_TURN_1, session_id="s")
+        """每一路**各自**写一行（不是合并成一行），且 ``raw`` 带轮次锚点。"""
+        self.engine.observe_turn(student_id=self.student_id, turn=1, text=DAILY_TERM_TURN, session_id="s")
         rows = self.rows("SELECT signal_type, value, raw, session_id FROM grade_signals ORDER BY id")
-        self.assertGreaterEqual(len(rows), 2, "四类里至少有词汇与深度两路读数")
+        self.assertGreaterEqual(len(rows), 2, "至少有词汇与深度两路读数")
         self.assertEqual({row["session_id"] for row in rows}, {"s"})
         for row in rows:
             self.assertTrue(str(row["raw"]).startswith("t1|"), "raw 必须带轮次锚点")
         kinds = {row["signal_type"] for row in rows}
         self.assertIn("vocab", kinds)
-        self.assertNotIn("meta_cognition", kinds, "童言 1 里没有元认知表达，就不写这一路")
+        self.assertIn("depth", kinds, "普通疑问句也落默认档（中性证据）")
+        self.assertNotIn("meta_cognition", kinds, "这句里没有元认知表达，就不写这一路")
+
+    def test_neutral_evidence_is_still_written(self) -> None:
+        """★ 中性证据（值为 0）**照样落库** —— 它是「这一轮来过」的账本。
+
+        「只上不下」把方向压成 0，但**不**把证据删掉：``raw`` 仍写着
+        ``口语=…`` / ``深度=…``，所以报告与排障仍然看得见「模型读到了什么」。
+        只有 ``raw`` 为空（真的什么都没命中）才走 M-10 的占位行。
+        """
+        self.engine.observe_turn(student_id=self.student_id, turn=1, text=DAILY_TERM_TURN, session_id="s")
+        rows = self.rows("SELECT signal_type, value, raw FROM grade_signals ORDER BY id")
+        vocab = next(row for row in rows if row["signal_type"] == "vocab")
+        self.assertEqual(vocab["value"], 0.0, "方向被压成 0")
+        self.assertIn("口语=", str(vocab["raw"]), "但证据摘要仍然写进 raw")
+        self.assertNotIn(NO_EVIDENCE_RAW, str(vocab["raw"]), "不是占位行")
 
     # ------------------------------------------------------------------ M-10 --
     def test_m10_a_turn_without_evidence_still_leaves_exactly_one_neutral_reading(self) -> None:
@@ -876,29 +1205,40 @@ class TestEnginePersistence(GradeEngineCase):
         self.assertIsInstance(signals[0], GradeSignal)
         self.assertTrue(any(signal.value != 0.0 for signal in signals))
 
-    def test_quiz_history_in_the_database_drives_the_quiz_signal(self) -> None:
-        """★ 答题表现**从 learning.db 读**（票 14/15 写进去的答题记录），桌面端不用上交。"""
-        summary = quiz_performance_from_history(self.store)
-        self.assertEqual((summary.attempts, summary.current_streak), (0, 0), "没有记录 → 没有信号")
+    def test_quiz_records_no_longer_drive_the_grade(self) -> None:
+        """★ 2026-09-21：**答题记录不再参与学段判定**（原「答题表现」那一路已移除）。
 
-        for correct in (True, True, True):
-            self.store.add_history(kp_id="ai-definition-jr", activity="quiz", is_correct=correct)
-        summary = quiz_performance_from_history(self.store)
-        self.assertEqual((summary.attempts, summary.correct, summary.current_streak), (3, 3, 3))
+        反向对照旧行为：以前连对 3 题会连续 3 轮各产生一条 ``quiz_perf`` 上调，
+        把学段推上去。现在答题再好也不动学段 —— 那是 ``mastery`` 该管的事
+        （``MASTERY_GAIN_CORRECT`` 有独立机制），不是「你年级更高」。
 
-        # 连续 3 轮答题（每轮都带着「连对 3」这同一份库内证据）→ 上调一级
+        这条同时钉住「别把答题表现加回来」：``score`` 不再是判定输入。
+        """
+        for _ in range(3):
+            self.store.add_history(kp_id="ai-definition-jr", activity="quiz", is_correct=True)
+        before = self.engine.current_level(self.student_id)
+
         for turn in (1, 2, 3):
             decision = self.engine.observe_turn(
                 student_id=self.student_id, turn=turn, text="我做完了"
             )
             kinds = {reading.signal_type for reading in decision.readings if reading.has_evidence}
-            self.assertIn("quiz_perf", kinds)
-        self.assertEqual(self.engine.current_level(self.student_id), "junior")
+            self.assertNotIn("quiz_perf", kinds, "答题表现不该再产生信号")
+            self.assertFalse(
+                any(reading.signal_type == "quiz_perf" for reading in decision.readings),
+                "连读数里都不该有这一路",
+            )
 
-        # 连错两题后再来一轮 → 下调（连错 ≥2）
-        self.store.add_history(kp_id="ai-definition-jr", activity="quiz", is_correct=False)
-        self.store.add_history(kp_id="ai-definition-jr", activity="quiz", is_correct=False)
-        self.assertEqual(quiz_performance_from_history(self.store).current_streak, -2)
+        self.assertEqual(
+            self.engine.current_level(self.student_id),
+            before,
+            "答题记录（连对）不再改学段",
+        )
+        # 连错也一样：不再产生下调
+        for _ in range(2):
+            self.store.add_history(kp_id="ai-definition-jr", activity="quiz", is_correct=False)
+        self.engine.observe_turn(student_id=self.student_id, turn=4, text="我做完了")
+        self.assertEqual(self.engine.current_level(self.student_id), before, "连错也不改学段")
 
     # ------------------------------------------------------------------ D1 --
     def test_d1_verdicts_bucket_by_session_and_turn(self) -> None:
@@ -1023,15 +1363,24 @@ class TestGradeRoutes(unittest.TestCase):
         self.assertEqual(body["degraded"], "no_llm")
         self.assertIsNone(body["llmConfidence"])
 
-    def test_quiz_performance_drives_the_signal(self) -> None:
+    def test_quiz_field_is_rejected_by_the_contract(self) -> None:
+        """★ 契约层面**明确拒绝** ``quiz``（2026-09-21 起）。
+
+        这条比「删掉提取器」更重要：``GradeTurnInput`` 是 ``extra="forbid"``，
+        所以删掉字段之后老调用方会立刻拿到 422 —— **契约收下一个字段就等于承诺它参与判定**，
+        现在它不参与了，就必须**响亮地**拒绝，而不是静默收下不用
+        （静默收下会让人以为「我传了答题数据所以学段变了」）。
+        """
         response = self.submit(
             {"turn": 1, "text": "我做完了", "quiz": {"attempts": 5, "correct": 5, "currentStreak": 4}}
         )
-        body = response.json()
-        kinds = [signal["signalType"] for signal in body["signals"]]
-        self.assertIn("quiz_perf", kinds)
-        quiz_signal = next(signal for signal in body["signals"] if signal["signalType"] == "quiz_perf")
-        self.assertGreater(quiz_signal["value"], 0)
+        self.assertEqual(response.status_code, 422, "带 quiz 的请求体必须被拒")
+        # 不带 quiz 的老字段照常可用
+        ok = self.submit({"turn": 1, "text": "梯度下降怎么推导？"})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        kinds = [signal["signalType"] for signal in ok.json()["signals"]]
+        self.assertNotIn("quiz_perf", kinds)
+        self.assertTrue(kinds, "仍然有别的信号（词汇 / 深度）")
 
     def test_auth_is_required(self) -> None:
         anonymous = TestClient(self.app)

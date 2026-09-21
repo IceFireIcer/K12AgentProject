@@ -926,12 +926,12 @@ if (gradeProbe?.present !== true) {
     `显示「当前：${gradeProbe.badgeText}」；旁边说明「${gradeProbe.hintText}」`
   )
   check(
-    '★ 来源标签说清了「怎么定下来的」（手动选中 / AI 引擎推算）',
+    '★ 来源标签说清了「怎么定下来的」（手动选中 / AI 引擎判定 / 本地规则判定）',
     // 待判定时不显示这句（还没定下来的东西没有「怎么定下来的」可言），
     // 所以判据分两支：判出来了必须有来源标签；没判出来必须**没有**。
     gradeProbe.grade === ''
       ? gradeProbe.originText === ''
-      : ['手动选中', 'AI 引擎推算'].includes(gradeProbe.originText),
+      : ['手动选中', 'AI 引擎判定', '本地规则判定'].includes(gradeProbe.originText),
     `data-grade="${gradeProbe.grade}"，来源标签「${gradeProbe.originText}」`
   )
   check(

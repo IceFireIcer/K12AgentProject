@@ -144,6 +144,8 @@ class GradeHistoryRecord:
     from_level: str | None
     to_level: str
     source: str
+    #: 哪一层判的（D-066）：``rules`` / ``llm`` / ``None``（历史行或手动指定行）。
+    decided_by: str | None
     confidence: float
 
 
@@ -821,7 +823,7 @@ class LearningStore:
           这个给报告用（只读、正序）。两者都只读，**不构成两套状态推导**。
         """
         rows = self.conn.execute(
-            "SELECT id, ts, turn, from_level, to_level, source, confidence "
+            "SELECT id, ts, turn, from_level, to_level, source, decided_by, confidence "
             "FROM grade_history ORDER BY id DESC LIMIT ?",
             (int(limit),),
         ).fetchall()
@@ -833,6 +835,7 @@ class LearningStore:
                 from_level=None if row["from_level"] is None else str(row["from_level"]),
                 to_level=str(row["to_level"] or ""),
                 source=str(row["source"] or ""),
+                decided_by=None if row["decided_by"] is None else str(row["decided_by"]),
                 confidence=float(row["confidence"] or 0.0),
             )
             for row in reversed(rows)

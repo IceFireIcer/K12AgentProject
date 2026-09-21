@@ -141,6 +141,10 @@ export interface paths {
          *     与 ``POST /grade/turns`` 的分工：那条路径收的是**证据**（可能改变学段，也可能不），
          *     这条路径收的是**决定**（一定按学生的意思生效）。两者写的是同一张 ``grade_history``，
          *     区别只有 ``source`` 与冷却窗口长度 —— 冷却期一过，自动推断照常接管。
+         *
+         *     ★ 冷却锚点（``signal_mark``）**由服务端自己取**：它是「写这一行时 ``grade_signals``
+         *     的最大 id」，全局单调、跨会话可比 —— 所以请求体里不需要会话参数，
+         *     而「手动后 10 轮内不再自动调整」这条验收仍在字面上成立（跨会话照数）。
          */
         post: operations["override_grade_api_grade_override__student_id__post"];
         delete?: never;
@@ -187,6 +191,10 @@ export interface paths {
          *
          *     当前学段可能是**推断引擎自动写入**的，也可能是**学生手动设定**的
          *     （后者 ``source="explicit"``、``cooldownRemainingTurns`` 更长）。
+         *
+         *     ★ 冷却不需要会话参数：锚点记的是 ``grade_signals`` 的**信号位标**（全局单调、
+         *     跨会话可比），所以「还剩几轮」在任何会话里读都是同一个真实轮数
+         *     —— 与 ``POST /grade/turns`` 报出的值也必然一致（P-094 的形态不会重现）。
          *
          *     学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，
          *     而不是 404 —— 学段推断从第一轮就要开始工作。
@@ -1504,6 +1512,8 @@ export interface components {
              * @default 0
              */
             confidence: number;
+            /** Decidedby */
+            decidedBy?: string | null;
             /** Fromlevel */
             fromLevel?: ("primary_low" | "primary_high" | "junior" | "senior") | null;
             /** Source */
@@ -1547,11 +1557,14 @@ export interface components {
          * @description ``POST /api/grade/override/{student_id}`` 的请求体。
          *
          *     ★★ **刻意不提供 ``note``（留痕说明）字段** —— 这是取舍，不是省事：
-         *     ``grade_history`` 只有 ``(ts, turn, from_level, to_level, source, confidence)``
-         *     这几列（"不许新增表或列" 是硬约束），多出来的文本**没有地方落盘**；
-         *     退而求其次写进日志又违反「日志里不出现学生文本」的合规要求。
+         *     ``grade_history`` 只存结构化字段，没有放**任意文本**的列；多出来的说明
+         *     **没有地方落盘**；退而求其次写进日志又违反「日志里不出现学生文本」的合规要求。
          *     收下一个**写不进去**的字段等于让接口撒谎：调用方以为自己留了痕，其实内容被静默丢弃，
          *     之后排查时还会以为「日志里没有是因为没填」。宁可不提供。
+         *
+         *     ★ 请求体里**也不需要会话 id**：冷却锚点记的是 ``grade_signals`` 的**信号位标**
+         *     （全局单调、跨会话可比），不是某个会话里的轮次号 —— 服务端写这一行时自己就能取到。
+         *     详见 ``app/grade/rules.py`` 的 ``_cooldown_remaining``。
          */
         GradeOverrideRequest: {
             /**
@@ -1682,6 +1695,13 @@ export interface components {
              */
             cooldownRemainingTurns: number;
             /**
+             * Cumulativeturns
+             * @default 0
+             */
+            cumulativeTurns: number;
+            /** Decidedby */
+            decidedBy?: string | null;
+            /**
              * Direction
              * @default 0
              */
@@ -1693,7 +1713,10 @@ export interface components {
             grade: "primary_low" | "primary_high" | "junior" | "senior";
             /** Lastchangeturn */
             lastChangeTurn?: number | null;
-            /** Lastturn */
+            /**
+             * Lastturn
+             * @default 0
+             */
             lastTurn: number;
             /** Source */
             source: string;
@@ -1709,11 +1732,17 @@ export interface components {
         };
         /**
          * GradeTurnInput
-         * @description **一轮**证据：轮次号 + 学生原话 + （可选）答题表现与第二层提议。
+         * @description **一轮**证据：轮次号 + 学生原话 + （可选）第二层提议与其**通道状态**。
+         *
+         *     ★ 2026-09-21：原先还有一个 ``quiz``（答题表现）。已随那条信号一起移除 ——
+         *     答题表现不该改学段（那是 ``mastery`` 的事），而且它会从原文里捡「太难了」
+         *     与元认知重复计数。见 ``app/grade/signals.py`` 的模块 docstring。
+         *     ⚠️ 不要再把它加回来：契约收下一个字段，就等于承诺它会参与判定。
          */
         GradeTurnInput: {
+            /** Layer2Status */
+            layer2Status?: string | null;
             proposal?: components["schemas"]["GradeProposalInput"] | null;
-            quiz?: components["schemas"]["QuizPerformanceInput"] | null;
             /** Sessionid */
             sessionId?: string | null;
             /**
@@ -1735,6 +1764,8 @@ export interface components {
             confidence: number;
             /** Cooldownremainingturns */
             cooldownRemainingTurns: number;
+            /** Decidedby */
+            decidedBy?: string | null;
             /** Degraded */
             degraded?: string | null;
             /** Direction */
@@ -2537,39 +2568,6 @@ export interface components {
              * @enum {string}
              */
             source: "bank" | "generated";
-        };
-        /**
-         * QuizPerformanceInput
-         * @description 答题表现（从 ``learning.db`` 读出来的结构化摘要，由桌面端带上来）。
-         *
-         *     **不带题干与作答正文**，只有数字 —— 与 ``learning_history`` 的口径一致。
-         */
-        QuizPerformanceInput: {
-            /**
-             * Attempts
-             * @default 0
-             */
-            attempts: number;
-            /**
-             * Correct
-             * @default 0
-             */
-            correct: number;
-            /**
-             * Currentstreak
-             * @default 0
-             */
-            currentStreak: number;
-            /**
-             * Hintsrequested
-             * @default 0
-             */
-            hintsRequested: number;
-            /**
-             * Toohard
-             * @default false
-             */
-            tooHard: boolean;
         };
         /**
          * QuizQuestionOut

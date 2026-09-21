@@ -1,9 +1,26 @@
 # -*- coding: utf-8 -*-
-"""四类学段信号的提取（执行文档 §10.2 / §10.3，票 21）—— **第一层，不调 LLM**。
+"""学段信号的提取（执行文档 §10.2 / §10.3，票 21）—— **第一层，不调 LLM**。
 
-本模块是**信号提取的唯一实现**：桌面端只上交「本轮证据」（学生原话 + 答题表现 +
+本模块是**信号提取的唯一实现**：桌面端只上交「本轮证据」（学生原话 +
 第二层的 LLM 提议），提取与判定都在 Python 侧发生一次。**不要在 TS 里再写一份轻量版** ——
 两份实现必然漂移，而漂移的表现是「学段莫名乱动」，现场演示时最难解释。
+
+★★ **三路信号（2026-09-21 起；原先四路，去掉了「答题表现」）**：
+:data:`SIGNAL_TYPES` = ``vocab`` / ``depth`` / ``meta_cognition``。
+
+去掉 ``quiz_perf`` 的理由（两条，都是实测出来的）：
+
+1. **概念错位**：答错两道题说明「这个知识点没掌握」，不等于「学段更低」——
+   那本来就是 ``mastery`` 该管的事（``MASTERY_GAIN_CORRECT`` / ``MASTERY_LOSS_WRONG``
+   已有一套独立机制）。让答题表现去改学段，等于把「掌握度」和「学段」两个量混在一起。
+2. **重复计数**：``TOO_HARD_TERMS``（太难了 / 太难 / 好难 / 不会做）与 ``META_STRUGGLE``
+   是同一批词，而 ``extract_quiz_perf_signal`` 还会**读学生原话**去找它们 ——
+   学生说一句「太难了」既产生一条元认知 ``-0.5``，又产生一条答题 ``-0.5``，
+   该轮合并值直接顶到 ``-1.0``（强度封顶）。一句话的挫败被当成两条独立证据。
+   它还绕过了「答题表现只从 ``learning.db`` 读」的设计意图，偷偷读了对话。
+
+⚠️ 契约里仍保留 ``quiz_perf`` 这个取值：历史库里已经有这类行，
+   把字面量删掉会让读旧库的接口 500（``GradeSignal.signal_type`` 会校验失败）。
 
 契约（每个提取器都必须满足）
 ----------------------------
@@ -21,7 +38,7 @@
 
 > ★ 「连续 3 个同方向信号」的计数单位是**轮**，不是「信号条数」（见
 > :class:`TurnSignals` / :func:`turn_direction`）：一轮里同时出现词汇、深度、元认知
-> 三条同向信号，仍然只算**一轮**。否则学生一口气多说两句就能把学段推走一级。
+> 两条同向信号，仍然只算**一轮**。否则学生一口气多说两句就能把学段推走一级。
 """
 
 from __future__ import annotations
@@ -36,8 +53,13 @@ from app.knowledge.library import GRADE_LEVELS, load_terminology
 
 logger = logging.getLogger(__name__)
 
-#: 四类信号（**与 ``contracts.GradeSignalType`` 逐字一致**，新增类型要改三处：契约 / 本元组 / 提取器）。
-SIGNAL_TYPES: tuple[GradeSignalType, ...] = ("vocab", "depth", "quiz_perf", "meta_cognition")
+#: **本模块真正提取的**三路信号（2026-09-21 起）。
+#:
+#: ⚠️ 它与 ``contracts.GradeSignalType`` **不是**同一个集合：契约那个联合类型里还留着
+#: ``quiz_perf`` —— 不是给提取器用的，而是**为了能读历史库**（升级前写入的行仍存着那个取值，
+#: ``recent_signals()`` 会把库里的值原样灌进 ``GradeSignal``，删掉取值就会 500）。
+#: 所以新增一路时改三处：契约 / 本元组 / 提取器；**移除**一路时契约那一处**不要删**。
+SIGNAL_TYPES: tuple[GradeSignalType, ...] = ("vocab", "depth", "meta_cognition")
 
 #: 学段由低到高（复用教材轨的冻结顺序，**不要**再抄一份字面量）。
 GRADE_ORDER: tuple[GradeLevel, ...] = GRADE_LEVELS  # type: ignore[assignment]
@@ -225,21 +247,19 @@ META_REPHRASE: tuple[str, ...] = (
     "换个说法",
     "换种说法",
     "换一个说法",
-    "详细一点",
-    "讲详细",
-    "举个例子",
 )
 
-#: 答题表现阈值（§10.2 第三行：「连对 ≥3 考虑上调，连错或『太难了』触发下调」）。
-QUIZ_STREAK_UP = 3
-QUIZ_STREAK_DOWN = 2
-QUIZ_ACCURACY_UP = 0.8
-QUIZ_ACCURACY_DOWN = 0.4
-QUIZ_MIN_ATTEMPTS = 3
-QUIZ_HINTS_DOWN = 3
+#: ★ 刻意**不**收录「举个例子」「详细一点」「讲详细」（2026-09-21 移除）：
+#:   它们是**好奇心与求知欲**的表达 ——「能举个例子吗」是听懂了、想更深一层，
+#:   不是「刚才那段讲深了」。把它们当成受挫信号，会让积极提问的学生被**降级**，
+#:   而且这类话在低学段尤其常见，方向恰好是反的。
+#:   真正要表达「听不懂」的人会用 :data:`META_STRUGGLE` 里的词（听不懂 / 太难了 / 慢一点）。
 
-#: 「太难了」既可能出现在元认知里，也可能出现在答题上下文里 —— 两处都认，字面量只写一遍。
-TOO_HARD_TERMS: tuple[str, ...] = ("太难了", "太难", "好难", "不会做")
+#: 「太难了」这类受挫表达**已经并入** :data:`META_STRUGGLE`（那边本来就有
+#: 太难了 / 太难 / 好难 / 不会做）。原先这里另有一份 ``TOO_HARD_TERMS`` 是给
+#: 「答题表现」那一路用的 —— 它从**对话原文**里找这些词，于是与元认知重复计数
+#: （一句「太难了」产生两条 ``-0.5``、该轮强度封顶）。那一路已整体移除，
+#: 这份常量随之删除，避免留一个「改词表要记得改两处」的坑。
 
 
 # --------------------------------------------------------------------------- #
@@ -281,30 +301,10 @@ class SignalReading:
         )
 
 
-@dataclass(frozen=True)
-class QuizPerformance:
-    """答题表现（从 ``learning.db`` 的 ``mastery`` / ``learning_history`` 读出来的结构化摘要）。
-
-    这个结构由**调用方**（``POST /api/grade/turns`` 的请求体，或将来直接读库的入口）
-    填好传进来，本模块不碰数据库 —— 提取器保持纯函数才测得动。
-    """
-
-    attempts: int = 0
-    correct: int = 0
-    #: 正数 = 连对几题；负数 = 连错几题；0 = 没有连续记录
-    current_streak: int = 0
-    hints_requested: int = 0
-    too_hard: bool = False
-
-    @property
-    def accuracy(self) -> float:
-        return (self.correct / self.attempts) if self.attempts > 0 else 0.0
-
-
 class Directional(Protocol):
     """「有方向、有强度」的最小结构面。
 
-    :class:`TurnSignals`（本轮的四路读数）与 ``rules.TurnVerdict``（从库里还原出来的轮次读数）
+    :class:`TurnSignals`（本轮的各路读数）与 ``rules.TurnVerdict``（从库里还原出来的轮次读数）
     都满足它 —— 连续同方向的统计只写一份，两处共用。
     """
 
@@ -402,12 +402,38 @@ def _reading(
     current_level: str,
     target_level: str | None,
     raw: str,
+    *,
+    only_up: bool = False,
 ) -> SignalReading:
-    """按「当前学段 + 证据指向的学段」组装读数（无证据 → 值 0）。"""
+    """按「当前学段 + 证据指向的学段」组装读数（无证据 → 值 0）。
+
+    ``only_up=True``（深度信号用）：档位**低于**当前学段时方向取 0 ——
+    **证据照记**（``level_hint`` / ``raw`` 都留着，仍然落库、仍然可审计、
+    仍然是一条会打断「连续同向」的中性轮），但**不产生下调**。
+
+    ★ 为什么需要它：``classify_depth`` 返回的是**绝对档位**（``什么是X`` → ``primary_high``、
+    普通疑问句兜底 → ``primary_high``），再对当前学段求差 —— 初中生问「什么是矩阵」
+    就得到一条 ``-0.5``。连问三句这样的问题（``0.5 × 3`` → 置信度 0.75 ≥ 0.6）
+    就会把学段**自动降级**。实测日志里 ``第 [8] 轮 → primary_high
+    （changed=True reason=changed 置信度=0.75 连续=4）`` 正是这种单路下调。
+
+    这与「问得浅 = 学段低」的推论并不成立：**任何学段的学生都会用「什么是…」的句式
+    问一个自己刚接触的概念** —— 那是好奇心的常态，不是学段证据。
+    真正的「听不懂 / 太难了」由元认知那一路负责下调（它说的是「刚才讲深了」，
+    而不是「你年级低」），两者分工由此清晰。
+    """
     evidence = raw[:RAW_MAX_CHARS]
     if target_level is None or not evidence:
         return SignalReading(signal_type=signal_type, value=0.0, level_hint=None, raw=evidence)
     direction, strength = strength_for(current_level, target_level)
+    if only_up and direction < 0:
+        # 记为中性：证据保留，但不作为下调依据。
+        return SignalReading(
+            signal_type=signal_type,
+            value=0.0,
+            level_hint=target_level,  # type: ignore[arg-type]
+            raw=evidence,
+        )
     return SignalReading(
         signal_type=signal_type,
         value=direction * strength,
@@ -494,12 +520,18 @@ def highest_terminology_level(
 def extract_vocab_signal(
     text: str, current_level: str, *, terminology: dict | None = None
 ) -> SignalReading:
-    """① 词汇复杂度：专业术语（往上）vs 日常口语（往下）。
+    """① 词汇复杂度：命中专业术语 → 往上；日常口语 → **中性**（不再往下）。
 
     - 命中术语表 → ``level_hint`` = 命中的**最高** ``min_grade``（「梯度下降」→ senior）；
-    - 只命中日常用语 → ``level_hint`` = ``primary_low``（「电脑怎么认图片」这种口径
-      在小学低年级教材里是**正式表述**，见 ``knowledge/primary-low``）；
+    - 只命中日常用语 → ``level_hint`` = ``primary_low``，但**方向恒为 0**（``only_up=True``）；
     - 两者都没有 → 没有证据（``value = 0``）。
+
+    ★★ **日常口语为什么不再下调**（2026-09-21）：``DAILY_TERMS`` 里的词
+    （电脑 / 动画 / 图片 / 机器人 / 手机 / 小猫…）在**四个学段**的教材里都到处都是 ——
+    初、高中生聊「机器人」是很自然的事，却会各得一条 ``-0.5``；连提三轮就凑够
+    「连续 3 轮同向 + 置信度 0.75」，把学段**自动降级**。
+    这与深度信号「问得浅 ≠ 学段低」是同一类错误：**用词日常**只说明他在用生活语言，
+    不说明他年级低。下调只留给元认知（「听不懂」）—— 那才是真的信号。
     """
     highest, terms = highest_terminology_level(text, terminology)
     if highest is not None:
@@ -507,7 +539,9 @@ def extract_vocab_signal(
         return _reading("vocab", current_level, highest, raw)
     daily = find_terms(text, DAILY_TERMS)
     if daily:
-        return _reading("vocab", current_level, "primary_low", "口语=" + ",".join(daily[:6]))
+        return _reading(
+            "vocab", current_level, "primary_low", "口语=" + ",".join(daily[:6]), only_up=True
+        )
     return SignalReading(signal_type="vocab", value=0.0, level_hint=None, raw="")
 
 
@@ -564,69 +598,33 @@ def classify_depth(text: str) -> GradeLevel | None:
 
 
 def extract_depth_signal(text: str, current_level: str) -> SignalReading:
-    """② 问题深度（规则 + 关键词，**不调 LLM**；第二层的轻量 LLM 只做复核）。"""
+    """② 问题深度（规则 + 关键词，**不调 LLM**；第二层的轻量 LLM 只做复核）。
+
+    ★★ **只上不下**（``only_up=True``，2026-09-21 起）：判出的档位低于当前学段时方向取 0。
+    问得浅**不是**学段低的证据 —— 任何学段的学生都会用「什么是…」问一个刚接触的概念。
+    原先它会累计成一条真正的下调（实测：初中生连问三句「什么是矩阵」→ 0.75 ≥ 0.6 → 降级）。
+    下调由元认知那一路负责，它说的是「刚才讲深了」，与「你是几年级」是两回事。
+    """
     level = classify_depth(text)
     if level is None:
         return SignalReading(signal_type="depth", value=0.0, level_hint=None, raw="")
     hit_patterns = [pattern for _, patterns in DEPTH_LEVELS for pattern in matches_any(text, patterns)]
     raw = f"深度={level}" + (f";命中={'/'.join(hit_patterns[:3])}" if hit_patterns else ";命中=疑问语气")
-    return _reading("depth", current_level, level, raw)
+    return _reading("depth", current_level, level, raw, only_up=True)
 
 
 # --------------------------------------------------------------------------- #
-# ③ 答题表现
-# --------------------------------------------------------------------------- #
-def extract_quiz_perf_signal(
-    quiz: QuizPerformance | None, text: str, current_level: str
-) -> SignalReading:
-    """③ 答题表现：连对 ≥3 上调；连错 ≥2 / 正确率低 / 频繁要提示 /「太难了」下调。
-
-    ★ 冲突时**下调优先**：证据一半朝上一半朝下时，宁可讲浅一点，
-    也不要把一个正在受挫的学生往上推（体验代价不对称）。
-    """
-    quiz = quiz or QuizPerformance()
-    too_hard = quiz.too_hard or bool(find_terms(text, TOO_HARD_TERMS))
-
-    up_reasons: list[str] = []
-    if quiz.current_streak >= QUIZ_STREAK_UP:
-        up_reasons.append(f"连对{quiz.current_streak}")
-    if quiz.attempts >= QUIZ_MIN_ATTEMPTS and quiz.accuracy >= QUIZ_ACCURACY_UP:
-        up_reasons.append(f"正确率{quiz.accuracy:.2f}")
-
-    down_reasons: list[str] = []
-    if quiz.current_streak <= -QUIZ_STREAK_DOWN:
-        down_reasons.append(f"连错{abs(quiz.current_streak)}")
-    if quiz.attempts >= QUIZ_MIN_ATTEMPTS and quiz.accuracy <= QUIZ_ACCURACY_DOWN:
-        down_reasons.append(f"正确率{quiz.accuracy:.2f}")
-    if quiz.hints_requested >= QUIZ_HINTS_DOWN:
-        down_reasons.append(f"要提示{quiz.hints_requested}次")
-    if too_hard:
-        down_reasons.append("太难了")
-
-    if not up_reasons and not down_reasons:
-        return SignalReading(signal_type="quiz_perf", value=0.0, level_hint=None, raw="")
-
-    current_rank = rank_of(current_level)
-    if down_reasons:
-        target = level_at(current_rank - 1) if current_rank is not None else None
-        if target is None:  # 已在最低学段：下调无从谈起
-            return SignalReading(signal_type="quiz_perf", value=0.0, level_hint=None, raw="")
-        return _reading("quiz_perf", current_level, target, "答题=" + ",".join(down_reasons[:4]))
-
-    target = level_at(current_rank + 1) if current_rank is not None else None
-    if target is None:  # 已在最高学段
-        return SignalReading(signal_type="quiz_perf", value=0.0, level_hint=None, raw="")
-    return _reading("quiz_perf", current_level, target, "答题=" + ",".join(up_reasons[:4]))
-
-
-# --------------------------------------------------------------------------- #
-# ④ 元认知表达
+# ③ 元认知表达
 # --------------------------------------------------------------------------- #
 def extract_meta_cognition_signal(text: str, current_level: str) -> SignalReading:
-    """④ 元认知表达：「听不懂 / 再讲一遍 / 换个说法」→ **下调**信号（§10.2 第四行）。
+    """③ 元认知表达：「听不懂 / 再讲一遍 / 换个说法」→ **下调**信号（§10.2 第四行）。
 
     这类表达不告诉你学生是几年级，只告诉你**刚才那一段讲深了** ——
     所以 ``level_hint`` 取「当前学段往下调一级」，而不是硬说他是小学低年级。
+
+    ★ 它是「受挫」这条路**唯一**的来源：原先「答题表现」那一路也会读
+    ``TOO_HARD_TERMS``（与 ``META_STRUGGLE`` 是同一批词），导致一句「太难了」
+    同时产生两条 ``-0.5``、该轮强度直接封顶。那一路已整体移除（见模块 docstring）。
     """
     struggle = find_terms(text, META_STRUGGLE)
     rephrase = find_terms(text, META_REPHRASE)
@@ -650,7 +648,7 @@ def extract_meta_cognition_signal(text: str, current_level: str) -> SignalReadin
 
 
 # --------------------------------------------------------------------------- #
-# 组合：一轮 → 四路读数
+# 组合：一轮 → 各路读数
 # --------------------------------------------------------------------------- #
 def extract_turn_signals(
     *,
@@ -658,14 +656,19 @@ def extract_turn_signals(
     turn: int,
     current_level: str,
     session_id: str = "",
-    quiz: QuizPerformance | None = None,
     terminology: dict | None = None,
 ) -> TurnSignals:
-    """一轮对话 → 四路读数（**第一层的唯一入口**，每轮同步执行、不调 LLM）。"""
+    """一轮对话 → 各路读数（**第一层的唯一入口**，每轮同步执行、不调 LLM）。
+
+    ★ **只从学生这一轮的原文里取证据**（词汇 / 深度 / 元认知三路）。
+    原先还有第四路「答题表现」（从 ``learning.db`` 连对连错读出来）——
+    2026-09-21 整体移除：它把「知识点没掌握」误当成「学段更低」，
+    而且会从**对话原文**里捡「太难了」，与元认知那一路重复计数。
+    详见模块 docstring。
+    """
     readings = (
         extract_vocab_signal(text, current_level, terminology=terminology),
         extract_depth_signal(text, current_level),
-        extract_quiz_perf_signal(quiz, text, current_level),
         extract_meta_cognition_signal(text, current_level),
     )
     return TurnSignals(turn=int(turn), session_id=session_id, readings=readings)
@@ -743,18 +746,10 @@ __all__ = [
     "META_STRUGGLE",
     "MIN_QUESTION_CONTENT_CHARS",
     "QUESTION_MARKERS",
-    "QUIZ_ACCURACY_DOWN",
-    "QUIZ_ACCURACY_UP",
-    "QUIZ_HINTS_DOWN",
-    "QUIZ_MIN_ATTEMPTS",
-    "QUIZ_STREAK_DOWN",
-    "QUIZ_STREAK_UP",
     "RAW_MAX_CHARS",
     "SIGNAL_STRENGTH_PER_LEVEL",
     "SIGNAL_TYPES",
-    "QuizPerformance",
     "SignalReading",
-    "TOO_HARD_TERMS",
     "TurnSignals",
     "classify_depth",
     "consecutive_same_direction",
@@ -764,7 +759,6 @@ __all__ = [
     "encode_turn_raw",
     "extract_depth_signal",
     "extract_meta_cognition_signal",
-    "extract_quiz_perf_signal",
     "extract_turn_signals",
     "extract_vocab_signal",
     "find_terms",

@@ -340,12 +340,22 @@ function trailFrom(level: GradeLevel | null | undefined): string {
 }
 
 /**
- * `grade_history.source` 是**宽松文本**（契约里 `GradeHistoryEntry.source` 就是 `string`）——
- * 认不出的取值按「非手动」处理（与后端 `_contract_source` 同一口径），
- * 中文说法一律交给 `gradeOriginLabel()`（唯一实现），这里不写第二份映射。
+ * 轨迹行的来源标签（D-066 起**两个轴**：谁写的 × 哪一层判的）。
+ *
+ * - `source === 'explicit'` → 学生手动（最高优先，手动谈不上哪层引擎）；
+ * - 否则看 `decided_by`：`llm` → 「AI 引擎判定」、`rules` → 「本地规则判定」；
+ * - 两者都取不到（D-066 之前写入的历史行）→ 按 `source` 折（`inferred` = 规则判过）。
+ *
+ * ★ 中文说法一律交给 `gradeOriginLabel()`（唯一实现），这里不写第二份映射。
  */
-function originOf(source: string): GradeOrigin | null {
-  return source === 'explicit' || source === 'inferred' || source === 'default' ? source : null
+function originOf(source: string, decidedBy?: string | null): GradeOrigin | null {
+  if (source === 'explicit') return 'explicit'
+  if (decidedBy === 'llm') return 'llm'
+  if (decidedBy === 'rules') return 'rules'
+  // 历史行没有 decided_by：`inferred` 等价于「规则判过」
+  if (source === 'inferred') return 'rules'
+  if (source === 'default') return 'default'
+  return null
 }
 
 /* ------------------------------------------------------------------ *
@@ -801,7 +811,7 @@ onMounted(() => {
             {{ trailFrom(entry.fromLevel) }} → {{ GRADE_LABELS[entry.toLevel] ?? entry.toLevel }}
           </p>
           <p class="trail__meta">
-            来源 {{ gradeOriginLabel(originOf(entry.source)) }} · 置信度
+            来源 {{ gradeOriginLabel(originOf(entry.source, entry.decidedBy)) }} · 置信度
             {{ entry.confidence.toFixed(2) }}
           </p>
         </el-timeline-item>

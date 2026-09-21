@@ -56,7 +56,6 @@ from app.contracts import (
     GradeSignals,
 )
 from app.grade.rules import SIGNAL_LIST_LIMIT, GradeEngine, GradeProposal
-from app.grade.signals import QuizPerformance
 from app.routes.students import (
     as_grade_level,
     open_learning_store,
@@ -79,20 +78,6 @@ MAX_BATCH_TURNS = 20
 # --------------------------------------------------------------------------- #
 # 本地模型（契约模型补齐后应迁进 contracts.py，本文件只做「形状」）
 # --------------------------------------------------------------------------- #
-class QuizPerformanceInput(CamelModel):
-    """答题表现（从 ``learning.db`` 读出来的结构化摘要，由桌面端带上来）。
-
-    **不带题干与作答正文**，只有数字 —— 与 ``learning_history`` 的口径一致。
-    """
-
-    attempts: int = Field(default=0, ge=0, le=1000)
-    correct: int = Field(default=0, ge=0, le=1000)
-    #: 正数 = 连对几题；负数 = 连错几题；0 = 没记录
-    current_streak: int = Field(default=0, ge=-100, le=100)
-    hints_requested: int = Field(default=0, ge=0, le=1000)
-    too_hard: bool = False
-
-
 class GradeProposalInput(CamelModel):
     """第二层 LLM 的**提议**（``{suggestedGrade, confidence}``）。
 
@@ -105,13 +90,24 @@ class GradeProposalInput(CamelModel):
 
 
 class GradeTurnInput(CamelModel):
-    """**一轮**证据：轮次号 + 学生原话 + （可选）答题表现与第二层提议。"""
+    """**一轮**证据：轮次号 + 学生原话 + （可选）第二层提议与其**通道状态**。
+
+    ★ 2026-09-21：原先还有一个 ``quiz``（答题表现）。已随那条信号一起移除 ——
+    答题表现不该改学段（那是 ``mastery`` 的事），而且它会从原文里捡「太难了」
+    与元认知重复计数。见 ``app/grade/signals.py`` 的模块 docstring。
+    ⚠️ 不要再把它加回来：契约收下一个字段，就等于承诺它会参与判定。
+    """
 
     turn: int = Field(ge=0, le=100_000)
     text: str = Field(default="", max_length=MAX_TURN_CHARS)
     session_id: str | None = Field(default=None, max_length=128)
-    quiz: QuizPerformanceInput | None = None
     proposal: GradeProposalInput | None = None
+    #: 第二层通道的状态（``Layer2Status``：``due`` / ``used`` / ``no_llm`` /
+    #: ``judge_error`` / ``already_proposed`` / ``not_due`` …）。
+    #: ★ 由桌面端上报，因为**只有它知道**为什么这一轮没有提议：是没接线、是调用失败，
+    #: 还是本窗口早就提过议了（后者**不是降级**）。服务端据此决定 ``degraded`` 要不要置位。
+    #: 不传（旧客户端）→ 服务端退回老口径（没提议就报降级，宁可多报）。
+    layer2_status: str | None = Field(default=None, max_length=32)
 
 
 class GradeTurnsRequest(CamelModel):
@@ -151,6 +147,9 @@ class GradeTurnResponse(CamelModel):
     cooldown_remaining_turns: int
     #: 第二层被跳过时**可见**（``no_llm``）；正常为 ``null``。降级不许静默。
     degraded: str | None = None
+    #: **这一轮是谁定的**（D-066）：``rules`` / ``llm``。报告与前端标签都按它区分
+    #: 「本地规则判定」与「AI 引擎判定」。
+    decided_by: str | None = None
     #: 本批写入 ``grade_signals`` 的读数（含中性读数：它们同样是证据）
     signals: list[GradeSignal] = Field(default_factory=list)
     #: 每一轮的判定轨迹（第 3 轮为什么改、第 6 轮为什么被冷却挡住，一眼可见）
@@ -163,7 +162,12 @@ class GradeStateOut(CamelModel):
     student_id: str
     grade: GradeLevel
     source: str
-    last_turn: int
+    #: **哪一层产出了当前学段**（D-066）：``rules``（本地规则判定）/ ``llm``（AI 引擎判定）/
+    #: ``null``（冷启动基线或学生手动指定 —— 标签分别回落成「待判定」「手动选中」）。
+    decided_by: str | None = None
+    #: **累计轮次**（跨会话连续）：桌面端用它判断「该不该请 LLM 出场」（``LLM_DECIDES_FROM_TURN``）。
+    cumulative_turns: int = 0
+    last_turn: int = 0
     last_change_turn: int | None = None
     cooldown_remaining_turns: int = 0
     streak: int = 0
@@ -261,6 +265,10 @@ def grade_state(request: Request, student_id: str) -> GradeStateOut:
     当前学段可能是**推断引擎自动写入**的，也可能是**学生手动设定**的
     （后者 ``source="explicit"``、``cooldownRemainingTurns`` 更长）。
 
+    ★ 冷却不需要会话参数：锚点记的是 ``grade_signals`` 的**信号位标**（全局单调、
+    跨会话可比），所以「还剩几轮」在任何会话里读都是同一个真实轮数
+    —— 与 ``POST /grade/turns`` 报出的值也必然一致（P-094 的形态不会重现）。
+
     学生还没建库时**冷启动**：建默认学段（小学高年级）并写一条基线轨迹，
     而不是 404 —— 学段推断从第一轮就要开始工作。
     """
@@ -271,6 +279,8 @@ def grade_state(request: Request, student_id: str) -> GradeStateOut:
             student_id=student_id,
             grade=state.grade_level,
             source=state.source,
+            decided_by=state.decided_by,
+            cumulative_turns=engine.cumulative_turns(),
             last_turn=state.last_turn,
             last_change_turn=state.last_change_turn,
             cooldown_remaining_turns=state.cooldown_remaining,
@@ -303,6 +313,7 @@ def grade_history(request: Request, student_id: str) -> GradeHistoryResponse:
                 from_level=as_grade_level(row["from_level"]) if row["from_level"] else None,
                 to_level=as_grade_level(row["to_level"]),
                 source=row["source"],
+                decided_by=row.get("decided_by"),
                 confidence=row["confidence"],
             )
             for row in engine.history()
@@ -339,8 +350,8 @@ def submit_grade_turns(
                 turn=item.turn,
                 text=item.text,
                 session_id=item.session_id or "",
-                quiz=_as_quiz_performance(item.quiz),
                 proposal=_as_proposal(item.proposal),
+                layer2_status=item.layer2_status,
             )
             decisions.append(decision)
 
@@ -349,7 +360,7 @@ def submit_grade_turns(
         after = engine.current_level(student_id)
         # 日志**只记轮次与结论**，绝不记学生原话（合规：日志里也不出现对话正文）
         logger.info(
-            "学段判定：%s 第 %s 轮 → %s（changed=%s reason=%s 置信度=%.2f 连续=%d%s）",
+            "学段判定：%s 第 %s 轮 → %s（changed=%s reason=%s 置信度=%.2f 连续=%d 由=%s%s）",
             student_id,
             [decision.turn for decision in decisions],
             after,
@@ -357,7 +368,8 @@ def submit_grade_turns(
             core.reason,
             core.confidence,
             core.streak,
-            "；第二层已跳过（no_llm）" if core.degraded else "",
+            core.decided_by or "?",
+            "；第二层已跳过（%s）" % core.degraded if core.degraded else "",
         )
         return GradeTurnResponse(
             student_id=student_id,
@@ -374,6 +386,7 @@ def submit_grade_turns(
             streak=core.streak,
             cooldown_remaining_turns=core.cooldown_remaining,
             degraded=core.degraded,
+            decided_by=core.decided_by,
             signals=[
                 reading.to_contract()
                 for decision in decisions
@@ -413,11 +426,14 @@ def override_grade(
     与 ``POST /grade/turns`` 的分工：那条路径收的是**证据**（可能改变学段，也可能不），
     这条路径收的是**决定**（一定按学生的意思生效）。两者写的是同一张 ``grade_history``，
     区别只有 ``source`` 与冷却窗口长度 —— 冷却期一过，自动推断照常接管。
+
+    ★ 冷却锚点（``signal_mark``）**由服务端自己取**：它是「写这一行时 ``grade_signals``
+    的最大 id」，全局单调、跨会话可比 —— 所以请求体里不需要会话参数，
+    而「手动后 10 轮内不再自动调整」这条验收仍在字面上成立（跨会话照数）。
     """
     engine = _open_engine(request, student_id)
     try:
-        result = engine.override_level(student_id=student_id, level=payload.grade_level)
-        # 日志只记 id / 学段 / 是否真的变了 / 轮次 —— 手动切换本来就不带学生文本，别在这里加。
+        result = engine.override_level(student_id=student_id, level=payload.grade_level)        # 日志只记 id / 学段 / 是否真的变了 / 轮次 —— 手动切换本来就不带学生文本，别在这里加。
         logger.info(
             "学段手动设定：%s grade=%s changed=%s turn=%s",
             student_id,
@@ -439,18 +455,6 @@ def override_grade(
         raise HTTPException(status_code=503, detail=f"设定学段失败（本地数据库异常）：{exc}") from exc
     finally:
         engine.store.close()
-
-
-def _as_quiz_performance(value: QuizPerformanceInput | None) -> QuizPerformance | None:
-    if value is None:
-        return None
-    return QuizPerformance(
-        attempts=value.attempts,
-        correct=value.correct,
-        current_streak=value.current_streak,
-        hints_requested=value.hints_requested,
-        too_hard=value.too_hard,
-    )
 
 
 def _as_proposal(value: GradeProposalInput | None) -> GradeProposal | None:
@@ -476,6 +480,5 @@ __all__ = [
     "GradeTurnsRequest",
     "MAX_BATCH_TURNS",
     "MAX_TURN_CHARS",
-    "QuizPerformanceInput",
     "router",
 ]

@@ -137,17 +137,22 @@ export const GRADE_LEVELS: readonly GradeLevel[] = ['primary_low', 'primary_high
  *
  * 与 `api/events.ts` 同一原则：脏数据一律「忽略而不抛异常」，绝不猜一个最近的学段。
  *
- * ★ `origin` **三态都要认**（`inferred` / `explicit` / 其它 → `default`）。
+ * ★★ `origin` 现在是**五态**（D-066，2026-09-21）：`explicit` / `llm` / `rules` /
+ *   `inferred`（历史值，等价于 `rules`）/ 其余 → `default`。
  *   把 `explicit` 漏成 `default` 的后果不是「显示得不准」，而是**整条推送被丢掉**：
- *   store 只让 `inferred` / `explicit` 上屏，学生刚点完学段、主进程立刻推来的那条
+ *   store 只让「真的判过或学生选过」的态上屏，学生刚点完学段、主进程立刻推来的那条
  *   `origin: 'explicit'` 会被归一化成一个「不算判定结果」的值，界面停在上一个状态 ——
  *   表现成**点了没反应**（学生以为自己没点中，于是反复点）。
- *   缺省时按 `default` 处理：**宁可显示待判定，也不要假装系统判过**。
+ *
+ *   ★ `default` = **还没判过**（冷启动基线）：宁可显示「待判定」，
+ *   也不要假装系统判过 —— 那正是用户点名要修的「发一句你好就成了 AI 引擎推算」。
  *
  * ★ 只投影**两个字段**（`gradeLevel` / `origin`）：它们是界面真正消费的部分，也是
  *   `GradeState` 两个版本都有的字段。传输类型里那些诊断字段（`reason` / `source` 之类，
  *   只给开发者看）**不复制、也不在这里另起名字** —— 渲染进程不该为了排查再维护一份契约。
  */
+const KNOWN_GRADE_ORIGINS: readonly GradeOrigin[] = ['explicit', 'llm', 'rules', 'inferred']
+
 export function normalizeGradeState(raw: unknown): GradeState | null {
   if (typeof raw !== 'object' || raw === null) return null
   const record = raw as Record<string, unknown>
@@ -155,10 +160,12 @@ export function normalizeGradeState(raw: unknown): GradeState | null {
   const gradeLevel = readGradeLevel(record.gradeLevel)
   if (gradeLevel === null) return null
 
+  const origin = record.origin
   return {
     gradeLevel,
-    origin:
-      record.origin === 'inferred' || record.origin === 'explicit' ? record.origin : 'default'
+    origin: KNOWN_GRADE_ORIGINS.includes(origin as GradeOrigin)
+      ? (origin as GradeOrigin)
+      : 'default'
   }
 }
 
