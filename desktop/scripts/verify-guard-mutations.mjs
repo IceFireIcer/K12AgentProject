@@ -22,17 +22,20 @@ const TEST = 'tests/student-view-discipline.test.ts'
 /**
  * 跑一次测试，返回「是否变红」。
  *
- * ★ 学段那几条守卫**在服务端的 Python 测试里**（`server/tests/test_grade.py`），
- *   所以每条变异可以自带 `runner`：
- *   - 缺省（不写 `runner`）：桌面端 `node --test --test-name-pattern <expect> tests/student-view-discipline.test.ts`；
- *   - `runner: 'server'`：`uv run python -m unittest tests.test_grade`（`expect` 用作子串匹配的红条名）。
+ * ★ 守卫不止住在一个测试文件里，所以每条变异可以自带目标：
+ *   - 缺省（不写 `runner` / `testFile`）：桌面端
+ *     `node --test --test-name-pattern <expect> tests/student-view-discipline.test.ts`；
+ *   - `testFile`：换一个桌面测试文件（如 `tests/installer-config.test.ts`）；
+ *   - `runner: 'server'`：`uv run python -m unittest tests.test_grade`
+ *     （`expect` 用作子串匹配的红条名）。
  */
 function runExpect(mutation) {
   const isServer = mutation.runner === 'server'
+  const testFile = mutation.testFile ?? TEST
   const command = isServer ? 'uv' : 'node'
   const args = isServer
     ? ['run', 'python', '-m', 'unittest', 'tests.test_grade']
-    : ['--test', '--test-name-pattern', mutation.expect, TEST]
+    : ['--test', '--test-name-pattern', mutation.expect, testFile]
   const cwd = isServer ? join(repoRoot, 'server') : desktopRoot
   let output = ''
   let threw = false
@@ -47,12 +50,12 @@ function runExpect(mutation) {
     output = String(error.stdout ?? '') + String(error.stderr ?? '')
   }
   // `node --test` 报 `fail N`；`unittest` 报 `FAILED (failures=N)`。
-  // ★ 服务端那一侧还要确认**红的是我们期望的那条**（`unittest` 里别的用例红了也算红，
+  // ★ 还要确认**红的是我们期望的那条**（别的用例红了也算红，
   //   那会让变异验证变成「只要有任何失败就通过」）。所以额外要求 expect 出现在输出里。
   const failed = isServer
     ? /FAILED \((failures|errors)=[1-9]/.test(output)
     : threw || /fail [1-9]/.test(output)
-  const matchedExpect = isServer ? output.includes(mutation.expect) : true
+  const matchedExpect = isServer || mutation.testFile ? output.includes(mutation.expect) : true
   return { red: failed && matchedExpect, output }
 }
 
@@ -311,6 +314,50 @@ const MUTATIONS = [
     replace: `                        signal_mark,
                         None,`,
     expect: 'test_decided_by_is_recorded_on_the_history_row'
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 安装包与版本号（D-067）—— 守卫在 `tests/installer-config.test.ts`
+   * ------------------------------------------------------------------ */
+  {
+    name: '㉜ 安装器改回一键装（双击就装完、没有向导页）',
+    testFile: 'tests/installer-config.test.ts',
+    file: 'electron-builder.yml',
+    find: '  oneClick: false',
+    replace: '  oneClick: true',
+    expect: 'G21-1'
+  },
+  {
+    name: '㉝ 卸载时删学生数据（installer 会把 %APPDATA% 整目录删掉）',
+    testFile: 'tests/installer-config.test.ts',
+    file: 'electron-builder.yml',
+    find: '  deleteAppDataOnUninstall: false',
+    replace: '  deleteAppDataOnUninstall: true',
+    expect: 'G21-3'
+  },
+  {
+    name: '㉞ 抽掉欢迎页（引导式安装器默认没有，抽掉后第一眼就是「选择安装范围」）',
+    testFile: 'tests/installer-config.test.ts',
+    file: 'build/installer.nsh',
+    find: '!macro customWelcomePage\n  !insertmacro MUI_PAGE_WELCOME\n!macroend',
+    replace: '; 变异：欢迎页被抽掉\n!macro customWelcomePage\n!macroend',
+    expect: 'G21-4'
+  },
+  {
+    name: '㉟ 版本号越界不再报错（0.1.70000 → makensis 才炸，离改动很远）',
+    testFile: 'tests/installer-config.test.ts',
+    file: 'scripts/build-version.mjs',
+    find: '    if (part > MAX_VERSION_PART) {',
+    replace: '    if (false && part > MAX_VERSION_PART) {',
+    expect: 'G21-6'
+  },
+  {
+    name: '㊱ 打包前不盖版本号（每个 nightly 都叫 0.1.0、安装包互相覆盖）',
+    testFile: 'tests/installer-config.test.ts',
+    file: '../.github/workflows/nightly.yml',
+    find: '        run: npm run version:stamp',
+    replace: '        run: echo "变异：不盖版本号"',
+    expect: 'G21-7'
   }
 ]
 

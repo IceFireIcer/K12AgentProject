@@ -1825,3 +1825,94 @@ Release 页就是「拿到安装包」这条路径的最短入口，也是报告
 
 **服务哪条评分**：教育适配性 20%（学段真的跟着对话积累走）+ 创新性 15%（双层判定有了**可展示的分工**：
 前 4 轮规则、第 5 轮起 AI，标签逐轮可见）+ 体验 15%（不再拿默认值冒充判定结果）。
+
+---
+
+## D-067 ★★ 安装器改引导式 + 版本号机制（CI 派生、单调递增）+ 升级保留学生数据
+
+**背景**：用户原话 ——
+> 「你那个 NSIS 的安装包搞正常一点，不要一上来就是直接安装，按正常的页面走引导用户去安装。
+> 还有设计一下版本号更新机制，通过 CI 或者 nightly 或者其他的，我不管你。
+> 然后检测到版本号高以后把低版本的保留数据卸载程序掉。」
+
+**三件事分别的现状与改动**：
+
+### ① 安装器：从「一键装完」改成**引导式向导**
+
+**现状是缺陷级**：`electron-builder` 的 `nsis.oneClick` **默认 true**，而仓库里没写这个键
+（`NsisTarget.js`：`const oneClick = options.oneClick !== false`）—— 于是双击安装包**直接装完**，
+学生看不到任何页面、不知道装到了哪、也没有「装到别的盘」的机会。
+
+**改动**：`oneClick: false` + `allowToChangeInstallationDirectory: true`
+（后者**只对引导式有效**，`oneClick: true` 时设它 electron-builder 会抛
+`InvalidConfigurationError`）+ `build/installer.nsh` 的**欢迎页**。
+最终页面：`欢迎 → 安装范围（仅我/所有用户）→ 安装位置 → 安装中 → 完成`。
+
+★ **欢迎页是必须自己补的**：electron-builder 的引导式安装器**默认没有欢迎页**
+（`assistedInstaller.nsh` 只在宏 `customWelcomePage` 已定义时才 `!insertmacro MUI_PAGE_WELCOME`），
+不补的话第一眼就是「选择安装范围（为所有用户 / 仅为我）」，很突兀。
+★ 安装向导固定简体中文（`installerLanguages: [zh_CN]` + `language: "2052"`）：
+产品没有英文界面，安装器跟着系统语言变英文只会让人困惑。
+
+### ② 版本号机制：CI 派生、**单调递增**
+
+**现状是缺陷级**：`package.json` 的 `version` 是手填的 `0.1.0` 且从不变 ——
+每个 nightly 都叫 `0.1.0`，**安装包同名互相覆盖**，控制面板里也看不出装的是哪一版，
+「版本号高」这件事根本无从判定。
+
+**改动**：唯一实现 `desktop/scripts/build-version.mjs`，规则：
+
+| 场景 | 版本号 | 触发 |
+| --- | --- | --- |
+| 手工发版 / 复现 | `K12_VERSION=X.Y.Z` 原样采用 | 人 |
+| CI | `<major>.<minor>.<GITHUB_RUN_NUMBER>` | `npm run version:stamp`（nightly 在 electron-builder **之前**） |
+| 本地 | **不动**基线版本 | 无 |
+
+★★ **为什么这个形状**（而不是常见的 `0.1.0-nightly.20260921`）：NSIS 的 `VIProductVersion`
+只接受**四段数字、每段 ≤ 65535**，而 electron-builder 用
+`getVersionInWeirdWindowsForm()` 解析 `version` 的前三段（`parseInt` 每段）。所以：
+- **日期不能当一段**：`20260921 > 65535` → makensis 报 `invalid VIProductVersion format`，
+  **整条打包链失败**；
+- **prerelease 后缀看着能用、其实是坏的**：`parseInt('0-nightly')` 碰巧得 0 不报错，
+  但四段数字里丢掉了构建信息 → Windows 文件版本对所有 nightly 都是同一个值，
+  「检测到版本号高」没有判据。
+脚本把这两类都挡在 makensis 之前（越界/形状不对 → **非零退出**）。
+
+### ③ 升级：卸旧版程序、**保留学生数据**
+
+**这一条 electron-builder 已经内建**，不需要自己写版本比较：
+`installSection.nsh` 在拷贝新文件**之前**调 `!insertmacro uninstallOldVersion`，
+它会静默跑旧卸载器并带 `--updated` 参数；而 `--updated` 的作用正是
+「即使定义了 `DELETE_APP_DATA_ON_UNINSTALL`，也**不要**删用户数据」
+（`installUtil.nsh` 里的注释原话）。
+
+**所以真正要做的是「不要把它关掉」**：显式写 `deleteAppDataOnUninstall: false` 并加守卫。
+⚠️ 这条要是被改成 `true`，手动卸载会把 `$APPDATA\<APP_FILENAME>` **整目录删掉**，
+而学生的全部数据正好就在那儿（userData slug 钉在 `k12-agent-desktop`，与 APP_FILENAME 同名
+—— 见 `src/main/index.ts` 的 `applyStableUserDataSlug`）。
+★ 「数据留在原地」还有第二个前提：**userData 目录不随版本/品牌名变**，
+那一条由 `applyStableUserDataSlug` 负责（守卫 G19-2，早就有了）。
+
+**被否决的方案**：
+① **自己在 NSIS 里写版本比较**（「只有更高版本才卸载旧版」）—— 内建行为已经满足需求，
+   自写宏反而引入「比较写错 → 升级时没卸干净 → 新旧文件混在一起」的风险，
+   而且自定义 NSIS 只能在打包时编译，本地测不到；
+② **把日期编码进版本号**（`0.<yy>.<dayOfYear>` 之类）—— 能过 NSIS 约束但可读性差、
+   且与语义化版本的习惯不符；日期放在 Release 标签与发布说明里已经够了；
+③ **改用 prerelease 后缀**（`-nightly.<date>`）—— 见上面的「看着能用其实是坏的」；
+④ **push 触发那一轮也发 Release** —— 它会覆盖当天真正的 nightly 产物；
+   改成「只构建 + 上传 artifact，不发 Release」。
+
+**连带改动**：nightly 增加 `push`（paths 白名单：`electron-builder.yml` / `build/**` /
+`package.json` / `build-version.mjs` / 该 workflow 自身）—— 否则「改了安装器配置」
+要等到第二天凌晨才知道打不打得出来，而 NSIS 的失败往往离改动很远；
+发布说明里带**版本号**与「升级不会动你的学习数据」一句。
+
+**守卫**：`desktop/tests/installer-config.test.ts` **8 条**（G21-1…G21-8）+
+`guards:mutation` 的 **5 条**变异（一键装 / 删数据 / 抽欢迎页 / 版本越界不报错 / 不盖版本号）。
+★ 其中 ㉞ 当场抓到一条**假守卫**：第一版 G21-4 在**整个 .nsh 文件里**搜
+`!insertmacro MUI_PAGE_WELCOME`，而文件头注释里就写着这串字 → 把宏掏空它照样绿。
+改成锚定**宏体**之后才真的会红（P-111 那个老病的第 6 次实例）。
+
+**服务哪条评分**：用户体验 15%（安装向导是评委的第一次接触面）+ 设计合理性 25%
+（版本号可追溯 / 数据不丢是「产品化」而非「作业」的判据）。

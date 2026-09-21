@@ -30,6 +30,21 @@ on:
     # UTC 18:00 = 北京 02:00（避开白天用机高峰；GitHub 的 cron 高峰可能延迟数分钟到数十分钟）
     - cron: '0 18 * * *'
   workflow_dispatch:
+  # ★★ 打包相关的改动**推上去就真的构建一遍**（D-067）——
+  #   否则「改了安装器配置」要等到第二天凌晨才知道能不能打出来，
+  #   而 NSIS 的失败往往离改动很远（.nsh 拼错、版本号越界）。
+  #   ⚠️ 用 paths 白名单：只在**真会影响产物**的文件上触发，
+  #      不然每次 push 都跑一趟 19 分钟的打包（含 90MB 模型下载）。
+  #   ⚠️ push 触发的那一轮**不发 Release**（见「发布」一步的 if）——
+  #      它是「验能不能打出来」，不该冒充当天的 nightly 去抢标签。
+  push:
+    branches: [master]
+    paths:
+      - 'desktop/electron-builder.yml'
+      - 'desktop/build/**'
+      - 'desktop/package.json'
+      - 'desktop/scripts/build-version.mjs'
+      - '.github/workflows/nightly.yml'
 
 # 手动触发与定时任务不并发（同时打包会互相踩 dist/ 目录）
 concurrency:
@@ -126,6 +141,16 @@ jobs:
         run: npm run typecheck && npm test
 
       # ── 打包 ───────────────────────────────────────────────────────────
+      # ★★ 先定版本号（D-067）：`<major>.<minor>.<GITHUB_RUN_NUMBER>` ——
+      #   单调递增，且形状满足 NSIS 的 `VIProductVersion`（四段数字、每段 ≤ 65535）。
+      #   必须在 `electron-builder` **之前**跑：安装包文件名、程序集版本、
+      #   「程序和功能」里显示的版本号，全都取自 package.json 的 version。
+      #   ⚠️ **不要**把日期塞进版本号（20260921 > 65535 → makensis 直接失败）；
+      #      日期只出现在 Release 标签与发布说明里。
+      - name: 定本次构建的版本号
+        working-directory: desktop
+        run: npm run version:stamp
+
       # `electron-builder` 之前必须先编好：`npm run build` 会
       #   ① 经 `build-server.mjs` 重打 sidecar（PyInstaller，含带向量的 kb 自检）
       #   ② typecheck  ③ electron-vite build（主/渲染进程）
@@ -179,10 +204,16 @@ jobs:
       # ★ 为什么既发 Release 又留 artifact：两者的用途不同 ——
       #   artifact 挂在**这次 run** 上（排查时从 Actions 页直接下，14 天后自动过期）；
       #   Release 给的是**稳定的下载页与直链**（发给别人、写进文档、贴进报告）。
+      # ★★ push 触发的那一轮**只构建、不发布**（D-067）：它的目的是「验这次安装器改动
+      #   打得出来」，不该冒充当天的 nightly 去抢 `nightly-<日期>` 标签、覆盖真正的夜间产物。
+      #   产物仍会进 artifact，Actions 页照样能下载验包。
       - name: 生成发布说明（最近 20 条提交标题）
+        if: github.event_name != 'push'
         shell: bash
         run: |
           set -euo pipefail
+          # ★ 版本号取自**刚盖过章的** package.json（与安装包名、程序集版本完全同源）。
+          APP_VERSION=$(node -p "require('./desktop/package.json').version")
           {
             echo "## 智团团 · Nightly 构建"
             echo ""
@@ -190,9 +221,13 @@ jobs:
             echo ""
             echo "| | |"
             echo "| --- | --- |"
+            echo "| **版本号** | \`${APP_VERSION}\` |"
             echo "| 构建时间 | $(date -u '+%Y-%m-%d %H:%M UTC') |"
             echo "| 提交 | \`${GITHUB_SHA:0:7}\` |"
             echo "| 触发 | ${GITHUB_EVENT_NAME} |"
+            echo ""
+            echo "> 版本号形如 \`<主>.<次>.<构建序号>\`：**构建序号单调递增**，"
+            echo "> 所以后一版一定比前一版号大（安装新版会**自动卸掉旧版程序、保留学生数据**）。"
             echo ""
             echo "### 本次构建包含的改动（最近 20 条提交）"
             echo ""
@@ -210,12 +245,14 @@ jobs:
             echo "| \`*-portable.exe\` | **便携版**：单个 exe，数据落在 exe 同级 \`data/\` |"
             echo ""
             echo "> 三个都是**同一份代码**打出来的，只是「装不装」与「解压由谁做」不同。"
+            echo "> ⚠️ 升级装新版**不会**动你的学习数据（\`config.json\` / \`learning.db\` / 会话记录）。"
           } > release-notes.md
 
           # ★ 自检：条目数够不够。
           #   浅克隆（fetch-depth 默认 1）会让这里**静默**只剩一条 ——
           #   不检查的话，发布说明看起来「正常」，只是内容少得可疑。
           COUNT=$(grep -c '^- ' release-notes.md || true)
+          echo "版本号：$APP_VERSION"
           echo "发布说明里的提交条数：$COUNT"
           if [ "$COUNT" -lt 2 ]; then
             echo "::warning::发布说明只列出 $COUNT 条提交 —— 检查 checkout 的 fetch-depth"
@@ -224,6 +261,7 @@ jobs:
           cat release-notes.md
 
       - name: 发布到 Releases
+        if: github.event_name != 'push'
         shell: bash
         env:
           # `gh` 从环境变量读令牌（不要写进命令行参数 —— 那会进进程列表）

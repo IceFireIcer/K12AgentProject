@@ -12,6 +12,8 @@
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "node --test \"tests/**/*.test.ts\" && npm run check:api && npm run check:tool-schema && npm run check:docs",
+    "version:stamp": "node scripts/build-version.mjs --write",
+    "version:show": "node scripts/build-version.mjs",
     "test:unit": "node --test \"tests/**/*.test.ts\"",
     "gen:api": "node scripts/gen-api-types.mjs",
     "check:api": "node scripts/gen-api-types.mjs --check",

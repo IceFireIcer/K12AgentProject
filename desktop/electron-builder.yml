@@ -86,8 +86,39 @@ win:
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
-  uninstallDisplayName: ${productName}
+  # ★ 控制面板（程序和功能）里带上版本号 —— 学生/老师一眼能看出装的是哪一版，
+  #   「升级到底成没成」不必再去翻文件属性。
+  uninstallDisplayName: ${productName} ${version}
+
+  # ★★ **引导式安装向导**（assisted installer），不是一键装完（D-067）。
+  #   electron-builder 的 `oneClick` **默认是 true** —— 双击安装包就闷头装完，
+  #   学生看不到任何选择、也不知道装到哪去了。改成 false 后走标准页面：
+  #   欢迎 → 安装范围（仅我 / 所有用户）→ 安装位置 → 安装中 → 完成。
+  oneClick: false
+
+  # ★ 允许学生自己选安装位置（**只能用于引导式**：oneClick 为 true 时设它会直接报错）。
+  allowToChangeInstallationDirectory: true
+
   createDesktopShortcut: always
+  createStartMenuShortcut: true
+
+  # ★★ **卸载 / 升级时绝不删学生数据**（D-067）。
+  #   false = 卸载只删程序文件与快捷方式；`config.json` / `learning.db` /
+  #   Pi 会话（`students/<id>/`）全部原样保留。
+  #   ⚠️ 千万不要改成 true：安装器会把 `$APPDATA\<APP_FILENAME>` **整目录删掉**，
+  #   而学生的全部数据正好就在那儿 —— userData slug 钉在 `k12-agent-desktop`
+  #   （见 `src/main/index.ts` 的 applyStableUserDataSlug），与 APP_FILENAME 同名。
+  #   守卫：`tests/installer-config.test.ts` 的 G21-2。
+  deleteAppDataOnUninstall: false
+
+  # ★ 安装向导固定中文：产品本身没有英文界面，半英文的安装器只会让人困惑
+  #   （`language` 是 LCID，2052 = 简体中文；也决定 exe 版本信息块的语言）。
+  installerLanguages: [zh_CN]
+  language: "2052"
+
+  # ★ 欢迎页见 `build/installer.nsh` —— electron-builder 的引导式安装器
+  #   **默认没有欢迎页**，第一眼就是「选择安装范围」，很突兀。
+  include: build/installer.nsh
 npmRebuild: false
 
 portable:

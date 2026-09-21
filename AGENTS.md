@@ -585,7 +585,41 @@ npm run build:unpack   # ★ 票 03 必做：打包后实测 esbuild 是否解�
 # 只想单独查后端产物新旧（不构建）：
 npm run check:server              # 查 server/dist 里的那一份
 npm run check:server:packaged     # 查**已装进安装包**的那一份
+npm run version:show              # 只打印「这次该打几号版本」（不写文件）
+npm run version:stamp             # 盖版本号（CI 打包前跑；会改 package.json + lock）
 ```
+
+### ★★ 安装包（NSIS）与版本号机制（D-067，2026-09-21）
+
+**安装器是引导式的**（`nsis.oneClick: false`）：`欢迎 → 安装范围 → 安装位置 → 安装中 → 完成`。
+⚠️ electron-builder 的 `oneClick` **默认是 true** —— 双击就闷头装完、没有向导页，
+改配置时**别把它漏掉**。引导式还带来两个必须成对的东西：`allowToChangeInstallationDirectory`
+（只在引导式下有意义，否则 electron-builder 直接抛错）与 `build/installer.nsh` 的
+**欢迎页**（electron-builder 的引导式安装器**默认没有欢迎页**，第一眼就是「选择安装范围」）。
+
+**★★ 升级/卸载绝不删学生数据**：`nsis.deleteAppDataOnUninstall: false`，且**不要改成 true** ——
+安装器会把 `$APPDATA\<APP_FILENAME>` **整目录删掉**，而学生的 `config.json` / `learning.db` /
+Pi 会话正好就在那儿（userData slug 钉在 `k12-agent-desktop`，与 APP_FILENAME 同名）。
+升级时 electron-builder 本来就会带 `--updated` 跳过删除，但**手动卸载**会真的删。
+「装新版 → 自动卸旧版程序 + 数据原样保留」这条链是 electron-builder 内建的
+（`installSection.nsh` 的 `uninstallOldVersion`），**不要自己写版本比较**去实现它。
+
+**★ 版本号机制**（唯一实现在 `desktop/scripts/build-version.mjs`）：
+
+| 场景 | 版本号 | 谁触发 |
+| --- | --- | --- |
+| 手工发版 / 复现某版本 | `K12_VERSION=X.Y.Z` 原样采用 | 人 |
+| **CI（nightly）** | `<major>.<minor>.<GITHUB_RUN_NUMBER>`（**单调递增**） | `npm run version:stamp`，在 electron-builder **之前** |
+| 本地 | **不动** `package.json` 的基线版本 | 无 |
+
+⚠️ **版本号形状有硬约束**：NSIS 的 `VIProductVersion` 只接受 **四段数字、每段 ≤ 65535**，
+而 electron-builder 用 `getVersionInWeirdWindowsForm()` 解析 `version` 的前三段。
+所以 **① 不要把日期塞成一段**（`20260921 > 65535` → makensis 直接
+`invalid VIProductVersion format`，整条打包链失败）；**② 不要用
+`0.1.0-nightly.<date>` 这类 prerelease 后缀**（`parseInt('0-nightly')` 碰巧是 0 不报错，
+但四段数字里丢掉了构建信息，Windows 文件版本对所有 nightly 都一样 →「版本号高」无从判定）。
+脚本会在越界/形状不对时**非零退出**（挡在 makensis 之前）。
+守卫：`desktop/tests/installer-config.test.ts`（G21-1…G21-8，**8 条**，含 5 条变异验证）。
 
 > ★★ **两条构建链现在由代码联动，不再靠「记得先跑」（P-072 / D-045）**：
 > `desktop/package.json` 的 `build` **先**跑 `build:server`
@@ -611,7 +645,7 @@ npm run check:server:packaged     # 查**已装进安装包**的那一份
 | 文件 | 触发 | 干什么 | 多久 |
 | --- | --- | --- | --- |
 | `ci.yml` | push master / PR / 手动 | 后端测试 + 桌面 typecheck/测试/三项自检 + 令牌漂移 | ~3 min |
-| `nightly.yml` | 每天 UTC 18:00 / 手动 | **真打包**：取模型 → 建带向量 kb → 双端全量测试 → PyInstaller → electron-builder（nsis/zip/portable）→ 校验包内后端新鲜度 → **发 GitHub Release** + 传 artifact（保留 14 天） | ~19 min |
+| `nightly.yml` | 每天 UTC 18:00 / 手动 / **打包相关文件的 push** | **真打包**：定版本号 → 取模型 → 建带向量 kb → 双端全量测试 → PyInstaller → electron-builder（nsis/zip/portable）→ 校验包内后端新鲜度 → **发 GitHub Release** + 传 artifact（保留 14 天）。★ push 触发的那一轮**只构建不发 Release**（见该文件里 `if: github.event_name != 'push'`），因为它只是「验这次安装器改动打不打得出来」，不该冒充当天 nightly 去抢标签 | ~19 min |
 
 **四条纪律（都是云端首跑踩出来的，见 P-107）**：
 1. **中文输出必须自己保证 stdio 是 UTF-8**：任何会打印中文的入口（含被 PyInstaller
