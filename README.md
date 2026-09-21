@@ -15,7 +15,7 @@
 [![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](#技术栈)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](#技术栈)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#技术栈)
-[![Tests](https://img.shields.io/badge/回归测试-1859%20项%20全绿-2ea44f)](#测试与质量守卫)
+[![Tests](https://img.shields.io/badge/回归测试-1864%20项%20全绿-2ea44f)](#测试与质量守卫)
 [![Local](https://img.shields.io/badge/数据-本地优先%20·%20一人一库-8957e5)](#设计与取舍)
 
 </div>
@@ -179,7 +179,7 @@ K12Agent/
 │  ├─ knowledge-supplement/ 第 8 章「编程实践」（本项目自写，3 概念 × 四学段）——与用户源库分开存放
 │  ├─ resources/            题库（`quizbank/`，按章分片 ch01–ch08）· 动画模板 · 代码模板 · 敏感词表
 │  ├─ scripts/              导入教材 / 建库 / 取模型 / 导出 OpenAPI / 打包+指纹 / 生成品牌图标
-│  └─ tests/                1052 项回归
+│  └─ tests/                1057 项回归
 ├─ K12KnowledgeBase/        教材源库（用户提供，54 概念 × 四学段；本项目只读地用 import_knowledge.py 导入）
 ├─ docs/                    设计文档 · 任务票 · 决策与踩坑素材 · 界面版式契约 · 对标材料
 ├─ logos/                   品牌原图（2048²，不入包）
@@ -221,7 +221,7 @@ K12Agent/
 ## 测试与质量守卫
 
 ```bash
-cd server  && uv run python -m unittest discover -s tests   # 1052 项
+cd server  && uv run python -m unittest discover -s tests   # 1057 项
 cd desktop && npm test                                      # 807 项 + 契约漂移比对 + Tool schema 一致性 + 文档数字自检
 ```
 

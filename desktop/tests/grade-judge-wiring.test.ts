@@ -161,12 +161,13 @@ test('★ J2 接上通道后，第 3 轮的 LLM 提议被用上（layer2 === use
     log: () => {}
   })
 
-  for (const text of ['电脑怎么认图片呀？', '它为什么会认错呢', '那它是不是也要先看很多张图']) {
+  // ★ 2026-09-21（D-066）：LLM 在**累计第 5 轮**出场（前 4 轮由规则引擎判）
+  for (const text of ['电脑怎么认图片呀？', '它为什么会认错呢', '那它是不是也要先看很多张图', '还有别的例子吗', '那它能学会新东西吗']) {
     extension.observeTurn(text)
   }
   await extension.flush()
 
-  assert.equal(prompts, 1, '第 3 轮触发**一次**轻量 LLM 判定（一个窗口只判一次）')
+  assert.equal(prompts, 1, '累计第 5 轮触发**一次**轻量 LLM 判定（一个窗口只判一次）')
   assert.equal(extension.snapshot().layer2, 'used', '提议被采纳 → 状态是 used')
   const last = submitted.at(-1)!
   assert.equal(last.turns[0].proposal?.suggestedGrade, 'primary_low')
@@ -206,11 +207,13 @@ test('★★ J3 无 Key：judge 抛可读错误 → judge_error，第一层证�
     log: (line) => logs.push(line)
   })
 
-  for (const text of ['一', '二', '三']) extension.observeTurn(text)
+  // ★ 2026-09-21（D-066）：judge 在**累计第 5 轮**才被调用 —— 前 4 轮规则判，
+  //   所以「判定失败」要走到第 5 轮才会发生（这正是本用例要验的那个时刻）。
+  for (const text of ['一', '二', '三', '四', '五']) extension.observeTurn(text)
   await extension.flush()
 
   assert.equal(extension.snapshot().layer2, 'judge_error', '判定失败必须可见（不是静默 no_llm）')
-  assert.equal(submitted.length, 3, '★ 第一层照常上交三轮证据（judge 挂着不影响第一层）')
+  assert.equal(submitted.length, 5, '★ 第一层照常上交五轮证据（judge 挂着不影响第一层）')
   assert.equal(submitted.at(-1)!.turns[0].proposal, undefined, '失败时不带脏提议')
   assert.ok(
     logs.some((line) => line.includes('第二层判定失败')),
@@ -220,7 +223,7 @@ test('★★ J3 无 Key：judge 抛可读错误 → judge_error，第一层证�
   // ★ 「下一轮生效」（grade.ts 的既定语义）：服务端判出的学段先落进 `pendingGrade`……
   assert.equal(extension.snapshot().pendingGrade, 'junior', '第一层判出的学段已就绪（下一轮生效）')
   // ……下一次 `observeTurn` 才交接给 `appliedGrade`（学生无感，没有「切换」事件）
-  extension.observeTurn('第四轮')
+  extension.observeTurn('第六轮')
   await extension.flush()
   assert.equal(
     extension.snapshot().appliedGrade,

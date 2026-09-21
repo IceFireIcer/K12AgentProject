@@ -46,6 +46,8 @@ from app.config import build_runtime_config  # noqa: E402
 from app.contracts import GradeSignal  # noqa: E402
 from app.grade.rules import (  # noqa: E402
     CONFIDENCE_THRESHOLD,
+    DECIDED_BY_LLM,
+    DECIDED_BY_RULES,
     COOLDOWN_TURNS,
     DECISION_ORDER,
     DEGRADED_NO_LLM,
@@ -842,6 +844,104 @@ class TestDecisionRules(unittest.TestCase):
         legacy = decide(current_level="primary_high", turn=5, verdicts=self.down)
         self.assertEqual(legacy.degraded, DEGRADED_NO_LLM, "没带状态时保守报降级")
 
+    # ------------------------------------------------- D-066（决策权移交）--
+    def test_llm_decides_from_the_fifth_cumulative_turn(self) -> None:
+        """★★ D-066：**累计第 5 轮起，LLM 的提议直接定方向**（不再只是提议）。
+
+        这是 D-020「LLM 只是提议、反向即否决」那半条的**正面修订**（用户裁决）：
+        前 4 轮由规则引擎全权判定（标签「本地规则判定」），第 5 轮起交给 LLM
+        （标签「AI 引擎判定」），规则退居安全网。
+
+        ★ 关键差别用**同一组输入**对照：规则方向向下、LLM 提议向上 ——
+        第 4 轮报 `llm_conflict`（规则否决 LLM），第 5 轮 LLM 说了算（真的上调）。
+        """
+        # 规则方向向下（`self.down` 三句受挫表达），LLM 提议**向上**
+        upward = GradeProposal("senior", 0.9)
+
+        # ① 累计第 4 轮：还在规则的地盘 → LLM 的反向提议被**否决**
+        before = decide(
+            current_level="primary_high",
+            turn=4,
+            verdicts=self.down,
+            proposal=upward,
+            cumulative_turns=4,
+        )
+        self.assertFalse(before.changed, "前 4 轮规则说了算")
+        self.assertEqual(before.reason, REASON_LLM_CONFLICT, "规则否决了 LLM 的反向提议")
+        self.assertEqual(before.decided_by, DECIDED_BY_RULES)
+
+        # ② 累计第 5 轮：LLM 接管 → **同一份提议**这次说了算（真的上调）
+        after = decide(
+            current_level="primary_high",
+            turn=5,
+            verdicts=self.down,
+            proposal=upward,
+            cumulative_turns=5,
+        )
+        self.assertTrue(after.changed, "第 5 轮起 LLM 直接定方向（同一份提议）")
+        self.assertEqual(after.decided_by, DECIDED_BY_LLM)
+        self.assertEqual(after.target_level, "junior", "一次最多动一级（即便提议 senior）")
+
+    def test_rules_keep_three_safety_nets_when_llm_decides(self) -> None:
+        """★★ 决策权移交后，**三条安全网仍在**（它们防的是「学段乱跳」，与「谁判」无关）：
+
+        ④ 冷却期、⑤ ±1 级 / 到顶到底、以及 LLM 自报置信度 ≥ 0.6 的门槛。
+        漏掉任何一条，LLM 就能把学段一次推两级、或在刚调完时立刻再调。
+        """
+        upward = GradeProposal("senior", 0.9)
+
+        # ① 冷却期照常拦（锚点之后还没走满窗口）
+        cooling = decide(
+            current_level="primary_low",
+            turn=6,
+            verdicts=self.up,
+            proposal=upward,
+            cumulative_turns=9,
+            anchor_source=SOURCE_INFERRED,
+            elapsed_turns=1,
+        )
+        self.assertEqual(cooling.reason, REASON_COOLDOWN, "刚调整过 → 冷却期照常拦")
+        self.assertEqual(cooling.decided_by, DECIDED_BY_LLM, "但这一轮确实是 LLM 在判")
+
+        # ② ±1 级照常夹取：提议是 senior（比 primary_low 高两级），一次只动一级。
+        #    ★ 注：`at_boundary` 在 LLM 分支里**结构上不可达** —— 方向是「提议相对当前学段」
+        #    算出来的，再夹到 ±1；「到顶/到底而无可动」只会在方向为 0 时出现，
+        #    而那种情况已由上面的 `llm_direction == 0 → no_direction` 提前返回。
+        #    真正的边界情形属于**规则分支**（规则方向来自绝对档位，可能与当前学段同档）。
+        stepped = decide(
+            current_level="primary_low",
+            turn=6,
+            verdicts=self.down,
+            proposal=upward,
+            cumulative_turns=9,
+        )
+        self.assertTrue(stepped.changed)
+        self.assertEqual(stepped.target_level, "primary_high", "±1 级：不一次跳到 senior")
+
+        # ③ LLM 自报置信度 < 0.6 → 不动（判定 prompt 里就要求它「0.6 以上才算有把握」）
+        unsure = decide(
+            current_level="primary_low",
+            turn=6,
+            verdicts=self.down,
+            proposal=GradeProposal("senior", 0.35),
+            cumulative_turns=9,
+        )
+        self.assertEqual(unsure.reason, REASON_LOW_CONFIDENCE, "LLM 说自己没把握就别动")
+        self.assertFalse(unsure.changed)
+
+    def test_llm_says_same_grade_is_no_direction(self) -> None:
+        """LLM 提议「还是这个学段」→ 没有方向，本轮不动（既不算降级也不算失败）。"""
+        same = decide(
+            current_level="primary_high",
+            turn=6,
+            verdicts=self.up,
+            proposal=GradeProposal("primary_high", 0.9),
+            cumulative_turns=9,
+        )
+        self.assertFalse(same.changed)
+        self.assertEqual(same.reason, REASON_NO_DIRECTION)
+        self.assertIsNone(same.degraded, "有提议就不算降级")
+
     def test_low_confidence_is_reported_before_cooldown(self) -> None:
         """判定顺序冻结：置信度不足 + 冷却期未过 → 报 ``low_confidence``。"""
         weak = [TurnVerdict(turn=n, direction=-1, strength=0.2) for n in (1, 2, 3)]
@@ -990,6 +1090,69 @@ class TestEnginePersistence(GradeEngineCase):
             self.engine.state(self.student_id).cooldown_remaining,
             seen[-1],
             "state() 与 observe_turn() 必须一致",
+        )
+
+    def test_decided_by_is_recorded_on_the_history_row(self) -> None:
+        """★★ `decided_by` 必须**落进 ``grade_history``** —— 报告与界面标签都读它。
+
+        两个轴各说各的：``source``（谁写的）+ ``decided_by``（哪一层判的）。
+        报告叙事的价值就在这里：「第 3 轮**本地规则判定**为初中」与
+        「第 12 轮**AI 引擎判定**为高中」是两种不同的证据。
+        """
+        # 前 3 轮只有规则 → 写的是 rules
+        for turn in (1, 2, 3):
+            self.engine.observe_turn(
+                student_id=self.student_id,
+                turn=turn,
+                text=[CHILD_TURN_1, CHILD_TURN_2, CHILD_TURN_3][turn - 1],
+                session_id="s",
+            )
+        rows = self.rows(
+            "SELECT turn, source, decided_by FROM grade_history "
+            "WHERE from_level IS NOT NULL ORDER BY id"
+        )
+        self.assertEqual(len(rows), 1, "第 3 轮改过一次")
+        self.assertEqual(rows[0]["source"], SOURCE_INFERRED)
+        self.assertEqual(rows[0]["decided_by"], DECIDED_BY_RULES, "前几轮是规则判的")
+
+        # 走到累计第 5 轮之后，LLM 的提议改学段 → 那一行必须写 llm
+        for turn in (4, 5):
+            self.engine.observe_turn(
+                student_id=self.student_id,
+                turn=turn,
+                text="梯度下降的链式法则怎么推导？",
+                session_id="s",
+                proposal=GradeProposal("primary_low", 0.9) if turn == 5 else None,
+            )
+        latest = self.rows(
+            "SELECT turn, decided_by FROM grade_history "
+            "WHERE from_level IS NOT NULL ORDER BY id DESC LIMIT 1"
+        )[0]
+        # 第 3 轮刚改过 → 冷却 5 轮，第 5 轮会被冷却挡住；所以这里断言的是
+        # 「判定层被正确标出来」而不是「一定改了学段」。
+        self.assertIn(
+            latest["decided_by"],
+            (DECIDED_BY_RULES, DECIDED_BY_LLM),
+            "轨迹行必须带一个可读的判定层（不许为空）",
+        )
+        # ★ 而且 state() 报的判定层与轨迹行一致（同一行读出来，H-1 的纪律）
+        self.assertEqual(self.engine.state(self.student_id).decided_by, latest["decided_by"])
+
+    def test_cumulative_turns_counts_across_sessions(self) -> None:
+        """★★ 累计轮次**跨会话**（D-066 的计数单位）—— 换会话不清零、同号不重复计。"""
+        self.assertEqual(self.engine.cumulative_turns(), 0, "冷启动：一轮都没有")
+        for turn in (1, 2):
+            self.engine.observe_turn(
+                student_id=self.student_id, turn=turn, text=CHILD_TURN_1, session_id="sess-A"
+            )
+        self.assertEqual(self.engine.cumulative_turns(), 2)
+
+        # 换个会话，轮次号从 1 重来 —— 累计数必须**接着涨**（不是归零、也不是被同号吞掉）
+        self.engine.observe_turn(
+            student_id=self.student_id, turn=1, text=CHILD_TURN_2, session_id="sess-B"
+        )
+        self.assertEqual(
+            self.engine.cumulative_turns(), 3, "换会话不清零（换会话 ≠ 没聊过）"
         )
 
     def test_signals_are_written_per_class_with_turn_anchor(self) -> None:

@@ -279,6 +279,38 @@ const MUTATIONS = [
         degraded = None
     else:`,
     expect: 'test_degraded_reports_the_real_channel_status'
+  },
+  {
+    name: '㉙ D-066：把决策权交回规则（第 5 轮后 LLM 又只是提议）',
+    runner: 'server',
+    file: '../server/app/grade/rules.py',
+    // 让 `llm_decides` 恒为假 —— 那就是「决策权还在规则引擎」的旧口径
+    find: 'llm_decides = proposal is not None and cumulative >= LLM_DECIDES_FROM_TURN',
+    replace: 'llm_decides = False',
+    expect: 'test_llm_decides_from_the_fifth_cumulative_turn'
+  },
+  {
+    name: '㉚ D-066：累计轮次改回「只看本会话」（规则在短会话里永远等不到 LLM）',
+    runner: 'server',
+    file: '../server/app/grade/rules.py',
+    find: `            "SELECT COUNT(DISTINCT COALESCE(session_id, '') || '|' || "
+            "substr(raw, 1, instr(raw, '|') - 1)) AS turns "
+            "FROM grade_signals WHERE raw LIKE 't%|%'"`,
+    replace: `            "SELECT COUNT(DISTINCT "
+            "substr(raw, 1, instr(raw, '|') - 1)) AS turns "
+            "FROM grade_signals WHERE raw LIKE 't%|%' AND session_id = "
+            "(SELECT session_id FROM grade_signals ORDER BY id DESC LIMIT 1)"`,
+    expect: 'test_cumulative_turns_counts_across_sessions'
+  },
+  {
+    name: '㉛ D-066：decided_by 不落库（界面标签退回「都在冒充 AI 推算」）',
+    runner: 'server',
+    file: '../server/app/grade/rules.py',
+    find: `                        signal_mark,
+                        decision.decided_by,`,
+    replace: `                        signal_mark,
+                        None,`,
+    expect: 'test_decided_by_is_recorded_on_the_history_row'
   }
 ]
 

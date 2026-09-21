@@ -527,15 +527,26 @@ test('G4a observeTurn 上交本轮证据，且不含任何服务端算好的信�
   assert.deepEqual(Object.keys(harness.pi.handlers), [], '本扩展不得订阅任何 Pi 事件')
 })
 
-test('G4b 第 3 轮带上第二层提议；没有通道时不带提议而且降级可见', async () => {
+test('G4b ★★ 累计第 5 轮带上第二层提议；没有通道时不带提议而且降级可见', async () => {
+  // ★ 2026-09-21（D-066）：LLM 的出场点从「第 3 轮」改成「累计第 5 轮」
+  //   —— 前 4 轮是**规则引擎**的地盘（标签「本地规则判定」）。
   const withJudge = createHarness({ judge: true })
-  for (const text of ['一', '二', '三']) withJudge.pushTurn(text)
+  for (const text of ['一', '二', '三', '四', '五']) withJudge.pushTurn(text)
   await withJudge.extension.flush()
-  assert.equal(withJudge.submitted.at(-1)!.turns[0].proposal?.suggestedGrade, 'primary_low')
+  assert.equal(
+    withJudge.submitted.at(-1)!.turns[0].proposal?.suggestedGrade,
+    'primary_low',
+    '第 5 轮才带提议（前 4 轮规则判，不上交提议）'
+  )
   assert.equal(withJudge.extension.snapshot().layer2, 'used')
+  assert.equal(
+    withJudge.submitted.slice(0, 4).every((entry) => !entry.turns[0].proposal),
+    true,
+    '前 4 轮一律不带提议'
+  )
 
   const withoutJudge = createHarness({ judge: false })
-  for (const text of ['一', '二', '三']) withoutJudge.pushTurn(text)
+  for (const text of ['一', '二', '三', '四', '五']) withoutJudge.pushTurn(text)
   await withoutJudge.extension.flush()
   assert.equal(withoutJudge.submitted.at(-1)!.turns[0].proposal, undefined, '没有通道就只交第一层证据')
   assert.equal(withoutJudge.extension.snapshot().layer2, 'no_llm')
@@ -547,28 +558,28 @@ test('G4b 第 3 轮带上第二层提议；没有通道时不带提议而且降�
 
 test('G4c 换会话不再触发第二层的重复判定', async () => {
   const harness = createHarness({ judge: true })
-  for (let index = 0; index < 5; index += 1) harness.pushTurn(`第 ${index} 轮`)
+  for (let index = 0; index < 6; index += 1) harness.pushTurn(`第 ${index} 轮`)
   await harness.extension.flush()
   const proposals = harness.submitted.filter((entry) => entry.turns[0].proposal)
   assert.equal(proposals.length, 1, '一个窗口只判定一次（already_proposed）')
 })
 
-test('G4c-1 ★ 第一层每轮都跑且**不产生额外的 LLM 调用**（票 21 的验收口径）', async () => {
+test('G4c-1 ★ 前 4 轮一次 LLM 都不调；累计第 5 轮才触发（D-066 的冻结口径）', async () => {
   const harness = createHarness({ judge: true })
-  harness.pushTurn('第一轮')
-  await harness.extension.flush()
-  assert.equal(harness.judgeCalls(), 0, '第 1 轮：第一层照常上交，一次 LLM 都不调')
-  harness.pushTurn('第二轮')
-  await harness.extension.flush()
-  assert.equal(harness.judgeCalls(), 0, '第 2 轮同上')
+  for (const nth of ['第一轮', '第二轮', '第三轮', '第四轮']) {
+    harness.pushTurn(nth)
+    await harness.extension.flush()
+    assert.equal(harness.judgeCalls(), 0, `${nth}：前 4 轮是规则引擎的地盘，一次 LLM 都不调`)
+  }
+  assert.equal(harness.submitted.length, 4, '前 4 轮都上交了第一层证据（规则判）')
 
-  harness.pushTurn('第三轮')
-  await harness.extension.flush()
-  assert.equal(harness.judgeCalls(), 1, '第 3 轮才触发**一次**第二层判定')
-  assert.equal(harness.submitted.length, 3, '三轮都上交了第一层证据')
-
-  harness.pushTurn('第四轮')
   harness.pushTurn('第五轮')
+  await harness.extension.flush()
+  assert.equal(harness.judgeCalls(), 1, '累计第 5 轮：LLM 出场，触发**一次**判定')
+  assert.equal(harness.submitted.length, 5, '五轮都上交了第一层证据')
+
+  harness.pushTurn('第六轮')
+  harness.pushTurn('第七轮')
   await harness.extension.flush()
   assert.equal(harness.judgeCalls(), 1, '同一窗口不再重复判定')
 })
@@ -720,18 +731,26 @@ test('G4j 同一学生换会话（/new）：学段沿用，但第二层的窗口
   })
   extension(pi as never)
 
-  for (let index = 0; index < 3; index += 1) {
+  // ★ 2026-09-21（D-066）：LLM 在**累计**第 5 轮出场（前 4 轮规则判）
+  for (let index = 0; index < 5; index += 1) {
     extension.observeTurn(`第 ${index} 轮`)
     await extension.flush()
   }
-  assert.equal(judgeCalls, 1, '第 3 轮判定过一次')
-  assert.equal(extension.snapshot().turn, 3)
+  assert.equal(judgeCalls, 1, '累计第 5 轮判定过一次')
+  assert.equal(extension.snapshot().turn, 5)
 
   session = { studentId: 'student_001', sessionId: 'sess-B', gradeLevel: 'primary_high' }
   extension.observeTurn('换会话后的第一轮')
   await extension.flush()
   const stats = extension.snapshot()
-  assert.equal(stats.turn, 1, '新会话的轮次从 1 重新计')
-  assert.equal(stats.layer2, 'not_due')
+  assert.equal(stats.turn, 1, '新会话的轮次从 1 重新计（**本地计数器**）')
+  // ★★ **累计轮次跨会话继续累加**（D-066 的核心）：换会话前已聊 5 轮，这里换完再聊 1 轮 → 6。
+  //   它**不能**跟着 `turn` 归零 —— 否则「第 5 轮起 LLM 接管」在跨会话时永远不成立
+  //   （实测 CI：这条断言曾报 `1 !== 6`，正是「累计数被 resetWindow 打回去」的现场）。
+  assert.equal(
+    stats.cumulativeTurns,
+    6,
+    '累计轮次跨会话累加（换会话 ≠ 没聊过）——这正是 D-066 要的口径'
+  )
   assert.equal(stats.appliedGrade, DEFAULT_GRADE_LEVEL, '同一学生：学段沿用（此处服务端返回的也是默认值）')
 })

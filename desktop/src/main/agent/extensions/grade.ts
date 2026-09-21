@@ -680,6 +680,20 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
    */
   let serverCumulativeTurns = 0
   /**
+   * ★★ **累计轮次的本地增量**（D-066）—— 换**会话不归零**、换**学生才归零**。
+   *
+   * 为什么不能用 `turn` 推：`turn` 是**每会话**计数器，`resetWindow()` 会在换会话时把它清零
+   * （见该函数）。拿它算累计数，换会话那一下累计值会从 6 掉回 1 ——
+   * 于是「第 5 轮起 LLM 接管」这条规则在跨会话时永远不成立（实测 CI：`1 !== 6`）。
+   *
+   * 语义：上次从服务端同步之后，本地又观察到了几轮。
+   * - 每次 `observeTurn` +1；
+   * - `refresh()` 成功同步时清零（服务端那个数**已经包含**本地之前交上去的轮次，
+   *   不清零就把同一批轮次算两遍）；
+   * - `reset()`（换学生）清零。
+   */
+  let localTurnsSinceSync = 0
+  /**
    * 当前学段是**哪一层**判的（`rules` / `llm` / `null`）—— 服务端同一行读出来的。
    * 界面标签据此显示「本地规则判定」/「AI 引擎判定」/「待判定」。
    */
@@ -725,6 +739,15 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     sessionId: string
     turn: number
     text: string
+    /**
+     * ★★ **入队那一刻的累计轮次**（D-066）—— 与身份快照（F3）同一个道理。
+     *
+     * 为什么不能在执行时读全局 `localTurnsSinceSync`：上交是**串行队列**，
+     * 而 `observeTurn` 是**同步连推**的（一轮回答结束时可能连推好几轮）。
+     * 实测（G4b）：无 await 连推 5 轮后队列才开始跑，第一个任务读到的计数器**已经是 5**
+     * → 它以为「这已经是累计第 5 轮」而请 LLM 出场 —— 判定落到了**第 1 轮**上。
+     */
+    cumulativeTurns: number
     /** 切学生时被丢弃：执行到它时直接跳过（**绝不用新学生的身份发旧学生的证据**）。 */
     discarded: boolean
   }
@@ -735,7 +758,9 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     appliedGrade,
     pendingGrade,
     layer2,
-    cumulativeTurns: serverCumulativeTurns,
+    // ★ 报**扩展实际相信的**累计轮次（服务端同步值 + 本地增量），不是只报服务端那一半 ——
+    //   `snapshot()` 是诊断出口，报一个「判定时并不使用」的数会误导排查。
+    cumulativeTurns: serverCumulativeTurns + localTurnsSinceSync,
     decidedBy,
     submitted,
     failed,
@@ -764,6 +789,7 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     //   换会话**不**归零（累计轮次本就跨会话，见 serverCumulativeTurns 的说明）——
     //   那条路径在 `trackBoundary` 里只调 `resetWindow()`。
     serverCumulativeTurns = 0
+    localTurnsSinceSync = 0
     decidedBy = null
     // ★ 手动设定的冷却也是**学生级**状态：换学生时一起归零，绝不把上一个学生的冷却
     //   显示到下一个学生的界面上（与 appliedGrade 必须一起重置是同一条纪律）。
@@ -889,11 +915,9 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     const epochAtSubmit = epoch
 
     const decision = shouldRequestLayer2({
-      // ★ 累计轮次（跨会话连续）—— 由服务端 `GET /api/grade/state` 的
-      //   `cumulativeTurns` 同步下来（见 `refresh()`），本地只做**乐观 +1**：
-      //   本轮的证据马上要上交，服务端那边会把它算进去。
-      //   ⚠️ 不要退回用本地的 `turn`（每会话计数器）——那正是 D-066 要修的口径。
-      cumulativeTurns: serverCumulativeTurns + 1,
+      // ★★ 累计轮次用**入队时的快照**（`item.cumulativeTurns`），不读全局计数器 ——
+      //   队列是串行异步的，读全局会拿到「后来涨上去的值」（实测 G4b：判定落到第 1 轮）。
+      cumulativeTurns: item.cumulativeTurns,
       usableTurns: countUsableTurns(buffer),
       windowHasProposal,
       judgeAvailable: judge !== null
@@ -1023,6 +1047,9 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
 
       applyPending()
       turn += 1
+      // ★★ 累计轮次的本地增量（D-066）：与 `turn` **分开**计数 —— `turn` 是每会话计数器
+      //   （`resetWindow()` 会把它清零），而累计轮次必须**跨会话**（换会话 ≠ 没聊过）。
+      localTurnsSinceSync += 1
       const turnIndex = turn
       if (clean.trim()) {
         buffer.push({ turn: turnIndex, text: clampTurnText(clean) })
@@ -1032,11 +1059,13 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
       // ★★ 身份快照（F3）：**在这里**取好 studentId / sessionId，队列里不再读全局。
       //   切学生（`bindAgentSession`）不会取消队列，排在后面的任务若在执行时才读全局，
       //   就会拿新学生的身份把旧学生的原话发过去 —— A 的话进 B 的 `grade_signals`。
+      // ★★ 累计轮次同理（D-066）：**入队快照**，否则队列里读到的会是「后来涨上去的值」。
       const item: PendingTurn = {
         studentId: session.studentId,
         sessionId: session.sessionId ?? '',
         turn: turnIndex,
         text: clean,
+        cumulativeTurns: serverCumulativeTurns + localTurnsSinceSync,
         discarded: false
       }
       pending.push(item)
@@ -1193,6 +1222,9 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
       //   而实测会话普遍只有 3–8 轮。
       if (typeof state.cumulativeTurns === 'number' && state.cumulativeTurns >= 0) {
         serverCumulativeTurns = state.cumulativeTurns
+        // ★★ **本地增量必须清零**（D-066）：服务端那个数**已经包含**本地之前交上去的轮次，
+        //   不清零就把同一批算两遍（累计虚高 → 提前请 LLM 出场）。
+        localTurnsSinceSync = 0
       }
       // ★ 判定层（`rules` / `llm` / `NULL`）也以服务端为准，界面标签据此显示
       //   「本地规则判定」还是「AI 引擎判定」。

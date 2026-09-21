@@ -350,14 +350,14 @@ test('G6a ★★ LLM 判定在飞期间的手动设定必须作废这条在途�
   const judgeGate = { entered: deferred(), release: deferred() }
   const harness = createHarness({ judgeGate })
 
-  // 第 1、2 轮先走完（没到第二层的触发轮次，也就没有在飞窗口）
-  harness.pushTurn('第一轮')
-  harness.pushTurn('第二轮')
+  // 前 4 轮先走完（没到第二层的触发轮次，也就没有在飞窗口）
+  // ★ 2026-09-21（D-066）：LLM 的出场点是**累计第 5 轮**（前 4 轮由规则引擎判）
+  for (const nth of ['第一轮', '第二轮', '第三轮', '第四轮']) harness.pushTurn(nth)
   await harness.extension.flush()
-  assert.equal(harness.submitted.length, 2, '前两轮不走第二层，正常上交')
-  assert.equal(harness.extension.snapshot().pendingGrade, null, '前两轮服务端说的就是当前学段')
+  assert.equal(harness.submitted.length, 4, '前四轮不走第二层，正常上交')
+  assert.equal(harness.extension.snapshot().pendingGrade, null, '前四轮服务端说的就是当前学段')
 
-  // ★ 第 3 轮：第二层判定在飞（`LAYER2_FIRST_TURN` / `LAYER2_MIN_TURNS` 都是 3）
+  // ★ 第 5 轮：第二层判定在飞（`LLM_DECIDES_FROM_TURN` = 5）
   harness.setGrade('primary_low') // 这条在途结论算出来的是 primary_low（按**旧学段**算的）
   harness.pushTurn('梯度下降是什么？')
   await judgeGate.entered.promise // 判定已经在飞（正 await 那道 LLM 调用）
@@ -381,7 +381,7 @@ test('G6a ★★ LLM 判定在飞期间的手动设定必须作废这条在途�
   )
   assert.equal(
     harness.submitted.length,
-    2,
+    4,
     '连提议都不许带上交（按旧学段算出来的提议对服务端也是过期的原料）'
   )
   assert.ok(
@@ -401,19 +401,19 @@ test('G6b ★ P-053 反向对照：判定在飞期间**不**手动设定时，�
   const judgeGate = { entered: deferred(), release: deferred() }
   const harness = createHarness({ judgeGate })
 
-  harness.pushTurn('第一轮')
-  harness.pushTurn('第二轮')
+  // ★ D-066：累计第 5 轮才轮到 LLM 出场
+  for (const nth of ['第一轮', '第二轮', '第三轮', '第四轮']) harness.pushTurn(nth)
   await harness.extension.flush()
 
-  harness.setGrade('primary_low') // 第 3 轮判出来的新学段
+  harness.setGrade('primary_low') // 第 5 轮判出来的新学段
   harness.pushTurn('梯度下降是什么？')
   await judgeGate.entered.promise
   judgeGate.release.resolve()
   await harness.extension.flush()
 
-  assert.equal(harness.submitted.length, 3, '没有手动选择时第三轮照常上交')
+  assert.equal(harness.submitted.length, 5, '没有手动选择时第五轮照常上交')
   assert.equal(
-    harness.submitted[2].proposal?.suggestedGrade,
+    harness.submitted[4].proposal?.suggestedGrade,
     'primary_low',
     '第二层的提议必须跟着这一轮一起交上去'
   )
@@ -556,16 +556,33 @@ function functionBody(file: string, header: string): string {
   return matched[0]
 }
 
-test('G5a ★ 学段来源以服务端 source 为准：explicit 必须映射成 explicit（否则学生的手动选择被显示成 AI 推的）', () => {
+test('G5a ★ 学段来源以服务端为准：explicit 最优先，其次 decidedBy（D-066）', () => {
   const body = functionBody(join(desktopRoot, 'src', 'main', 'ipc', 'handlers.ts'), 'async function readGradeState')
+  // ★ 判据锚在**语义**上，不锚某一行写法：
+  //   ① explicit 必须最优先（否则学生刚选的学段会被标成「系统判的」，唯一的人工入口在界面上隐身）；
+  //   ② 其次看服务端的 `decidedBy`（D-066 新增的第二个轴：rules / llm）；
+  //   ③ 两个都取不到 → `default`（冷启动不许冒充「判过了」）。
   assert.ok(
-    /source\s*===\s*'explicit'\s*\?\s*'explicit'/.test(body),
-    'readGradeState 必须把 source === "explicit" 映射成 origin: "explicit" —— ' +
-      '否则学生刚选的学段会被标成「系统判的」，唯一的人工入口在界面上隐身'
+    body.includes("source === 'explicit'"),
+    'readGradeState 必须把 source === "explicit" 认出来'
   )
   assert.ok(
-    /lastTurn > 0 \? 'inferred' : 'default'/.test(body),
-    '其余情况仍按 lastTurn 区分 inferred / default（冷启动不许冒充推断结果）'
+    body.includes('decidedBy'),
+    'readGradeState 必须读服务端的 decidedBy（哪一层判的：rules / llm）—— D-066'
+  )
+  assert.ok(
+    body.includes("'rules'") && body.includes("'llm'"),
+    '两层的映射都要在（否则「本地规则判定」/「AI 引擎判定」显示不出来）'
+  )
+  assert.ok(
+    body.includes("'default'"),
+    '取不到时落 default（冷启动显示「待判定」，不许冒充推断结果）'
+  )
+  // ★ 反向对照：不许再把 lastTurn 当成「判过了」的判据 ——
+  //   那正是「发一句你好就成了 AI 引擎推算」的根因（用户点名的「过于粗暴」）。
+  assert.ok(
+    !/lastTurn\s*>\s*0\s*\?\s*'inferred'/.test(body),
+    '不许再用 lastTurn > 0 推「引擎判过」—— 聊过几句 ≠ 判过（D-066 的根因）'
   )
 })
 
