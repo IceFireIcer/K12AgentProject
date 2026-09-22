@@ -30,6 +30,7 @@ import {
   parseProposal,
   type GradeProposal
 } from '../src/main/agent/extensions/grade.ts'
+import { DEFAULT_GRADE_LEVEL } from '../src/main/agent/prompts/grade.ts'
 import { createModelCompleter } from '../src/main/agent/safety/review.ts'
 import type { GradeLevel } from '../src/shared/ipc-events.ts'
 
@@ -189,9 +190,10 @@ test('★★ J3 无 Key：judge 抛可读错误 → judge_error，第一层证�
     submitter: async (_studentId, body) => {
       submitted.push(body as never)
       // 第一层照常给出判定（服务端把 no proposal 标成 degraded）
+      // ★ 新学段用 senior：D-073 之后默认是 junior，再判成 junior 等于「没换」
       return {
-        grade: 'junior',
-        previousGrade: 'primary_high',
+        grade: 'senior',
+        previousGrade: DEFAULT_GRADE_LEVEL,
         changed: true,
         reason: '第一层信号足够',
         confidence: 0.7,
@@ -202,8 +204,12 @@ test('★★ J3 无 Key：judge 抛可读错误 → judge_error，第一层证�
         degraded: 'no_llm'
       }
     },
-    fetcher: async () => ({ grade: 'primary_high' } as never),
-    sessionProvider: () => ({ studentId: 'student_001', sessionId: 'sess-1', gradeLevel: 'primary_high' as GradeLevel }),
+    fetcher: async () => ({ grade: DEFAULT_GRADE_LEVEL } as never),
+    sessionProvider: () => ({
+      studentId: 'student_001',
+      sessionId: 'sess-1',
+      gradeLevel: DEFAULT_GRADE_LEVEL as GradeLevel
+    }),
     log: (line) => logs.push(line)
   })
 
@@ -221,13 +227,13 @@ test('★★ J3 无 Key：judge 抛可读错误 → judge_error，第一层证�
   )
 
   // ★ 「下一轮生效」（grade.ts 的既定语义）：服务端判出的学段先落进 `pendingGrade`……
-  assert.equal(extension.snapshot().pendingGrade, 'junior', '第一层判出的学段已就绪（下一轮生效）')
+  assert.equal(extension.snapshot().pendingGrade, 'senior', '第一层判出的学段已就绪（下一轮生效）')
   // ……下一次 `observeTurn` 才交接给 `appliedGrade`（学生无感，没有「切换」事件）
   extension.observeTurn('第六轮')
   await extension.flush()
   assert.equal(
     extension.snapshot().appliedGrade,
-    'junior',
+    'senior',
     '★ 第一层仍然把学段改了（这就是「无 Key 也能用」——没有 LLM 也不影响学段可动）'
   )
 })
@@ -237,8 +243,9 @@ test('J3 no key 世界：完全不接线（useJudge(null)）→ no_llm，且第�
   const extension = createGradeExtension({
     judge: null,
     submitter: async () => ({
-      grade: 'junior',
-      previousGrade: 'primary_high',
+      // ★ 新学段用 senior：D-073 之后默认是 junior，再判成 junior 等于「没换」
+      grade: 'senior',
+      previousGrade: DEFAULT_GRADE_LEVEL,
       changed: true,
       reason: '第一层',
       confidence: 0.7,
@@ -248,14 +255,18 @@ test('J3 no key 世界：完全不接线（useJudge(null)）→ no_llm，且第�
       cooldownRemainingTurns: 0,
       degraded: 'no_llm'
     }),
-    fetcher: async () => ({ grade: 'primary_high' } as never),
-    sessionProvider: () => ({ studentId: 'student_001', sessionId: 'sess-1', gradeLevel: 'primary_high' as GradeLevel }),
+    fetcher: async () => ({ grade: DEFAULT_GRADE_LEVEL } as never),
+    sessionProvider: () => ({
+      studentId: 'student_001',
+      sessionId: 'sess-1',
+      gradeLevel: DEFAULT_GRADE_LEVEL as GradeLevel
+    }),
     log: (line) => logs.push(line)
   })
   for (const text of ['一', '二', '三']) extension.observeTurn(text)
   await extension.flush()
   assert.equal(extension.snapshot().layer2, 'no_llm')
-  assert.equal(extension.snapshot().pendingGrade, 'junior', '第一层照常判定（下一轮生效）')
+  assert.equal(extension.snapshot().pendingGrade, 'senior', '第一层照常判定（下一轮生效）')
   assert.ok(logs.some((line) => line.includes('no_llm')))
 })
 

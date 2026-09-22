@@ -50,7 +50,10 @@ from app.grade.rules import (  # noqa: E402
 )
 from app.main import create_app  # noqa: E402
 from app.routes.grade import router as grade_router  # noqa: E402
-from app.routes.students import student_learning_db_path  # noqa: E402
+from app.routes.students import (  # noqa: E402
+    open_learning_store,
+    student_learning_db_path,
+)
 
 TOKEN = "test-token-grade-override"
 
@@ -156,8 +159,24 @@ class GradeOverrideRoutes(unittest.TestCase):
         finally:
             conn.close()
 
+    def seed_level(self, level: str, student_id: str | None = None) -> None:
+        """把学生的**起点学段显式钉成** ``level``（不写 history → ``source`` 仍是 inferred）。
+
+        ★ 为什么测试要自己钉起点（2026-09-22 / D-073）：冷启动默认值会随产品决策变
+          （由 ``primary_high`` 改成 ``junior``），凡是「从 X 档动到 Y 档」的用例都依赖它。
+          钉住起点之后，默认值再变也不会让这些用例跟着漂。
+        """
+        target = student_id or self.student_id
+        store = open_learning_store(self.tmp, target)
+        try:
+            store.upsert_student(target, nickname="", grade_level=level)
+        finally:
+            store.close()
+
+
     # ------------------------------------------------------------ ① 契约 --
     def test_override_returns_the_frozen_contract_shape(self) -> None:
+        self.seed_level("primary_high")
         response = self.override("junior")
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
@@ -199,6 +218,7 @@ class GradeOverrideRoutes(unittest.TestCase):
 
     # ------------------------------------------------------------ ② 落库 --
     def test_override_writes_an_explicit_row_with_the_previous_level(self) -> None:
+        self.seed_level("primary_high")
         self.override("junior")
         rows = [row for row in self.history_rows() if row["source"] == SOURCE_EXPLICIT]
         self.assertEqual(len(rows), 1)
@@ -270,6 +290,7 @@ class GradeOverrideRoutes(unittest.TestCase):
         因为原来那条断言（``test_repeating_the_same_level_writes_a_row_but_is_not_a_change``）
         只读了走对的那条路的 ``state()`` —— 是**假绿**。
         """
+        self.seed_level("primary_high")
         # 造出「真变更 @3」：第 1..3 轮童言本来就会在**第 3 轮**把学段调下去（自动路径）
         self.submit(*self.child_evidence(1, 2, 3))
         self.assertEqual(self.state()["grade"], "primary_low", "前提：自动路径在第 3 轮改过学段")
@@ -365,6 +386,7 @@ class GradeOverrideRoutes(unittest.TestCase):
         ★ 2026-09-21：冷却的度量已改成「锚点之后**真实发生了几轮**」（不再是两个轮次号相减），
         所以轮次必须**连续**上交 —— 跳着交的轮次不曾发生，自然不计入冷却。
         """
+        self.seed_level("primary_high")
         self.advance_to(6)
         override = self.override("junior")
         self.assertEqual(override.status_code, 200, override.text)
@@ -410,6 +432,7 @@ class GradeOverrideRoutes(unittest.TestCase):
         反向对照是这条断言的另一半：**同一批证据**在没有手动改过的对照学生身上
         必须把学段调下去 —— 否则「没改」可能只是因为证据本身不够格，冷却没被真正验证。
         """
+        self.seed_level("primary_high")
         # 前提：这组童言本身够格，自动路径本来就会在第 3 轮把学段调下去
         self.submit(*self.child_evidence(1, 2, 3))
         self.assertEqual(self.state()["grade"], "primary_low", "前提：自动路径本来够格")
@@ -451,6 +474,7 @@ class GradeOverrideRoutes(unittest.TestCase):
 
         # ★ 反向对照：同一批证据（第 1/2/3 轮童言）在没手动改过的学生身上必须改学段
         control = "student_002"
+        self.seed_level("primary_high", control)  # 与主学生对同一个起点（见 seed_level 的说明）
         self.submit(*self.child_evidence(1, 2, 3), student_id=control)
         self.assertEqual(
             self.state(control)["grade"],
@@ -471,6 +495,7 @@ class GradeOverrideRoutes(unittest.TestCase):
 
     def test_automatic_cooldown_is_still_the_shorter_window(self) -> None:
         """手动窗口更长**不该**顺手把自动窗口也改长（两处口径分别钉住）。"""
+        self.seed_level("primary_high")
         self.submit(*self.child_evidence(1, 2, 3))
         state = self.state()
         self.assertEqual(state["grade"], "primary_low")

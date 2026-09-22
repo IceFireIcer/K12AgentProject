@@ -2273,3 +2273,65 @@ Release 页就是「拿到安装包」这条路径的最短入口，也是报告
 
 **服务哪条评分**：用户体验 15% —— 「学生以为自己的对话丢了」是这类缺陷最贵的代价；
 设计合理性 25% —— 同一个状态在三条路径上的**判据统一**（而不是各写一份）是一次真实的收敛。
+
+## D-073 ★★ 冷启动默认学段改成「初中」+ 判定 prompt 补上「初中 ↔ 高中」的判读口径
+
+**背景**：用户原话（2026-09-22）——
+> 「本地规则你直接先默认初中 然后后续再进行ai引擎判断」
+> 「对于初中和高中的AI引擎换学段判断 你别把高中和初中的AI判断也太难了 太难了
+>  其实高中生也不会问的特别高深的 反而高中学段比较难去判定去自动切换」
+
+### ① 冷启动默认学段：`primary_high` → `junior`
+
+**改哪三处（必须一起改，`tests/grade-prompts.test.ts` 的 P4c 跨语言断言钉着）**：
+
+| 文件 | 常量 | 作用 |
+| --- | --- | --- |
+| `server/app/routes/students.py` | `DEFAULT_COLD_START_GRADE` | 服务端兜底（未知学生被写记录/偏好时建行） |
+| `server/app/agent`... 精确到 `desktop/src/main/agent/prompts/grade.ts` | `DEFAULT_GRADE_LEVEL` | 桌面端首轮 system prompt 的起点 |
+| `desktop/src/main/ipc/handlers-data.ts` | （引用上者） | **新装机器首跑建学生**时 `POST /api/students` 的 `gradeLevel` —— 它原先硬编码 `primary_high`，是这条改动的"生效口" |
+
+**理由**：四档里偏下的两档（小学低/高）与偏上的两档（初中/高中）讲法差别最大 ——
+从初中起步、判小了往下调一档只是讲得更细；而从小高起步去讲高中内容，学生会直接看不懂。
+另外「被当小孩」比「被当大孩」更伤体验（K12 场景的体感不对称）。
+
+★ 它**只是起点不是判定结果**：`grade_history` 那条基线行的 `decided_by` 仍为空，
+界面照旧显示「待判定」（D-066 那条纪律在这里同样成立），AI 引擎从第 5 个累计轮次起接管。
+
+### ② 判定 prompt：把「初 / 高」的判读口径写进去
+
+旧版只说「只依据提问用词与问题深度，不要猜测他的身份」，于是模型面对
+「什么是集合」「帮我看看这段代码」这类**朴素提问**时判成初中/小学 ——
+**而高中生的提问本来就朴素**，结果 `senior` 几乎只在学生自报年级时才会被提出来，
+自动往上切换形同虚设（这正是用户说的"高中学段比较难去判定"）。
+
+新版（`desktop/src/main/agent/extensions/grade.ts` 的 `buildJudgePrompt`）加了四条口径：
+
+1. **看话题落点，不要看「深不深」** —— 判 `senior` 靠话题是否落在高中课程范围
+   （集合与逻辑 / 函数与导数 / 三角与数列 / 概率统计 / 立体几何与向量 /
+   算法与复杂度 / 信息技术基础），**而不是等一个「高深」的问题**；
+2. **术语层级** —— 用课程内的说法问（「函数的单调性」「时间复杂度」）比用生活说法问更能说明学段；
+3. **学生自己说出的年级算证据**（旧版那句「不要猜测他的身份」把它一起挡掉了）；
+   但它只是**一条**证据，与内容明显矛盾时以内容为准；
+4. **拿不准就不要动** —— 证据不足时保持当前学段（来回跳比不动更伤：每次调整都会换掉整套讲法）。
+
+confidence 的分档也写进 prompt（0.75+ 有明确课程范围证据 / 0.6~0.75 倾向 / <0.6 保持现状）——
+**门槛没有拿掉**：`CONFIDENCE_THRESHOLD = 0.6` 与冷却 / ±1 级三条安全网照旧（D-066 的安全网部分未动）。
+
+**服务哪条评分**：教育适配性 20%（学段自适应是评分表明文验收项）+ 设计合理性 25%。
+一句话：*起点放中间，**往两端判**都不需要"证据夸张"才能动 —— 但也不为动而动。*
+
+### 守卫
+
+- `desktop/tests/grade-prompts.test.ts` **P4c（新增）**：跨语言断言 —— 读 `students.py`
+  的 `DEFAULT_COLD_START_GRADE` 与桌面端 `DEFAULT_GRADE_LEVEL` **必须逐字一致**；
+  此前这句话只是一句注释（注释挡不住"只改一边"，这次变成可执行断言）。
+- `desktop/tests/grade-prompts.test.ts` P4b：`DEFAULT_GRADE_LEVEL === 'junior'`。
+- `server/tests/test_grade.py` 的 `test_cold_start_defaults_to_junior_with_baseline_row`。
+- ★ 新增 `seed_level()`（两个测试模块各一份）：**用例自己钉起点学段**，
+  这样默认值再变也不会让「从 X 档动到 Y 档」的用例跟着漂（本轮 14 条用例都这么改的）。
+  ⚠️ 基线那一行（`from_level IS NULL`）也要跟着改，否则「学生行说 A、历史基线说 B」自相矛盾。
+- 未动：阈值四件套（`CONFIDENCE_THRESHOLD` / `COOLDOWN_TURNS` / `MANUAL_COOLDOWN_TURNS` /
+  `MAX_STEP_LEVELS`）与 `LLM_DECIDES_FROM_TURN`（仍只在 `rules.py`）。
+
+**验证**：后端 `1057 OK (skipped=2)` + 桌面 `860/860`（含 `check:api` / `check:tool-schema` / `check:docs`）。

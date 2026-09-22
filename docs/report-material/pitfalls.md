@@ -2889,3 +2889,34 @@ Emulation.setPageVisibility  →  {"code":-32601,"message":"'Emulation.setPageVi
 **报告用法**：「验证工具的口径要先读懂再用」的标本 —— 一个错误配置的验证器会**给你假信心**。
 一句话：*用了两年的脚本，参数含义也要重新读一遍；
 `expect: '先切后删'` 这种写法看起来天经地义，实则是把「跑哪个用例」和「断言什么」混成了一个字段。*
+
+## P-122 ★★ 批量改代码的脚本「锚点没命中也打印成功」—— 假成功比失败更贵
+
+**现象**：给两个测试文件批量插 import 的脚本，控制台打了 `import 已补`，
+可紧接着跑测试却报 `ReferenceError` —— 而且报出来的症状离题十万八千里：
+`layer2 === 'not_due'`（轮次是 0、上交 0 条），完全看不出和"缺一行 import"有关。
+
+**根因**：脚本里 `print('已补 ...')` 写在 `if/else` **之外** —— 而那个 `else` 分支里的
+`s.replace("import { createGradeExtension", ...)` **一行都没匹配上**（源码是
+`import {
+  buildJudgePrompt,
+  createGradeExtension,` 换行写的多行 import，字面量里没有这个串）。
+于是"打印成功"与"真的改了"彻底脱钩。
+
+**为什么会走那么远的弯路**：`ReferenceError: DEFAULT_GRADE_LEVEL` 发生在
+`sessionProvider()` 里，而它被 `observeTurn` 的 `try/catch` 吞掉（只记日志）——
+于是「轮次不涨、上交数为 0、判定状态卡在 not_due」，看起来像**引擎的逻辑坏了**。
+一个 import 漏写，被表现成了三处互不相干的数字异常。
+
+**解法（批量改代码的三条纪律）**：
+1. **改完就读文件确认**（`grep -n` 打印出插入后的那一行），不要相信脚本自己的 print ——
+   判断依据只有一条：**磁盘上的字节**；
+2. 每个替换前 **assert 锚点存在**（`assert old in s, '锚点'`），一个都没命中就抛错；
+3. 关键插入**用 AST 定位**（`ast.parse` → 找到目标 `FunctionDef` 的 `body[0].end_lineno`）
+   —— 这类"在 docstring/多行 import 之后插一行"的定位，靠字符串搜迟早踩正则与缩进的坑。
+   本轮后 14 条用例的插入就是用 AST 做的，一次通过。
+
+**报告用法**：*诊断顺序永远是「先看报错发生在哪、它被谁吞了」*。
+本轮最有价值的一步不是改测试，而是**打出一行 debug snapshot** ——
+`turn:0, submitted:0` 立刻把范围从"引擎状态机"缩到"这几行根本没执行"。
+一句话：**打印成功 ≠ 打印事实；先证明代码跑到了，再讨论它跑出了什么。**

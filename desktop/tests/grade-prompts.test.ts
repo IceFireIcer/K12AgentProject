@@ -32,6 +32,8 @@ import {
 import { PROMPT_SECTIONS } from '../src/main/agent/prompts/rules.ts'
 import { PAYLOAD_TOOL_NAMES } from '../src/main/ipc/tool-kinds.ts'
 
+const HERE = dirname(fileURLToPath(import.meta.url))
+
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const promptsDir = join(desktopRoot, 'src', 'main', 'agent', 'prompts')
 const read = (...segments: string[]): string => readFileSync(join(...segments), 'utf8')
@@ -223,8 +225,28 @@ test('P4a gradePromptFor：四个学段各取到自己的模板，**绝不回落
   }
 })
 
+test('P4c ★ 跨语言断言：服务端与桌面端的冷启动默认学段必须是同一个', () => {
+  // ★ 这条把 P4b 那句「两处必须一起改」从注释变成**可执行**的断言：
+  //   两个常量分处 Python / TS 两个进程，只改一边的表现是「服务端说初中、
+  //   桌面 template 用小学高年级」—— 首轮对话与后续判定就对不上，而且**不会报错**。
+  const server = readFileSync(
+    join(HERE, '..', '..', 'server', 'app', 'routes', 'students.py'),
+    'utf8'
+  )
+  const matched = /DEFAULT_COLD_START_GRADE:\s*GradeLevel\s*=\s*"([a-z_]+)"/.exec(server)
+  assert.ok(matched, '找不到服务端的 DEFAULT_COLD_START_GRADE')
+  assert.equal(
+    matched[1],
+    DEFAULT_GRADE_LEVEL,
+    '★ 服务端 `DEFAULT_COLD_START_GRADE` 与桌面端 `DEFAULT_GRADE_LEVEL` 必须逐字一致（D-073）'
+  )
+})
+
 test('P4b 脏值兜底：非法学段落到默认值（而不是空串 / undefined）', () => {
-  assert.equal(DEFAULT_GRADE_LEVEL, 'primary_high', '冷启动默认学段是小学高年级（§10.1）')
+  // ★ 2026-09-22（D-073）：冷启动默认学段由 primary_high 改成 junior ——
+  //   先按初中讲、再由 LLM 判定接手（用户裁决）。这一条与服务端的
+  //   `DEFAULT_COLD_START_GRADE` 是**同一件事**，两处必须一起改。
+  assert.equal(DEFAULT_GRADE_LEVEL, 'junior', '冷启动默认学段是初中（D-073）')
   const dirty: Array<GradeLevel | string | undefined> = [undefined, '', '   ', '大学', 'PRIMARY_LOW', 'primary-low', 'senior ']
   for (const value of dirty) {
     assert.equal(gradePromptFor(value), GRADE_PROMPTS[DEFAULT_GRADE_LEVEL], `脏值 ${JSON.stringify(value)} 必须落到默认学段模板`)

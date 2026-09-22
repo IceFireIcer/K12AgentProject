@@ -503,7 +503,7 @@ export interface paths {
          * 学习记录写入（答题/代码/动画观看/答疑）
          * @description 把一条结构化学习记录写进该学生的 ``learning.db``。
          *
-         *     冷启动兜底：学生行不存在时按请求里的学段（缺省 ``primary_high``）建一条 ——
+         *     冷启动兜底：学生行不存在时按请求里的学段（缺省 ``junior``）建一条 ——
          *     「学生还没登录就先产生了学习记录」不该丢数据，也不该 500。
          */
         post: operations["record_learning_event_api_profile__student_id__events_post"];

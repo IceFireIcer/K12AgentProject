@@ -967,21 +967,50 @@ class GradeEngineCase(unittest.TestCase):
     def rows(self, sql: str, *params: object) -> list[sqlite3.Row]:
         return self.store.conn.execute(sql, params).fetchall()
 
+    def seed_level(self, level: str) -> None:
+        """把学生的**起点学段显式钉成** ``level``（不写 history、不留冷却锚点）。
+
+        ★ 为什么测试要自己钉起点（2026-09-22 / D-073）：冷启动默认值会随产品决策变
+          （由 ``primary_high`` 改成了 ``junior``），凡是「从 X 档动到 Y 档」的用例都依赖它。
+          钉住起点之后，默认值再变也不会让这些用例跟着漂 —— 而「默认值是多少」由
+          :meth:`TestEnginePersistence.test_cold_start_defaults_to_junior_with_baseline_row`
+          与桌面的 ``grade-prompts.test.ts`` 各钉一次。
+        """
+        self.engine.ensure_student(self.student_id)  # 建行（含基线 history 行）
+        self.store.conn.execute(
+            "UPDATE student SET grade_level = ? WHERE student_id = ?", (level, self.student_id)
+        )
+        # ★ 基线那一行（`from_level IS NULL`）也要跟着改：否则「学生行说 primary_high、
+        #   历史基线说 junior」自相矛盾，而 `state()` 的来源与报告都读后者。
+        self.store.conn.execute(
+            "UPDATE grade_history SET to_level = ? WHERE from_level IS NULL", (level,)
+        )
+        self.store.conn.commit()
+
+
 
 class TestEnginePersistence(GradeEngineCase):
-    def test_cold_start_defaults_to_primary_high_with_baseline_row(self) -> None:
+    def test_cold_start_defaults_to_junior_with_baseline_row(self) -> None:
+        """★ 冷启动默认学段 = **初中**（2026-09-22 / D-073，原为小学高年级）。
+
+        为什么改：四档里偏下的两档（小学低/高）与偏上的两档（初中/高中）讲法差别最大 ——
+        从初中起步、判小了往下调一档只是讲得更细；而从小高起步去讲高中内容，
+        学生会直接看不懂。桌面端的 `DEFAULT_GRADE_LEVEL` 由 `grade-prompts.test.ts` 钉住，
+        两处必须一起改。
+        """
         state = self.engine.state(self.student_id)
-        self.assertEqual(state.grade_level, "primary_high", "冷启动默认小学高年级")
+        self.assertEqual(state.grade_level, "junior", "冷启动默认初中（D-073）")
         self.assertEqual(state.source, SOURCE_INFERRED)
         self.assertEqual(state.cooldown_remaining, 0, "基线不是一次变更，不该产生冷却")
 
         rows = self.rows("SELECT turn, from_level, to_level, source, confidence FROM grade_history")
         self.assertEqual(len(rows), 1)
         self.assertIsNone(rows[0]["from_level"])
-        self.assertEqual(rows[0]["to_level"], "primary_high")
+        self.assertEqual(rows[0]["to_level"], "junior")
         self.assertEqual(rows[0]["source"], SOURCE_INFERRED)
 
     def test_child_style_turns_lower_the_grade_at_the_third_turn(self) -> None:
+        self.seed_level("primary_high")
         first = self.engine.observe_turn(
             student_id=self.student_id, turn=1, text=CHILD_TURN_1, session_id="sess-1"
         )
@@ -1036,6 +1065,7 @@ class TestEnginePersistence(GradeEngineCase):
           实测 450 次判定里 226 次（50%）卡在这里。
         - 现在：冷却按**真实发生的轮数**算（跨会话连续累计），走满窗口就放行。
         """
+        self.seed_level("primary_high")
         # 会话 A：第 1..3 轮受挫表达 → 第 3 轮自动下调一级
         for turn, text in enumerate((CHILD_TURN_1, CHILD_TURN_2, CHILD_TURN_3), start=1):
             self.engine.observe_turn(
@@ -1219,6 +1249,7 @@ class TestEnginePersistence(GradeEngineCase):
         第 11 轮才够 3。★ 对照组是**同一批句子**在连续三轮里（第 11..13 轮）照样能改 —
         证明证据本身够格，是「空白轮不留痕」这一条在改结果。
         """
+        self.seed_level("primary_high")
         self.engine.observe_turn(student_id=self.student_id, turn=1, text=CHILD_TURN_1, session_id="s")
         for turn in range(2, 9):
             decision = self.engine.observe_turn(
@@ -1296,6 +1327,7 @@ class TestEnginePersistence(GradeEngineCase):
             self.assertIn("|", str(row["raw"]), "raw 里只该有轮次锚点 + 词表命中项")
 
     def test_advanced_terminology_moves_up_one_level_only(self) -> None:
+        self.seed_level("primary_high")
         for index, text in enumerate([CHILD_TURN_1, CHILD_TURN_2, CHILD_TURN_3], start=1):
             self.engine.observe_turn(student_id=self.student_id, turn=index, text=text)
         self.assertEqual(self.engine.current_level(self.student_id), "primary_low")
@@ -1339,6 +1371,7 @@ class TestEnginePersistence(GradeEngineCase):
         )
 
     def test_state_survives_reopening_the_database(self) -> None:
+        self.seed_level("primary_high")
         for index, text in enumerate([CHILD_TURN_1, CHILD_TURN_2, CHILD_TURN_3], start=1):
             self.engine.observe_turn(student_id=self.student_id, turn=index, text=text)
         self.store.close()
@@ -1351,6 +1384,7 @@ class TestEnginePersistence(GradeEngineCase):
         self.assertGreater(restarted.state(self.student_id).cooldown_remaining, 0)
 
     def test_suggested_level_is_exposed_while_blocked_by_cooldown(self) -> None:
+        self.seed_level("primary_high")
         for index, text in enumerate([CHILD_TURN_1, CHILD_TURN_2, CHILD_TURN_3], start=1):
             self.engine.observe_turn(student_id=self.student_id, turn=index, text=text)
         for turn in (4, 5, 6):
@@ -1473,7 +1507,21 @@ class TestGradeRoutes(unittest.TestCase):
     def submit(self, *turns: dict) -> object:
         return self.client.post(f"/api/grade/turns/{self.student_id}", json={"turns": list(turns)})
 
+    def seed_level(self, level: str) -> None:
+        """路由级用例的起点学段（与 ``GradeEngineCase.seed_level`` 同一目的，见那里的说明）。
+
+        直接经 ``open_learning_store`` 把学生行建出来并写好学段 —— **不写 history**，
+        所以 ``state()`` 的 ``source`` 仍是 inferred（与冷启动一致）。
+        """
+        store = open_learning_store(self.tmp, self.student_id)
+        try:
+            store.upsert_student(self.student_id, nickname="", grade_level=level)
+        finally:
+            store.close()
+
+
     def test_state_and_signals_are_camel_case(self) -> None:
+        self.seed_level("primary_high")
         state = self.client.get(f"/api/grade/state/{self.student_id}")
         self.assertEqual(state.status_code, 200, state.text)
         body = state.json()
@@ -1490,6 +1538,7 @@ class TestGradeRoutes(unittest.TestCase):
         self.assertIsNone(payload["suggestedLevel"])
 
     def test_batch_of_turns_changes_grade_and_returns_evaluations(self) -> None:
+        self.seed_level("primary_high")
         response = self.submit(
             {"turn": 1, "text": CHILD_TURN_1, "sessionId": "sess-1"},
             {"turn": 2, "text": CHILD_TURN_2, "sessionId": "sess-1"},

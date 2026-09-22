@@ -585,37 +585,41 @@ test('G4c-1 ★ 前 4 轮一次 LLM 都不调；累计第 5 轮才触发（D-066
 })
 
 test('G4d 判定出的学段在**下一轮**才进 prompt（学生无感）', async () => {
+  // ★ 2026-09-22（D-073）：默认学段改成 junior 之后，「新学段」必须换成一个**不等于默认值**的
+  //   （原先这里写的是 junior，而它现在就是默认值 —— 等于「没换」，两条断言会同时失真）。
+  const next = 'senior' as GradeLevel
   const harness = createHarness()
-  // 第 1 轮：服务端说 junior
-  harness.setGrade('junior')
+  // 第 1 轮：服务端说 senior
+  harness.setGrade(next)
   harness.pushTurn('第一轮')
   await harness.extension.flush()
 
-  // 第 1 轮：服务端还没判出来 → 别人拼的是 primary_high，学段片段不动（只追加权威段）
-  const first = harness.promptFor(GRADE_PROMPTS.primary_high)
-  assert.ok(first.includes(GRADE_PROMPTS.primary_high), '本轮学段还没交接：模板保持原样')
-  assert.ok(!first.includes(GRADE_PROMPTS.junior), '本轮不得提前换成新学段')
-  assert.equal(harness.extension.appliedGrade(), 'primary_high')
+  // 第 1 轮：服务端还没判出来 → 别人拼的是**默认学段**的模板，学段片段不动（只追加权威段）
+  const first = harness.promptFor(GRADE_PROMPTS[DEFAULT_GRADE_LEVEL])
+  assert.ok(first.includes(GRADE_PROMPTS[DEFAULT_GRADE_LEVEL]), '本轮学段还没交接：模板保持原样')
+  assert.ok(!first.includes(GRADE_PROMPTS[next]), '本轮不得提前换成新学段')
+  assert.equal(harness.extension.appliedGrade(), DEFAULT_GRADE_LEVEL)
 
-  // 第 2 轮：交接发生 → 换成 junior 的模板
+  // 第 2 轮：交接发生 → 换成 senior 的模板
   harness.pushTurn('第二轮')
-  const second = harness.promptFor(GRADE_PROMPTS.primary_high)
-  assert.ok(second.includes(GRADE_PROMPTS.junior), '第 2 轮必须换成新学段')
-  assert.ok(!second.includes(GRADE_PROMPTS.primary_high), '旧学段模板应当被换掉')
+  const second = harness.promptFor(GRADE_PROMPTS[DEFAULT_GRADE_LEVEL])
+  assert.ok(second.includes(GRADE_PROMPTS[next]), '第 2 轮必须换成新学段')
+  assert.ok(!second.includes(GRADE_PROMPTS[DEFAULT_GRADE_LEVEL]), '旧学段模板应当被换掉')
   assert.ok(second.includes(GRADE_OVERRIDE_HEADING), '★ 权威段始终在（wire prompt 可断言）')
-  assert.equal(harness.extension.appliedGrade(), 'junior')
+  assert.equal(harness.extension.appliedGrade(), next)
 })
 
 test('G4e 学段没变时不动别人的模板内容（只追加权威段）', async () => {
-  const harness = createHarness({ grade: 'primary_high' })
+  // ★ 用默认学段当「服务端返回的值」：两边相等才是「没变」（D-073 之后默认是 junior）
+  const harness = createHarness({ grade: DEFAULT_GRADE_LEVEL })
   harness.pushTurn('随便问一句')
   await harness.extension.flush()
-  const prompt = harness.promptFor(GRADE_PROMPTS.primary_high)
-  assert.ok(prompt.includes(GRADE_PROMPTS.primary_high), '别人的模板原样保留')
-  assert.equal(prompt.split(GRADE_PROMPTS.primary_high).length - 1, 1, '不得把模板抄第二遍')
+  const prompt = harness.promptFor(GRADE_PROMPTS[DEFAULT_GRADE_LEVEL])
+  assert.ok(prompt.includes(GRADE_PROMPTS[DEFAULT_GRADE_LEVEL]), '别人的模板原样保留')
+  assert.equal(prompt.split(GRADE_PROMPTS[DEFAULT_GRADE_LEVEL]).length - 1, 1, '不得把模板抄第二遍')
   assert.ok(prompt.includes(GRADE_OVERRIDE_HEADING), '★ 学段没变也要有权威段（可审计）')
   assert.equal(harness.extension.snapshot().pendingGrade, null)
-  assert.equal(harness.extension.snapshot().appliedGrade, 'primary_high')
+  assert.equal(harness.extension.snapshot().appliedGrade, DEFAULT_GRADE_LEVEL)
 })
 
 test('G4f 上交失败不影响本轮对话，只记日志并计数', async () => {
@@ -701,7 +705,11 @@ test('G4i 换学生必须把学段一起重置（绝不把上一个学生的学�
   // 换到学生 B：第一次 observeTurn 就该回到冷启动默认值，而不是沿用 senior
   session = { studentId: 'student_002', sessionId: 'sess-B', gradeLevel: 'primary_high' }
   extension.observeTurn('你好')
-  assert.equal(extension.snapshot().appliedGrade, 'primary_high', '换学生后按冷启动默认值起步')
+  assert.equal(
+    extension.snapshot().appliedGrade,
+    DEFAULT_GRADE_LEVEL,
+    '换学生后按冷启动默认值起步（D-073 起是 junior）'
+  )
   assert.ok(logs.some((line) => line.includes('切换学生')), '换学生要留一行可见日志')
   await extension.flush()
 })
@@ -712,8 +720,8 @@ test('G4j 同一学生换会话（/new）：学段沿用，但第二层的窗口
   let judgeCalls = 0
   const extension = createGradeExtension({
     submitter: async (_studentId: string, body: { turns: Array<{ turn: number }> }) => ({
-      grade: 'primary_high',
-      previousGrade: 'primary_high',
+      grade: DEFAULT_GRADE_LEVEL,
+      previousGrade: DEFAULT_GRADE_LEVEL,
       changed: false,
       reason: 'no_direction',
       confidence: 0,

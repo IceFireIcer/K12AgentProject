@@ -456,20 +456,24 @@ test('G6c ★ refresh 的回执在途中被手动设定作废（fire-and-forget 
  * ------------------------------------------------------------------ */
 
 test('G4a ★ adoptOverride 清掉 pendingGrade（否则下一轮 applyPending 会把它顶回来）', async () => {
-  const harness = createHarness({ grade: 'junior' })
+  // ★ 服务端判出的学段必须**不等于默认值**（D-073 之后默认是 junior，再判成 junior
+  //   等于「没换」→ pending 不会被置位，这条用例也就验不到它要验的东西了）。
+  const harness = createHarness({ grade: 'senior' })
   harness.pushTurn('第一轮')
   await harness.extension.flush()
-  assert.equal(harness.extension.snapshot().pendingGrade, 'junior', '服务端判出的学段已就绪')
+  assert.equal(harness.extension.snapshot().pendingGrade, 'senior', '服务端判出的学段已就绪')
 
-  harness.extension.adoptOverride('senior', 10)
+  // ★ 学生手动改到**另一个**学段（与 pending 不同才有区分度：相同的值顶上去看不出来）
+  harness.extension.adoptOverride('primary_low', 10)
   assert.equal(harness.extension.snapshot().pendingGrade, null, '★ 手动选择后必须清空 pendingGrade')
+  assert.equal(harness.extension.appliedGrade(), 'primary_low', '手动选择立即生效')
 
   // 下一轮：不允许那个「下一轮生效」的旧值把学生刚选的顶掉
   harness.pushTurn('第二轮')
   await harness.extension.flush()
   assert.equal(
     harness.extension.appliedGrade(),
-    'senior',
+    'primary_low',
     '下一轮的交接不得把学生手动选的学段覆盖掉'
   )
 })

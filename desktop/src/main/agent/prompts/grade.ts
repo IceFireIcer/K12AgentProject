@@ -18,8 +18,17 @@ import { PRIMARY_HIGH_STYLE, PRIMARY_HIGH_SYSTEM_PROMPT } from './primary-high.t
 import { JUNIOR_STYLE, JUNIOR_SYSTEM_PROMPT } from './junior.ts'
 import { SENIOR_STYLE, SENIOR_SYSTEM_PROMPT } from './senior.ts'
 
-/** 冷启动默认学段（执行文档 §10.1：学生从未选择时生效；与渲染进程 `DEFAULT_GRADE_LEVEL` 一致）。 */
-export const DEFAULT_GRADE_LEVEL: GradeLevel = 'primary_high'
+/**
+ * 冷启动默认学段（执行文档 §10.1：学生从未选择时生效）。
+ *
+ * ★ 2026-09-22 由 `primary_high` 改成 **`junior`**（D-073，用户裁决：「本地规则先默认初中，
+ *   然后后续再进行 AI 引擎判断」）。理由见 `server/app/routes/students.py` 的
+ *   `DEFAULT_COLD_START_GRADE` 注释（一句话：从小高起步讲高中内容学生会直接看不懂，
+ *   而从初中起步往下调一档只是讲得更细）。
+ * ⚠️ 必须与服务端那个常量**逐字一致**（`desktop/tests/grade-prompts.test.ts` 钉着），
+ *   否则「服务端说初中、桌面 template 用小学高年级」会在第一轮就对不上。
+ */
+export const DEFAULT_GRADE_LEVEL: GradeLevel = 'junior'
 
 /** 四个学段（冻结字面量，顺序与执行文档 §10.5 的矩阵一致）。 */
 export const GRADE_LEVELS: readonly GradeLevel[] = ['primary_low', 'primary_high', 'junior', 'senior']

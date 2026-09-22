@@ -16,6 +16,7 @@
  *      抛出去会变成渲染进程侧的一坨堆栈文本，而不是界面上一句可读中文。
  */
 
+import { DEFAULT_GRADE_LEVEL } from '../agent/prompts/grade.ts'
 import { ipcMain, type WebContents } from 'electron'
 import {
   IPC,
@@ -129,7 +130,7 @@ export function registerDataHandlers(options: {
     // 学段给冷启动默认值 —— 它只是起点，之后由服务端推断接管。
     return await requestJson('/api/students', {
       method: 'POST',
-      body: { nickname: '同学', gradeLevel: 'primary_high' }
+      body: { nickname: '同学', gradeLevel: DEFAULT_GRADE_LEVEL }
     })
   })
 

@@ -139,7 +139,10 @@ RULE_CONFIDENCE_GAIN = 1.5
 #: 同时避免「规则置信度 1.0」给人「绝对确定」的错觉。
 MAX_RULE_CONFIDENCE = 0.9
 
-#: 冷启动默认学段（无历史 → 小学高年级），与 ``routes.students.DEFAULT_COLD_START_GRADE`` 同一口径。
+#: 冷启动默认学段（无历史 → **初中**），与 ``routes.students.DEFAULT_COLD_START_GRADE`` 同一口径。
+#: ★ 2026-09-22 由「小学高年级」改成「初中」（D-073，用户裁决）：先按初中讲，再由 LLM 判定接手。
+#:   ⚠️ 它只是**起点**而不是判定结果 —— 基线行的 ``decided_by`` 仍为空，界面显示「待判定」，
+#:     不冒充任何一层引擎的结论（D-066 那条纪律在这里同样成立）。
 DEFAULT_GRADE_LEVEL: GradeLevel = DEFAULT_COLD_START_GRADE
 
 #: ``grade_history.source``：系统推断（规则引擎自己改的）。

@@ -43,6 +43,7 @@ from app.contracts import PREFERENCE_VALUE_MAX_CHARS, PreferenceKey  # noqa: E40
 from app.main import create_app  # noqa: E402
 from app.routes.profile import router as profile_router  # noqa: E402
 from app.routes.students import (  # noqa: E402
+    DEFAULT_COLD_START_GRADE,
     LEARNING_DB_NAME,
     STUDENTS_STORE_ATTR,
     InMemoryStudentStore,
@@ -282,7 +283,8 @@ class TestLearningEvents(ProfileCase):
         self.assertEqual(self.post_event("student_778", activity="qa").status_code, 200)
         self.assertEqual(
             self.query("student_778", "SELECT grade_level FROM student")[0]["grade_level"],
-            "primary_high",
+            DEFAULT_COLD_START_GRADE,
+            "冷启动默认值（D-073 起是初中）",
         )
 
     def test_migration_is_idempotent_and_records_version(self) -> None:
@@ -601,7 +603,7 @@ class TestPreferenceWrite(ProfileCase):
                 (r["student_id"], r["grade_level"])
                 for r in self.query("student_666", "SELECT student_id, grade_level FROM student")
             ],
-            [("student_666", "primary_high")],
+            [("student_666", DEFAULT_COLD_START_GRADE)],
             "冷启动应当建出学生行（学段退到默认值，不在库里留 NULL）",
         )
         self.assertEqual(

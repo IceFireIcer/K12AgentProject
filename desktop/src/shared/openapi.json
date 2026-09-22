@@ -4152,7 +4152,7 @@
     },
     "/api/profile/{student_id}/events": {
       "post": {
-        "description": "把一条结构化学习记录写进该学生的 ``learning.db``。\n\n冷启动兜底：学生行不存在时按请求里的学段（缺省 ``primary_high``）建一条 ——\n「学生还没登录就先产生了学习记录」不该丢数据，也不该 500。",
+        "description": "把一条结构化学习记录写进该学生的 ``learning.db``。\n\n冷启动兜底：学生行不存在时按请求里的学段（缺省 ``junior``）建一条 ——\n「学生还没登录就先产生了学习记录」不该丢数据，也不该 500。",
         "operationId": "record_learning_event_api_profile__student_id__events_post",
         "parameters": [
           {
