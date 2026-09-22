@@ -526,19 +526,27 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
 /**
  * 空态里那句「这个学段是怎么定下来的」。
  *
- * ★ 三种来源说三种话（`gradeOriginLabel()` 是来源说法的**唯一实现**）：
- *   - 学生手动选的 → 如实说「你选的」（否则与顶栏的「手动选中」当场矛盾）；
- *   - 系统判出来的 → 说「系统根据对话自动判定」，并提醒**学生可以自己改**
+ * ★ 三档说法（`gradeOriginLabel()` 是来源说法的**唯一实现**）：
+ *   - 学生手动选的（`explicit`）→ 如实说「你选的」（否则与顶栏的「手动选中」当场矛盾）；
+ *   - **判过的**（`llm` / `rules` / `inferred`）→ 说出是哪一层判的，并提醒**学生可以自己改**
  *     （D-037 之后确实可以，这句是入口的提示）；
- *   - 冷启动默认值（`default`，`applyGradeState` 会把它整条丢掉，理论上到不了这里）
+ *   - 冷启动基线（`default`，`applyGradeState` 会把它整条丢掉，理论上到不了这里）
  *     → 按「还没判出来」的口径说，**不冒充判定结果**。
+ *
+ * ⚠️ 2026-09-22 修：这里原先只列了 `explicit` / `inferred` 两档，而 D-066 之后
+ *   origin 的实际取值是 `explicit` / `llm` / `rules` / `inferred` ——
+ *   于是 `rules` / `llm` 会掉进 `default` 分支，屏幕上一行写「当前：初中 · 本地规则判定」、
+ *   下一行写「（还没判出来，系统会先看几轮你的提问。）」**自相矛盾**（新装首屏就是这样）。
+ *   现在把「判过的」那三档并列，标签一律来自 `gradeOriginLabel()`（唯一实现）。
  */
 const gradeSourceSentence = computed(() => {
   switch (chat.gradeOrigin) {
     case 'explicit':
       return `（这是你自己选的 · ${gradeOriginLabel('explicit')}）想换个年级的话，点上面的学段指示器。`
+    case 'llm':
+    case 'rules':
     case 'inferred':
-      return `（${gradeOriginLabel('inferred')}）你也可以自己指定。`
+      return `（${gradeOriginLabel(chat.gradeOrigin)}）你也可以自己指定。`
     default:
       return '（还没判出来，系统会先看几轮你的提问。）'
   }
