@@ -70,8 +70,13 @@ export function recommendationPath(studentId: string): string {
  *   开场引导是「新会话的第一句话」（只在会话为空时有意义，且带一句已拼好的中文）。
  *   合并成一条会逼着两个调用点各自判断「我现在要不要念推荐里的哪一条」。
  */
-export function openingPath(studentId: string): string {
-  return `${profilePath(studentId)}/opening`
+export function openingPath(studentId: string, seed?: string): string {
+  const base = `${profilePath(studentId)}/opening`
+  // ★★ D-074：开场引导是**随机**的（知识点与说法都随机），而 `seed` 决定抽到什么。
+  //   传**会话 id** → 同一条会话反复读拿到逐字相同的那一句（否则「切走再切回 / 重启」
+  //   屏幕上那句与写进会话文件的那句对不上 —— D-072 修的就是这类不一致）；
+  //   换一条会话（新 id）→ 自然换一个知识点、换一套说法（用户要的「每次换一个」）。
+  return seed ? `${base}?seed=${encodeURIComponent(seed)}` : base
 }
 
 /** 学段信号（`GET /api/grade/signals/{id}`）。 */
@@ -263,7 +268,7 @@ function describeError(error: unknown): string {
 export const dataRequests = {
   profile: (studentId: string) => requestJson(profilePath(studentId)),
   recommendation: (studentId: string) => requestJson(recommendationPath(studentId)),
-  opening: (studentId: string) => requestJson(openingPath(studentId)),
+  opening: (studentId: string, seed?: string) => requestJson(openingPath(studentId, seed)),
   gradeSignals: (studentId: string) => requestJson(gradeSignalsPath(studentId)),
   gradeHistory: (studentId: string) => requestJson(gradeHistoryPath(studentId)),
 

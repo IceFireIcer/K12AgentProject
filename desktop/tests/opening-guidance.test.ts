@@ -104,7 +104,7 @@ test('★★ 开场引导的判据是「学生开口了没有」，不是「会�
   // 已经聊过的会话：铺消息、一个字的开场都不给（不许插在历史对话前面）。
   assert.match(
     body,
-    /\{\s*started:\s*true,\s*messages:\s*\[\.\.\.instance\.restoredMessages\],\s*opening:\s*'',\s*openingKpId:\s*''\s*\}/,
+    /\{\s*started:\s*true,\s*messages:\s*\[\.\.\.instance\.restoredMessages\],\s*opening:\s*'',\s*openingKpId:\s*'',\s*openingKpName:\s*''\s*\}/,
     '★ `started === true` 时必须原样铺消息、且开场语为空串'
   )
 
@@ -148,7 +148,9 @@ test('★★ 开场引导的判据是「学生开口了没有」，不是「会�
 test('★★ 开场引导**只在「会话开始/恢复」那条路上**取（不在每轮对话里）', () => {
   const source = stripComments(read(HANDLERS))
   // `fetchOpening` 的调用点只该落在唯一的那个判据函数里（两条未开始分支各一次）
-  const calls = [...source.matchAll(/await fetchOpening\(\)/g)]
+  // ★ D-074：调用要带 seed（会话 id）—— 开场白是随机的，同 seed 才是同一句。
+  //   所以匹配「带任意参数」的调用，而不是空参 `()`。
+  const calls = [...source.matchAll(/await fetchOpening\([^)]*\)/g)]
   assert.equal(
     calls.length,
     2,
@@ -156,9 +158,15 @@ test('★★ 开场引导**只在「会话开始/恢复」那条路上**取（�
   )
   const prelude = topLevelBody(source, 'async function resolveSessionPrelude(')
   assert.equal(
-    countOccurrences(prelude, 'await fetchOpening()'),
+    (prelude.match(/await fetchOpening\([^)]*\)/g) ?? []).length,
     2,
     '★ 两次调用都必须在 resolveSessionPrelude 内 —— 它是「开场引导发不发」的唯一判据'
+  )
+  assert.match(
+    prelude,
+    /await fetchOpening\(instance\.sessionId\)/,
+    '★★ seed 必须是**会话 id**：开场白是随机的，同一条会话必须拿到同一句 —— ' +
+      '否则「切走再切回」时现取的那句与文件里那句对不上，动作按钮会被（正确地）撤掉（D-074）'
   )
 
   // 而它**不在** runChatTurn 里（那条是「学生发一条 → 模型回一条」的路径）
@@ -193,12 +201,12 @@ test('★ 取开场失败时**安静降级**（不发开场，但对话照常）
   const at = source.indexOf('async function fetchOpening(')
   assert.ok(at > 0, '找不到 fetchOpening')
   const body = source.slice(at, at + 1200)
-  // 拿不到（ok:false）→ 空串，不抛
-  assert.match(body, /if\s*\(!result\.ok\)\s*return\s*\{\s*text:\s*''/, '失败必须回空串而不是抛')
+  // 拿不到（ok:false）→ 空串，不抛（D-074：三个字段一起空 —— text/kpId/kpName 同进同退）
+  assert.match(body, /if\s*\(!result\.ok\)\s*return\s*empty/, '失败必须回空串而不是抛')
   // 空文本 → 空串（不硬凑）
-  assert.match(body, /if\s*\(!text\)\s*return\s*\{\s*text:\s*''/, '没有内容时不发开场')
-  // kpId 只在有开场语时才有意义
-  assert.match(body, /text,\s*kpId/, '两样一起回（只有开场语没有目标时界面不渲染按钮）')
+  assert.match(body, /if\s*\(!text\)\s*return\s*empty/, '没有内容时不发开场')
+  // 三样一起回（开场语 + 目标 + 名字）
+  assert.match(body, /return\s*\{\s*text,\s*kpId,\s*kpName\s*\}/, '三样一起回')
 })
 
 test('★ 开场语与「写进会话的那一份」是**同一份文本**（不能两处各拼一次）', () => {
@@ -379,7 +387,8 @@ function installBridge(opening: string, openingKpId: string): void {
       messages: [],
       started: false,
       opening,
-      openingKpId
+      openingKpId,
+      openingKpName: openingKpId ? '循环' : ''
     }),
     openSession: () => ({
       ok: true,
@@ -387,7 +396,8 @@ function installBridge(opening: string, openingKpId: string): void {
       messages: [],
       started: false,
       opening,
-      openingKpId
+      openingKpId,
+      openingKpName: openingKpId ? '循环' : ''
     }),
     startNewSession: () => ({
       ok: true,
@@ -395,7 +405,8 @@ function installBridge(opening: string, openingKpId: string): void {
       messages: [],
       started: false,
       opening,
-      openingKpId
+      openingKpId,
+      openingKpName: openingKpId ? '循环' : ''
     }),
     // ★ 分叉（「从这里重新问」）也要在：`resolveSessionBridge` 的必需方法清单里
     //   有它，缺一个整个桥就是 `ready:false` —— 而那时**所有**会话动作都会失败

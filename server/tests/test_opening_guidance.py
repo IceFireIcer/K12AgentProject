@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import random
 import shutil
 import sys
 import tempfile
@@ -97,6 +98,15 @@ class OpeningCase(unittest.TestCase):
         self.assertEqual(graded.status_code, 200, graded.text)
 
 
+def _rng(seed: str = "seed-a") -> random.Random:
+    """固定种子的随机源。
+
+    ★ D-074 起开场白是**随机**的（知识点随机 + 说法随机），而它的随机源由调用方注入
+      （`seed` = 会话语义上的种子）—— 测试必须显式给种子，否则用例自己就不可复现。
+    """
+    return random.Random(seed)
+
+
 # --------------------------------------------------------------------------- #
 # 1. ★ 纯函数：没有依据就没有开场语
 # --------------------------------------------------------------------------- #
@@ -105,30 +115,40 @@ class TestOpeningTextIsHonest(unittest.TestCase):
 
     def test_empty_source_yields_empty_text(self) -> None:
         """★ 没有推荐内容 → 空串（前端据此不发开场，而不是硬凑一句寒暄）。"""
-        self.assertEqual(_opening_text("empty", []), "")
+        self.assertEqual(_opening_text("empty", [], _rng()), "")
 
     def test_empty_items_yield_empty_text_even_with_a_source(self) -> None:
         """防御性：`source` 与 `items` 不一致时也**不发**（宁可不说，不要说错）。"""
-        self.assertEqual(_opening_text("graph", []), "")
+        self.assertEqual(_opening_text("random", [], _rng()), "")
 
-    def test_every_real_source_produces_readable_chinese(self) -> None:
-        """三种真实来源各有各的说法，且都是可读中文、不含内部痕迹。"""
-        from app.routes.profile import RecommendationItem
+    def test_variants_are_readable_and_actually_vary(self) -> None:
+        """★ 随机来源要**真的换说法**（用户原话：「自动也换一下文案」），且都干净可读。
+
+        ⚠️ 2026-09-22（D-074）之前这条叫「三种来源说三种话」—— 那时有 3 种来源
+        （review / graph / cold_start）各自一句固定话。现在 graph/cold_start 已不再产出，
+        变化性转移到了**随机来源自己**身上，所以判据换成「换种子要能换出多种说法」。
+        """
+        from app.routes.profile import _OPENING_VARIANTS, RecommendationItem
 
         real = [RecommendationItem(kp_id="prog-loop-jr", name="循环")]
-        texts = {
-            source: _opening_text(source, real)  # type: ignore[arg-type]
-            for source in ("review", "graph", "cold_start")
-        }
-        for source, text in texts.items():
-            self.assertTrue(text, f"{source} 必须给出开场语")
-            for bad in FORBIDDEN_SUBSTRINGS:
-                self.assertNotIn(bad, text, f"{source} 的开场语里出现内部字段痕迹：{bad}")
-            for word in FORBIDDEN_WORDS:
-                self.assertNotIn(word, text, f"{source} 的开场语里出现技术词：{word}")
+        review_text = _opening_text("review", real, _rng())
+        variants = {_opening_text("random", real, _rng(f"seed-{i}")) for i in range(32)}
 
-        # ★ 三种来源必须**说三句不同的话**：否则「针对性引导」退化成一句万能招呼
-        self.assertEqual(len(set(texts.values())), 3, f"三种来源的说法重复了：{texts}")
+        for text in {review_text, *variants}:
+            self.assertTrue(text)
+            for bad in FORBIDDEN_SUBSTRINGS:
+                self.assertNotIn(bad, text, f"开场语里出现内部字段痕迹：{bad}")
+            for word in FORBIDDEN_WORDS:
+                self.assertNotIn(word, text, f"开场语里出现技术词：{word}")
+        # 每条变体都要点到那个知识点（动作按钮的目标必须出现在文案里）
+        for text in variants:
+            self.assertIn("循环", text)
+        self.assertNotIn(review_text, variants, "重练与随机来源必须说不同的话")
+        self.assertGreaterEqual(
+            len(variants),
+            min(3, len(_OPENING_VARIANTS)),
+            f"32 个种子只换出 {len(variants)} 种说法：{variants}",
+        )
 
     def test_text_names_exactly_the_item_the_action_button_targets(self) -> None:
         """★★ 开场语里**只能出现第一个知识点** —— 动作按钮只去得了那一个。
@@ -143,17 +163,17 @@ class TestOpeningTextIsHonest(unittest.TestCase):
             RecommendationItem(kp_id="ai-definition-pl", name="人工智能的定义"),
             RecommendationItem(kp_id="computing-power-pl", name="算力"),
         ]
-        text = _opening_text("cold_start", items)  # type: ignore[arg-type]
+        text = _opening_text("random", items, _rng())
         self.assertIn("人工智能的定义", text)
         # ★ 第二个知识点**一个字节都不许出现**（它没有对应的动作）
         self.assertNotIn("算力", text)
         self.assertNotIn(items[1].kp_id, text)
 
-    def test_falls_back_to_kp_id_when_the_graph_has_no_chinese_name(self) -> None:
-        """图里查不到中文名时退化成 kp_id —— 不空、不抛（宁可说个代号也不留白）。"""
+    def test_falls_back_to_kp_id_when_the_library_has_no_chinese_name(self) -> None:
+        """库里查不到中文名时退化成 kp_id —— 不空、不抛（宁可说个代号也不留白）。"""
         from app.routes.profile import RecommendationItem
 
-        text = _opening_text("cold_start", [RecommendationItem(kp_id="mystery-kp", name="")])  # type: ignore[arg-type]
+        text = _opening_text("random", [RecommendationItem(kp_id="mystery-kp", name="")], _rng())
         self.assertIn("mystery-kp", text)
 
 
@@ -167,25 +187,38 @@ class TestOpeningOverHttp(OpeningCase):
             self.skipTest(f"缺少真实知识库 {REAL_KB}，无法断言「开场语来自依赖图推荐」")
 
     def test_brand_new_student_gets_an_opening(self) -> None:
-        """★ 全新学生：有开场语、指向冷启动入口、与推荐接口第一位一致。"""
+        """★ 全新学生：有开场语、有可去的知识点，且**文案里的名字与 kpId 是同一个**。
+
+        ⚠️ D-074 之后这里**不再**断言「开场指向的 kp == 推荐接口第一位」：
+           开场是「随机给你一个」的欢迎语，侧栏那条「建议接着练」是另一路随机，
+           两者不必是同一个知识点（这条口径写进了 decisions.md 的 D-074）。
+           真正必须成立的仍然是**同一份载荷内部的自洽**：
+           `kpName` 出现在 `text` 里、`kpId` 就是那个 `kpName` 对应的知识点 ——
+           否则按钮点下去会落到另一个知识点上（这正是这条用例要防的缺陷）。
+        """
         student = "student_opening_fresh"
-        response = self.opening(student)
+        response = self.opening(student, seed="sess-fresh")
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
 
-        self.assertEqual(body["source"], "cold_start")
-        self.assertTrue(body["text"], "冷启动必须有开场语（这是「AI 先开口」的第一屏）")
+        self.assertEqual(body["source"], "random")
+        self.assertTrue(body["text"], "全新学生必须有开场语（这是「AI 先开口」的第一屏）")
         self.assertTrue(body["kpId"], "接受引导要有可去的地方")
+        self.assertTrue(body["kpName"], "动作按钮要点名那个知识点，名字必须一并给出")
+        self.assertIn(body["kpName"], body["text"], "文案里必须出现按钮指向的那个知识点")
+
+        # 那个 kpId 在知识库里确实叫这个名字（不是在文案里现编的）
+        from app.routes.profile import _load_kb_connection  # noqa: PLC0415
 
         items = self.recommendation(student)["items"]
-        self.assertTrue(items)
+        names = {item["kpId"]: item["name"] for item in items}
+        if body["kpId"] in names:
+            self.assertEqual(names[body["kpId"]], body["kpName"])
+        # ★ 侧栏「建议接着练」与开场卡**各自随机**，但都不许推出他已经会的：
+        #   两次调用的知识点集合各自唯一（去重由服务端保证）
         self.assertEqual(
-            body["kpId"],
-            items[0]["kpId"],
-            "★ 开场指向的知识点必须与推荐接口的第一位一致（否则界面两处自相矛盾）",
+            len({item["kpId"] for item in items}), len(items), "推荐项不许重复"
         )
-        # ★ 中文名必须来自图（裸 kp_id 说明拼接绕过了推荐接口）
-        self.assertIn(items[0]["name"], body["text"])
 
     def test_kp_id_absent_when_there_is_no_opening(self) -> None:
         """★ 没有开场语时**不许**给 kp_id：否则界面会渲染一个「去吧」按钮却没有目标。"""
@@ -208,17 +241,23 @@ class TestOpeningOverHttp(OpeningCase):
         self.assertEqual(response.status_code, 200, response.text)
         # 契约字段一个都不能少（前端按它们决定发不发）
         self.assertEqual(
-            sorted(response.json().keys()), ["kpId", "source", "text"], response.text
+            sorted(response.json().keys()), ["kpId", "kpName", "source", "text"], response.text
         )
 
     def test_opening_does_not_claim_learning_history_without_evidence(self) -> None:
         """★ 全新学生的开场语里**不许**出现「上次 / 再练」这类编造的历史。"""
         student = "student_opening_nohistory"
-        body = self.opening(student).json()
-        self.assertEqual(body["source"], "cold_start")
+        body = self.opening(student, seed="sess-nohistory").json()
+        self.assertEqual(body["source"], "random")
         for phrase in ("上次", "再练", "刚才卡住"):
             self.assertNotIn(
-                phrase, body["text"], "冷启动没有学习历史，说「上次」就是编造"
+                phrase, body["text"], "全新学生没有学习历史，说「上次」就是编造"
+            )
+        # ★★ D-074：也不许声称「路线 / 前置 / 解锁」——用户明确要求去掉这套主张
+        #    （原话：「你别设计成死按着内置教材和知识点的路线去走」「解锁也去掉吧」）
+        for phrase in ("路线", "前置", "解锁", "起点"):
+            self.assertNotIn(
+                phrase, body["text"], f"开场语不该再提「{phrase}」（D-074 已去掉路线主张）"
             )
 
     def test_low_mastery_student_gets_a_review_opening(self) -> None:
@@ -238,16 +277,27 @@ class TestOpeningOverHttp(OpeningCase):
         self.assertIn("练熟", body["text"], f"重练场景该说回炉，实际：{body['text']}")
         self.assertNotIn("起点", body["text"], "重练场景不该说「这是起点」（那是冷启动的说法）")
 
-    def test_opening_is_stable_across_calls(self) -> None:
-        """★ 同一状态下连问两次，开场语**逐字相同**。
+    def test_opening_is_seeded_by_the_session(self) -> None:
+        """★★ 同一条会话（同 seed）逐字相同；换一条会话就换一个知识点 / 一套说法。
 
-        界面会在「新建会话」时调一次；如果同一个学生每次开新会话都拿到不同的一句话，
-        学生会以为系统在随机说话 —— 而推荐本身在数据不变时是确定的，开场语也必须确定。
+        为什么必须按 seed 稳定：开场语会被**写进会话文件**（`appendOpeningMessage`），
+        而「切换会话再切回来」会重新读一次 —— 若两次结果不同，屏幕上的那句与历史里的
+        那句就对不上（D-072 修的就是这类不一致）。
+        为什么必须能变：用户原话「每次启动给他随机换一个知识点，自动也换一下文案」。
         """
         student = "student_opening_stable"
-        first = self.opening(student).json()
-        second = self.opening(student).json()
-        self.assertEqual(first, second)
+        a1 = self.opening(student, seed="sess-A").json()
+        a2 = self.opening(student, seed="sess-A").json()
+        self.assertEqual(a1, a2, "同一条会话必须逐字相同（否则与写进会话的那句对不上）")
+
+        seen = {(a1["kpId"], a1["text"])}
+        for seed in ("sess-B", "sess-C", "sess-D", "sess-E"):
+            seen.add((self.opening(student, seed=seed).json()["kpId"], self.opening(student, seed=seed).json()["text"]))
+        self.assertGreater(
+            len(seen), 1, f"换 5 个种子拿到的都是同一句：{seen}（那就不叫「随机换一个」了）"
+        )
+        # 不传 seed 时也必须有开场（其他调用方——比如手工 curl——不该拿到空串）
+        self.assertTrue(self.opening(student).json()["text"])
 
     def test_student_id_is_validated(self) -> None:
         """非法学生 id 当场 422（它会拼进文件系统路径，见 `assertStudentId` 那一族）。"""
@@ -267,8 +317,8 @@ class TestOpeningContract(unittest.TestCase):
         self.assertEqual(body["source"], "empty")
 
     def test_camel_case_aliases_are_what_the_frontend_reads(self) -> None:
-        body = OpeningGuidance(text="x", kp_id="k", source="graph").model_dump(by_alias=True)
-        self.assertEqual(sorted(body.keys()), ["kpId", "source", "text"])
+        body = OpeningGuidance(text="x", kp_id="k", kp_name="循环", source="random").model_dump(by_alias=True)
+        self.assertEqual(sorted(body.keys()), ["kpId", "kpName", "source", "text"])
         # snake_case 也能读（populate_by_name）—— 路由内部构造时用的是它
         self.assertEqual(OpeningGuidance(kpId="k").kp_id, "k")
 

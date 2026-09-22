@@ -623,6 +623,14 @@ export type SessionStateResult =
       opening: string
       /** 开场引导指向的知识点（供「好啊，就从这里开始」这个动作定位；空串 = 没有动作）。 */
       openingKpId: string
+      /**
+       * ★ 那个知识点的**中文名**（D-074；空串 = 名字拿不到，前端退回旧行为）。
+       *
+       * 动作按钮要拼「我想学「X」」，而 X 必须是**学生看到的那句开场白里出现的名字**。
+       * 此前前端是从 `/recommendation` 按 kpId 反查的 —— 推荐改成随机之后两者不再同源，
+       * 反查会落空（表现是「点了按钮没反应」）。所以名字跟着开场白一起走。
+       */
+      openingKpName: string
     }
   | { ok: false; message: string }
 

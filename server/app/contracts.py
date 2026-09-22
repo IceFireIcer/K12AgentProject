@@ -637,10 +637,11 @@ class ChapterStateOut(CamelModel):
 #: | 取值 | 含义 |
 #: | --- | --- |
 #: | ``review`` | 优先重练（掌握度不足且练过） |
-#: | ``graph`` | 依赖图后继（掌握某知识点后往前推） |
-#: | ``cold_start`` | 全新学生：给图里的入口知识点 |
+#: | ``graph`` | *历史值*： 依赖图后继（掌握某知识点后往前推） |
+#: | ``random`` | 从「本学段、还没学过」里随机挑（D-074 起的主要来源） |
+#: | ``cold_start`` | *历史值*：图里的入口知识点（D-074 起不再产出） |
 #: | ``empty`` | 推不出内容（知识库不可用 / 已全部掌握）—— **不发开场**，不是错误 |
-RecommendationSource = Literal["review", "graph", "cold_start", "empty"]
+RecommendationSource = Literal["review", "random", "graph", "cold_start", "empty"]
 
 
 class OpeningGuidance(CamelModel):
@@ -667,6 +668,13 @@ class OpeningGuidance(CamelModel):
     text: str = ""
     #: 学生接受引导时要定位的知识点；``None`` = 没有可去的地方（前端**不要**渲染动作按钮）。
     kp_id: str | None = None
+    #: 那个知识点的**中文名**（与 `kp_id` 配对，前端拼「我想学「X」」时用它）。
+    #:
+    #: ★ 为什么必须由服务端给（D-074）：动作按钮要点名一个知识点，而名字此前是前端从
+    #:   `/recommendation` 里按 kp_id 反查的 —— 推荐改成**随机**之后两者不再同源，
+    #:   反查会落空（表现是「点了按钮没反应」）。名字与 kp_id 取自同一个 item 就不会错位。
+    #: ⚠️ 库里没有中文名时不填（**绝不把 kp slug 推给界面**）。
+    kp_name: str | None = None
     #: 与 ``RecommendationResponse.source`` 同口径（同一个 :data:`RecommendationSource`）。
     source: "RecommendationSource" = "empty"
 

@@ -2443,12 +2443,14 @@ export interface components {
         OpeningGuidance: {
             /** Kpid */
             kpId?: string | null;
+            /** Kpname */
+            kpName?: string | null;
             /**
              * Source
              * @default empty
              * @enum {string}
              */
-            source: "review" | "graph" | "cold_start" | "empty";
+            source: "review" | "random" | "graph" | "cold_start" | "empty";
             /**
              * Text
              * @default
@@ -2787,9 +2789,10 @@ export interface components {
          *     | source | 含义 |
          *     | --- | --- |
          *     | ``review`` | 优先重练（掌握度不足且练过） |
-         *     | ``graph`` | 依赖图后继（掌握某知识点后往前推） |
-         *     | ``cold_start`` | 全新学生：给图里的入口知识点 |
-         *     | ``empty`` | 依赖图不可用且无任何学习记录（前端按空态展示，**不是错误**） |
+         *     | ``random`` | 从「本学段、还没学过」的知识点里**随机**挑（D-074 起的主要来源） |
+         *     | ``graph`` | *历史值*：依赖图后继 —— **D-074 起不再产出**（保留取值以免旧客户端/旧测试炸） |
+         *     | ``cold_start`` | *历史值*：图里的入口知识点 —— **D-074 起不再产出**（同上） |
+         *     | ``empty`` | 知识库不可用且无任何学习记录（前端按空态展示，**不是错误**） |
          */
         RecommendationResponse: {
             /** Items */
@@ -2798,7 +2801,7 @@ export interface components {
              * Source
              * @enum {string}
              */
-            source: "review" | "graph" | "cold_start" | "empty";
+            source: "review" | "random" | "graph" | "cold_start" | "empty";
             /** Studentid */
             studentId: string;
             /**
@@ -2811,7 +2814,7 @@ export interface components {
          * RecommendationSource
          * @enum {string}
          */
-        RecommendationSource: "review" | "graph" | "cold_start" | "empty";
+        RecommendationSource: "review" | "random" | "graph" | "cold_start" | "empty";
         /**
          * RegisterVariantsRequest
          * @description ``POST /api/quiz/variants`` 的请求体：把 LLM 生成的题登记到该学生的库里。
@@ -3594,6 +3597,8 @@ export interface operations {
             query?: {
                 /** @description 覆盖学段（默认用画像里的当前学段） */
                 grade_level?: string | null;
+                /** @description 随机种子：同一条会话传同一个值 → 同一句开场白（同知识点、同说法）；不传则每次随机。前端传的是**会话 id**。 */
+                seed?: string | null;
             };
             header?: never;
             path: {

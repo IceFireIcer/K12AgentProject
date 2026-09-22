@@ -190,6 +190,12 @@ export const useChatStore = defineStore('chat', () => {
   const opening = ref('')
   /** 开场引导指向的知识点（空串 = 没有可去的地方，界面**不渲染**动作按钮）。 */
   const openingKpId = ref('')
+  /**
+   * 那个知识点的中文名（空串 = 拿不到）。
+   * ★ D-074：动作按钮的预填文案用它，**不再**去 `/recommendation` 里按 id 反查 ——
+   *   推荐改成随机之后两处不再同源，反查会落空（表现是「点了按钮没反应」）。
+   */
+  const openingKpName = ref('')
 
   /** 学生已经回应过开场引导（点过动作、或直接开口说话）→ 不再显示它。 */
   const openingDismissed = ref(false)
@@ -470,6 +476,7 @@ export const useChatStore = defineStore('chat', () => {
       }
       opening.value = result.opening
       openingKpId.value = result.openingKpId
+      openingKpName.value = result.openingKpName
       openingDismissed.value = false
     } catch {
       /* 拉取失败不影响推送路径（学生仍能正常开新对话） */
@@ -587,6 +594,7 @@ export const useChatStore = defineStore('chat', () => {
           }>
           opening: string
           openingKpId: string
+          openingKpName: string
         }
       | { ok: false; message: string }
     >
@@ -633,6 +641,7 @@ export const useChatStore = defineStore('chat', () => {
     }>
     opening: string
     openingKpId: string
+    openingKpName: string
   }): void {
     currentSessionId.value = result.current.sessionId
     currentSessionTitle.value = result.current.title
@@ -654,6 +663,7 @@ export const useChatStore = defineStore('chat', () => {
     //   「我们从X开始吧」插在他自己聊过的内容前面，那是明显的错位）。
     opening.value = result.opening
     openingKpId.value = result.openingKpId
+    openingKpName.value = result.openingKpName
     openingDismissed.value = false
     // ★ 清掉超前缓冲：那些条目 id 属于**上一条会话** —— 留着它们会在新会话里
     //   命中同一个 requestId（理论上不会，但那是一个不该存在的巧合依赖）。
@@ -687,6 +697,7 @@ export const useChatStore = defineStore('chat', () => {
     //   而它说的那个知识点可能已经不是现在这条会话要学的了。
     opening.value = ''
     openingKpId.value = ''
+    openingKpName.value = ''
     openingDismissed.value = false
     // ★ 清掉「显示 → wire」映射（与 `applySwitchResult` 同一条纪律：它是本地翻译表，
     //   属于这段对话；留着会让同一句显示文本被翻译成上一段对话的 wire 文本）。
@@ -1147,6 +1158,8 @@ export const useChatStore = defineStore('chat', () => {
     opening,
     /** 引导指向的知识点（空串 = 界面不渲染动作按钮）。 */
     openingKpId,
+    /** 那个知识点的中文名（动作按钮的预填文案用它；D-074）。 */
+    openingKpName,
     /** 该不该显示它（有内容且学生还没回应过）。 */
     showOpening,
     /** 学生接受了引导（收起它；真正的提问由组件发起）。 */

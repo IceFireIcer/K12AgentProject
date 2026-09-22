@@ -2320,10 +2320,22 @@
             ],
             "title": "Kpid"
           },
+          "kpName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kpname"
+          },
           "source": {
             "default": "empty",
             "enum": [
               "review",
+              "random",
               "graph",
               "cold_start",
               "empty"
@@ -2866,7 +2878,7 @@
       },
       "RecommendationResponse": {
         "additionalProperties": false,
-        "description": "``GET /api/profile/{student_id}/recommendation`` 的响应（票 20）。\n\n``source`` 说明这一批推荐是怎么来的 —— 前端据此决定提示语，\n也是验收时「冷启动 / 依赖图 / 待重练」三种形态的**可断言标志**：\n\n| source | 含义 |\n| --- | --- |\n| ``review`` | 优先重练（掌握度不足且练过） |\n| ``graph`` | 依赖图后继（掌握某知识点后往前推） |\n| ``cold_start`` | 全新学生：给图里的入口知识点 |\n| ``empty`` | 依赖图不可用且无任何学习记录（前端按空态展示，**不是错误**） |",
+        "description": "``GET /api/profile/{student_id}/recommendation`` 的响应（票 20）。\n\n``source`` 说明这一批推荐是怎么来的 —— 前端据此决定提示语，\n也是验收时「冷启动 / 依赖图 / 待重练」三种形态的**可断言标志**：\n\n| source | 含义 |\n| --- | --- |\n| ``review`` | 优先重练（掌握度不足且练过） |\n| ``random`` | 从「本学段、还没学过」的知识点里**随机**挑（D-074 起的主要来源） |\n| ``graph`` | *历史值*：依赖图后继 —— **D-074 起不再产出**（保留取值以免旧客户端/旧测试炸） |\n| ``cold_start`` | *历史值*：图里的入口知识点 —— **D-074 起不再产出**（同上） |\n| ``empty`` | 知识库不可用且无任何学习记录（前端按空态展示，**不是错误**） |",
         "properties": {
           "items": {
             "items": {
@@ -2878,6 +2890,7 @@
           "source": {
             "enum": [
               "review",
+              "random",
               "graph",
               "cold_start",
               "empty"
@@ -2905,6 +2918,7 @@
       "RecommendationSource": {
         "enum": [
           "review",
+          "random",
           "graph",
           "cold_start",
           "empty"
@@ -4233,6 +4247,24 @@
               ],
               "description": "覆盖学段（默认用画像里的当前学段）",
               "title": "Grade Level"
+            }
+          },
+          {
+            "description": "随机种子：同一条会话传同一个值 → 同一句开场白（同知识点、同说法）；不传则每次随机。前端传的是**会话 id**。",
+            "in": "query",
+            "name": "seed",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "随机种子：同一条会话传同一个值 → 同一句开场白（同知识点、同说法）；不传则每次随机。前端传的是**会话 id**。",
+              "title": "Seed"
             }
           }
         ],

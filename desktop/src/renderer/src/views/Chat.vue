@@ -462,8 +462,11 @@ async function onBranch(entryId: string): Promise<void> {
  *   两处各解析一次就会出现「引导说 X、提问里写 Y」这种不一致。
  */
 function acceptOpening(): void {
-  const kpId = chat.openingKpId
-  const name = insight.recommended?.kpId === kpId ? recommendedName.value : null
+  // ★★ 名字直接用**开场白载荷里带的那个**（D-074）。
+  //   此前是「拿 kpId 去 /recommendation 里反查」—— 推荐改成随机之后两者不再同源，
+  //   反查必然落空，于是按钮点下去只会把光标放进输入框（看起来像没反应）。
+  //   现在名字与 kpId 来自同一份载荷，卡片上写的那句与按钮指向的必然是同一个知识点。
+  const name = chat.openingKpName
   chat.acceptOpening()
   if (name) fillComposer(`我想学「${name}」，请先讲一下它是什么。`)
   else composerRef.value?.focus?.()

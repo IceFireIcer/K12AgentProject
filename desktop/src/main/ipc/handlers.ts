@@ -1132,7 +1132,8 @@ function registerSessionHandlers(): void {
       messages: prelude.messages,
       started: prelude.started,
       opening: prelude.opening,
-      openingKpId: prelude.openingKpId
+      openingKpId: prelude.openingKpId,
+      openingKpName: prelude.openingKpName
     }
   })
 
@@ -1355,7 +1356,8 @@ async function swapToSession(target: SessionTarget): Promise<SessionOpenResult> 
     messages: prelude.messages,
     started: prelude.started,
     opening: prelude.opening,
-    openingKpId: prelude.openingKpId
+    openingKpId: prelude.openingKpId,
+    openingKpName: prelude.openingKpName
   }
 }
 
@@ -1365,6 +1367,15 @@ interface SessionPrelude {
   messages: Array<{ role: 'user' | 'assistant'; text: string; at: number; entryId: string }>
   opening: string
   openingKpId: string
+  /**
+   * ★ 开场指向的知识点的**中文名**（D-074）。
+   *
+   * 为什么服务端要一并给：动作按钮要拼「我想学「X」」，而此前前端是从
+   * `/recommendation` 里按 kp_id 反查名字的 —— 推荐改成**随机**之后两者不再同源，
+   * 反查会落空（表现是「点了按钮没反应」）。名字与 kpId 取自同一份载荷就不会错位。
+   * 空串 = 名字拿不到（前端退回旧行为，**绝不把 kp slug 印给学生**）。
+   */
+  openingKpName: string
 }
 
 /**
@@ -1392,23 +1403,38 @@ interface SessionPrelude {
  */
 async function resolveSessionPrelude(instance: ChatRuntime): Promise<SessionPrelude> {
   if (instance.hasUserTurn) {
-    return { started: true, messages: [...instance.restoredMessages], opening: '', openingKpId: '' }
+    return {
+      started: true,
+      messages: [...instance.restoredMessages],
+      opening: '',
+      openingKpId: '',
+      openingKpName: ''
+    }
   }
   const stored = storedOpeningText(instance.restoredMessages)
   if (!stored) {
-    const fetched = await fetchOpening()
+    const fetched = await fetchOpening(instance.sessionId)
     if (fetched.text) {
       // ★ 写进 Pi 会话（否则重启后这句开场消失）：内容与屏幕上显示的那一条**同一份文本**。
       instance.appendOpeningMessage(fetched.text)
     }
-    return { started: false, messages: [], opening: fetched.text, openingKpId: fetched.kpId }
+    return {
+      started: false,
+      messages: [],
+      opening: fetched.text,
+      openingKpId: fetched.kpId,
+      openingKpName: fetched.kpName
+    }
   }
-  const fetched = await fetchOpening()
+  const fetched = await fetchOpening(instance.sessionId)
   return {
     started: false,
     messages: [],
     opening: stored,
-    openingKpId: fetched.text === stored ? fetched.kpId : ''
+    // ★★ 名字与 id 必须**同进同退**：文本对不上时两个都不给（否则卡片上写 A、
+    //    按钮却指向 B —— D-072 那条纪律在这里同样适用）。
+    openingKpId: fetched.text === stored ? fetched.kpId : '',
+    openingKpName: fetched.text === stored ? fetched.kpName : ''
   }
 }
 
@@ -1434,15 +1460,19 @@ function storedOpeningText(messages: readonly TranscriptMessage[]): string {
  * ★ kpId 只在**同时有开场语**时才有意义（服务端已保证，这里再核对一次：
  *   「有话可说但没有可去的地方」与「有地方可去但无话可说」都不该渲染动作按钮）。
  */
-async function fetchOpening(): Promise<{ text: string; kpId: string }> {
-  const result = await dataRequests.opening(resolveActiveStudentId())
-  if (!result.ok) return { text: '', kpId: '' }
-  const data = result.data as { text?: unknown; kpId?: unknown } | null
-  if (!data || typeof data !== 'object') return { text: '', kpId: '' }
+async function fetchOpening(seed: string): Promise<{ text: string; kpId: string; kpName: string }> {
+  const empty = { text: '', kpId: '', kpName: '' }
+  // ★ seed = 会话 id（D-074）：开场白是随机的，同一个 seed 才会拿到同一句 ——
+  //   否则「切走再切回」时现取的那句与文件里那句对不上，动作按钮会被（正确地）撤掉。
+  const result = await dataRequests.opening(resolveActiveStudentId(), seed)
+  if (!result.ok) return empty
+  const data = result.data as { text?: unknown; kpId?: unknown; kpName?: unknown } | null
+  if (!data || typeof data !== 'object') return empty
   const text = typeof data.text === 'string' ? data.text.trim() : ''
-  if (!text) return { text: '', kpId: '' }
+  if (!text) return empty
   const kpId = typeof data.kpId === 'string' ? data.kpId.trim() : ''
-  return { text, kpId }
+  const kpName = typeof data.kpName === 'string' ? data.kpName.trim() : ''
+  return { text, kpId, kpName }
 }
 
 /**

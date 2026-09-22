@@ -153,7 +153,9 @@ class TestColdStart(PersonalizationCase):
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         self.assertEqual(body["studentId"], "student_fresh_20")
-        self.assertEqual(body["source"], "cold_start")
+        # ★ D-074：冷启动不再走「图里的入口知识点」，来源是 `random`
+        #   （从本学段、还没学过的里随机挑）
+        self.assertEqual(body["source"], "random")
         self.assertGreater(len(body["items"]), 0, "冷启动必须给出推荐（不是空屏）")
         self.assertLessEqual(len(body["items"]), RECOMMEND_LIMIT)
         for item in body["items"]:
@@ -181,132 +183,190 @@ class TestColdStart(PersonalizationCase):
         self.assertEqual(body["items"], [])
         self.assertTrue(body["summary"], "没有推荐也要说清原因，不能留白")
 
-    def test_cold_start_items_match_the_student_grade(self) -> None:
-        """冷启动推荐要贴合学段（初中生不该被推小学的入口当作唯一选项）。"""
+    def test_suggestions_match_the_student_grade(self) -> None:
+        """★ 推荐要贴合学段 —— **随机不等于乱推**（学段隔离是硬边界）。
+
+        D-074 之后推荐是随机的，但随机范围被限死在**本学段**：
+        推一个他那个学段检索不到的知识点，等于给一个点不开的入口。
+        """
         if not self.has_kb:
-            self.skipTest("需要真实依赖图")
-        for grade in ("primary_low", "junior", "senior"):
-            self.set_student(f"student_cold_{grade}")
-            body = self.recommend(gradeLevel=grade).json()
-            self.assertGreater(len(body["items"]), 0, f"{grade} 的冷启动应有推荐")
-            grades = {item.get("gradeLevel") for item in body["items"]}
-            self.assertNotEqual(
-                grades,
-                {None},
-                f"{grade}：推荐条目应带学段（图里查得到）",
-            )
+            self.skipTest("需要真实知识库")
+        from app.store import kb as kb_repo  # noqa: PLC0415
+        from app.store.connections import connect  # noqa: PLC0415
+        from app.rag.retriever import default_kb_path  # noqa: PLC0415
+
+        conn = connect(default_kb_path(self.tmp), readonly=True)
+        try:
+            for grade in ("primary_low", "junior", "senior"):
+                self.set_student(f"student_cold_{grade}")
+                body = self.recommend(gradeLevel=grade).json()
+                self.assertGreater(len(body["items"]), 0, f"{grade} 应有推荐")
+                allowed = set(kb_repo.kp_ids_by_grade(conn, grade))
+                for item in body["items"]:
+                    self.assertIn(
+                        item["kpId"],
+                        allowed,
+                        f"{grade}：推荐了不属于本学段的知识点 {item['kpId']}（隔离被绕开）",
+                    )
+                    self.assertEqual(
+                        item.get("gradeLevel"), grade, "条目上的学段要与筛选口径一致"
+                    )
+        finally:
+            conn.close()
 
 
 # --------------------------------------------------------------------------- #
 # 2. ★ 依赖图驱动的推荐
 # --------------------------------------------------------------------------- #
 @unittest.skipUnless(REAL_KB.exists(), f"缺少真实知识库 {REAL_KB}（先跑 scripts/build_kb.py）")
-class TestGraphDrivenRecommendation(PersonalizationCase):
-    """掌握「人工智能的定义（小学低年级）」→ 推荐它的后继「人工智能的定义（小学高年级）」。
+class TestRandomSuggestion(PersonalizationCase):
+    """★★ D-074：推荐不再沿依赖图走 —— 从「本学段、还没学过」里**随机**挑。
 
-    这一对来自新教材（K12KnowledgeBase）里**同一概念跨学段的链**：
-    ``ai-definition-pl → ai-definition-ph → ai-definition-jr → ai-definition-sr``
-    —— 概念内四学段成链、链上相邻两级是 ``prerequisite`` 边，正是「沿链推荐」的样本。
+    这一段替换的是旧的 `TestGraphDrivenRecommendation`（断言「掌握前置 → 推它的后继」）。
+    那条口径已被用户 2026-09-22 的裁决取代，原话：
+
+        「你别设计成死按着内置教材和知识点的路线去走，每次启动给他随机换一个知识点；
+          知识点什么解锁也去掉吧，没必要非得了解一个才能了解另一个」
+
+    保留下来的不变量 + 新加的判据：
+      ① **不推已掌握的**（推了等于白说）—— 旧口径里最实质的那半，继续守；
+      ② **本学段**（见 `TestColdStart.test_suggestions_match_the_student_grade`）；
+      ③ **随机真的随机**：换种子能换出不同的知识点（否则「每次换一个」是句空话）；
+      ④ **同种子稳定**：同一批输入两次结果一致（侧栏不该每刷一次跳一个）。
     """
 
-    #: 链上的前置（也是整张依赖图的唯一根）
-    PREREQUISITE = "ai-definition-pl"
-    #: 它的直接后继（同一概念的下一个学段）
-    SUCCESSOR = "ai-definition-ph"
+    #: 一个**初中学段**的知识点（掌握它 → 它该从推荐里消失）
+    CHAIN_HEAD = "ai-definition-jr"
+    #: ★ 一个有**同学段前置**的知识点：`ai-definition-jr → ai-three-values-jr`（related 边）。
+    #:   它正是「解锁」那套主张的判据对象：去掉解锁之后，**没学过前置也能被抽到**。
+    GATED_KP = "ai-three-values-jr"
 
-    def test_mastering_prerequisite_recommends_its_successor(self) -> None:
-        """★ 执行文档 §8.6 用途一的直接断言（也是汇报要念的那一条）。"""
-        self.set_student("student_graph_chain")
-        self.master(self.PREREQUISITE, prefix="chain")
-
-        body = self.recommend(gradeLevel="junior").json()
-        self.assertEqual(body["source"], "graph", "掌握后应走依赖图后继这条路径")
-        ids = [item["kpId"] for item in body["items"]]
-        self.assertIn(
-            self.SUCCESSOR,
-            ids,
-            f"★ 掌握「人工智能的定义（小学低年级）」后应推荐依赖图里的后继"
-            f"「人工智能的定义（小学高年级）」，实际推荐：{ids}",
-        )
-        successor = next(item for item in body["items"] if item["kpId"] == self.SUCCESSOR)
-        self.assertTrue(successor["name"], "推荐条目应带上人类可读的名字（图里查得到）")
-        self.assertGreaterEqual(successor["depth"], 1, "后继的跳数至少是 1")
-
-    def test_recommendation_is_not_alphabetical_or_random(self) -> None:
-        """★ 推荐来自依赖图，**不是**按 id 字典序取下一个、也不是随机取。
-
-        两个方向合起来才有判别力（单看任一条会放过某些错误实现）：
-          - 还没掌握前置时，后继 `ai-definition-ph` **不该出现** —— 依赖图是有方向的
-            （冷启动给的是图里的入口，不会因为 ph 在字典序上紧挨着 pl 就把它带上）；
-          - 掌握前置之后，它**必须出现** —— 说明真的沿 `prerequisite` 边走了一步。
-        换成「把 kp 表按 id 排序取下一个未掌握项」第一条就会红；换成随机取第二条会红。
-        """
-        self.set_student("student_not_alpha")
+    def test_mastered_kp_is_not_suggested_back(self) -> None:
+        """★ 掌握之后它**不再出现**在推荐里（这条不变量与「走不走图」无关）。"""
+        self.set_student("student_random_mastered")
         before = [item["kpId"] for item in self.recommend(gradeLevel="junior").json()["items"]]
-        self.assertNotIn(
-            self.SUCCESSOR, before, "还没掌握前置时，后继不该被推荐出来（依赖图是有方向的）"
-        )
-        self.master(self.PREREQUISITE, prefix="alpha")
+        self.master(self.CHAIN_HEAD, prefix="rand-master")
+
         after = [item["kpId"] for item in self.recommend(gradeLevel="junior").json()["items"]]
-        self.assertIn(self.SUCCESSOR, after, "掌握前置后，后继应当出现在推荐里")
-
-    def test_mastering_two_links_walks_further_along_the_chain(self) -> None:
-        """★ 沿链继续往深走：掌握链上前两级后，推荐推进到第三级，且不回推已掌握的两级。
-
-        概念内四学段成链 ``ai-definition-pl → -ph → -jr → -sr``：
-          - 掌握 ``-pl`` → 推 ``-ph``（见上一条用例）；
-          - 再掌握 ``-ph`` → 推 ``-jr``：**链在往前走**，不是原地打转；
-          - 两个已掌握的 kp **一个都不许出现在推荐里** —— ``recommend_next`` 必须过滤已掌握项，
-            否则学生会被反复推回刚学会的内容（掌握前置 → 它的后继正是刚掌握的那个）。
-        """
-        self.set_student("student_graph_walk")
-        self.master(self.PREREQUISITE, prefix="walk-1")
-        middle = self.SUCCESSOR  # ai-definition-ph
-        self.master(middle, prefix="walk-2")
-
-        body = self.recommend(gradeLevel="junior").json()
-        self.assertEqual(body["source"], "graph")
-        ids = [item["kpId"] for item in body["items"]]
-        self.assertIn(
-            "ai-definition-jr", ids, f"掌握链上前两级后应推进到第三级，实际推荐：{ids}"
+        self.assertNotIn(
+            self.CHAIN_HEAD, after, "已掌握的知识点不该被推回来（那不叫「可以学」）"
         )
-        self.assertNotIn(self.PREREQUISITE, ids, "已掌握的第一级不该被推回来")
-        self.assertNotIn(middle, ids, "已掌握的第二级不该被推回来（它是第一级的后继）")
+        # 掌握前后都该有推荐（不是「掌握一个就空了」）
+        self.assertGreater(len(before), 0)
+        self.assertGreater(len(after), 0, "掌握一个知识点之后仍要有可学的")
 
-    def test_recommendation_never_exceeds_the_limit(self) -> None:
-        self.set_student("student_limit")
-        ids = [item["kpId"] for item in self.recommend(gradeLevel="junior").json()["items"]]
-        self.assertLessEqual(len(ids), RECOMMEND_LIMIT)
-        self.assertEqual(len(ids), len(set(ids)), "推荐不应有重复条目")
-        self.assertGreater(len(ids), 0, "冷启动也给得出推荐")
+    def test_no_prerequisite_gating(self) -> None:
+        """★★ 去掉「解锁」之后：**没学过前置也能被推到**。
 
+        旧口径下「掌握 A 才会推 A 的后继」，于是链上更靠后的知识点永远不会出现在
+        新学生的推荐里。现在的判据相反：把链上**第二级**（要先学第一级的那种）放进
+        候选池时，随机一批里就**应该**能抽到它 —— 学生想看就看得见。
+        """
+        from app.routes.profile import _learnable_kp_ids  # noqa: PLC0415
+        from app.store.connections import connect  # noqa: PLC0415
+        from app.rag.retriever import default_kb_path  # noqa: PLC0415
+        import random as _random  # noqa: PLC0415
 
-# --------------------------------------------------------------------------- #
-# 3. ★ 推荐随掌握度变化（可演示数据流）
-# --------------------------------------------------------------------------- #
-@unittest.skipUnless(REAL_KB.exists(), f"缺少真实知识库 {REAL_KB}（先跑 scripts/build_kb.py）")
+        self.set_student("student_no_gating")
+        conn = connect(default_kb_path(self.tmp), readonly=True)
+        try:
+            seen: set[str] = set()
+            for i in range(40):
+                seen.update(
+                    _learnable_kp_ids(
+                        conn,
+                        grade_level="junior",
+                        exclude=(),
+                        limit=6,
+                        rng=_random.Random(f"pool-{i}"),
+                    )
+                )
+            self.assertIn(
+                self.GATED_KP,
+                seen,
+                "有前置的知识点必须能出现在候选里 —— 否则等于还在「解锁」",
+            )
+        finally:
+            conn.close()
+
+    def test_pool_is_seeded_and_stable(self) -> None:
+        """★ 同种子同结果、换种子换顺序（「随机」必须是真的，且必须可复现）。"""
+        from app.routes.profile import _learnable_kp_ids  # noqa: PLC0415
+        from app.store.connections import connect  # noqa: PLC0415
+        from app.rag.retriever import default_kb_path  # noqa: PLC0415
+        import random as _random  # noqa: PLC0415
+
+        conn = connect(default_kb_path(self.tmp), readonly=True)
+        try:
+            def pick(seed: str) -> list[str]:
+                return _learnable_kp_ids(
+                    conn,
+                    grade_level="junior",
+                    exclude=(),
+                    limit=RECOMMEND_LIMIT,
+                    rng=_random.Random(seed),
+                )
+
+            self.assertEqual(pick("same"), pick("same"), "同种子必须逐项相同（可复现）")
+            # 换 6 个种子：至少出现两批不同的（4 条一组的组合极难完全撞上）
+            batches = {tuple(pick(f"seed-{i}")) for i in range(6)}
+            self.assertGreater(len(batches), 1, "换种子拿到的还是同一批 —— 随机没生效")
+        finally:
+            conn.close()
+
+    def test_exclude_removes_mastered_from_the_pool(self) -> None:
+        """★ `exclude`（已掌握 + 本次已选）必须真的把那些知识点从池子里去掉。"""
+        from app.routes.profile import _learnable_kp_ids  # noqa: PLC0415
+        from app.store.connections import connect  # noqa: PLC0415
+        from app.rag.retriever import default_kb_path  # noqa: PLC0415
+        from app.store import kb as kb_repo  # noqa: PLC0415
+        import random as _random  # noqa: PLC0415
+
+        conn = connect(default_kb_path(self.tmp), readonly=True)
+        try:
+            pool = kb_repo.kp_ids_by_grade(conn, "junior")
+            blocked = set(pool[:5])
+            picked = _learnable_kp_ids(
+                conn,
+                grade_level="junior",
+                exclude=blocked,
+                limit=len(pool),
+                rng=_random.Random("exclude-check"),
+            )
+            self.assertTrue(picked, "池子里不该一个都不剩")
+            self.assertEqual(
+                blocked & set(picked), set(), f"被 exclude 的知识点仍被推出：{blocked & set(picked)}"
+            )
+            self.assertEqual(len(picked), len(set(picked)), "同一次调用里不许重复")
+        finally:
+            conn.close()
+
 class TestRecommendationTracksMastery(PersonalizationCase):
     def test_wrong_answers_move_the_topic_to_the_front(self) -> None:
         """★ 票 20 的核心演示：「连续答错某知识点 → 下一轮更可能再考它」。
 
         步骤（可照念）：
-          ① 新学生 → 推荐是冷启动入口；
-          ② 在 A 上答对几道（掌握 A）→ 推荐换成 A 的后继（依赖图驱动）；
-          ③ 在后继上**连续答错** → 它的掌握度掉到 0 且低于重练线 →
-             推荐的第一位变成它（`source` 从 `graph` 变成 `review`）。
+          ① 新学生 → 推荐是随机挑的「还没学过」的知识点；
+          ② 在 A 上答对几道（掌握 A）→ A **从推荐里消失**（不再推已会的）；
+          ③ 在另一个知识点上**连续答错** → 它的掌握度掉到低于重练线 →
+             推荐的第一位变成它（`source` 从 `random` 变成 `review`）。
         """
         self.set_student("student_demo_flow")
-        # ① 冷启动
+        # ① 冷启动（D-074：不再有「图里的入口」这回事，来源是 random）
         first = self.recommend(gradeLevel="junior").json()
-        self.assertEqual(first["source"], "cold_start")
+        self.assertEqual(first["source"], "random")
 
-        # ② 掌握「人工智能的定义（小学低年级）」→ 推荐后继（同一概念的下一个学段）
+        # ② 掌握一个知识点 → 它不再被推（随机池里被 exclude 掉）
         self.master("ai-definition-pl", prefix="demo-var")
         second = self.recommend(gradeLevel="junior").json()
-        self.assertEqual(second["source"], "graph")
-        self.assertIn("ai-definition-ph", [item["kpId"] for item in second["items"]])
+        self.assertEqual(second["source"], "random")
+        self.assertNotIn(
+            "ai-definition-pl",
+            [item["kpId"] for item in second["items"]],
+            "★ 已掌握的不该再被推荐（旧口径这里断言的是「换成它的后继」）",
+        )
 
-        # ③ 在后继上连续答错 → 推荐第一位变成它（重练）
+        # ③ 在另一个知识点上连续答错 → 推荐第一位变成它（重练）
         bad = self.register([_variant("demo-loop-1", "ai-definition-ph")])
         for _ in range(3):
             self.answer(bad[0], "", correct=False)

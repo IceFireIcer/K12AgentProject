@@ -42,6 +42,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+import random
 import logging
 import sqlite3
 from typing import Collection
@@ -169,9 +171,10 @@ class RecommendationResponse(CamelModel):
     | source | 含义 |
     | --- | --- |
     | ``review`` | 优先重练（掌握度不足且练过） |
-    | ``graph`` | 依赖图后继（掌握某知识点后往前推） |
-    | ``cold_start`` | 全新学生：给图里的入口知识点 |
-    | ``empty`` | 依赖图不可用且无任何学习记录（前端按空态展示，**不是错误**） |
+    | ``random`` | 从「本学段、还没学过」的知识点里**随机**挑（D-074 起的主要来源） |
+    | ``graph`` | *历史值*：依赖图后继 —— **D-074 起不再产出**（保留取值以免旧客户端/旧测试炸） |
+    | ``cold_start`` | *历史值*：图里的入口知识点 —— **D-074 起不再产出**（同上） |
+    | ``empty`` | 知识库不可用且无任何学习记录（前端按空态展示，**不是错误**） |
     """
 
     student_id: str
@@ -218,66 +221,42 @@ def _kp_names(conn, kp_ids: list[str]) -> dict[str, str]:
         return {}
 
 
-def _entry_kp_ids(
+def _learnable_kp_ids(
     conn,
     *,
     grade_level: str,
     exclude: Collection[str] = (),
     limit: int = RECOMMEND_LIMIT,
+    rng: "random.Random",
 ) -> list[str]:
-    """冷启动入口：该学段里没有前置的知识点（**优先本学段**，再退到更低学段）。
+    """随机挑几个「可以学」的知识点（**推荐与开场白共用的唯一实现**，D-074）。
 
-    「没有前置」= 依赖图里的入边为空。这些是必修的起点，也是新学生唯一
-    「先看哪一个」的**有依据**答案（不是按 id 字典序瞎取一个）。
+    ★★ 为什么是随机、而不是沿依赖图走（2026-09-22 用户裁决，原话）：
+      「你别设计成死按着内置教材和知识点的路线去走，每次随机换一个知识点；
+        知识点什么解锁也去掉吧，没必要非得了解一个才能了解另一个」。
+    于是原先的两段（② 依赖图后继 / ③ 冷启动入口节点）整体去掉：
+    「必须先掌握 A 才能看 B」是我们对学习顺序的假设，不是学生的约束 ——
+    他想先看「神经网络」就先看，不该因为没学过「数据」而看不到入口。
 
-    ★ 排序按 ``|grade_index - 学生学段|`` —— 初中小朋友拿到的入口应该是初中内容，
-      而不是因为「小学的根也没有前置」就把小学生课程推给他。
-      ``compatible_grades`` 把更低学段也算合法（内容可以回看），所以这里**不能**直接过滤，
-      只能**排序**（更低的留着当兜底）。
-    ★ ``exclude`` 排除已经掌握的知识点：全掌握时不该再把起点推一遍。
+    ★ 仍然**按学段过滤**（先本学段；本学段一个都没有才退回全库）：
+      学段隔离是硬边界（RAG 只取不高于学生学段的内容），推一个他那个学段
+      根本检索不到的知识点，等于给一个点不开的入口。
+    ★ ``exclude`` 传「已掌握 + 本次已选」：不推他已经会的，也不重复推。
+    ★ ``rng`` **由调用方注入**（`random.Random(seed)`）：同一条会话内结果稳定、
+      换一条会话就换一批 —— 这是可测的（见 `tests/test_personalization.py`）。
     """
-    from app.knowledge.library import compatible_grades, grade_index
-
-    allowed = sorted(set(compatible_grades(grade_level)))
-    rows = conn.execute(
-        "SELECT k.kp_id, k.grade_level FROM kp k "
-        "WHERE NOT EXISTS ("
-        "  SELECT 1 FROM knowledge_dependencies d WHERE d.to_kp_id = k.kp_id"
-        ") AND k.grade_level IN ({}) ORDER BY k.kp_id".format(",".join("?" * len(allowed))),
-        tuple(allowed),
-    ).fetchall()
-
-    try:
-        target_rank = grade_index(grade_level)
-    except (KeyError, ValueError):  # pragma: no cover - 学段已在外层校验过
-        target_rank = len(allowed)
-
-    def distance(row) -> tuple[int, str]:
-        grade = str(row["grade_level"])
-        try:
-            return (abs(grade_index(grade) - target_rank), str(row["kp_id"]))
-        except (KeyError, ValueError):  # pragma: no cover - 库里的脏学段
-            return (99, str(row["kp_id"]))
+    from app.store import kb as kb_repo
 
     blocked = {kp for kp in exclude if kp}
-    ordered = [str(row["kp_id"]) for row in sorted(rows, key=distance)]
-    picked = [kp_id for kp_id in ordered if kp_id not in blocked][:limit]
-
-    # ★ 补位：教材骨架目前是**一条主链**（只有一个根），于是「没有前置的入口」常常只有 1 个，
-    #   对初中生就成了「推荐小学内容」—— 技术上正确（那是这条线的起点），但演示与体验都不对。
-    #   所以不足 ``limit`` 时再补上**本学段**的知识点：学生可以从线头开始，也可以直接上本学段。
-    if len(picked) < limit:
-        same_grade = conn.execute(
-            "SELECT kp_id FROM kp WHERE grade_level = ? ORDER BY kp_id", (grade_level,)
-        ).fetchall()
-        for row in same_grade:
-            kp_id = str(row["kp_id"])
-            if kp_id in blocked or kp_id in picked:
-                continue
-            picked.append(kp_id)
-            if len(picked) >= limit:
-                break
-    return picked
+    try:
+        pool = [kp for kp in kb_repo.kp_ids_by_grade(conn, grade_level) if kp not in blocked]
+        if not pool:
+            # 本学段没候选（教材还没铺到这一档，或全掌握了）→ 退回全库：宁可跨档，也别推空
+            pool = [kp for kp in kb_repo.all_kp_ids(conn) if kp not in blocked]
+    except sqlite3.Error:  # pragma: no cover - 坏库
+        return []
+    rng.shuffle(pool)
+    return pool[:limit]
 
 
 def _kp_grade(conn, kp_id: str) -> str | None:
@@ -296,22 +275,31 @@ def build_recommendation(
     *,
     student_id: str,
     grade_level: str,
+    rng: "random.Random | None" = None,
 ) -> RecommendationResponse:
     """★ 个性化推荐的**唯一实现**（票 20，被 ``GET /profile`` 与 ``/recommendation`` 共用）。
 
-    三段式，优先级从高到低：
+    两段式，优先级从高到低（**2026-09-22 / D-074 改**）：
 
     1. **待重练**（``source="review"``）：练过但掌握度 < :data:`REVIEW_MASTERY_CEILING` 的知识点，
        按「分数升序、最近练过优先」排 —— 这就是「连续答错 → 下一轮更可能再考它」；
-    2. **依赖图后继**（``source="graph"``）：掌握度 ≥ 阈值的知识点，经
-       ``deps.recommend_next()`` 取它的**后继**（「掌握变量 → 推荐循环」）。
-       这是执行文档 §8.6 的用途一，**不自己写第二个推荐器**；
-    3. **冷启动**（``source="cold_start"``）：一条记录都没有的新学生，给图里的**入口知识点**。
+    2. **随机挑没学过的**（``source="random"``）：本学段里、掌握度不到阈值的知识点里
+       **随机**取（:func:`_learnable_kp_ids`）。
+       ⚠️ 原先这里还有两段：「依赖图后继」（掌握 A → 推 A 的后继）与「冷启动入口节点」
+       （入度为 0 的起点）。用户 2026-09-22 裁决去掉 ——「没必要非得了解一个才能了解另一个」。
+       依赖图仍然服务于检索上下文扩展、闯关/编程的关卡结构与学习地图展示，只是**不再决定推荐什么**。
 
     知识库不可用时退化为「只用掌握度」（第 1 段照常工作，第 2/3 段跳过）——
     推荐是加分项，不该让画像整体打不开。
     """
     mastery_map = store.mastery_map()
+    # ★★ rng 由调用方注入（开场白传「会话 id」当种子 → 同一条会话同一句）。
+    #   不传时用 **学生 + 当天日期** 当种子（D-074）：
+    #     · 同一天内反复取数结果稳定 —— 侧栏「建议接着练」不该每刷一次就跳一个；
+    #     · 跨天自动换一批 —— 用户要的「随机给一个」在这里体现为**每天轮换**；
+    #     · 也让 `/profile` 与 `/recommendation` 两个出口在同一天内给出同一份推荐
+    #       （它们都调本函数，旧行为要求两者一致，这条不变量值得留着）。
+    rng = rng if rng is not None else random.Random(f"{student_id}:{date.today().isoformat()}")
 
     conn = _load_kb_connection(request)
 
@@ -363,66 +351,40 @@ def build_recommendation(
             )
         source: RecommendationSource = "review" if items else "empty"
 
-        # ② 依赖图后继（仅在还有位置、且知识库可用时）
+        # ② 随机挑「还没学过」的（D-074：不再走依赖图后继，也不再有「入口知识点」）
+        #
+        # ⚠️ 这里原先分两段：② 依赖图后继（掌握 A → 推 A 的后继 B）、③ 冷启动入口节点
+        #    （依赖图里入度为 0 的那些）。两段都含「顺序」主张，用户明确要去掉。
+        #    现在只剩一条：**从本学段里随机挑没学过的**。
         if conn is not None and len(items) < RECOMMEND_LIMIT:
-            from app.knowledge.deps import recommend_next
-
-            mastered = [
-                kp_id
-                for kp_id, score in mastery_map.items()
-                if score >= MASTERY_UNLOCK_THRESHOLD
-            ]
-            # 多要几条：其中可能有一部分与第 ① 段重复（去重后会不够 RECOMMEND_LIMIT）
-            graph_rows = recommend_next(
-                conn,
-                mastered,
-                limit=RECOMMEND_LIMIT + len(picked),
-                grade_level=grade_level,
-            )
-            graph_names = _kp_names(conn, [row.kp_id for row in graph_rows]) if graph_rows else {}
-            added_graph = False
-            for row in graph_rows:
-                if len(items) >= RECOMMEND_LIMIT:
-                    break
-                if row.kp_id in picked:
-                    continue  # 已在第 ① 段作为「待重练」推过（重练优先，不重复）
-                picked.add(row.kp_id)
-                added_graph = True
-                items.append(
-                    RecommendationItem(
-                        kp_id=row.kp_id,
-                        name=graph_names.get(row.kp_id, row.name or row.kp_id),
-                        grade_level=_as_grade_or_none(row.grade_level),
-                        depth=max(1, int(row.depth)),
-                        mastery=max(0.0, min(1.0, mastery_map.get(row.kp_id, 0.0))),
-                        reason="你已经掌握了它的前置知识，可以顺着这条线往下学了。",
-                    )
-                )
-            if added_graph and source == "empty":
-                source = "graph"
-
-        # ③ 冷启动：还没有「待重练」也没有「可推进的后继」（新学生，或全掌握但图走到头了）
-        if not items and conn is not None:
-            entry_ids = _entry_kp_ids(
+            learnable = _learnable_kp_ids(
                 conn,
                 grade_level=grade_level,
-                # 已掌握的不再当起点推（全掌握时宁可不推，也不重复推一遍）
-                exclude=[kp for kp, score in mastery_map.items() if score >= MASTERY_UNLOCK_THRESHOLD],
+                # 已掌握的不再推（那不叫「可以学」，叫「学过了」）+ 本次已选的不重复推
+                exclude=picked
+                | {
+                    kp_id
+                    for kp_id, score in mastery_map.items()
+                    if score >= MASTERY_UNLOCK_THRESHOLD
+                },
+                limit=RECOMMEND_LIMIT - len(items),
+                rng=rng,
             )
-            entry_names = _kp_names(conn, entry_ids)
-            for kp_id in entry_ids:
+            names.update(_kp_names(conn, learnable))
+            for kp_id in learnable:
+                picked.add(kp_id)
                 items.append(
                     RecommendationItem(
                         kp_id=kp_id,
-                        name=entry_names.get(kp_id, kp_id),
+                        name=names.get(kp_id, kp_id),
                         grade_level=_as_grade_or_none(_kp_grade(conn, kp_id)),
                         depth=0,
                         mastery=max(0.0, min(1.0, mastery_map.get(kp_id, 0.0))),
-                        reason="这是这条学习路线的起点，我们从它开始。",
+                        reason="这个还没学过 —— 想的话可以从它开始看看。",
                     )
                 )
-            if items:
-                source = "cold_start"
+            if items and source == "empty":
+                source = "random"
     finally:
         if conn is not None:
             conn.close()
@@ -441,7 +403,24 @@ def build_recommendation(
     )
 
 
-def _opening_text(source: RecommendationSource, items: list[RecommendationItem]) -> str:
+#: 开场白的几种说法（**随机选一种**，D-074）。
+#:
+#: 用户原话：「每次提问你想学点什么，后面随机给他跟一个知识点就可以」
+#: —— 所以形态固定为「一句问学生想学什么」+ 「一个随机的知识点」，
+#: 每次换一种问法（同一条会话内不换，见 `_opening_text` 的 rng 说明）。
+#: ⚠️ 每条变体里 `{name}` **只能出现一次**：开场卡的动作按钮只指向一个知识点，
+#:    文案里出现两个学生就不知道点下去会去哪里（这条纪律有过实测教训）。
+_OPENING_VARIANTS: tuple[str, ...] = (
+    "今天想聊点什么？我这边可以先从{name}说起，想听听吗？",
+    "想学点什么都可以 —— 要不我们从{name}聊起？",
+    "先从{name}开始怎么样？不想聊它，也可以问我别的。",
+    "你有什么想学的？或者我随手挑一个：{name}，要听听看吗？",
+)
+
+
+def _opening_text(
+    source: RecommendationSource, items: list[RecommendationItem], rng: "random.Random"
+) -> str:
     """把推荐结论拼成一句**可直接念**的开场语（纯模板，**不调 LLM**）。
 
     为什么用模板而不是让模型写（待实现文档给出的两个方案里选 A）：
@@ -468,12 +447,11 @@ def _opening_text(source: RecommendationSource, items: list[RecommendationItem])
         return ""
     if source == "review":
         body = f"{name}这个地方还没练熟，我们把它再过一遍。"
-    elif source == "graph":
-        body = f"你已经掌握了它的前置知识，下一步可以学{name}了。"
     else:
-        # cold_start（以及任何未登记的来源：按「起步」说 —— 它是最保守的一种说法，
-        # 不含任何关于学生历史的主张）
-        body = f"我们从{name}开始吧，这是这条学习路线的起点。"
+        # ★★ 其余来源（现在的 `random`，以及任何未登记的来源）走**同一组随机说法**（D-074）：
+        #    既不再声称「这是这条路线的起点」（路线/解锁那套主张已按用户要求去掉），
+        #    也不同一条会话里换说法 —— 变体由注入的 `rng` 选，同 seed 同结果。
+        body = rng.choice(_OPENING_VARIANTS).format(name=name)
     # 「你好，我是智团团。」让学生知道**是谁**在开口，而不是凭空冒出一个没有主语的建议。
     # ★ 2026-09-21：自称与产品名（`@shared/brand` 的 `BRAND_NAME`）统一成「智团团」，
     #   此前这里是「团团」、提示词里又是「小 AI 老师 / AI 通识课老师」—— 三处不一致。
@@ -487,9 +465,9 @@ def _recommendation_summary(source: RecommendationSource, items: list[Recommenda
     names = "、".join(item.name or item.kp_id for item in items[:2])
     if source == "review":
         return f"先回头把{names}再练熟一点，我们再往前走。"
-    if source == "graph":
-        return f"顺着你已掌握的内容，下一步适合学{names}。"
-    return f"从{names}开始吧，这是这条学习路线的起点。"
+    # ★ D-074：不再有「顺着依赖图往下学」与「学习路线的起点」两种说法 ——
+    #   推荐只是「你还没学过的、可以看看的」，不含任何顺序主张。
+    return f"想学点什么都可以 —— 比如{names}。"
 
 
 def _as_grade_or_none(value: str | None) -> GradeLevel | None:
@@ -657,6 +635,13 @@ def student_opening(
     student_id: str,
     grade_level: str | None = Query(None, description="覆盖学段（默认用画像里的当前学段）"),
     gradeLevel: str | None = Query(None, include_in_schema=False),
+    seed: str | None = Query(
+        None,
+        description=(
+            "随机种子：同一条会话传同一个值 → 同一句开场白（同知识点、同说法）；"
+            "不传则每次随机。前端传的是**会话 id**。"
+        ),
+    ),
 ) -> OpeningGuidance:
     """★ 「主动发起对话引导」的**唯一出口**（需求明文要求，此前零实现）。
 
@@ -691,18 +676,30 @@ def student_opening(
                 status_code=422,
                 detail=f"gradeLevel 非法：{level!r}（只允许四学段之一）",
             )
+        # ★ rng 由 seed 派生（默认=会话 id，由主进程给）：同一条没开始的会话反复读，
+        #   拿到的必须是**同一句**（否则历史里那句与屏幕上的对不上 —— D-072 修的就是这类）。
+        rng = random.Random(seed) if seed else random.Random()
         recommendation = build_recommendation(
-            request, store, student_id=student_id, grade_level=level
+            request, store, student_id=student_id, grade_level=level, rng=rng
         )
     finally:
         store.close()
 
     first = recommendation.items[0] if recommendation.items else None
     guidance = OpeningGuidance(
-        text=_opening_text(recommendation.source, recommendation.items),
+        text=_opening_text(recommendation.source, recommendation.items, rng),
         # ★ 只在**真有推荐项**时给 kp_id：空推荐配一个 kp_id 会让前端渲染出一个
         #   「去吧」按钮，而点下去没有任何目标。
         kp_id=first.kp_id if first is not None else None,
+        # ★ 知识点中文名一并给前端：动作按钮要拼「我想学「X」」，而 X 必须是**学生看到的那个名字**。
+        #   此前前端是从 /recommendation 里按 kp_id 反查名字 —— 推荐改成随机之后两者不再同源，
+        #   反查会落空（按钮点了没反应）。名字与 kp_id 取自同一个 item ✓
+        #   ⚠️ 名字取不到时（库里没中文名，name 回落成 kp_id）**不给** —— 绝不把 slug 印给学生。
+        kp_name=(
+            first.name
+            if first is not None and first.name and first.name != first.kp_id
+            else None
+        ),
         source=recommendation.source,
     )
     logger.info(
