@@ -587,8 +587,16 @@ const gradeSourceSentence = computed(() => {
           >
             <component :is="historyOpen ? PanelLeftClose : PanelLeftOpen" :size="16" />
           </button>
-          <span class="chat__bar-title">本轮对话</span>
-          <span class="chat__bar-meta">{{ isEmpty ? '尚未开始' : `${turnCount} 轮` }}</span>
+          <!-- ★★ 两段文字**自己包一层**：这样外层能按中心线对齐（32px 的开关与文字块同一条线），
+               而文字内部仍按**基线**对齐（13px 的标题与 12px 的元信息 —— 基线对齐才不显歪）。
+               ⚠️ 走查实测的缺陷：原来这一行是 `align-items: baseline` 且没有这层包裹，
+                  开关是唯一的非文字子项 —— 它的「基线」是按钮盒子的底边，于是
+                  **整枚开关比文字高出 4px**（量到中心线 145 vs 149），
+                  与右端那枚按中心线对齐的 `rail-toggle` 也不在同一条线上。 -->
+          <span class="chat__bar-titles">
+            <span class="chat__bar-title">本轮对话</span>
+            <span class="chat__bar-meta">{{ isEmpty ? '尚未开始' : `${turnCount} 轮` }}</span>
+          </span>
         </div>
         <div class="chat__bar-right">
           <button
@@ -904,8 +912,18 @@ const gradeSourceSentence = computed(() => {
   flex: 1;
   min-width: 0;
   display: flex;
+  /* ★ 这一行里既有 32px 的图标开关、也有两段文字 —— **按中心线对齐**，
+   *   这样它与右端的 `rail-toggle`（那一组本来就是 `center`）落在同一条线上。
+   *   ⚠️ 别改回 `baseline`：图标按钮的「基线」是盒子底边，会高出文字 4px（实测）。 */
+  align-items: center;
+  gap: 10px;
+}
+/* 两段文字的小容器：内部仍按**基线**对齐（13px 标题 + 12px 元信息） */
+.chat__bar-titles {
+  display: flex;
   align-items: baseline;
   gap: 10px;
+  min-width: 0;
 }
 .chat__bar-title {
   font-size: var(--k12-fs-sm);

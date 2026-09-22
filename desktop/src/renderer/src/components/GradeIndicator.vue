@@ -195,10 +195,22 @@ async function choose(level: GradeLevel): Promise<void> {
          紧凑时整层浮到 chip 下方 —— 见下面 `.grade--compact .grade__extras`。
          包一层而不是各自绝对定位：两条同时出现（提示 + 通道缺失）会叠在一起。 -->
     <div class="grade__extras">
-      <!-- 学段变化时的一次性提示：适配发生了（或学生自己选了）也要看得出来。
+      <!-- ★★ 顶栏（`compact`）**只留「学生自己刚选完」那条回执**（2026-09-22 走查改）：
+           原先系统自动适配那句（`我按小学高年级的说法来讲。`）在顶栏上是一条**绿底椭圆浮条**
+           —— 它出现在**每一页**（顶栏是全局 chrome），而且**没人问就冒出来**、
+           还浮在内容之上。走查结论：那是层级放错了（通知不该长在全局顶栏上）。
+           现在自动适配那句话只在**设置页**那一处显示（in-flow 的一行字，不浮动）。
+           ★ 手动那条**保留**：学生自己点完必须当场看到生效（D-037），
+             而且它紧挨着刚点的那枚按钮，属于「对我这个动作的回执」。
            ⚠️ 这个节点里**只有**那一句话（`已按你选的X来讲。` / `我按X的说法来讲。`）——
               验收脚本按整串匹配它，第二句不许塞进来（见脚本里 `switchDetail` 的说明）。 -->
-      <p v-if="chat.gradeNotice" class="grade__notice" data-testid="grade-notice">{{ chat.gradeNotice }}</p>
+      <p
+        v-if="chat.gradeNotice && (!compact || chat.gradeOrigin === 'explicit')"
+        class="grade__notice"
+        data-testid="grade-notice"
+      >
+        {{ chat.gradeNotice }}
+      </p>
 
       <!-- 第二句（只在学生自己选完之后出现）：回答「那我之前学的还在吗」。
            独立节点，与上面那句各占一行。 -->
@@ -469,6 +481,11 @@ async function choose(level: GradeLevel): Promise<void> {
   right: 10px;
 }
 
+/* 提示纸条（绿色椭圆）—— ★ 2026-09-22 起**只剩「学生自己刚选完」那条**：
+ * 系统自动适配那句已经不在顶栏渲染（见模板里那段说明：绿底浮条出现在每一页、
+ * 且没人问就冒出来，走查判定为层级放错）。所以这条样式现在服务的场景是
+ * 「学生点了选项 → 紧挨着他刚点的地方给一句回执」，几秒后随下一次操作消失。
+ * ⚠️ 别把自动适配那句再加回顶栏：它属于设置页那一处（in-flow 的一行字）。 */
 .grade--compact .grade__extras > .grade__notice {
   margin: 0;
   padding: 3px 10px;
