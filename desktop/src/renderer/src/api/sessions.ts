@@ -21,6 +21,7 @@ import type {
   SessionBranchRequest,
   SessionBranchResult,
   SessionCurrent,
+  SessionDeleteResult,
   SessionOpenResult,
   SessionStateResult
 } from '../../../main/ipc/channels'
@@ -33,6 +34,8 @@ export interface SessionBridge {
   startNewSession(): Promise<SessionOpenResult>
   /** ★★ 从某条消息处重新问（分叉出新会话，原会话不动）。 */
   branchSession(request: SessionBranchRequest): Promise<SessionBranchResult>
+  /** ★★ 删掉一条历史会话（**不可撤销**）。删的是当前会话时，主进程会先切到一条新会话再删文件。 */
+  deleteSession(sessionId: string): Promise<SessionDeleteResult>
   onSessionChanged(listener: (state: SessionCurrent) => void): () => void
 }
 
@@ -43,16 +46,17 @@ export type SessionBridgeLookup =
 /** 缺通道时给学生看的那句话（照它就能把线接上）。 */
 export const SESSION_BRIDGE_MISSING_HINT =
   '还不能切换会话：preload 白名单缺少 openSession / startNewSession / branchSession / ' +
-  'getSessionState / onSessionChanged —— 需要先在主进程注册 `session:open` / ' +
-  '`session:new` / `session:branch` / `session:state` / `session:changed` 五条通道' +
-  '（由 preload 白名单暴露，渲染进程不直接持有通道名）。接线后刷新页面即可生效。'
+  'deleteSession / getSessionState / onSessionChanged —— 需要先在主进程注册 `session:open` / ' +
+  '`session:new` / `session:branch` / `session:delete` / `session:state` / `session:changed` ' +
+  '六条通道（由 preload 白名单暴露，渲染进程不直接持有通道名）。接线后刷新页面即可生效。'
 
-/** 这一层**唯一**的必需能力（少一个就用不了「切会话续聊」）。 */
+/** 这一层**唯一**的必需能力（少一个就用不了「切会话续聊 / 删会话」）。 */
 const REQUIRED_METHODS = [
   'getSessionState',
   'openSession',
   'startNewSession',
   'branchSession',
+  'deleteSession',
   'onSessionChanged'
 ] as const
 
@@ -85,6 +89,7 @@ export function resolveSessionBridge(
       openSession: (sessionId) => api.openSession(sessionId),
       startNewSession: () => api.startNewSession(),
       branchSession: (request) => api.branchSession(request),
+      deleteSession: (sessionId) => api.deleteSession(sessionId),
       onSessionChanged: (listener) => api.onSessionChanged(listener)
     }
   }

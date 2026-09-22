@@ -235,6 +235,16 @@ export interface ChatRuntime {
    */
   readonly messageCount: number
   /**
+   * ★★ 会话里**有没有学生说过话** —— 「这段对话开始了没有」的**唯一判据**。
+   *
+   * 它存在的理由（实测缺陷，别再合并回 `messageCount`）：开场引导是**写进会话文件**的
+   * 一条 assistant 消息，所以「刚建好、学生还没开口」的会话在切走再切回时
+   * `messageCount` 已经是 1 —— 用它判判据就会把同一段对话在界面上长成两副样子。
+   * 调用方要问的问题其实是「学生开口了没有」：没开口 → 界面给空态（开场卡 + 入口卡），
+   * 开口了 → 铺消息列表。
+   */
+  readonly hasUserTurn: boolean
+  /**
    * 本次装配时**从已有会话里读回来的对话**（按 `{role, text, at}` 投影，与回看同形）。
    * 新会话 / 空会话时是空数组。界面把它铺成消息列表 —— **恢复历史对话的唯一数据源**。
    */
@@ -948,17 +958,31 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    *   让它抛会把「续聊最近会话」整条路带崩（学生看到的是打不开的应用）。
    */
   function readExistingSession(): { messageCount: number; restored: TranscriptMessage[] } {
+    const messages = projectSessionMessages()
+    return { messageCount: messages.length, restored: messages }
+  }
+
+  /**
+   * 会话文件里的可显示消息（**唯一投影口径**，三个调用方共用）。
+   *
+   * ★ 抽出来是为了**判据不会漂**：`messageCount` / `hasUserTurn` / `restoredMessages`
+   *   说的都是「这份 JSONL 里有什么」。各写一份 `getEntries() + projectTranscript`，
+   *   迟早出现「一处按 `type === 'message'` 数、另一处按 `role` 数」的差值 ——
+   *   而那点差值正好能让开场语多发一次（`countMessages` 的注释里记着这条教训）。
+   * ★ 它**不抛**：读不出历史只是「这段对话显示不出来」，重启后重开一次就好；
+   *   让它抛会把「续聊最近会话」整条路带崩（学生看到的是打不开的应用）。
+   */
+  function projectSessionMessages(): TranscriptMessage[] {
     try {
       const entries = (sessionManager as { getEntries?(): unknown[] }).getEntries?.() ?? []
-      const projected = projectTranscript(entries)
-      return { messageCount: projected.messages.length, restored: projected.messages }
+      return projectTranscript(entries).messages
     } catch (error) {
       console.warn(
         `[agent] 读取会话已有内容失败（按空会话处理）：${
           error instanceof Error ? error.message : String(error)
         }`
       )
-      return { messageCount: 0, restored: [] }
+      return []
     }
   }
 
@@ -973,12 +997,21 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    *   差值正好是 toolResult 那些条目 —— 而「数错一个」就能让开场语多发一次。
    */
   function countMessages(): number {
-    try {
-      const entries = (sessionManager as { getEntries?(): unknown[] }).getEntries?.() ?? []
-      return projectTranscript(entries).messages.length
-    } catch {
-      return 0
-    }
+    return projectSessionMessages().length
+  }
+
+  /**
+   * 会话里**有没有学生说过话** —— 「这段对话开始了没有」的**唯一判据**。
+   *
+   * ★★ 为什么不能拿 `messageCount === 0` 当这个判据（实测缺陷）：
+   *   开场引导是**写进会话文件**的一条 assistant 消息（见 `appendOpeningMessage`），
+   *   所以「刚建好、学生还没开口」的会话在切走再切回时 `messageCount` 已经是 1 ——
+   *   于是主进程不再给开场语、界面把那条问候当普通消息铺回去，同一段对话长成了另一副样子
+   *   （开场卡 / 四张入口卡 / 建议问题全没了，还多出一个空气泡）。
+   *   **「文件里有几条消息」与「学生开口了没有」是两件事**，只有后者决定界面显示空态还是消息列表。
+   */
+  function sessionHasUserTurn(): boolean {
+    return projectSessionMessages().some((message) => message.role === 'user')
   }
 
   const existing = readExistingSession()
@@ -1237,6 +1270,11 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       //   调用方（`ipc/handlers.ts`）靠它判断「这条会话该不该发开场语」，
       //   拿一个永不更新的常量会让「新会话」与「已聊过的会话」再也分不开。
       return countMessages()
+    },
+    // ★ 同样读**当前**状态：学生开口之后它必须跟着变 true。
+    //   一个冻结在装配时刻的值会让「切回来还是空态」在下一次切换才被纠正（晚一轮的错）。
+    get hasUserTurn() {
+      return sessionHasUserTurn()
     },
     // ★ 读**当前**投影（不是装配时的快照）：跑过几轮之后新消息也要带上各自的
     //   条目 id —— 否则「从这里重新问」只对历史消息可用（实测踩到，见 P-105）。

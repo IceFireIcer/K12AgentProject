@@ -346,6 +346,7 @@ function installBridge(overrides: Record<string, (...args: unknown[]) => unknown
     openSession: () => ({ ok: false, message: '未接线' }),
     startNewSession: () => ({ ok: false, message: '未接线' }),
     branchSession: () => ({ ok: false, message: '未接线' }),
+    deleteSession: () => ({ ok: false, message: '未接线' }),
     onSessionChanged: () => () => {},
     onChatEvent: () => () => {},
     onGradeChanged: () => () => {},

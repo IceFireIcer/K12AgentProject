@@ -179,12 +179,13 @@ export const useChatStore = defineStore('chat', () => {
    * 它是**独立于 turns 的一条状态**，理由有两条：
    *   1. 它**不是一轮问答**（没有学生的问题、没有流式过程、没有 `requestId`）——
    *      塞进 `turns` 会逼着所有按轮次算的逻辑（排队、滚动、卡片收集）去理解一个特例；
-   *   2. 它只在该会话**还没有任何消息**时出现，学生一开口就该消失（见 `send`）——
-   *      而 `turns` 里的东西是**只增不减**的。
+   *   2. 它只在该会话**还没开始**（学生一句话都没说过）时出现，学生一开口就该消失
+   *      （见 `send`）—— 而 `turns` 里的东西是**只增不减**的。
    *
-   * ★ 它**同时已经写进了 Pi 会话**（主进程 `appendOpeningMessage`），所以重启后
-   *   它会作为一条普通的助手消息出现在恢复出来的历史里 —— 两处不会重复显示，
-   *   因为「新会话」与「重启恢复」是两条互斥的路径。
+   * ★ 它**同时已经写进了 Pi 会话**（主进程 `appendOpeningMessage`）。所以恢复一条
+   *   **没开始**的会话时，主进程**不再给 `opening` 之外的东西**：那半条消息不当普通消息
+   *   铺回来（否则界面进不了空态，开场卡与四张入口卡全没了 —— 那次实测缺陷见
+   *   `handlers.ts` 的 `resolveSessionPrelude`）。
    */
   const opening = ref('')
   /** 开场引导指向的知识点（空串 = 没有可去的地方，界面**不渲染**动作按钮）。 */
@@ -418,33 +419,61 @@ export const useChatStore = defineStore('chat', () => {
      * 而恢复出来的正文只有它手里有 —— 不读这一次，学生看到的就是空对话。
      *
      * ⚠️ 与 `openSession` 不同，这里**不**用 `applySwitchResult`：
-     *    那个函数会清掉「与上一段对话绑定的临时状态」，而挂载时那些状态本来就是空的；
-     *    更重要的是它会把 `opening` 覆盖成本次回执的值（空串）—— 冷启动**不发**开场
-     *    （见主进程 `session:state` 的注释），所以那个覆盖在这里恰好是对的，
-     *    但**不要**把它当成「以后也这样」的理由。
+     *    那个函数会清掉「与上一段对话绑定的临时状态」，而挂载时那些状态本来就是空的。
      * ⚠️ 失败**不报错**：没有 Key / 服务没起来时应用仍要能用（降级永不白屏）。
+     *
+     * ★★ 冷启动**同样**会带来开场引导（2026-09-22 修正了这里的老口径）：判据在主进程那一侧
+     *    （`resolveSessionPrelude`，看「学生开口了没有」）。当年「冷启动开头恒为空串」是为了
+     *    避免「每次开应用都看到同一句招呼」—— 那条对**已经聊过**的会话仍然成立（`opening` 是空串），
+     *    但对**还没开始**的会话，它让同一段对话重启后变成第三副样子（只剩一个空气泡 + 一句问候）。
+     *    现在的纪律：**不重发**（不重复写进会话文件），但显示的就是文件里那条开场白。
      */
-    void lookup.bridge.getSessionState().then(
-      (result) => {
-        if (!result.ok) return
-        currentSessionId.value = result.current.sessionId
-        currentSessionTitle.value = result.current.title
-        currentSessionMessageCount.value = result.current.messageCount
-        // ★ 只在**渲染进程手里还没有任何消息**时才铺历史：
-        //   挂载与「首条消息发出」可能竞态（学生手快），那时用历史覆盖会把他刚发的那轮抹掉。
-        if (conversation.value.turns.length === 0 && result.messages.length > 0) {
-          // ★ 与 `applySwitchResult` 同一个出口的纪律：历史里的学生消息也要过翻译
-          //   （JSONL 存的是发给模型的原文，见 `studentFacingMessages`）。
-          conversation.value = restoreConversation(studentFacingMessages(result.messages), null)
-        }
-        opening.value = result.opening
-        openingKpId.value = result.openingKpId
-        openingDismissed.value = false
-      },
-      () => {
-        /* 拉取失败不影响推送路径（学生仍能正常开新对话） */
+    void applyCurrentSessionState({ replace: false })
+  }
+
+  /**
+   * 读一次「当前会话的完整状态」，并按它把界面**对齐**（唯一的落点）。
+   *
+   * 两条路共用：挂载时的**冷启动恢复**（见 {@link connectSession}）、
+   * **删掉当前会话之后**的重新对齐（那条路主进程已经切到一条新的空白会话，
+   * 而 `session:delete` 的回执里只有 id，没有状态 —— 不补读的话屏幕上会留着
+   * 一段**已经不在盘上**的对话）。
+   *
+   * `replace`：
+   *   · `false`（冷启动）—— 只在渲染进程手里**还没有任何消息**时才铺历史。
+   *     挂载与「首条消息发出」可能竞态（学生手快），那时用历史覆盖会把他刚发的那轮抹掉；
+   *   · `true`（删掉当前会话之后）—— **无条件整段替换**：手里那段属于刚被删掉的那条会话，
+   *     留着它就是显示一份已经不存在的记录。
+   *
+   * ⚠️ 失败**不报错**（降级永不白屏）：没有 Key / 服务没起来 / 桥缺失时，
+   *   界面保持现状即可，下一轮动作会再对齐一次。
+   */
+  async function applyCurrentSessionState(options: { replace: boolean }): Promise<void> {
+    const lookup = resolveSessionBridge()
+    if (!lookup.ready) {
+      sessionBridgeError.value = lookup.message
+      return
+    }
+    try {
+      const result = await lookup.bridge.getSessionState()
+      if (!result.ok) return
+      currentSessionId.value = result.current.sessionId
+      currentSessionTitle.value = result.current.title
+      currentSessionMessageCount.value = result.current.messageCount
+      if (options.replace || conversation.value.turns.length === 0) {
+        // ★ 与 `applySwitchResult` 同一个出口的纪律：历史里的学生消息也要过翻译
+        //   （JSONL 存的是发给模型的原文，见 `studentFacingMessages`）。
+        conversation.value =
+          result.messages.length > 0
+            ? restoreConversation(studentFacingMessages(result.messages), null)
+            : emptyConversation()
       }
-    )
+      opening.value = result.opening
+      openingKpId.value = result.openingKpId
+      openingDismissed.value = false
+    } catch {
+      /* 拉取失败不影响推送路径（学生仍能正常开新对话） */
+    }
   }
 
   /**
@@ -504,6 +533,44 @@ export const useChatStore = defineStore('chat', () => {
     if (!lookup.ready) return { ok: false, message: lookup.message }
     const sessionId = currentSessionId.value
     return await runSwitch(() => lookup.bridge.branchSession({ sessionId, entryId }))
+  }
+
+  /**
+   * ★★ **删掉一条历史会话**（`session:delete` 的唯一入口；**不可撤销**）。
+   *
+   * ★ 与 `startNewSession()` 的区别：那个是「换一条新会话，旧的原样留着」，
+   *   这个是**真的把那条会话从盘上删掉**（Pi 的 JSONL 一起）——
+   *   所以界面必须先用确认框问一次（`SessionList.vue` 的右键菜单）。
+   * ★ 删的是**当前会话**时由**主进程**决定怎么做（先切到一条新的空白会话、成功后才删文件）——
+   *   那条顺序纪律在 `handlers.ts` 里，渲染进程不参与（它一次性拿到结果，见
+   *   `deleteSessionById` 的注释）。删完当前会话后主进程会推一条 `session:changed`，
+   *   界面据此切到新会话。
+   * ★★ 失败时**绝不清空当前对话**：与切会话同一条纪律 —— 拿不到结果就保持原样 + 一句可读中文。
+   */
+  async function deleteSession(sessionId: string): Promise<{ ok: boolean; message?: string }> {
+    if (!sessionId) return { ok: false, message: '删除失败：没有指定要删哪条对话。' }
+    const lookup = resolveSessionBridge()
+    if (!lookup.ready) return { ok: false, message: lookup.message }
+    try {
+      const result = await lookup.bridge.deleteSession(sessionId)
+      if (!result.ok) return { ok: false, message: result.message }
+      // ★ 删掉的是**当前那条**：主进程已经切到一条新的空白会话（并带了开场引导），
+      //   而这条回执里只有 id —— 补读一次完整状态，界面才跟得上。
+      //   不补读的话，屏幕上会留着刚被删掉的那段对话（它已经不在盘上了）。
+      if (result.id === currentSessionId.value) {
+        resetConversation()
+        currentSessionId.value = ''
+        currentSessionTitle.value = ''
+        currentSessionMessageCount.value = 0
+        await applyCurrentSessionState({ replace: true })
+      }
+      return { ok: true }
+    } catch (error) {
+      return {
+        ok: false,
+        message: `删除失败：${error instanceof Error ? error.message : String(error)}`
+      }
+    }
   }
 
   /** 切换 / 新建 / 分叉共用的执行与落库（见 {@link openSession} 的三步说明）。 */
@@ -1073,6 +1140,8 @@ export const useChatStore = defineStore('chat', () => {
     startNewSession,
     /** ★★ 从某条消息处重新问（分叉出新会话，原会话不动）。 */
     branchSession,
+    /** ★★ 删掉一条历史会话（**不可撤销**；删的是当前会话时主进程会先切到新会话）。 */
+    deleteSession,
     /* ── 主动发起对话（开场引导）───────────────────────────────────────── */
     /** AI 主动说的第一句（空串 = 这次没有引导）。 */
     opening,

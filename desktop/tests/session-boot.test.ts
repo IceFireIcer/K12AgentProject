@@ -72,23 +72,34 @@ test('★★ `session:state` 会**装配**会话（不装配就读不到恢复�
   const source = stripComments(read(HANDLERS))
   const at = source.indexOf('IPC.sessionState,')
   assert.ok(at > 0, '找不到 session:state 的处理器')
-  const body = source.slice(at, at + 1400)
+  const body = source.slice(at, at + 1600)
   assert.match(
     body,
     /await ensureChatRuntime\(\)/,
     '★★ 必须装配：恢复出来的正文只有主进程手里有 —— 不装配就回空，' +
       '学生看到的是「关掉应用再打开，上一段对话消失了」（数据其实还在盘上）'
   )
+  // ★★ 判据与切换会话**共用同一个函数**（2026-09-22）：分两处写就会让同一条没开始的会话
+  //    在「刚建好 / 切回来 / 重启后」长出三副样子（开场卡与空气泡轮流出现）。
   assert.match(
     body,
-    /restoredMessages/,
+    /await resolveSessionPrelude\(instance\)/,
+    '★ 冷启动必须走与切换会话同一个判据 `resolveSessionPrelude`（它负责把正文带回来、' +
+      '并决定给不给开场引导）'
+  )
+  const preludeAt = source.indexOf('async function resolveSessionPrelude(')
+  assert.ok(preludeAt > 0, '找不到 resolveSessionPrelude')
+  const prelude = source.slice(preludeAt, source.indexOf('\n}\n', preludeAt))
+  assert.match(
+    prelude,
+    /instance\.restoredMessages/,
     '★ 必须把恢复出来的正文带上（`instance.restoredMessages`）'
   )
-  // ★★ 冷启动**不发**开场：那份历史里本来就有当时发过的那一条
+  // ★★ 冷启动**只在会话还没开始时**才给开场（并且是从文件里读那条，不重发）
   assert.match(
-    body,
-    /opening:\s*''/,
-    '★★ 冷启动必须回**空**开场：恢复出来的历史里已经有当时发过的那条，' +
+    prelude,
+    /if\s*\(instance\.hasUserTurn\)/,
+    '★★ 已经聊过的会话（`hasUserTurn`）必须回空开场：那份历史里本来就有当时发过的那一条，' +
       '再发一次就是「每次开应用都看到同一句招呼」'
   )
   // 装配失败不报错（没有 Key / 服务没起来时应用仍要能用）
@@ -105,6 +116,7 @@ function installBridge(state: Record<string, unknown>): void {
     openSession: () => ({ ok: false, message: '未接线' }),
     startNewSession: () => ({ ok: false, message: '未接线' }),
     branchSession: () => ({ ok: false, message: '未接线' }),
+    deleteSession: () => ({ ok: false, message: '未接线' }),
     onSessionChanged: () => () => {},
     onChatEvent: () => () => {},
     onGradeChanged: () => () => {},
@@ -158,13 +170,19 @@ test('★★ 挂载后把上一段对话铺回消息列表（重启后对话还�
   }
 })
 
-test('★★ 冷启动**不发**开场引导（那份历史里本来就有那条）', async () => {
+test('★★ 冷启动：**已经聊过**的会话不再发开场引导（那条当时就写进历史了）', async () => {
   const originalWindow = (globalThis as { window?: unknown }).window
   try {
     installBridge({
       ok: true,
-      current: { sessionId: 'sess-restored', title: '', messageCount: 1 },
-      messages: [{ role: 'assistant', text: '你好，我是团团。从循环开始吧。', at: 1 }],
+      current: { sessionId: 'sess-restored', title: '', messageCount: 3 },
+      // ★ 已经聊过的会话的真实形态：开场白 + 学生的问 + 回答（三处顺序与 JSONL 里一致）
+      messages: [
+        { role: 'assistant', text: '你好，我是智团团。从循环开始吧。', at: 1 },
+        { role: 'user', text: '循环是什么？', at: 2 },
+        { role: 'assistant', text: '循环就是重复做同一件事。', at: 3 }
+      ],
+      started: true,
       opening: '',
       openingKpId: ''
     })
@@ -174,11 +192,43 @@ test('★★ 冷启动**不发**开场引导（那份历史里本来就有那条
     chat.connect()
     await flush()
 
-    assert.equal(chat.showOpening, false, '★ 冷启动不该再发一次开场')
+    assert.equal(chat.showOpening, false, '★ 已经聊过的会话不该再发一次开场')
     // 而当时发的那条**已经在历史消息里**（这是「只发一次」的真相：
     // 它写进了 Pi 会话，所以恢复出来就是一条普通的助手消息）
-    assert.equal(chat.turns.length, 1, '开场引导那条 assistant 单独一轮')
-    assert.match(chat.turns[0]?.text ?? '', /团团/)
+    assert.match(chat.turns[0]?.text ?? '', /智团团/)
+    assert.equal(
+      chat.turns[0]?.userText,
+      '',
+      '★ 开场那一轮的 `userText` 是空的 —— 界面靠它不渲染学生气泡（ChatMessage 的 `v-if="turn.userText"`）'
+    )
+    assert.equal(chat.turns.length, 2, '开场白单独一轮 + 问-答一轮（界面按「有学生提问」数则只算 1 轮）')
+  } finally {
+    if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window
+    else (globalThis as { window?: unknown }).window = originalWindow
+  }
+})
+
+test('★★ 冷启动：**还没开始**的会话照样给开场卡（重启后与刚建好时长得一样）', async () => {
+  const originalWindow = (globalThis as { window?: unknown }).window
+  try {
+    installBridge({
+      ok: true,
+      current: { sessionId: 'sess-fresh', title: '', messageCount: 1 },
+      // ★ 未开始的会话：正文空（那条开场白不当普通消息铺回来），开场白走 `opening`
+      messages: [],
+      started: false,
+      opening: '你好，我是智团团。我们从人工智能的定义开始吧。',
+      openingKpId: 'ai-definition-pl'
+    })
+    const { useChatStore } = await import('../src/renderer/src/stores/chat.ts')
+    setActivePinia(createPinia())
+    const chat = useChatStore()
+    chat.connect()
+    await flush()
+
+    assert.equal(chat.turns.length, 0, '★ 未开始的会话不许铺出任何消息（界面要停在空态）')
+    assert.equal(chat.showOpening, true, '★ 开场卡必须还在 —— 这就是「重启后又变回另一副样子」的修复')
+    assert.equal(chat.openingKpId, 'ai-definition-pl', '★ 有目标知识点时动作按钮要有依据')
   } finally {
     if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window
     else (globalThis as { window?: unknown }).window = originalWindow
@@ -246,6 +296,7 @@ test('★★ 恢复与「学生刚发出第一条」竞态：不许用历史覆�
       openSession: () => ({ ok: false, message: '未接线' }),
       startNewSession: () => ({ ok: false, message: '未接线' }),
       branchSession: () => ({ ok: false, message: '未接线' }),
+      deleteSession: () => ({ ok: false, message: '未接线' }),
       onSessionChanged: () => () => {},
       onChatEvent: () => () => {},
       onGradeChanged: () => () => {},

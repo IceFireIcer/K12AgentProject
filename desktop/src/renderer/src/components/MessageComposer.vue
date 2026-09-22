@@ -21,7 +21,9 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ArrowUp, Cpu, Mic } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
 import { useModelStore } from '../stores/model'
+import { useSettingsStore } from '../stores/settings'
 import { useViewModeStore } from '../stores/viewMode'
+import { llmChipTitle } from '../labels'
 
 const props = withDefaults(
   defineProps<{
@@ -35,21 +37,21 @@ const emit = defineEmits<{ (e: 'send', text: string): void }>()
 
 const chat = useChatStore()
 const model = useModelStore()
+const settings = useSettingsStore()
 const viewMode = useViewModeStore()
 
 /**
- * 模型 chip 的 title（**必须随视角变**）。
+ * 模型 chip 的 title（**三态 + 随视角变**，唯一实现在 `labels.ts` 的 `llmChipTitle`）。
  *
+ * ★ 三态：读取中 / **还没配置模型** / 当前模型。中间那一档是 2026-09-22 补的
+ *   （实测缺陷）：chip 此前直接显示服务端默认的模型名，于是首次安装、没填 Key 时
+ *   界面上也写着 `deepseek-v4-flash` —— 看起来像「配好了」，而第一句话会直接失败。
  * ★ 学生视角下弹层是只读的（换模型是老师 / 评委的事，见 `ModelPicker.vue`）——
  *   那时还写「点这里更换」就是在承诺一件做不到的事：学生点开只会看到一个
  *   没有可点项的清单，然后开始怀疑是不是自己点错了（一个**界面撒谎**的缺陷，
  *   与「按钮文案指向下一个视图」那条纪律同类）。
  */
-const modelChipTitle = computed(() =>
-  viewMode.isTeacher
-    ? `当前模型：${model.label} —— 点这里更换`
-    : `当前模型：${model.label}（想换模型请去设置里的高级设置）`
-)
+const modelChipTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.isTeacher))
 
 /** 草稿直接绑 store（见文件头的理由）。 */
 const draft = computed({

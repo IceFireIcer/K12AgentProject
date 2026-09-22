@@ -88,11 +88,26 @@ watch(
   { immediate: true }
 )
 
-/** 当前模型（还没读到时为 `null`）。 */
+/** 当前模型（还没读到设置 / **还没配置**时为 `null`）。 */
 const active = computed<ModelOption | null>(() => model.current)
 
-/** 头部那一行「当前用的是什么」：三种状态都如实说 */
+/**
+ * ★★ **还没配置模型**（没填 Key）—— 这一档是 2026-09-22 补的。
+ *
+ * 实测缺陷：此前弹层里直接显示服务端默认的模型名（`deepseek-v4-flash`）并标上
+ * 「正在用」，于是首次安装、一个 Key 都没填的时候，学生/老师看到的是
+ * 「已经配好了一个模型」—— 而发出去的第一句话只会收到「缺 Key」的失败提示。
+ * 判据的唯一实现在 `labels.ts` 的 `llmReadyState`（与两个 chip 同源）。
+ */
+const needsSetup = computed(() => model.readyState === 'unconfigured')
+
+/** 头部那一行「当前用的是什么」：四种状态都如实说 */
 const currentLine = computed(() => {
+  if (needsSetup.value) {
+    return viewMode.isTeacher
+      ? '还没配置模型 —— 现在发消息收不到回答，先在这里把供应商与 API Key 填上。'
+      : '还没配置模型 —— 现在问问题还答不了。'
+  }
   if (active.value !== null) {
     return `当前：${active.value.providerName} · ${active.value.modelId}`
   }
@@ -190,14 +205,45 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
           <header class="mp__head">
             <div class="mp__head-text">
               <!-- 标题跟着形态走：学生那一份不能叫「选择模型」——
-                   它是一个说明面板（点不了），写着「选择」而选不了就是一句谎话。 -->
-              <p class="mp__title">{{ viewMode.isTeacher ? '选择模型' : '正在使用的模型' }}</p>
+                   它是一个说明面板（点不了），写着「选择」而选不了就是一句谎话。
+                   ★ 未配置时**两个视角都不许说「正在使用的模型」**：那时没有任何模型在用
+                     （那正是这次修的那句话 —— 界面在说自己没有的东西）。 -->
+              <p class="mp__title">
+                {{
+                  needsSetup ? '还没配置模型' : viewMode.isTeacher ? '选择模型' : '正在使用的模型'
+                }}
+              </p>
               <p class="mp__sub">{{ currentLine }}</p>
             </div>
             <button type="button" class="mp__close" title="关闭" @click="model.closePicker()">
               <X :size="16" />
             </button>
           </header>
+
+          <!-- ★★ 还没配置时最显眼的那一条（2026-09-22）：一进来就知道「这里缺一步」，
+               而不是看到一串候选模型、却不知道为什么发出去的消息收不到回答。
+               ★ 两半各说各的话（双视角纪律）：老师看到的是「去填什么」，
+                 学生看到的是「找谁」（他自己不会去动供应商那张表）。
+               ⚠️ 这一块**只在未配置时渲染**：配好之后它就该消失，
+                  否则一个常驻的警告会变成噪声（每次换模型都看到）。 -->
+          <section v-if="needsSetup" class="mp__setup" data-testid="model-unconfigured">
+            <p class="mp__setup-text">
+              {{
+                viewMode.isTeacher
+                  ? '还没配置模型。在「设置 → 高级设置（教师 / 答辩）→ 供应商」里填上 API Key 并保存，就能开始对话。'
+                  : '智团团还没接上云端大脑，暂时答不了问题。请老师或家长在「设置 → 高级设置（教师 / 答辩）」里配置一下。'
+              }}
+            </p>
+            <button
+              type="button"
+              class="k12-cta mp__setup-cta"
+              data-testid="model-setup-cta"
+              @click="goSettings"
+            >
+              <Settings2 :size="14" />
+              <span>打开设置</span>
+            </button>
+          </section>
 
           <!-- ★★ 候选清单分两种形态（同一份数据、同一批 testid）：
                · 教师 / 答辩视角 = **可选**的按钮列表（点一项即换，选中就保存）；
@@ -380,6 +426,28 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
     background: var(--k12-surface-2);
     color: var(--k12-fg-2);
   }
+}
+
+/* 还没配置模型时的那一条（唯一一处「配置入口」的引导）。
+ * ★ 用强调底色而不是警告红：这不是故障，是「还差一步配置」—— 红色会让学生以为软件坏了。 */
+.mp__setup {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 18px;
+  background: var(--k12-accent-soft);
+  border-bottom: 1px solid var(--k12-accent-border);
+}
+.mp__setup-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg-2);
+}
+.mp__setup-cta {
+  flex: none;
 }
 
 .mp__list {

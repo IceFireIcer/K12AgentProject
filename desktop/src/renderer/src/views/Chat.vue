@@ -42,9 +42,12 @@ import {
   Clock,
   Code,
   MessageCircle,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   Plus,
+  Settings2,
   ShieldAlert,
   TriangleAlert,
   Trophy
@@ -57,9 +60,12 @@ import SessionList from '../components/SessionList.vue'
 import { useChatStore } from '../stores/chat'
 import { useConfirm } from '../stores/confirm'
 import { useInsightStore } from '../stores/insight'
+import { useModelStore } from '../stores/model'
+import { usePanelsStore } from '../stores/panels'
 import { useStudentStore } from '../stores/student'
 import { useTraceStore } from '../stores/trace'
 import { useUiStore, type PageName } from '../stores/ui'
+import { useViewModeStore } from '../stores/viewMode'
 // ★ 来源说法（手动选中 / AI 引擎推算）只有 `labels.ts` 一处实现 ——
 //   本页与右栏各写一份映射迟早对不上，而那种不一致是「界面自相矛盾」。
 import { gradeOriginLabel } from '../labels'
@@ -69,15 +75,56 @@ import { DEFAULT_LOGO_URL } from '../brand-logo'
 const chat = useChatStore()
 const confirm = useConfirm()
 const insight = useInsightStore()
+const model = useModelStore()
 const student = useStudentStore()
 // ★ 工具轨迹只在「新会话」时需要写（清空）；订阅与渲染都在 ContextRail 里，
 //   这里取的仍是同一个 Pinia 单例，不会出现两份状态。
 const trace = useTraceStore()
 const ui = useUiStore()
+// ★ 只用来给「还没配置模型」那条提示挑措辞（老师看「填什么」、学生看「找谁」）——
+//   双视角纪律的落点见那条提示的注释与 `stores/viewMode.ts`。
+const viewMode = useViewModeStore()
+
+/**
+ * ★★ **还没配置模型**（没填 Key）→ 空态里给一条人话提示 + 一个去设置的入口。
+ *
+ * 实测缺陷（2026-09-22）：此前「没配 Key」这件事**只在学生真的发出去一条消息之后**
+ * 才以一种技术口吻的降级提示出现（「本机还没有配置 API Key…」）—— 学生已经把问题
+ * 打完了、按下发送、等了一会儿才被告知「答不了」。而顶栏与输入条那时还显示着一个
+ * 模型名，看起来像「配好了」。
+ * 现在：进门就在空态里说清「现在还答不了、为什么、找谁」，并指出**哪些功能本来就能用**
+ * （动画 / 编程 / 闯关都在本地跑，不依赖模型）—— 这样他知道该去点哪儿。
+ */
+const needsLlmSetup = computed(() => model.readyState === 'unconfigured')
+
+/** 去设置页（未配置时的引导；学生视角下那句话指向「老师或家长」，见模板里的两半）。 */
+function goSettings(): void {
+  ui.go('settings')
+}
 
 /* ── 消息列表：直接读 store（6 事件折叠的结果）──────────────────────────── */
 const turns = computed(() => chat.turns)
-const isEmpty = computed(() => turns.value.length === 0)
+
+/**
+ * 真正算「一轮」的轮次 —— **有学生提问的那些**。
+ *
+ * ★★ 判据是「这一轮有没有学生的话」，与主进程的 `ChatRuntime.hasUserTurn`
+ *   是**同一条规则**（两处都判「学生开口了没有」，不是「列表里有几条」）：
+ *   · 恢复出来的「开场白」是助手先说的那条，它自己占一轮但 `userText` 为空 ——
+ *     直接数 `turns.length` 会让同一段对话在切回来后从「1 轮」变成「2 轮」
+ *     （实测截图里就是「1 轮」配着一个空气泡）；
+ *   · 实时那一轮永远有 `userText`（它是学生刚发出去的那句话）。
+ */
+const turnCount = computed(() => turns.value.filter((turn) => turn.userText !== '').length)
+
+/**
+ * 空态（开场卡 + 四张能力入口 + 建议问题）的开关。
+ *
+ * ★ 用 `turnCount` 而不是 `turns.length`：两者只在「只有开场白、学生还没开口」时不同，
+ *   而那正是本次修的缺陷 —— 主进程对未开始的会话**回空消息数组**（开场白走 `opening`），
+ *   所以这里判「有没有学生提问」与主进程判的是同一件事，界面不会再出现第三种样子。
+ */
+const isEmpty = computed(() => turnCount.value === 0)
 
 /**
  * 自动滚到底。
@@ -213,8 +260,14 @@ function onSend(text: string): void {
   void chat.send(text)
 }
 
-/* ── 右栏：≥1280 常驻（可收），<1280 变浮层（进入该区间自动收起）──────────── */
-const railOpen = ref(true)
+/* ── 两栏：默认都收起（见 stores/panels.ts 的说明），各有一个开关 ────────────
+ * 左栏（历史对话）开关在会话工具条的**左端**、右栏在**右端** —— 两个开关对称落在
+ * 同一行两端，各自挨着自己控制的那一栏。
+ * ★ 状态在 `stores/panels.ts`（localStorage 持久化）：组件里再存一份 ref 就会出现
+ *   「一处改了另一处没同步」，而这类不同步在界面上表现成「点了没反应」。 */
+const panels = usePanelsStore()
+const historyOpen = computed(() => panels.historyOpen)
+const railOpen = computed(() => panels.railOpen)
 const NARROW = '(max-width: 1279px)'
 let mql: MediaQueryList | null = null
 /** 记录「这次收起是断点自动做的」—— 离开窄屏时才还原，不覆盖学生主动关掉的选择。 */
@@ -223,12 +276,14 @@ let autoClosed = false
 function onBreakpoint(): void {
   if (!mql) return
   if (mql.matches) {
-    if (railOpen.value) {
-      railOpen.value = false
+    if (panels.railOpen) {
+      // ★ `persist: false`：窄屏自动收起是**视口**决定的临时状态，不许覆盖学生的选择 ——
+      //   否则「在窄窗口里用过一次」就等于把偏好改成了收起，宽屏上再也回不来。
+      panels.setRail(false, { persist: false })
       autoClosed = true
     }
   } else if (autoClosed) {
-    railOpen.value = true
+    panels.setRail(true, { persist: false })
     autoClosed = false
   }
 }
@@ -275,10 +330,19 @@ onBeforeUnmount(() => {
   colRef.value?.removeEventListener('scroll', onColScroll)
 })
 
-function toggleRail(): void {
-  railOpen.value = !railOpen.value
+function setRailOpen(open: boolean): void {
+  panels.setRail(open)
   // 学生自己动手了：之后跨断点不再自动改他的选择
   autoClosed = false
+}
+
+function toggleRail(): void {
+  setRailOpen(!panels.railOpen)
+}
+
+/** 左栏（历史对话）开关：没有断点逻辑 —— 窄窗口下这一列本来就收成图标条（见 SessionList 的 CSS）。 */
+function toggleHistory(): void {
+  panels.toggleHistory()
 }
 
 /* ── 新会话：**开一个新的会话文件**（不是删旧的）───────────────────────── */
@@ -484,7 +548,18 @@ const gradeSourceSentence = computed(() => {
 <template>
   <div class="chat" data-testid="chat-area">
     <!-- ── 历史对话列（切换续聊的入口）─────────────────────────────── -->
-    <SessionList />
+    <!-- ★★ 包一层可折叠容器，而不是给它 `v-if`：`SessionList` **必须保持挂载** ——
+         它的两个 watcher（`currentSessionMessageCount` 变化 → 重取列表；
+         `currentSessionId` 变化 → 重取列表 + 解除祖先折叠）与 `onMounted` 里的首次取数
+         都靠挂载活着。用 `v-if` 收起的话，学生在折叠状态下新建/切换会话，
+         再展开时列表是**旧快照**（而「展开后列表是旧的」在界面上看起来就是「没保存」）。
+         ★ 收起时内层整体 `display: none`（与右栏 `.rail--closed .rail__panel` 同一手法）：
+           `overflow: hidden` 只是裁剪，子元素仍有 236px 的矩形 —— 而体检脚本按
+           「渲染后的矩形」判可见性（`w > 0 && h > 0`），裁剪出来的东西会被量进
+           「学生能点的元素」（假红假绿都发生过）。 -->
+    <div class="chat__side" :class="{ 'chat__side--closed': !historyOpen }">
+      <SessionList />
+    </div>
 
     <!-- ── 主列 ─────────────────────────────────────────────────────── -->
     <div class="chat__main">
@@ -496,11 +571,24 @@ const gradeSourceSentence = computed(() => {
         <ChapterIndicator />
       </div>
 
-      <!-- 会话工具条：会话状态 + 新会话 + 右栏开关 -->
+      <!-- 会话工具条：会话状态 + 左栏开关 + 新会话 + 右栏开关 -->
       <div class="chat__bar">
         <div class="chat__bar-left">
+          <!-- ★ 左栏开关在**最左端**（挨着它控制的那一列），右栏开关在最右端 ——
+               两个开关对称落在同一行两端。图标与右栏那枚同一套语义
+               （PanelLeft/Right + Open/Close），`aria-pressed` 给屏幕阅读器同样的信息。 -->
+          <button
+            type="button"
+            class="chat__bar-icon"
+            data-testid="history-toggle"
+            :title="historyOpen ? '收起历史对话' : '展开历史对话'"
+            :aria-pressed="historyOpen"
+            @click="toggleHistory"
+          >
+            <component :is="historyOpen ? PanelLeftClose : PanelLeftOpen" :size="16" />
+          </button>
           <span class="chat__bar-title">本轮对话</span>
-          <span class="chat__bar-meta">{{ isEmpty ? '尚未开始' : `${turns.length} 轮` }}</span>
+          <span class="chat__bar-meta">{{ isEmpty ? '尚未开始' : `${turnCount} 轮` }}</span>
         </div>
         <div class="chat__bar-right">
           <button
@@ -600,6 +688,36 @@ const gradeSourceSentence = computed(() => {
                 <template v-if="chat.currentGrade">{{ gradeSourceSentence }}</template>
                 <template v-else>系统会先看几轮你的提问，再定成哪个年级。</template>
               </p>
+            </div>
+
+            <!-- ★★ 还没配置模型（没填 Key）：**进门就说清**，而不是等学生打完整句话、
+                 按下发送、等一会儿才收到一句技术口吻的失败提示（实测缺陷，见
+                 `needsLlmSetup` 的注释）。
+                 ★ 两半各说各的话（双视角纪律）：老师看到「去填什么」，
+                   学生看到「找谁」，并且**指出现在就能用的功能** —— 空态里那三张
+                   （动画 / 编程 / 闯关）都在本地跑，不依赖模型。 -->
+            <div v-if="needsLlmSetup" class="chat__llm-note" data-testid="chat-llm-unconfigured">
+              <TriangleAlert :size="14" class="chat__llm-ico" />
+              <p class="chat__llm-text">
+                <template v-if="viewMode.isTeacher">
+                  还没配置模型：在设置页填上供应商与 API Key 并保存，就能正常对话。
+                  下面的动画 / 编程 / 闯关不依赖模型，现在就能用。
+                </template>
+                <template v-else>
+                  智团团还没接上云端大脑，现在问问题还答不了 —— 请老师或家长在
+                  「设置 → 高级设置（教师 / 答辩）」里配置一下。
+                  下面的动画 / 编程 / 闯关不依赖模型，现在就能用。
+                </template>
+              </p>
+              <button
+                type="button"
+                class="chat__llm-cta"
+                data-testid="chat-llm-setup"
+                @click="goSettings"
+              >
+                <Settings2 :size="14" />
+                <span>打开设置</span>
+              </button>
             </div>
 
             <div class="chat__entries">
@@ -727,7 +845,10 @@ const gradeSourceSentence = computed(() => {
     </div>
 
     <!-- ── 右栏 ─────────────────────────────────────────────────────── -->
-    <ContextRail v-model:open="railOpen" />
+    <!-- ★ 不能用 `v-model:open`：两栏的状态是 store 里的（`stores/panels.ts`），
+         `v-model` 会对一个只读 computed 写值。显式绑 `:open` + `@update:open`，
+         走的是与工具条那个开关**同一个** store action。 -->
+    <ContextRail :open="railOpen" @update:open="setRailOpen" />
   </div>
 </template>
 
@@ -737,6 +858,18 @@ const gradeSourceSentence = computed(() => {
   height: 100%;
   min-height: 0;
   position: relative;
+}
+
+/* 历史对话列的可折叠外壳（宽度随内层那一列走）。
+ * ★ 宽度的唯一来源仍是 `SessionList.vue` 的 `.sl`（236 / 窄屏 60）——
+ *   这里只负责「收起时整列不参与布局、也不参与体检量测」。 */
+.chat__side {
+  flex: none;
+  display: flex;
+  min-height: 0;
+}
+.chat__side--closed :deep(.sl) {
+  display: none;
 }
 /* 主列 = 一整张纸。对话区是**方格纸工作面本身**（透出外壳的页面底色），
  * 回答与卡片是**压在方格纸上的白纸**：有厚度、有边界，与桌面区分开。
@@ -1043,6 +1176,47 @@ const gradeSourceSentence = computed(() => {
 .chat__hello-grade-text strong {
   color: var(--k12-fg);
   font-weight: 650;
+}
+
+/* 「还没配置模型」那条提示：与上面那行学段状态同一块版式，但用**暖色**而不是灰 ——
+ * 它不是状态说明，而是「现在就答不了」的原因。
+ * ★ 不用红色：这不是故障，是「还差一步配置」（红会让老师以为软件坏了）。 */
+.chat__llm-note {
+  background: var(--k12-warn-soft);
+  border: 1px solid color-mix(in srgb, var(--k12-warn) 30%, transparent);
+  border-radius: var(--k12-r-inset);
+
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 13px;
+  max-width: 72ch;
+}
+.chat__llm-ico {
+  flex: none;
+  color: var(--k12-warn);
+}
+.chat__llm-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg-2);
+}
+.chat__llm-cta {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 11px;
+  min-height: 28px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .chat__entries {

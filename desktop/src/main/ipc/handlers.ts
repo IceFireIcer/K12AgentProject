@@ -20,12 +20,13 @@
 
 import { app, BrowserWindow, dialog, ipcMain, type WebContents } from 'electron'
 import { writeFileSync } from 'node:fs'
+import { unlink } from 'node:fs/promises'
 import { apiFetch } from '../bridge/client.ts'
 import { describeRuntimeFailure } from '../agent/events.ts'
 import { gradeStatePath } from '../agent/extensions/grade.ts'
 import { bindCodeRunner, createRendererCodeRunner } from '../agent/extensions/coding.ts'
 import { builtinCatalog } from '../agent/pi-bootstrap.ts'
-import { assertStudentId } from '../agent/pi-paths.ts'
+import { assertStudentId, isInside, resolveStudentPiPaths } from '../agent/pi-paths.ts'
 import type { ChatRuntime, ChatSessionSource } from '../agent/runtime.ts'
 import { createChatRuntime } from '../agent/runtime.ts'
 import {
@@ -55,6 +56,7 @@ import {
   type SessionBranchRequest,
   type SessionBranchResult,
   type SessionCurrent,
+  type SessionDeleteResult,
   type SessionOpenResult,
   type SessionSearchRequest,
   type SessionStateResult,
@@ -95,9 +97,11 @@ import {
   projectSessionTree,
   projectTranscript,
   readStudentSessionEntries,
+  resolveDeletionTarget,
   searchSessions,
   truncateChars,
-  type SessionTranscript
+  type SessionTranscript,
+  type TranscriptMessage
 } from '../study/sessions.ts'
 // 导出的文件名清理（纯函数，安全边界）
 import {
@@ -1115,13 +1119,21 @@ function registerSessionHandlers(): void {
       return { ok: false, message: `读取当前会话失败：${describeRuntimeFailure(error)}` }
     }
     const current = sessionStateOf(instance)
-    // ★ 冷启动那条路**不发**开场引导：它是「会话建立**之后**由主进程主动说一句」，
-    //   而启动时恢复会话的形态是「把学生离开时的样子还给他」—— 在那份历史里
-    //   已经有一条开场语（如果当时发过）。再发一次就会变成两条一样的招呼。
-    //   ★ 这也让「开场只发一次」这条纪律在两条路径上一致：发过就写进了 JSONL，
-    //     恢复出来的历史里它作为一条普通助手消息存在。
-    const restored = [...instance.restoredMessages]
-    return { ok: true, current, messages: restored, opening: '', openingKpId: '' }
+    // ★★ 冷启动与「切换会话」走**同一个判据**（`resolveSessionPrelude`）—— 见它的说明。
+    //   ⚠️ 这里修正过 D-055 的一条口径（「冷启动开头恒为空串」）：当年那条的理由是
+    //      「恢复出来的历史里本来就有那句招呼，再发一次就是每次开应用都看到同一句招呼」——
+    //      对**已经聊过**的会话成立（`started === true` 时仍然一个字节都不发），
+    //      但对**没开始**的会话它让同一段对话长成了第三副样子（重启后只剩一个空气泡 + 一句问候）。
+    //      现在：不**重发**（不重复写入文件、不重复调模板），但把文件里那条开场白按**开场卡**渲染出来。
+    const prelude = await resolveSessionPrelude(instance)
+    return {
+      ok: true,
+      current,
+      messages: prelude.messages,
+      started: prelude.started,
+      opening: prelude.opening,
+      openingKpId: prelude.openingKpId
+    }
   })
 
   ipcMain.handle(
@@ -1132,9 +1144,15 @@ function registerSessionHandlers(): void {
 
   ipcMain.handle(IPC.sessionNew, async (): Promise<SessionOpenResult> => {
     // 「新会话」= 开一个**全新的 JSONL 文件**（`sessionSource: 'new'`）。
-    // ★ 旧会话**不删**（删除需要单独的确认流程，本期不做）：它仍在列表里，随时可切回去。
+    // ★ 旧会话**不删**（它仍在列表里，随时可切回去）；要删走 `session:delete` 那条独立通道。
     return await swapToSession({ kind: 'new' })
   })
+
+  ipcMain.handle(
+    IPC.sessionDelete,
+    async (_event, payload: unknown): Promise<SessionDeleteResult> =>
+      await deleteSessionById(typeof payload === 'string' ? payload : '')
+  )
 
   ipcMain.handle(
     IPC.sessionBranch,
@@ -1324,17 +1342,7 @@ async function swapToSession(target: SessionTarget): Promise<SessionOpenResult> 
     title: '',
     messageCount: instance.messageCount
   }
-  const restored = [...instance.restoredMessages]
-
-  // ★★ 主动发起对话（需求原文）：**只在这是全新的一段对话时**才发开场。
-  //    判据是 `messageCount === 0`（只数可显示的问答条数，见 `runtime.ts` 的说明）——
-  //    不是「刚新建」（切到一条空的历史会话同样该开场），也不是「source === 'new'」
-  //    （那会让「上次开了没说话的会话」永远等不到开场）。
-  const opening = current.messageCount === 0 ? await fetchOpening() : { text: '', kpId: '' }
-  if (opening.text) {
-    // ★ 写进 Pi 会话（否则重启后这句开场消失）：内容与屏幕上显示的那一条**同一份文本**。
-    instance.appendOpeningMessage(opening.text)
-  }
+  const prelude = await resolveSessionPrelude(instance)
 
   pushSessionState(current)
   // ★ 标题生成**不 await**：它要发一次模型调用（可能几秒），而学生此刻正等着
@@ -1344,10 +1352,78 @@ async function swapToSession(target: SessionTarget): Promise<SessionOpenResult> 
   return {
     ok: true,
     current,
-    messages: restored,
-    opening: opening.text,
-    openingKpId: opening.kpId
+    messages: prelude.messages,
+    started: prelude.started,
+    opening: prelude.opening,
+    openingKpId: prelude.openingKpId
   }
+}
+
+/** 「未开始 / 已开始」这两半在两条路径上共用的形态（见 {@link resolveSessionPrelude}）。 */
+interface SessionPrelude {
+  started: boolean
+  messages: Array<{ role: 'user' | 'assistant'; text: string; at: number; entryId: string }>
+  opening: string
+  openingKpId: string
+}
+
+/**
+ * ★★ **「这条会话开始了没有 + 该显示哪句开场白」的唯一实现**。
+ *
+ * 切换/新建（`swapToSession`）与冷启动恢复（`session:state`）都调它 ——
+ * 两处各写一份就会出现「新建时是开场卡、切回来变成一条普通消息」这类不对称，
+ * 而那正是这次修的缺陷。
+ *
+ * 判据是 **`instance.hasUserTurn`（学生开口了没有）**，不是消息条数：
+ * 开场引导是**写进会话文件**的一条 assistant 消息，所以「刚建好、学生还没开口」的会话
+ * 在切走再切回时消息条数已经是 1 —— 用条数判会让同一段对话长成两副样子。
+ *
+ * 三种情形：
+ *   ① `started` —— 铺 `messages`，不给开场（学生会看到一句「我们从X开始吧」
+ *      插在他自己聊过的内容前面，那是明显的错位）；
+ *   ② 未开始、**文件里还没有**开场白 → 现取一次 + 写进文件（内容与屏幕上那份同一份文本）；
+ *   ③ 未开始、**文件里已有**开场白 → 正文直接取**文件里那条**（唯一真相，不重复写入），
+ *      `kpId` 只在「重新取到的开场语与文件里那条逐字相同」时才给 ——
+ *      对不上就撤掉动作按钮：宁可没有按钮，也不让卡片上的字与历史里的字不一致
+ *      （推荐的知识点会随画像变，而文件里的那句是**当时**写下的）。
+ *
+ * ★ 未开始一律 `messages: []`：那条开场白由 `opening` 承载，不当普通消息铺回去 ——
+ *   否则界面进不了空态（开场卡 / 四张能力入口 / 建议问题全靠空态渲染）。
+ */
+async function resolveSessionPrelude(instance: ChatRuntime): Promise<SessionPrelude> {
+  if (instance.hasUserTurn) {
+    return { started: true, messages: [...instance.restoredMessages], opening: '', openingKpId: '' }
+  }
+  const stored = storedOpeningText(instance.restoredMessages)
+  if (!stored) {
+    const fetched = await fetchOpening()
+    if (fetched.text) {
+      // ★ 写进 Pi 会话（否则重启后这句开场消失）：内容与屏幕上显示的那一条**同一份文本**。
+      instance.appendOpeningMessage(fetched.text)
+    }
+    return { started: false, messages: [], opening: fetched.text, openingKpId: fetched.kpId }
+  }
+  const fetched = await fetchOpening()
+  return {
+    started: false,
+    messages: [],
+    opening: stored,
+    openingKpId: fetched.text === stored ? fetched.kpId : ''
+  }
+}
+
+/**
+ * 会话文件**开头那条开场白**（只在「学生还没开口」的会话里找）。
+ *
+ * ★ 为什么可以只看第一条 assistant 消息：开场白是这条会话里**唯一**能在学生消息之前
+ *   出现的助手消息（`appendOpeningMessage` 只在未开始的会话里被调用）。
+ * ★ 文本比对前 trim：写入时已经 trim 过（`appendOpeningMessage`），这里对齐口径，
+ *   免得因为一个首尾空格判定「对不上」而白丢掉动作按钮。
+ */
+function storedOpeningText(messages: readonly TranscriptMessage[]): string {
+  const first = messages[0]
+  if (!first || first.role !== 'assistant') return ''
+  return first.text.trim()
 }
 
 /**
@@ -1387,7 +1463,10 @@ async function maybeGenerateTitle(instance: ChatRuntime): Promise<void> {
     if (!loaded.ok) return
     const info = findSessionById(loaded.infos, instance.sessionId)
     if (info?.name) return
-    if (instance.messageCount === 0) return
+    // ★ 学生还没开口就没有可命名的东西。判据用 `hasUserTurn` 而不是 `messageCount === 0`：
+    //   后者在「刚建好、只发了开场白」的会话上已经是 1 —— 拿我们自己的招呼话去生成标题，
+    //   既白花一次模型调用，又会给列表起一个**像是学生提问**的标题。
+    if (!instance.hasUserTurn) return
     await instance.generateSessionTitle()
     // 标题生成完推一次（列表据此更新那一栏）——推的是**同一个投影函数**的产物
     pushSessionState(sessionStateOf(instance))
@@ -1446,6 +1525,72 @@ async function loadSessions(): Promise<
   } catch (error) {
     return { ok: false, message: `读取历史会话失败：${describeRuntimeFailure(error)}` }
   }
+}
+
+/**
+ * ★★ **删掉一条历史会话**（`session:delete` 的唯一实现；本项目唯一的破坏性文件操作）。
+ *
+ * 为什么是我们在删（而不是 Pi）：Pi SDK 0.85.1 **没有任何删除 API** ——
+ * `SessionManager` 只有 `list/open/create/continueRecent/createBranchedSession`，
+ * 连 `AgentSession` 上也没有。所以「删除」这件事从选路径到 unlink 都得自己做，
+ * 而正因为自己做，**两道防线是硬要求**（判据在 `resolveDeletionTarget()`，
+ * 那是个可单测的纯函数；这里只负责副作用）。
+ *
+ * ★★ **删「正在聊的那一条」时的顺序不能反**：先 `swapToSession({kind:'new'})`
+ *   （① dispose 旧会话 → ② `pendingSessionSource` 改道 → ③ 装配新的），**成功之后才 unlink**。
+ *   反过来的话有两种坏结果：
+ *     · 文件先没了、Pi 还持有它 → 下一次 flush 把文件**重新写出来**（学生以为删掉了，其实还在）；
+ *     · 并发的一条 `ensureChatRuntime()`（渲染进程挂载时的 `grade:get` 就是一条）
+ *       会拿着一条**已删除的路径**去 `open`。
+ *   ★ 切换失败就**不删**：宁可留着一条对话，也不让学生既没删成、当前会话也没了。
+ *
+ * ★ 正在流式回答时**拒绝删当前会话**：那一轮还在往这个文件里写，dispose 与飞行中的
+ *   轮次会打架，而学生此刻也正看着这段回答 —— 让他等这句话讲完再说。
+ */
+async function deleteSessionById(id: string): Promise<SessionDeleteResult> {
+  const loaded = await loadSessions()
+  if (!loaded.ok) return { ok: false, message: loaded.message }
+
+  const target = resolveDeletionTarget({
+    infos: loaded.infos,
+    id,
+    sessionDir: resolveStudentPiPaths(app.getPath('userData'), resolveActiveStudentId()).sessionDir
+  })
+  if (!target.ok) return target
+  // 已经不在了（另一处删过 / 上次删到一半）：目标状态已达成，什么都不做。
+  if (target.path === null) return { ok: true, id: id.trim() }
+
+  const activeSessionId = runtime?.sessionId ?? ''
+  if (activeSessionId !== '' && activeSessionId === id.trim()) {
+    if (chatStreams.activeTurns > 0) {
+      return { ok: false, message: '删除失败：这条对话正在回答，等它讲完再删。' }
+    }
+    const swapped = await swapToSession({ kind: 'new' })
+    if (!swapped.ok) {
+      return {
+        ok: false,
+        message: `删除失败：当前正聊着这条，没能先切到新对话（${swapped.message}）`
+      }
+    }
+  }
+
+  const resolved = resolveStudentPiPaths(app.getPath('userData'), resolveActiveStudentId())
+  // ★ unlink **之前再核一次**路径：上面那道判据用的是「列表里的 path」，
+  //   而这里要动的是磁盘 —— 中间隔着一次可能的 swapToSession（它会 dispose/重建会话）。
+  //   同一句判据写两遍不是冗余：这是**破坏性操作**，而两道防线里少一道就没得救。
+  if (!isInside(resolved.sessionDir, target.path)) {
+    return { ok: false, message: '删除失败：这条对话不在当前学生的会话目录里（已拒绝）。' }
+  }
+  try {
+    await unlink(target.path)
+  } catch (error) {
+    // ENOENT = 已经不在了（并发删除 / 手工删过）：目标状态已达成，不算失败。
+    const code = (error as { code?: string }).code
+    if (code !== 'ENOENT') {
+      return { ok: false, message: `删除失败：${describeRuntimeFailure(error)}` }
+    }
+  }
+  return { ok: true, id: id.trim() }
 }
 
 /** 按白名单里那条 `SessionInfo` 读它自己的文件（**path 由 Pi 提供，不是前端给的**）。 */

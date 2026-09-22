@@ -649,6 +649,12 @@ const EXPECTED_API_METHODS = [
   //   两个入参都只当字符串 id 用 —— `sessionId` 走会话白名单、`entryId` 由主进程
   //   核对该会话的条目清单（渲染进程指不了别的会话）。
   'branchSession',
+  // ★★ 会话删除（2026-09-22）：本项目**唯一**的破坏性能力。入参只当字符串 id 用 ——
+  //   主进程先做会话白名单对齐（path 由 Pi 给），再断言路径落在当前学生的 sessionDir 里
+  //   （两道防线都在 `study/sessions.ts` 的 `resolveDeletionTarget`，可单测）。
+  //   ⚠️ 不要把它并进别的通道（比如给 `session:open` 加个 `delete: true`）：
+  //      破坏性操作该有自己的名字，将来审计「谁能删东西」时只有这一处要查。
+  'deleteSession',
   'onSessionChanged',
   // ★ 本轮条目 id（`turn:entries` 推送）：「从这里重新问」的分叉点靠它 ——
   //   没有它，那个按钮只对**历史消息**出现，对刚聊出来的回答不出现（实测 P-105）。

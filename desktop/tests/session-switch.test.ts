@@ -197,13 +197,22 @@ test('★★ preload 侧同样只递字符串（两道都不放行对象形态�
  * 3. ★★ 通道纪律：invoke 与 push 不能混
  * ------------------------------------------------------------------ */
 
-test('★ `session:changed` 是唯一的推送；五条 invoke 一个都不许进 PUSH_CHANNELS', () => {
+test('★ `session:changed` 是唯一的推送；六条 invoke 一个都不许进 PUSH_CHANNELS', () => {
   const source = read(CHANNELS)
   const block = /export\s+const\s+PUSH_CHANNELS[^=]*=\s*\[([\s\S]*?)\]/.exec(source)?.[1]
   assert.ok(block, '找不到 PUSH_CHANNELS')
   assert.match(block, /IPC\.sessionChanged/, '★ `session:changed` 必须登记为推送通道')
 
-  for (const channel of ['sessionList', 'sessionTranscript', 'sessionSearch', 'sessionOpen', 'sessionNew', 'sessionCurrent']) {
+  // ★ 删除（`session:delete`）也必须是 invoke：它要回一句「删没删成」——
+  //   破坏性操作没有回执，界面就只能假装成功（而失败时学生以为删掉了，其实还在盘上）。
+  for (const channel of [
+    'sessionList',
+    'sessionTranscript',
+    'sessionSearch',
+    'sessionOpen',
+    'sessionNew',
+    'sessionDelete'
+  ]) {
     assert.doesNotMatch(
       block,
       new RegExp(`IPC\\.${channel}\\b`),
@@ -285,6 +294,7 @@ function installSessionBridge(overrides: Record<string, (...args: unknown[]) => 
     openSession: () => ({ ok: false, message: '未接线' }),
     startNewSession: () => ({ ok: false, message: '未接线' }),
     branchSession: () => ({ ok: false, message: '未接线' }),
+    deleteSession: () => ({ ok: false, message: '未接线' }),
     onSessionChanged: () => () => {},
     // chat store 的 connect() 还要订阅这些，全部给空实现
     onChatEvent: () => () => {},

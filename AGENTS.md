@@ -236,6 +236,10 @@ D-020 曾让需求「学生可选择学段」的字面要求被主动放弃，D-
   ⚠️ 历史默认 `deepseek-chat` **不在 Pi 的模型目录里**（那里的 deepseek 只有
   `deepseek-v4-flash` / `-vision-exp` / `-pro`），会让首轮对话直接抛「Pi 里找不到模型」（P-048）。
   两种 `/v1` 写法都可能连通，**保存时必须做真实连通性探测**，不要静默改写用户填的地址。
+  ★★ **但界面上「已配置 / 未配置」与这几个默认值无关**（D-069）：判据是 **`hasKey`**
+  （`labels.ts` 的 `llmReadyState`）—— 没填 Key 时 chip 必须显示「未配置」。
+  ⚠️ 上一版直接显示 `modelId`，于是**首次安装**时界面就写着 `deepseek-v4-flash`，
+  看起来像「已经配好了」，而第一句话必然失败 —— **界面不许说自己没有的东西**。
 - **供应商预设与拉取模型**：Pi 自带 40 个 provider 的目录（端点 + 模型清单），
   用 `ModelRuntime.create({ modelsPath: null })` **离线**读出来（不碰 `~/.pi`），
   设置页的预设下拉与「拉取模型」都基于它。自定义/校内网关（`providerId` 自取，如 `custom`）
@@ -465,7 +469,8 @@ D-020 曾让需求「学生可选择学段」的字面要求被主动放弃，D-
   `session:transcript` 与 `session:open` 都**只接受会话 id，绝不接受路径** ——
   主进程先用 `SessionManager.list()` 的结果做白名单对齐，再用 **Pi 给的 `path`** 打开。
   ★★ 四条新通道：`session:open` / `session:new` / `session:state`（三条 invoke）+
-  `session:changed`（**推送**，唯一的 session 推送通道 —— 五条 invoke 不许进 `PUSH_CHANNELS`）。
+  `session:changed`（**推送**，唯一的 session 推送通道 —— **六条 invoke 不许进 `PUSH_CHANNELS`**，
+  第六个是 2026-09-22 加的 `session:delete`，见下面 D-070 那一条）。
   ★★ **切换 = dispose 旧的 + 装配新的**，顺序不能反（`swapToSession()`）：
     不 dispose 会让旧 JSONL 半写；先装配后 dispose 会让并发取数拿到旧实例
     （表现是「会话切了一半，有的调用用新会话、有的用旧的」）。
@@ -522,20 +527,66 @@ D-020 曾让需求「学生可选择学段」的字面要求被主动放弃，D-
   全项目**唯一一处「AI 先开口」**。服务端 `GET /api/profile/{id}/opening` 用**模板拼接**
   （`routes/profile.py` 的 `_opening_text`，复用 `_recommendation_summary` 的措辞）——
   **不调 LLM**：它在「新建会话」这条路上，零延迟 / 断网可用 / 无成本三条都重要。
-  ★ 主进程**只在 `messageCount === 0` 时发**（`swapToSession()` 里那一行）：
-  不是「刚刚新建」（切到一条空的历史会话同样该开场），不是 `getEntries().length`
-  （那里面还有 `model_change`，开场**永远发不出来**）。
-  ★★ **冷启动不发**（`session:state` 回空串）：那份恢复出来的历史里本来就有当时发过的那条，
-    再发一次就是「每次开应用都看到同一句招呼」。
+  ★★ **判据是「学生开口了没有」，不是消息条数**（D-072，2026-09-22 修正）：
+    判据叫 `ChatRuntime.hasUserTurn`，唯一实现是 `handlers.ts` 的 `resolveSessionPrelude()`
+    （**切换/新建与冷启动恢复共用同一个** —— 两处各写一份就会长出第三副样子）。
+    ⚠️ 原判据 `messageCount === 0` 是被自己踩坏的：开场白**就是**写进会话文件的一条 assistant 消息，
+    所以「刚建好、学生还没开口」的会话在切走再切回时条数已经是 1 —— 于是开场卡 / 四张能力入口 /
+    建议问题全没了，只剩一个空气泡 + 一句问候，轮数还从「尚未开始」变成「1 轮」（P-119）。
+    ★ **未开始的会话一律回空消息数组**：那条开场白由 `opening` 承载，**不重复铺**；
+    文件里已有开场白时**不重复写入**，正文取文件里那条，`kpId` 只在「现取的与文件里的**逐字相同**」时才给。
+    ★ 渲染进程用**同一条规则**：`Chat.vue` 的 `turnCount`（只数有学生提问的轮次）驱动
+    「尚未开始 / N 轮」与空态；`ChatMessage.vue` 的学生气泡带 `v-if="turn.userText"`（否则开场白那轮挂个空气泡）。
+  ★★ **冷启动口径已修正（D-072 取代本条老说法）**：**已经聊过**的会话仍然一个字节都不发
+    （那条理由成立）—— 但**没开始**的会话要按**开场卡**渲染（不重复写文件、不重复调模板）；
+    当年「冷启动恒回空串」让同一段没开始的对话在重启后变成**第三副样子**。
+  ★ `maybeGenerateTitle` 同样用 `hasUserTurn`：拿我们自己的招呼话去生成标题既费一次调用，
+    又会给列表起一个像是学生提问的标题。
   ★★ 写进 Pi 会话用 **`appendMessage` + `role: 'assistant'`**，
   **不许**用 `custom_message`（Pi 的 `convertToLlm` 会把它变成 **user** 消息 ——
   模型以为「从X开始吧」是学生说的，属伪造对话记录）。
   ★ 三种来源三种说法、`source == 'empty'` 时 `text` 为空串 → 前端**不发**（不硬凑寒暄）；
   无 `kpId` 时不渲染动作按钮（点了什么都不发生）。
-  ★ `fetchOpening` 全仓**只有一个调用点**（切换/新建那条路）：每轮对话都不许碰它。
-  `usage` 全 0 **是事实**（模板拼出，没花 token）。
-  守卫：`server/tests/test_opening_guidance.py`（13）+ `desktop/tests/opening-guidance.test.ts`（12）+
-  `desktop/tests/session-switch.test.ts`（16）+ `desktop/tests/session-boot.test.ts`（7）。
+  ★ `fetchOpening` 全仓**只有两个调用点、且都在 `resolveSessionPrelude()` 里**
+  （未开始的两条分支）：每轮对话都不许碰它。`usage` 全 0 **是事实**（模板拼出，没花 token）。
+  守卫：`server/tests/test_opening_guidance.py`（13）+ `desktop/tests/opening-guidance.test.ts`（16）+
+  `desktop/tests/session-switch.test.ts`（16）+ `desktop/tests/session-boot.test.ts`（8）+
+  `npm run ux` 的 **D5b**（真机切到一条没开始的会话，断言仍是空态且没有空气泡）。
+- ★★ **会话删除（D-070，2026-09-22）**：`session:delete` 一条新增通道（**invoke**）——
+  全项目**唯一一处破坏性文件操作**（`unlink`）。Pi SDK 0.85.1 **没有任何删除 API**
+  （`SessionManager` 只有 list/open/create/continueRecent/createBranchedSession），所以从选路径到 unlink 都自己做。
+  ★★ **两道防线（缺一不可）**，唯一实现是 `study/sessions.ts` 的 `resolveDeletionTarget()`（纯函数、可单测）：
+    ① 白名单对齐（`id` → **Pi 给的 path**，前端递来的字符串只是 id）；② `isInside(sessionDir, path)`。
+  ★★ **删「正在聊的那一条」的顺序不能反**：先 `swapToSession({kind:'new'})`，**成功之后才 unlink** ——
+    反过来 Pi 还持有那个文件，下一次 flush 会把它**重新写出来**；切不过去就**不删**。
+  ★ 正在回答时拒绝删除（`chatStreams.activeTurns > 0`）；`unlink` 容忍 `ENOENT`（幂等）。
+  ★ 回执**只回 id 与一句人话，不回路径**；删的是当前会话时渲染进程要**补读一次** `getSessionState()`
+    （否则屏幕上留着一段已经不在盘上的对话）。
+  ★ 入口**右键菜单 + 行内悬停「⋯」**（同一个菜单）：右键是约定不是线索，可发现性靠 ⋯；
+    两者都必须先过确认框（`danger: true`）—— 手一抖就没了。
+  守卫：`desktop/tests/session-delete.test.ts`（14）+ `guards:mutation` 四条
+  （㊶ 撤 isInside / ㊷ 顺序反过来 / ㊸ 失败也清屏 / ㊹ 删完不对齐屏幕）+
+  `npm run ux` 的 **D13–D15**（右键弹菜单 / 不被裁 + 警示色 / Esc 可关；**刻意不真删**）。
+- ★★ **两栏默认收起（D-071，2026-09-22）**：`stores/panels.ts` 的 `historyOpen` / `railOpen`
+  **默认 false**，localStorage 持久化（与 `stores/viewMode.ts` 同一理由：纯界面偏好，不进 `config.json`、不新增通道）；
+  两个开关对称落在会话工具条两端（左端 `history-toggle` / 右端 `rail-toggle`）。
+  ★★ **收起必须 `display: none`**（不是 `overflow: hidden`）：裁剪出来的子元素仍有 236px 矩形，
+    而体检脚本按渲染后的宽度判可见性 —— 会被量进「学生能点的元素」（与右栏 `.rail--closed .rail__panel` 同法）。
+  ★★ **不许用 `v-if` 收起**：`SessionList` 挂着「切会话/新消息 → 重取列表」两个 watcher，
+    卸载之后学生在折叠状态下换会话，再展开看到的是**旧快照**（看起来像「没保存」）。
+  ★ 断点自动收起**不落盘**（`setRail(false, {persist:false})`）：那是视口决定的临时状态，不该覆盖学生的选择。
+  守卫：`desktop/tests/panel-collapse.test.ts`（8）+ `guards:mutation` 两条（㊻ 默认改回展开 / ㊼ 只裁剪宽度）；
+  ★ `ux-audit` / `ux-pages` / `ux-layout` 跑之前会**先把两栏展开**（测量前提，否则 D3/D4 集体假红）。
+- ★★ **模型 chip 的「已配置」判据 = `hasKey`（D-069，2026-09-22）**：唯一实现在 `labels.ts` 的
+  `llmReadyState()` / `llmDisplayLabel()` / `llmChipTitle()`，四处共用（顶栏 chip / 输入条 chip /
+  模型弹层 / 对话页空态提示）。**没填 Key 就显示「未配置」**（含空态里那句人话 + 「现在能用的功能」）——
+  ⚠️ 此前 chip 直接显示**服务端默认值** `deepseek-v4-flash`，于是首次安装、一个 Key 都没填时界面看起来
+  「已经配好了」，而第一句话必然失败。
+  ★ **底层 `DEFAULT_*` 一个字节都不动**：Pi 建会话必须有供应商与端点，改空它们会让「配好 Key 却用不了」；
+  这里改的是**显示**不是**配置**。
+  ★ 判据不许落在「快照缺失」上（那是 `loading`，不是未配置 —— 抢先说未配置是一次假报警）。
+  ★ 学生那一半**不出现** API Key / BaseURL / Model ID（双视角纪律），文案是「请老师或家长在设置里配置」。
+  守卫：`desktop/tests/llm-unconfigured.test.ts`（8）+ `guards:mutation` ㊺。
 - **导出文件名用白名单重建（D-035）**：`sanitizeFileName()` 只保留
   「汉字/字母/数字/空格/`-`/`_`/`.`」并可强制 `.md`；回执**只回文件名**（完整路径不进渲染进程）。
 - **学习地图自绘内联 SVG（D-036）**：**不引入任何图表库**（零新增依赖 + 断网可用）；
@@ -758,6 +809,17 @@ npm run guards:mutation         # ★★ 守卫的守卫：把每处修复改回
 ⚠️ **`ux:*` 探针默认假定应用停在对话页**（它们不发导航）。跑完 `ux:layout` 这类
 会逐页切页的脚本之后，应用会停在**最后一页**，直接跑 `ux` / `ux:scroll` / `ux:busy`
 会看到一堆假失败（找不到输入框 / 轮次不变）。**先 `npm run ux:reload` 或手动切回对话页。**
+★★ **跑之前把应用窗口切到前台**（2026-09-22 补，见 P-120）：这些脚本里
+「注意：本次改的脚本里量的是**渲染后的几何/时序**（B1/B2 滚动跟随、H1/H2 浮层几何、C1 触控尺寸）
+—— Chromium 在**窗口不可见**时会停掉渲染生命周期（`ResizeObserver` 不回调），
+那些断言会**全部假红**（实测 1573px / 2438px 的「掉队」，而代码是对的）。
+脚本里的 `ensureRendering()` 现在用 `Page.setWebLifecycleState({state:'active'})`；
+★ 被别的窗口遮住时仍可能回到 hidden，所以**跑之前手动把窗口点一下**。
+⚠️ 但**不要用「每 400ms 抢一次焦点」的循环**：那会把 A1（光标在输入框里）打红。
+
+⚠️ **两栏默认收起（D-071）之后，探针要先把它们展开**：`ux-audit` / `ux-pages` / `ux-layout`
+的脚本头已经各自加了这一步（按 `history-toggle` / `rail-toggle` 的 `aria-pressed` 判断），
+否则 D3/D4 会报「找不到 session-list」—— 那是**测量前提**不对，不是产品坏了。
 另：`npm run ux` 的 A3/A5/B1/G* 依赖真实模型往返，会话很长（40+ 轮）时容易超时 ——
 那几条红了先看是不是环境问题，别急着改代码（本轮实测过一次 8 条假红）。
 
@@ -959,6 +1021,9 @@ npm run guards:mutation         # ★★ 守卫的守卫：把每处修复改回
   ★ 2026-09-19 又补了 **4 条会话通道**（`session:open` / `session:new` / `session:state`
     + 推送 `session:changed`）与 **1 条开场引导**（复用 `profile:opening` 的取数层，
     没有新增通道）。
+  ★ 2026-09-22 补了 **1 条删除通道**（`session:delete`，invoke）—— 见上面的 D-070 那一条；
+    同一天的两项界面改动（D-071 两栏默认收起 / D-069 未配置显示）**都没有新增通道**
+    （前者走 localStorage，后者只改渲染层的显示判据）。
   ★★ **通道数不要写死在这一节里**：唯一口径是 `npm run check:docs` 打出来的那个数
     （它直接数 `channels.ts`）。本轮之前本文件里同时躺着「54 条」与「52 条」两个
     互相打架的数（856 行那处漏改），就是写死的代价。要引用就引用命令，不引用数字。

@@ -195,3 +195,83 @@ export function formatMasteryDelta(delta: number): string {
   const sign = delta > 0 ? '+' : ''
   return `掌握度 ${sign}${delta.toFixed(2)}`
 }
+
+/* ------------------------------------------------------------------ *
+ * 模型配置状态（顶栏与输入条的模型 chip）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 「模型配好了没有」的三种状态。
+ *
+ * ★★ 为什么需要它（2026-09-22 的实测缺陷）：chip 上原来直接显示
+ *   `settings.snapshot.llm.modelId`，而那是**服务端默认值**（`deepseek-v4-flash`）——
+ *   首次安装、**一个 Key 都没填**的时候它也照样显示，学生/老师看到的第一眼就是
+ *   「已经配好了一个模型」。事实是那时**一句话都发不出去**（主进程会走「缺 Key」早退）。
+ *   界面显示一个并不存在的「已配置」，比显示「未配置」坏得多：它会让人以为自己
+ *   只是网络不好，而不是「这里还缺一步配置」。
+ *
+ * 判据：**`hasKey` 且 modelId 非空**（`hasKey` 来自设置回执的 `llm.has_key`）。
+ * ⚠️ 底层默认值**不改**：Pi 建会话必须有供应商与端点，填了 Key 就该立刻能用
+ *   （详见 `pi-bootstrap.ts` 的 `DEFAULT_*` 说明）—— 这里只改**显示**。
+ */
+export type LlmReadyState = 'loading' | 'unconfigured' | 'ready'
+
+/** 设置快照里与「配没配好」有关的那几个字段（只读投影，不引契约类型）。 */
+export interface LlmReadiness {
+  hasKey?: boolean
+  modelId?: string
+}
+
+/**
+ * 设置快照 → 三态（**唯一实现**，顶栏 chip、输入条 chip、选择弹层都调它）。
+ *
+ * `snapshot === null`（还没读到设置）时是 `loading`，**不许**当 `unconfigured`：
+ * 首屏抢在设置回执之前就说「未配置」是一次假报警（`App.vue` 已经为此在启动时
+ * 主动拉一次设置，见那里的注释）。
+ */
+export function llmReadyState(llm: LlmReadiness | null | undefined): LlmReadyState {
+  if (!llm) return 'loading'
+  const hasKey = llm.hasKey === true
+  const modelId = (llm.modelId ?? '').trim()
+  return hasKey && modelId !== '' ? 'ready' : 'unconfigured'
+}
+
+/** 模型 chip 上显示的字（学生要能一眼看出「这里还缺一步」）。 */
+export const LLM_UNCONFIGURED_LABEL = '未配置'
+/** 还在读设置时 chip 上的字（不假报一个模型名）。 */
+export const LLM_LOADING_LABEL = '读取中…'
+
+/**
+ * chip 标签：三态各自说自己的话。
+ *
+ * ★ `'未配置'` 是给**学生**看的字：不含 API Key / BaseURL 这类技术词
+ *   （双视角纪律 D-063 —— 完整的配置说法在设置页的高级设置里）。
+ */
+export function llmDisplayLabel(llm: LlmReadiness | null | undefined): string {
+  const state = llmReadyState(llm)
+  if (state === 'loading') return LLM_LOADING_LABEL
+  if (state === 'unconfigured') return LLM_UNCONFIGURED_LABEL
+  return (llm?.modelId ?? '').trim()
+}
+
+/**
+ * chip 的悬停说明（**按视角分措辞**）。
+ *
+ * ★ 与「换模型请去设置里的高级设置」同一口径：学生视角下模型弹层是只读的，
+ *   所以未配置时给他的说明是「请老师或家长去设置」，而不是「去填 API Key」——
+ *   后者既是技术词，又指向一个学生自己不会去动的地方（配置入口在设置页的
+ *   「高级设置（教师 / 答辩）」里）。
+ */
+export function llmChipTitle(llm: LlmReadiness | null | undefined, isTeacher: boolean): string {
+  const state = llmReadyState(llm)
+  if (state === 'loading') {
+    return isTeacher ? '正在读取模型设置…（点击查看）' : '正在读取模型设置…'
+  }
+  if (state === 'unconfigured') {
+    return isTeacher
+      ? '还没配置模型 —— 在设置页填写 API Key 后就能对话（点击查看）'
+      : '还没配置模型（请老师或家长在设置里的高级设置中配置）'
+  }
+  const name = `当前模型：${llmDisplayLabel(llm)}`
+  return isTeacher ? `${name}（点击更换）` : `${name}（想换模型请去设置里的高级设置）`
+}

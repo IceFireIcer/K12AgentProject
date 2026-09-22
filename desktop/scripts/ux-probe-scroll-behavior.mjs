@@ -21,6 +21,30 @@ class Cdp {
     await cdp.#connect(page.webSocketDebuggerUrl)
     return cdp
   }
+  /**
+   * ★★ 让窗口**真的在渲染**（2026-09-22 补，见 P-120）。
+   *
+   * hidden 状态下 Chromium 停掉渲染生命周期（`ResizeObserver` 一次都不回调），
+   * 而本脚本量的正是「内容长高 → 到底了吗」—— 少了这一步，B 段那几个断言
+   * **全部假红**（实测：窗口在后台时报「离底部 742px」，而代码是对的）。
+   * ⚠️ `Emulation.setPageVisibility` 在 Electron 44 上**不存在**（-32601），
+   *    必须用 `Page.setWebLifecycleState`（实测调用后 `document.visibilityState` 立刻变 visible）。
+   */
+  async ensureRendering() {
+    for (const [m, p] of [
+      ['Page.bringToFront', {}],
+      ['Emulation.setFocusEmulationEnabled', { enabled: true }],
+      ['Page.setWebLifecycleState', { state: 'active' }]
+    ]) {
+      try {
+        await this.send(m, p)
+      } catch {
+        // 旧 CDP 上某个方法可能不存在：继续试下一个
+      }
+    }
+    return this.evaluate('document.visibilityState')
+  }
+
   async #connect(url) {
     this.#ws = new WebSocket(url)
     await new Promise((res, rej) => {
@@ -80,6 +104,11 @@ function check(id, what, ok, detail) {
 
 async function main() {
   const cdp = await Cdp.attach()
+  // ★★ 先让窗口真的在渲染（见 ensureRendering 的说明）—— 否则下面每一条都是假红
+  const visibility = await cdp.ensureRendering()
+  if (visibility !== 'visible') {
+    console.log(`[33m⚠️ 窗口仍是 ${visibility}：滚动跟随的断言会失真（把应用窗口点到前台再跑）[0m`)
+  }
 
   let s = await cdp.evaluate(STATE)
   if (!s?.scrollable) {

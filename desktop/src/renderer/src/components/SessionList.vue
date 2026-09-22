@@ -44,15 +44,20 @@ import {
   ChevronDown,
   ChevronRight,
   CornerDownRight,
+  Ellipsis,
   GitBranch,
   MessageSquarePlus,
-  Plus
+  Plus,
+  Trash2
 } from 'lucide-vue-next'
 import { useChatStore } from '../stores/chat'
+import { useConfirm } from '../stores/confirm'
 import { useStudyStore, type SessionSummaryShape } from '../stores/study'
 import { useViewModeStore } from '../stores/viewMode'
+import { useDismissable } from '../composables/useDismissable'
 
 const chat = useChatStore()
+const confirm = useConfirm()
 const study = useStudyStore()
 const viewMode = useViewModeStore()
 
@@ -297,6 +302,101 @@ async function createNew(): Promise<void> {
   }
 }
 
+/* ── 行菜单（右键 / ⋯）：删除这条对话 ────────────────────────────────────── */
+
+/**
+ * ★★ **删除一条历史对话**（唯一入口；**不可撤销** —— 连磁盘上的会话文件一起删）。
+ *
+ * 为什么行菜单里只有这一项、而且要点两下（菜单 → 确认框）：
+ *   它是本项目**唯一会真的丢东西**的操作（对话不在 SQLite 里，删了就是删了）。
+ *   学生右键一条列表项时最常见的心思其实是「我想看看有什么能做的」——
+ *   菜单一出现就删掉，是那种「手一抖什么都没了」的缺陷。
+ * ★ 文案是**学生的话**：不说 JSONL、不说目录、不说「服务端」——
+ *   只说「找不回来了」与「会从这台电脑上一起删掉」。
+ * ★ 删的是**当前这条**时：主进程会先切到一条新的空白会话（顺序纪律在那边），
+ *   界面这边由 `chat.deleteSession()` 负责把屏幕对齐（见它的注释）。
+ */
+const menuFor = ref<{ id: string; title: string; childCount: number } | null>(null)
+/** 菜单落点（视口坐标；贴边回吸之后的值）。 */
+const menuX = ref(0)
+const menuY = ref(0)
+const menuRef = ref<HTMLElement | null>(null)
+const menuTriggerRef = ref<HTMLElement | null>(null)
+/** 打开菜单前焦点在哪：关掉之后还回去（键盘用户不该因此丢失位置）。 */
+let focusBeforeMenu: HTMLElement | null = null
+
+/**
+ * 菜单在**视口边缘回吸**。
+ *
+ * ★ 列表贴着窗口左边（侧栏位），一行也就 236px 宽 —— 从行中间右键弹出菜单时，
+ *   右边的菜单很容易超出窗口，超出部分点不到（菜单是 fixed 定位，会被窗口裁掉）。
+ * ★ 尺寸写死是有意的：菜单只有一项，宽高是常量；量 DOM 反而要等一帧（会闪一下）。
+ */
+const MENU_W = 176
+const MENU_H = 44
+
+function closeMenu(): void {
+  if (menuFor.value === null) return
+  menuFor.value = null
+  const back = focusBeforeMenu
+  focusBeforeMenu = null
+  back?.focus?.()
+}
+
+// 与模型选择器、消息上的「⋯」同一套关闭手法（Esc + 点外部，见 useDismissable 的说明）
+useDismissable({
+  panel: menuRef,
+  trigger: menuTriggerRef,
+  open: () => menuFor.value !== null,
+  close: closeMenu
+})
+
+/** 打开某一条的行菜单（右键 → 指针处；⋯ 按钮 → 按钮右下）。 */
+function openMenu(item: TreeRow, event: MouseEvent, fromTrigger: boolean): void {
+  focusBeforeMenu = (event.currentTarget as HTMLElement | null) ?? null
+  menuTriggerRef.value = fromTrigger ? ((event.currentTarget as HTMLElement) ?? null) : null
+  const anchor = (event.currentTarget as HTMLElement | null)?.getBoundingClientRect()
+  const x = event.clientX > 0 ? event.clientX : (anchor?.left ?? 0)
+  const y = event.clientY > 0 ? event.clientY : (anchor?.bottom ?? 0)
+  menuX.value = Math.max(4, Math.min(x, window.innerWidth - MENU_W - 8))
+  menuY.value = Math.max(4, Math.min(y, window.innerHeight - MENU_H - 8))
+  menuFor.value = { id: item.id, title: displayTitle(item.title), childCount: item.childCount ?? 0 }
+}
+
+/** 确认框正文：只说学生需要知道的那两件事（会丢 / 分支会怎样）。 */
+function deleteBody(target: { title: string; childCount: number }): string {
+  const head = `「${target.title}」删掉后就找不回来了（这条对话会从这台电脑上一起删掉）。`
+  if (target.childCount <= 0) return head
+  return `${head}这条下面还有 ${target.childCount} 条从它分出来的对话，删掉它之后那些会变成独立的对话。`
+}
+
+async function removeSession(): Promise<void> {
+  const target = menuFor.value
+  if (!target) return
+  closeMenu()
+  const ok = await confirm.ask({
+    title: '删除这条对话？',
+    body: deleteBody(target),
+    danger: true,
+    confirmText: '删除'
+  })
+  if (!ok) return
+  notice.value = null
+  switchingId.value = target.id
+  try {
+    const result = await chat.deleteSession(target.id)
+    if (!result.ok) {
+      notice.value = result.message ?? '删除失败。'
+      return
+    }
+    // ★ 删完必须重取列表：这一条已经不在盘上了。`currentSessionId` 的 watcher 只在
+    //   「当前会话变了」时触发，删掉一条**不是当前**的会话时它根本不动。
+    await study.loadSessions()
+  } finally {
+    switchingId.value = ''
+  }
+}
+
 /** 相对时间（列表里最有用的是「多久以前」，不是精确时刻）。 */
 function relativeTime(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return ''
@@ -351,6 +451,7 @@ function relativeTime(ms: number): string {
         class="sl__row"
         :data-depth="item.depth"
         :data-testid="`session-row-${item.id}`"
+        @contextmenu.prevent="openMenu(item, $event, false)"
       >
         <!-- ★★ 树形连接线：**深度优先列表 + 每条自己画自己的前导**
              ★ 为什么不用嵌套 `<ul>`：那要在 Vue 里写自引用组件，而列表本身
@@ -440,13 +541,56 @@ function relativeTime(ms: number): string {
             </span>
           </span>
         </button>
+
+        <!-- ★★ ⋯ 触发器：与右键弹**同一个**菜单。
+             ★ 为什么还要它（需求只要求了右键）：右键是**约定**，不是可见线索 ——
+               学生不会去猜「右键能删」。可发现性靠这个按钮兜住。
+             ★★ 它必须是 `.sl__item`（本身是 `<button>`）的**兄弟节点**：
+               按钮里套按钮是非法嵌套（浏览器会把它拆开，点击行为随实现而变）。
+             ★ 默认不可见、悬停 / 键盘聚焦时显现（`opacity`，不是 `display`）：
+               行宽只有 236px，常驻一个 28px 的按钮会挤掉标题。
+               ⚠️ 但仍然要在 DOM 里、且尺寸 ≥28px：体检脚本按「渲染后的矩形」量
+                 触控目标（`w > 0 && h > 0` 才算数），`display: none` 会让它量不到，
+                  而 `opacity: 0` 保留矩形。 -->
+        <button
+          type="button"
+          class="sl__more"
+          :data-testid="`session-more-${item.id}`"
+          title="更多操作（也可以直接在这条上点右键）"
+          aria-haspopup="menu"
+          :aria-expanded="menuFor?.id === item.id ? 'true' : 'false'"
+          @click.stop="openMenu(item, $event, true)"
+        >
+          <Ellipsis :size="14" />
+        </button>
       </li>
     </ul>
-
-    <p class="sl__hint">
-      点一条就能接着聊。对话存在你自己的目录里，不跨学生共用。
-    </p>
   </aside>
+
+  <!-- 行菜单（Teleport 到 body：列表是 `overflow-y: auto` 的滚动容器，
+       放在里面会被裁掉一半 —— 实测形态是「菜单只露出一行」）。
+       ★ `role="menu"` + `role="menuitem"`：读屏会念成菜单，而不是一串按钮。 -->
+  <Teleport to="body">
+    <div
+      v-if="menuFor"
+      ref="menuRef"
+      class="sl-menu"
+      role="menu"
+      data-testid="session-row-menu"
+      :style="{ left: `${menuX}px`, top: `${menuY}px` }"
+    >
+      <button
+        type="button"
+        role="menuitem"
+        class="sl-menu__item"
+        data-testid="session-delete-action"
+        @click="removeSession"
+      >
+        <Trash2 :size="14" />
+        <span>删除这条对话</span>
+      </button>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -536,7 +680,9 @@ function relativeTime(ms: number): string {
   gap: 8px;
   width: 100%;
   min-height: 44px;
-  padding: 8px 9px;
+  /* ★ 右侧 30px 是给绝对定位的 ⋯ 让位：不留的话那一行的时间戳会被按钮压住
+   *   （按钮是 `opacity: 0` 时也占着那块位置，因为它在 DOM 里）。 */
+  padding: 8px 30px 8px 9px;
   border: 1px solid transparent;
   border-radius: var(--k12-r-control);
   background: transparent;
@@ -596,6 +742,86 @@ function relativeTime(ms: number): string {
   display: flex;
   align-items: stretch;
   min-width: 0;
+  /* ⋯ 触发器按绝对定位贴在行的右缘（见 `.sl__more`） */
+  position: relative;
+}
+
+/* ⋯（更多操作）：默认透明，悬停 / 键盘聚焦 / 菜单打开时显现。
+ * ★ 尺寸 28×28 是硬要求（UX 体检 C1：较小者 ≥20 且较大者 ≥28）；行高 44px，放得下。
+ * ★ 用 `opacity` 而不是 `display: none`：矩形要一直在（体检脚本按渲染后的矩形量），
+ *   而且 `opacity` 过渡不会在悬停时抖动。
+ * ★ 行里那一条 `sl__item` 因此要留出右边距（见下面的 `padding-right`）。 */
+.sl__more {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--k12-r-control);
+  background: transparent;
+  color: var(--k12-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.sl__row:hover .sl__more,
+.sl__row:focus-within .sl__more,
+.sl__more[aria-expanded='true'] {
+  opacity: 1;
+}
+@media (hover: hover) and (pointer: fine) {
+  .sl__more:hover {
+    background: var(--k12-surface);
+    border-color: var(--k12-border);
+    color: var(--k12-fg-2);
+  }
+}
+/* 键盘用户：看不见的按钮也能聚焦（`opacity: 0` 不阻止聚焦），所以要给焦点环 */
+.sl__more:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--k12-accent-ink);
+  outline-offset: 1px;
+}
+
+/* 行菜单（右键 / ⋯ 共用）。定位是 `fixed` + 视口坐标：它被 Teleport 到 body 上了，
+ * 相对定位会落在「最后那个定位祖先」身上，而那个祖先随页面结构变。 */
+.sl-menu {
+  position: fixed;
+  z-index: 80;
+  min-width: 176px;
+  padding: 5px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-card);
+}
+.sl-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--k12-r-inset);
+  background: transparent;
+  /* ★ 删除用**警示色**而不是默认前景色：菜单里只有这一项，而它的后果不可撤销
+   *   （与确认框的 `danger: true` 同一套语义，见 `stores/confirm.ts`）。 */
+  color: var(--k12-warn);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .sl-menu__item:hover {
+    background: var(--k12-warn-soft);
+  }
 }
 
 /* 树形前导：宽度由 depth 决定（每层一段 12px）。
@@ -735,13 +961,6 @@ function relativeTime(ms: number): string {
   color: var(--k12-warn);
 }
 
-.sl__hint {
-  flex: none;
-  font-size: var(--k12-fs-xs);
-  line-height: var(--k12-lh-ui);
-  color: var(--k12-muted-2);
-}
-
 /* 窄窗口：这一列收成图标条（与左导航同一档断点 1280） */
 @media (max-width: 1279px) {
   .sl {
@@ -761,8 +980,7 @@ function relativeTime(ms: number): string {
   }
   .sl__title,
   .sl__new-text,
-  .sl__item-text,
-  .sl__hint {
+  .sl__item-text {
     display: none;
   }
   .sl__head {
@@ -779,6 +997,11 @@ function relativeTime(ms: number): string {
   .sl__item {
     justify-content: center;
     padding: 8px 0;
+  }
+  /* ⋯ 在窄栏（60px）里放不下第二个 28px 目标：整列只剩一个图标，
+   * 两个圆点叠在一起反而更难点。窄栏里走**右键**（行菜单在哪里都能用）。 */
+  .sl__more {
+    display: none;
   }
   /* ★ 窄栏（60px）里缩进会吃掉本来就不够的文字空间 ——
    *   整列已经只剩一个图标，缩进看不出任何结构。

@@ -396,6 +396,109 @@ const MUTATIONS = [
     replace: 'build: {},',
     expect: 'G24-7'
   },
+
+  /* ------------------------------------------------------------------ *
+   * 会话删除（2026-09-22）—— 守卫在 tests/session-delete.test.ts
+   * 这几条守的是**破坏性操作**上的闸门：路径判据、顺序、可读失败。
+   * 它们全都「跑起来看着正常」——只有在删错东西 / 删不干净时才暴露。
+   * ------------------------------------------------------------------ */
+  {
+    name: '㊶ 删除少了目录包含那道防线（只按 id 对齐就 unlink → 指哪删哪）',
+    testFile: 'tests/session-delete.test.ts',
+    file: 'src/main/study/sessions.ts',
+    find: `  if (!isInside(options.sessionDir, info.path)) {`,
+    replace: `  if (false && !isInside(options.sessionDir, info.path)) {`,
+    expect: '别的学生'
+  },
+  {
+    name: '㊷ 删除顺序反过来（先删文件、再切会话 → Pi 把文件重新写出来）',
+    testFile: 'tests/session-delete.test.ts',
+    file: 'src/main/ipc/handlers.ts',
+    find: `    const swapped = await swapToSession({ kind: 'new' })`,
+    replace: `    const swapped = { ok: true as const, message: '' }`,
+    // ⚠️ `expect` 是 `--test-name-pattern` 的**测试名**（不是报错文本）：
+    //    写成报错里那句话会让这个模式匹配不到任何用例 → 一个都不跑 → 变异「没抓到」。
+    expect: '删当前会话'
+  },
+  {
+    name: '㊸ 删除失败也清空当前对话（清空了又什么都没恢复 = 最坏的失败形态）',
+    testFile: 'tests/session-delete.test.ts',
+    file: 'src/renderer/src/stores/chat.ts',
+    find: `      if (!result.ok) return { ok: false, message: result.message }`,
+    replace: `      if (!result.ok) {
+        resetConversation()
+        return { ok: false, message: result.message }
+      }`,
+    expect: '原样回传'
+  },
+  {
+    name: '㊹ 删完当前会话不对齐屏幕（屏幕上留着一段已经不存在的对话）',
+    testFile: 'tests/session-delete.test.ts',
+    file: 'src/renderer/src/stores/chat.ts',
+    find: `        await applyCurrentSessionState({ replace: true })`,
+    replace: `        await Promise.resolve()`,
+    expect: '不许留着一段已经不存在的对话'
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 「还没配置模型」的显示（2026-09-22）—— 守卫在 tests/llm-unconfigured.test.ts
+   * 这条守的是「界面在说自己没有的东西」：一个 Key 都没填时显示着模型名。
+   * ------------------------------------------------------------------ */
+  {
+    name: '㊺ 未配置时又把模型名当「当前模型」（用户以为已经配好了）',
+    testFile: 'tests/llm-unconfigured.test.ts',
+    file: 'src/renderer/src/labels.ts',
+    find: `  return hasKey && modelId !== '' ? 'ready' : 'unconfigured'`,
+    replace: `  return modelId !== '' ? 'ready' : 'unconfigured'`,
+    // ⚠️ 同上：`expect` 匹配的是**测试名**（'★★ 判据：没读到设置 = 读取中｜没 Key = 未配置｜…'）
+    expect: '没读到设置'
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 两栏默认收起（2026-09-22）—— 守卫在 tests/panel-collapse.test.ts
+   * ------------------------------------------------------------------ */
+  {
+    name: '㊻ 两栏默认改回展开（首屏又被两栏挤窄）',
+    testFile: 'tests/panel-collapse.test.ts',
+    file: 'src/renderer/src/stores/panels.ts',
+    find: `export const PANEL_DEFAULT_OPEN = false`,
+    replace: `export const PANEL_DEFAULT_OPEN = true`,
+    // ⚠️ 同上：`expect` 匹配测试名（'★★ 两栏的默认状态是【收起】…'）
+    expect: '默认状态是【收起】'
+  },
+  {
+    name: '㊼ 收起只裁剪宽度（子元素仍有 236px 矩形 → 体检把看不见的东西量成可点的）',
+    testFile: 'tests/panel-collapse.test.ts',
+    file: 'src/renderer/src/views/Chat.vue',
+    find: `.chat__side--closed :deep(.sl) {
+  display: none;
+}`,
+    replace: `.chat__side--closed :deep(.sl) {
+  overflow: hidden;
+}`,
+    expect: 'display: none'
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 未开始的会话在三条路径上长得一样（2026-09-22）—— 守卫在 tests/opening-guidance.test.ts
+   * ------------------------------------------------------------------ */
+  {
+    name: '㊽ 开场判据退回「消息条数为 0」（切回来时丢整个空态）',
+    testFile: 'tests/opening-guidance.test.ts',
+    file: 'src/main/ipc/handlers.ts',
+    find: `  if (instance.hasUserTurn) {`,
+    replace: `  if (instance.messageCount > 0) {`,
+    expect: '学生开口了没有'
+  },
+  {
+    name: '㊾ 未开始的会话又把开场白当普通消息铺回去（界面进不了空态）',
+    testFile: 'tests/opening-guidance.test.ts',
+    file: 'src/main/ipc/handlers.ts',
+    find: `    return { started: false, messages: [], opening: fetched.text, openingKpId: fetched.kpId }`,
+    replace: `    return { started: false, messages: [...instance.restoredMessages], opening: fetched.text, openingKpId: fetched.kpId }`,
+    // 同一条用例（判据那条）里的断言 —— 它同时守着两件事：判据 + 未开始时不铺消息
+    expect: '学生开口了没有'
+  }
 ]
 
 let failures = 0

@@ -78,13 +78,19 @@ class Cdp {
     // ★★ 让窗口**真的可见**：hidden 状态下 Chromium 停掉渲染生命周期，
     //    rAF 实测 0 次/秒（而 setInterval 正常）→ ResizeObserver 一次都不回调。
     //    实测里 `Page.bringToFront` 单独用**不管用**（窗口在后台时它不顶事），
+//    ★★ 2026-09-22 补漏：三个方法里原先是 `Emulation.setPageVisibility`，
+//       而**这个 CDP 方法在 Electron 44 上不存在**（`-32601 wasn't found`）——
+//       于是这条“修法”一直是**静默失效**的：脚本照样只印一句 ⚠️ 就往下跑，
+//       而 B1/B2（滚动跟随）与任何量几何的断言在后台窗口里**全是假红**。
+//       换成 `Page.setWebLifecycleState({state:'active'})`（实测：调用后
+//       `document.visibilityState` 立刻变 visible）。
     //    必须连 `Emulation.setFocusEmulationEnabled` 一起上；两者都调完之后
     //    `visibilityState` 变 visible、rAF 回到 ~240/秒（实测）。
     // ⚠️ 幂等：重复调用无副作用。
     for (const [method, params] of [
       ['Page.bringToFront', {}],
       ['Emulation.setFocusEmulationEnabled', { enabled: true }],
-      ['Emulation.setPageVisibility', { visibility: 'visible' }]
+      ['Page.setWebLifecycleState', { state: 'active' }]
     ]) {
       try {
         await this.send(method, params)
@@ -138,6 +144,22 @@ async function main() {
   }
   let bad = 0
   let cells = 0
+
+  /**
+   * ★★ 先把两栏展开（2026-09-22）：两栏默认收起（`stores/panels.ts`），而本脚本量的是
+   * **版式**（错位 / 裁切 / 表格宽度）—— 收起状态下的版式是「主列很宽」，
+   * 那正是本脚本要压的那一档。展开后才回到「三列同时在场」这个最紧的版式。
+   * ★ 状态落在 localStorage（随 userData 持久化，reload 后依然生效），
+   *   所以每个视口重载前展开一次即可。⚠️ 这是**测量前提**，不是产品行为。
+   */
+  await cdp.evaluate(`(() => {
+    for (const id of ['history-toggle', 'rail-toggle']) {
+      const btn = document.querySelector('[data-testid="' + id + '"]')
+      if (btn && btn.getAttribute('aria-pressed') !== 'true') btn.click()
+    }
+    return true
+  })()`)
+  await sleep(400)
 
   for (const [width, height] of VIEWPORTS) {
     await cdp.send('Emulation.setDeviceMetricsOverride', {

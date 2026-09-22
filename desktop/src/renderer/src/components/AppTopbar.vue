@@ -37,13 +37,15 @@ import type { PageName } from '../stores/ui'
 import { useChatStore } from '../stores/chat'
 import { useInsightStore } from '../stores/insight'
 import { useModelStore } from '../stores/model'
+import { useSettingsStore } from '../stores/settings'
 import { useViewModeStore } from '../stores/viewMode'
-import { chapterLineLabel } from '../labels'
+import { chapterLineLabel, llmChipTitle } from '../labels'
 
 const ui = useUiStore()
 const chat = useChatStore()
 const insight = useInsightStore()
 const model = useModelStore()
+const settings = useSettingsStore()
 const viewMode = useViewModeStore()
 
 const title = computed(() => PAGES[ui.page].title)
@@ -76,20 +78,18 @@ const subtitle = computed(() => {
 })
 
 /**
- * 模型 chip 的悬停说明；设置还没读到时如实说「正在读取」，不假报一个模型名。
+ * 模型 chip 的悬停说明（**三态 + 随视角分措辞**，唯一实现在 `labels.ts` 的 `llmChipTitle`）。
  *
+ * ★ 三种状态各自说自己的话：读取中 / **还没配置模型** / 当前模型。
+ *   中间那一档是 2026-09-22 补的（实测缺陷）：此前 chip 直接显示服务端默认的模型名，
+ *   于是首次安装、一个 Key 都没填的时候，界面就已经写着 `deepseek-v4-flash` ——
+ *   看起来像「配好了」，而学生发出去的第一句会直接失败。
  * ★ 末尾那半句必须**随视角变**：学生视角下模型弹层是只读的
  *   （换模型是老师 / 评委的事，见 `ModelPicker.vue` 与 `stores/viewMode.ts`），
  *   那时还写「点击更换」就是在承诺一件做不到的事 —— 学生点开看到一个
  *   没有可点项的清单，只会以为自己点错了。与 `MessageComposer.vue` 同一口径。
  */
-const modelTitle = computed(() => {
-  if (model.current === null) {
-    return viewMode.isTeacher ? '正在读取模型设置…（点击选择）' : '正在读取模型设置…'
-  }
-  const name = `当前模型：${model.current.providerName} · ${model.current.modelId}`
-  return viewMode.isTeacher ? `${name}（点击更换）` : `${name}（想换模型请去设置里的高级设置）`
-})
+const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.isTeacher))
 </script>
 
 <template>

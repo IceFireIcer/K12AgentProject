@@ -48,13 +48,19 @@ class Cdp {
     // ★★ 让窗口**真的可见**：hidden 状态下 Chromium 停掉渲染生命周期，
     //    rAF 实测 0 次/秒（而 setInterval 正常）→ ResizeObserver 一次都不回调。
     //    实测里 `Page.bringToFront` 单独用**不管用**（窗口在后台时它不顶事），
+//    ★★ 2026-09-22 补漏：三个方法里原先是 `Emulation.setPageVisibility`，
+//       而**这个 CDP 方法在 Electron 44 上不存在**（`-32601 wasn't found`）——
+//       于是这条“修法”一直是**静默失效**的：脚本照样只印一句 ⚠️ 就往下跑，
+//       而 B1/B2（滚动跟随）与任何量几何的断言在后台窗口里**全是假红**。
+//       换成 `Page.setWebLifecycleState({state:'active'})`（实测：调用后
+//       `document.visibilityState` 立刻变 visible）。
     //    必须连 `Emulation.setFocusEmulationEnabled` 一起上；两者都调完之后
     //    `visibilityState` 变 visible、rAF 回到 ~240/秒（实测）。
     // ⚠️ 幂等：重复调用无副作用。
     for (const [method, params] of [
       ['Page.bringToFront', {}],
       ['Emulation.setFocusEmulationEnabled', { enabled: true }],
-      ['Emulation.setPageVisibility', { visibility: 'visible' }]
+      ['Page.setWebLifecycleState', { state: 'active' }]
     ]) {
       try {
         await this.send(method, params)
@@ -202,8 +208,25 @@ async function main() {
   //    「内容长高后有没有跟随」这类测量会**全部失真**（实测踩到，见 ensureRendering 的说明）。
   const visibility = await cdp.ensureRendering()
   if (visibility !== 'visible') {
-    console.log(`[33m⚠️ 窗口仍是 ${visibility}：与渲染时序相关的断言可能失真（见 ensureRendering 的说明）[0m`)
+    console.log(`[33m⚠️ 窗口仍是 ${visibility}：与渲染时序相关的断言可能失真（见 ensureRendering 的说明）[0m`)
   }
+
+  /**
+   * ★★ 先把两栏**展开**（2026-09-22）：两栏现在默认收起（`stores/panels.ts`），
+   * 而收起的列是 `display: none`（矩形为 0），本脚本要量的元素（历史对话列表、
+   * 右栏页签）大多在它们里面 —— 不展开的话 D3/D4 与 G* 会集体**假红**
+   * （表现为「找不到 [data-testid=session-list]」，看起来像功能坏了）。
+   * ⚠️ 这是**测量前提**，不是产品行为：产品里学生点一下开关就展开，行为一致。
+   */
+  await cdp.evaluate(`(() => {
+    for (const id of ['history-toggle', 'rail-toggle']) {
+      const btn = document.querySelector('[data-testid="' + id + '"]')
+      if (btn && btn.getAttribute('aria-pressed') !== 'true') btn.click()
+    }
+    return true
+  })()`)
+  await sleep(400)
+
 
   /**
    * ★★ F2 的监听器**必须在这里装**（attach 之后的第一件事），不能挪回 F 段。
@@ -522,11 +545,26 @@ async function main() {
     '「新对话」与「删掉旧的」是两件事：旧的那条要留在列表里随时切回去')
 
   if (sidebar.present && sidebar.count >= 2 && sidebar.firstId) {
-    // D5：点一条**不是当前的**历史对话，消息区要恢复出内容
+    /**
+     * D5：点一条**不是当前的**历史对话，消息区要恢复出内容。
+     *
+     * ★★ 挑哪一条很关键（2026-09-22 实测踩到）：列表里的行带「· N 条」，
+     *    而 **N = 1 的那种是「只发过开场白、学生还没开口」的会话** ——
+     *    切到它显示的应该是**空态**（开场卡 + 能力入口），不是「一段恢复出来的对话」。
+     *    初版挑的是「第一条不是当前的」，于是随机命中一条没开始的会话，
+     *    断言 `turns > 0` 判成失败 —— 那是**判据选错了**（把「正确的新行为」当缺陷）。
+     *    所以这里显式挑一条**有学生发言**的（meta 里「N 条」且 N ≥ 2）。
+     */
     const targetId = await cdp.evaluate(`(() => {
       const items = Array.from(document.querySelectorAll('[data-testid^="session-item-"]'))
-      const other = items.find((el) => el.getAttribute('aria-current') !== 'true')
-      return other?.getAttribute('data-testid')?.replace('session-item-', '') ?? ''
+      const others = items.filter((el) => el.getAttribute('aria-current') !== 'true')
+      const started = others.find((el) => {
+        const meta = el.querySelector('.sl__item-meta')?.innerText ?? ''
+        const m = /(\\d+) 条/.exec(meta)
+        return m ? Number(m[1]) >= 2 : false
+      })
+      const pick = started ?? others[0]
+      return pick?.getAttribute('data-testid')?.replace('session-item-', '') ?? ''
     })()`)
     if (targetId) {
       const beforeTurns = await cdp.evaluate(`document.querySelectorAll('[data-testid="chat-turn"]').length`)
@@ -537,19 +575,22 @@ async function main() {
         turns: document.querySelectorAll('[data-testid="chat-turn"]').length,
         active: document.querySelectorAll('[data-testid^="session-item-"][aria-current="true"]').length,
         notice: document.querySelector('[data-testid="session-notice"]')?.innerText ?? '',
-        streaming: document.querySelectorAll('[data-testid="chat-turn"][data-status="streaming"]').length
+        streaming: document.querySelectorAll('[data-testid="chat-turn"][data-status="streaming"]').length,
+        empty: Boolean(document.querySelector('[data-testid="chat-empty"]'))
       }))()`)
-      check('D5', '点一条历史对话能恢复出内容（不是切了个空的）', after.turns > 0,
-        `${beforeTurns} 轮 → 切过去 ${after.turns} 轮${after.notice ? `（提示：${after.notice}）` : ''}`,
+      // ★ 判据：恢复出内容，**或者**（那条会话本来就没开始）显示空态 —— 两者都是对的
+      check('D5', '点一条历史对话能恢复出内容（本来就没开始的会话则显示空态，不是空白）',
+        after.turns > 0 || after.empty,
+        `${beforeTurns} 轮 → 切过去 ${after.turns} 轮（空态=${after.empty}）${after.notice ? `（提示：${after.notice}）` : ''}`,
         '切换失败最常见的原因是装配失败（缺 Key / 服务没起来）—— 那时应当**保持原样并说一句人话**，而不是把屏幕清空')
       check('D6', '切换后侧栏高亮跟着走（学生知道自己在哪一条上）', after.active === 1 && !after.streaming,
         `高亮 ${after.active} 条，恢复出来的轮次里 streaming=${after.streaming}`,
         '高亮不跟着走 = 学生点完不知道切没切成；恢复出来的历史消息更不该是「正在回答」状态')
     } else {
-      console.log('[2m  [SKIP] D5 只有一条会话，没有「另一条」可切[0m')
+      console.log('\u001b[2m  [SKIP] D5 只有一条会话，没有「另一条」可切\u001b[0m')
     }
   } else {
-    console.log('[2m  [SKIP] D5/D6 会话少于两条，无法验证「切回去」（多聊几轮再跑）[0m')
+    console.log('\u001b[2m  [SKIP] D5/D6 会话少于两条，无法验证「切回去」（多聊几轮再跑）\u001b[0m')
   }
 
   /* ── D7–D8. 会话分叉（从这里重新问）─────────────────────────────
@@ -740,6 +781,95 @@ async function main() {
     }
   } else {
     console.log('\u001b[2m  [SKIP] D11/D12 当前没有分支会话（先点两次「从这里重新问」再跑）\u001b[0m')
+  }
+
+  /* ── D5b. ★★ 没开始的会话：切过去还是空态（2026-09-22 修的缺陷）──────
+   * 形态：新建一条（只发开场白）→ 切到别的 → 切回来。
+   * 初版行为是「开场卡 / 能力入口 / 建议问题全没了，只剩一个空气泡 + 一句问候」——
+   * 同一段对话在「刚建好 / 切回来 / 重启后」三种情形下长得不一样。
+   * ------------------------------------------------------------------ */
+  if (sidebar.present) {
+    const emptyTarget = await cdp.evaluate(`(() => {
+      const items = Array.from(document.querySelectorAll('[data-testid^="session-item-"]'))
+      const unstarted = items.find((el) => {
+        const meta = el.querySelector('.sl__item-meta')?.innerText ?? ''
+        const m = /(\\d+) 条/.exec(meta)
+        return m ? Number(m[1]) === 1 : false
+      })
+      return unstarted?.getAttribute('data-testid')?.replace('session-item-', '') ?? ''
+    })()`)
+    if (emptyTarget) {
+      await cdp.evaluate(`document.querySelector('[data-testid="session-item-' + ${JSON.stringify(emptyTarget)} + '"]')?.click()`)
+      await sleep(3000)
+      const fresh = await cdp.evaluate(`(() => ({
+        empty: Boolean(document.querySelector('[data-testid="chat-empty"]')),
+        bubbles: document.querySelectorAll('[data-testid="user-message"]').length,
+        turns: document.querySelectorAll('[data-testid="chat-turn"]').length
+      }))()`)
+      check('D5b', '★ 切到一条**学生还没开口**的对话：仍是空态，且没有空气泡',
+        fresh.empty && fresh.bubbles === 0 && fresh.turns === 0,
+        `空态=${fresh.empty}，轮次=${fresh.turns}，学生气泡=${fresh.bubbles}`,
+        '同一段对话在「刚建好 / 切回来 / 重启后」必须长得一样 —— 否则学生会以为自己的对话丢了')
+    } else {
+      console.log('\u001b[2m  [SKIP] D5b 列表里没有「只发过开场白」的会话（先新建一条再跑）\u001b[0m')
+    }
+  }
+
+  /* ── D13/D14. 删除一条对话的入口（2026-09-22）────────────────────
+   * ★★ **刻意不真的删**：本脚本跑在开发机上，库里是真实会话（含学生数据）。
+   *    这里只验「菜单打得开、关闭方式对、菜单里那一项在」——
+   *    真正的删除由 `tests/session-delete.test.ts`（判据与顺序）与人工走查覆盖。
+   * ------------------------------------------------------------------ */
+  {
+    // D13：右键弹菜单（学生最常见的入口是右键）
+    const menu = await cdp.evaluate(`(() => {
+      const row = document.querySelector('[data-testid^="session-row-"]')
+      if (!row) return { present: false }
+      const box = row.getBoundingClientRect()
+      row.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true,
+        clientX: Math.round(box.left + 20), clientY: Math.round(box.top + 20)
+      }))
+      return { present: true }
+    })()`)
+    await sleep(350)
+    const menuUi = await cdp.evaluate(`(() => {
+      const el = document.querySelector('[data-testid="session-row-menu"]')
+      if (!el) return { open: false }
+      const item = el.querySelector('[data-testid="session-delete-action"]')
+      const r = el.getBoundingClientRect()
+      return {
+        open: true,
+        hasDelete: Boolean(item),
+        label: (item?.innerText || '').trim(),
+        // 菜单不能被窗口裁掉（贴边回吸）：右缘/下缘都要在视口内
+        insideViewport: r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1,
+        // 删除项必须是**警示色**（与确认框的 danger 同一套语义）
+        dangerColor: item ? getComputedStyle(item).color : ''
+      }
+    })()`)
+    check('D13', '在一条历史对话上右键，会弹出「删除这条对话」的菜单（要点两下才删得掉）',
+      menu.present && menuUi.open && menuUi.hasDelete,
+      menu.present
+        ? (menuUi.open ? `菜单已打开，操作项：「${menuUi.label}」` : '右键后没有出现菜单')
+        : '列表里没有可右键的行',
+      '删除是本项目唯一会真的丢东西的操作，入口必须先能看见（再确认一次）——' +
+        '菜单打不开 / 没有那一项，学生就只能靠猜')
+    if (menuUi.open) {
+      check('D14', '菜单不会被窗口裁掉，且删除项是警示色', menuUi.insideViewport && menuUi.dangerColor !== '',
+        `在视口内=${menuUi.insideViewport}，颜色=${menuUi.dangerColor}`,
+        '菜单被裁掉一半时，学生点不到它（列表贴着窗口左缘，这一条尤其容易发生）')
+      // ★ 关掉菜单（Esc）—— 顺便验键盘出口在，别把菜单留在屏幕上影响后续断言
+      const closed = await cdp.evaluate(`(() => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+        return true
+      })()`)
+      await sleep(300)
+      const stillOpen = await cdp.evaluate(`Boolean(document.querySelector('[data-testid="session-row-menu"]'))`)
+      check('D15', 'Esc 能关掉行菜单（键盘出口）', closed && !stillOpen,
+        stillOpen ? '按 Esc 之后菜单还在' : 'Esc 已关闭',
+        '浮层关不掉时，学生会以为界面卡住了（本项目实测过同类缺陷）')
+    }
   }
 
   /* ── E. 页面切换的记忆 ───────────────────────────────────────── */

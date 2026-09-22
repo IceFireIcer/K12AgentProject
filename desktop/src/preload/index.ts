@@ -45,6 +45,7 @@ import {
   type SessionBranchRequest,
   type SessionBranchResult,
   type SessionCurrent,
+  type SessionDeleteResult,
   type SessionOpenResult,
   type SessionStateResult,
   type SessionSearchRequest,
@@ -189,6 +190,15 @@ export interface K12Api {
    *   `entryId` 由主进程核对该会话的条目清单（渲染进程指不了别的会话）。
    */
   branchSession(request: SessionBranchRequest): Promise<SessionBranchResult>
+  /**
+   * ★★ **删掉一条历史会话**（连磁盘上的会话文件一起删，**不可撤销**）。
+   *
+   * ★ 入参只当**字符串 id** 用：主进程先按它做会话白名单对齐（path 由 Pi 给），
+   *   再断言那条路径确实落在当前学生的会话目录里 —— 渲染进程指不了别人的文件。
+   * ★ 回执**只回 id 与一句人话**，不回路径（宿主目录结构不进渲染进程）。
+   * ★ 删的是**正在聊的那一条**时：主进程会先切到一条新的空白会话，成功之后才删文件。
+   */
+  deleteSession(sessionId: string): Promise<SessionDeleteResult>
   /**
    * 订阅**本轮条目 id**（`{requestId, userEntryId, entryId}`），返回取消订阅函数。
    *
@@ -453,6 +463,9 @@ const api: K12Api = {
       entryId: typeof request?.entryId === 'string' ? request.entryId : ''
     }) as Promise<SessionBranchResult>,
 
+  deleteSession: (sessionId): Promise<SessionDeleteResult> =>
+    ipcRenderer.invoke(IPC.sessionDelete, String(sessionId ?? '')) as Promise<SessionDeleteResult>,
+
   onTurnEntries: (listener): (() => void) => {
     const handler = (_event: IpcRendererEvent, payload: unknown): void => {
       // 边界处过滤：三个字段都必须是字符串（半截对象直接丢掉，
@@ -697,10 +710,12 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.sessionList,
   IPC.sessionTranscript,
   IPC.sessionSearch,
-  // 会话切换 / 新建 / 当前状态（三条 invoke）+ 变化推送（一条 push）
+  // 会话切换 / 新建 / 当前状态 / **删除**（四条 invoke）+ 变化推送（一条 push）
   IPC.sessionOpen,
   IPC.sessionNew,
   IPC.sessionBranch,
+  // ★ 删除（invoke）：本项目唯一的**破坏性**通道，两道防线在主进程（白名单 + 目录包含）
+  IPC.sessionDelete,
   IPC.sessionState,
   IPC.sessionChanged,
   IPC.turnEntries,

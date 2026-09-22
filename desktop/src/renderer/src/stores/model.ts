@@ -17,6 +17,7 @@
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+import { llmDisplayLabel, llmReadyState } from '../labels'
 import { useSettingsStore } from './settings'
 
 /** 一个可选项（预设里的模型 / 探测拉回来的模型）。 */
@@ -37,10 +38,17 @@ export const useModelStore = defineStore('model', () => {
   /** 弹层是否打开（组件共用同一个实例，所以放 store 而不是组件本地）。 */
   const pickerOpen = ref(false)
 
-  /** 当前生效的模型（来自设置快照；还没读到快照时为 `null`）。 */
+  /**
+   * 当前生效的模型（来自设置快照；**还没读到快照 / 还没配好**时为 `null`）。
+   *
+   * ★★ 未配置（没填 Key）时必须回 `null`，**不许**把服务端默认值当成「当前模型」
+   *   （2026-09-22 的实测缺陷）：服务端默认值是 `deepseek-v4-flash`，于是首次安装、
+   *   一个 Key 都没填的时候，顶栏与输入条都显示着这个模型名 —— 看起来像「已经配好了」。
+   *   详见 `labels.ts` 的 `llmReadyState`。
+   */
   const current = computed<ModelOption | null>(() => {
     const llm = settings.snapshot?.llm
-    if (!llm) return null
+    if (!llm || llmReadyState(llm) !== 'ready') return null
     return {
       providerId: llm.providerId,
       providerName: llm.providerName,
@@ -49,6 +57,9 @@ export const useModelStore = defineStore('model', () => {
       modelId: llm.modelId
     }
   })
+
+  /** 「配好了没有」的三态（唯一实现在 `labels.ts`；顶栏 / 输入条 / 弹层共用）。 */
+  const readyState = computed(() => llmReadyState(settings.snapshot?.llm))
 
   /**
    * 可选模型清单。
@@ -73,8 +84,14 @@ export const useModelStore = defineStore('model', () => {
     return options
   })
 
-  /** chip 上的完整标签（模型 id 本身；学生要能看清到底是哪个模型）。 */
-  const label = computed(() => current.value?.modelId ?? '未配置模型')
+  /**
+   * chip 上的完整标签。
+   *
+   * ★★ 三态各自说自己的话（唯一实现在 `labels.ts` 的 `llmDisplayLabel`）：
+   *   `读取中…` / `未配置` / 模型 id。**不许**在没读到设置或没配 Key 时显示一个模型名 ——
+   *   那是在告诉学生「已经配好了」，而他发出去的第一句话会直接失败（实测缺陷）。
+   */
+  const label = computed(() => llmDisplayLabel(settings.snapshot?.llm))
   /** 窄容器（悬浮追问窗）里的短标签。 */
   const shortLabel = computed(() => {
     const raw = label.value
@@ -123,6 +140,7 @@ export const useModelStore = defineStore('model', () => {
   return {
     pickerOpen,
     current,
+    readyState,
     catalog,
     label,
     shortLabel,

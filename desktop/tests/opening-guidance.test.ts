@@ -7,11 +7,17 @@
  * 这个功能的价值全在**时机**上：同样一句话，早一秒晚一秒都会变味，而四种错误
  * 全都不报错、界面也不会崩 —— 只是学生会觉得这个助手有点奇怪：
  *
- * 1. ★★ **每轮都发** → 助手像个复读机（开场语只该在**会话为空**时出现一次）；
+ * 1. ★★ **每轮都发** → 助手像个复读机（开场语只该在**会话还没开始**时出现一次）；
  * 2. ★★ **切到历史会话也发** → 一句「我们从X开始吧」插在他自己聊过的内容前面；
  * 3. ★★ **没有依据也发** → 「今天想学什么？」这种对谁都成立的废话（服务端已经
  *    用空串表达了「这次不发」，前端必须**真的不发**）；
  * 4. ★ **没有目标还渲染动作按钮** → 学生点「好啊，就从这里开始」，什么都不发生。
+ * 5. ★★ **同一段没开始的会话长成两副样子**（2026-09-22 实测缺陷）：判据原来是
+ *    「会话里消息条数为 0」，而开场白**自己就是写进会话文件的一条消息** ——
+ *    于是「刚建好 → 切走 → 切回来」之后开场卡、四张能力入口、建议问题全没了，
+ *    只剩一个空气泡 + 一句问候，轮数还从「尚未开始」变成「1 轮」。
+ *    现在的判据是**「学生开口了没有」**（`ChatRuntime.hasUserTurn`），
+ *    主进程与渲染进程用**同一条规则**（`resolveSessionPrelude` / `turnCount`）。
  *
  * ★ 服务端那一半（`GET /api/profile/{id}/opening` 拼出什么话）由
  *   `server/tests/test_opening_guidance.py` 覆盖；本文件只管**主进程与前端**
@@ -52,56 +58,133 @@ function stripComments(source: string): string {
 const HANDLERS = 'src/main/ipc/handlers.ts'
 const CHAT_VIEW = 'src/renderer/src/views/Chat.vue'
 const CHAT_STORE = 'src/renderer/src/stores/chat.ts'
+const MESSAGE_VIEW = 'src/renderer/src/components/ChatMessage.vue'
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1
+}
+
+/**
+ * 取某个**顶层函数**的函数体（从签名到下一个顶层 `}` 行）。
+ *
+ * ★ 为什么不用 `slice(at, at + 3000)`：那会把**后面几个函数**一起圈进来 ——
+ *   断言"某调用不许出现"时，后面的函数里恰好出现一次就会假红/假绿（锚点选错的两种错法，
+ *   本仓库都有前科，见 P-111）。函数体自己有个明确的收尾，就别拿字节数当边界。
+ */
+function topLevelBody(source: string, signature: string): string {
+  const start = source.indexOf(signature)
+  assert.ok(start > 0, `源码里找不到 ${signature}`)
+  const end = source.indexOf('\n}\n', start)
+  return source.slice(start, end < 0 ? source.length : end)
+}
 
 /* ------------------------------------------------------------------ *
  * 1. ★★ 主进程：什么时候发
  * ------------------------------------------------------------------ */
 
-test('★★ 开场引导的判据是「这条会话里还没有消息」，不是「刚点了新建」', () => {
+test('★★ 开场引导的判据是「学生开口了没有」，不是「会话里有没有消息」', () => {
   const source = stripComments(read(HANDLERS))
-  const at = source.indexOf('async function swapToSession(')
-  assert.ok(at > 0, '找不到 swapToSession')
-  const body = source.slice(at, at + 3000)
+  const body = topLevelBody(source, 'async function resolveSessionPrelude(')
 
-  // ⚠️ 必须锚在**取开场那一行**上，不能只搜 `messageCount === 0` ——
-  //    同一个函数体里 `maybeGenerateTitle` 也有 `instance.messageCount === 0`，
-  //    泛搜会让「判据被删掉」这个改动**静默通过**（变异验证实测踩到过：
-  //    把整行改成 `const opening = await fetchOpening()` 之后，守卫仍然是绿的）。
-  const openingLine = /const opening = ([^\n]*)/.exec(body)?.[1] ?? ''
-  assert.ok(openingLine, '找不到取开场引导的那一行')
-  assert.match(
-    openingLine,
-    /messageCount\s*===\s*0/,
-    '★ 取开场的判据必须是「这条会话还没有消息」：\n' +
-      '  - 用 `source === "new"` → 切到一条空的历史会话永远等不到开场；\n' +
-      '  - 用 `getEntries().length === 0` → 刚建的会话已经有 model_change 等条目，开场永远发不出来；\n' +
-      '  - 不加判据（每轮都取）→ 切到已聊过的会话也会插一句「我们从X开始吧」。\n' +
-      `实际：${openingLine}`
-  )
-  // ★ 有开场才写进 Pi 会话（空开场不许写）
+  // ★★ 判据本体：`hasUserTurn`（学生开口了没有）。
   assert.match(
     body,
-    /if\s*\(opening\.text\)[\s\S]{0,200}appendOpeningMessage\(/,
+    /if\s*\(instance\.hasUserTurn\)/,
+    '★ 判据必须是「学生开口了没有」：开场白**自己就是写进会话文件的一条消息**，' +
+      '拿消息条数判会让「刚建好 → 切走 → 切回来」的会话丢掉整个空态（实测缺陷）。'
+  )
+  // ★ 反向：这个函数里不许再出现 `messageCount` —— 它正是被换掉的那个判据。
+  assert.equal(
+    countOccurrences(body, 'messageCount'),
+    0,
+    '★★ 判据不许回退到消息条数（`messageCount`）—— 开场白写进文件后它就是 1，' +
+      '「文件里有几条消息」与「学生开口了没有」是两件事。'
+  )
+
+  // 已经聊过的会话：铺消息、一个字的开场都不给（不许插在历史对话前面）。
+  assert.match(
+    body,
+    /\{\s*started:\s*true,\s*messages:\s*\[\.\.\.instance\.restoredMessages\],\s*opening:\s*'',\s*openingKpId:\s*''\s*\}/,
+    '★ `started === true` 时必须原样铺消息、且开场语为空串'
+  )
+
+  // ★★ 未开始的两条分支**都**回空消息数组：那条开场白由 `opening` 承载，
+  //    不许当作普通消息铺回去 —— 铺回去界面就进不了空态（开场卡/入口卡/建议问题全没了）。
+  assert.equal(
+    countOccurrences(body, 'messages: []'),
+    2,
+    '★★ 未开始的会话必须回**空消息数组**（两条分支各一处）：开场白走 `opening`，' +
+      '否则界面进不了空态 —— 那正是「切回来长得不一样」的根因。'
+  )
+
+  // ★ 有开场才写进 Pi 会话（空开场不许写），且只在「文件里还没有」那条分支里写。
+  assert.equal(
+    countOccurrences(body, 'appendOpeningMessage('),
+    1,
+    '★ `appendOpeningMessage` 只该调一次（只在文件里还没有开场白时才写）'
+  )
+  const branchAt = body.indexOf('if (!stored) {')
+  assert.ok(branchAt > 0, '找不到「文件里还没有开场白」那条分支')
+  const writeBranch = body.slice(branchAt, body.indexOf('\n  }\n', branchAt))
+  assert.match(
+    writeBranch,
+    /if\s*\(fetched\.text\)[\s\S]{0,300}appendOpeningMessage\(/,
     '★ 只有真的拿到开场语时才写进 Pi 会话（写空串会让历史里多出一条空消息）'
+  )
+  assert.doesNotMatch(
+    body.slice(body.lastIndexOf('return {')),
+    /appendOpeningMessage\(/,
+    '★★ 文件里已经有开场白时**不许再写一遍** —— 重复写入会让历史里出现两句招呼'
+  )
+
+  // ★ kpId 只在与文件里那条**逐字相同**时才给（推荐的知识点会变，而文件里那句是当时写下的）。
+  assert.match(
+    body,
+    /openingKpId:\s*fetched\.text === stored \? fetched\.kpId : ''/,
+    '★ 开场语与文件里那条对不上时必须撤掉动作按钮（宁可没有按钮，也不让卡片上的字与历史里的字不一致）'
   )
 })
 
-test('★★ 开场引导**只在切换/新建那条路上**取（不在每轮对话里）', () => {
+test('★★ 开场引导**只在「会话开始/恢复」那条路上**取（不在每轮对话里）', () => {
   const source = stripComments(read(HANDLERS))
-  // `fetchOpening` 的调用点：只该在 swapToSession 里有
+  // `fetchOpening` 的调用点只该落在唯一的那个判据函数里（两条未开始分支各一次）
   const calls = [...source.matchAll(/await fetchOpening\(\)/g)]
-  assert.equal(calls.length, 1, `fetchOpening 只该有一个调用点（切换/新建），实际 ${calls.length} 个`)
-  const at = source.indexOf('async function swapToSession(')
-  const body = source.slice(at, at + 3000)
-  assert.ok(body.includes('await fetchOpening()'), '★ 唯一的调用点必须在 swapToSession 里')
+  assert.equal(
+    calls.length,
+    2,
+    `fetchOpening 只该在 resolveSessionPrelude 里被调（未开始的两条分支），实际 ${calls.length} 处`
+  )
+  const prelude = topLevelBody(source, 'async function resolveSessionPrelude(')
+  assert.equal(
+    countOccurrences(prelude, 'await fetchOpening()'),
+    2,
+    '★ 两次调用都必须在 resolveSessionPrelude 内 —— 它是「开场引导发不发」的唯一判据'
+  )
 
-  // 而且它**不在** runChatTurn 里（那条是「学生发一条 → 模型回一条」的路径）
-  const runAt = source.indexOf('async function runChatTurn(')
-  const runBody = source.slice(runAt, runAt + 3000)
+  // 而它**不在** runChatTurn 里（那条是「学生发一条 → 模型回一条」的路径）
+  const runBody = topLevelBody(source, 'async function runChatTurn(')
   assert.doesNotMatch(
     runBody,
     /fetchOpening|opening/,
     '★★ 每轮对话都不许碰开场引导 —— 「每轮打招呼」是助手变复读机的形态'
+  )
+})
+
+test('★★ 切换与冷启动**共用同一个判据**（分两处写就会长出第三副样子）', () => {
+  const source = stripComments(read(HANDLERS))
+  // 三个调用点：swapToSession（切换/新建/分叉）与 session:state（冷启动恢复）
+  const calls = countOccurrences(source, 'await resolveSessionPrelude(')
+  assert.equal(
+    calls,
+    2,
+    `resolveSessionPrelude 只该被两处调用（切换 + 冷启动），实际 ${calls} 处 —— ` +
+      '两处各写一套判据正是「同一段没开始的会话长成两副样子」的成因'
+  )
+  const stateBody = topLevelBody(source, 'ipcMain.handle(IPC.sessionState,')
+  assert.match(
+    stateBody,
+    /await resolveSessionPrelude\(/,
+    '★ 冷启动（`session:state`）必须走同一个判据 —— 否则重启后又变回第三副样子'
   )
 })
 
@@ -120,18 +203,77 @@ test('★ 取开场失败时**安静降级**（不发开场，但对话照常）
 
 test('★ 开场语与「写进会话的那一份」是**同一份文本**（不能两处各拼一次）', () => {
   const source = stripComments(read(HANDLERS))
-  const at = source.indexOf('async function swapToSession(')
-  const body = source.slice(at, at + 3000)
-  // 写进去的是 opening.text（同一个变量），而不是再调一次 fetchOpening / 再拼一次
+  const body = topLevelBody(source, 'async function resolveSessionPrelude(')
+  // 写进去的是 fetched.text（同一次取回的那个值），而不是再调一次 fetchOpening / 再拼一次
   const writes = [...body.matchAll(/appendOpeningMessage\(([^)]*)\)/g)]
   assert.equal(writes.length, 1, `appendOpeningMessage 只该调一次，实际 ${writes.length} 次`)
   assert.match(
     writes[0]?.[1] ?? '',
-    /opening\.text/,
-    '★ 写进会话的必须是**屏幕上显示的那一份**（`opening.text`）—— 两处各拼一次迟早不一致'
+    /fetched\.text/,
+    '★ 写进会话的必须是**屏幕上显示的那一份**（`fetched.text`）—— 两处各拼一次迟早不一致'
   )
-  // 回执里给的也必须是同一份
-  assert.match(body, /opening:\s*opening\.text/, '★ 回执里给前端的也必须是同一份文本')
+  // 回执里给的也必须是同一份：现取的分支给 `fetched.text`，文件已有那条给 `stored`
+  assert.match(body, /opening:\s*fetched\.text/, '★ 现取的分支：回执与写入必须是同一份文本')
+  assert.match(
+    body,
+    /opening:\s*stored/,
+    '★ 文件里已有开场白的分支：回执给的是**文件里那条**（它是唯一真相，不能拿现取的那句盖掉）'
+  )
+})
+
+/* ------------------------------------------------------------------ *
+ * 1b. ★★ 渲染进程：未开始的会话不许长出第二副样子
+ * ------------------------------------------------------------------ */
+
+test('★★ 恢复出来的「开场白」不许挂着一个空气泡（`userText` 空就不渲染学生气泡）', () => {
+  const source = read(MESSAGE_VIEW)
+  const at = source.indexOf('data-testid="user-message"')
+  assert.ok(at > 0, '找不到学生气泡')
+  assert.match(
+    source.slice(Math.max(0, at - 700), at),
+    /v-if="turn\.userText"/,
+    '★★ 学生气泡必须带 `v-if="turn.userText"`：开场白是**助手**先说的那条，' +
+      '`restoreConversation` 会给它单独一轮而 `userText` 是空串 —— 无条件渲染就是那个空气泡（实测截图）。'
+  )
+})
+
+test('★★ 「尚未开始 / N 轮」与空态都按**学生开口了没有**算（不是数列表长度）', () => {
+  const source = read(CHAT_VIEW)
+  assert.match(
+    source,
+    /const turnCount = computed\(\(\) => turns\.value\.filter\(\(turn\) => turn\.userText !== ''\)\.length\)/,
+    "★ 必须有一个只数「有学生提问」的轮次计数器 —— 直接数 `turns.length` 会把开场白那一轮也算进去"
+  )
+  assert.match(
+    source,
+    /const isEmpty = computed\(\(\) => turnCount\.value === 0\)/,
+    '★ 空态判据必须是「学生还没开口」（与主进程 `hasUserTurn` 同一条规则）'
+  )
+  // 顶栏那行元信息也必须用它（否则界面会出现「尚未开始」与「1 轮」自相矛盾）
+  assert.match(
+    source,
+    /isEmpty \? '尚未开始' : `\$\{turnCount\} 轮`/,
+    '★ 「N 轮」必须用 turnCount —— 用 turns.length 会让同一条会话在切回来后从「1 轮」变「2 轮」'
+  )
+})
+
+test('★★ 未开始的会话：主进程回空正文 → 界面上就是空态 + 开场卡（行为面）', async () => {
+  const originalWindow = (globalThis as { window?: unknown }).window
+  try {
+    // 主进程对「学生还没开口」的会话的形态：started=false、正文空、开场白在 opening 里。
+    // ★ 这条正是「切走再切回来」那一刻的回执（开场白已经写在文件里了，所以不再现取）。
+    installBridge('你好，我是智团团。我们从人工智能的定义开始吧。', 'ai-definition-pl')
+    const { useChatStore } = await import('../src/renderer/src/stores/chat.ts')
+    setActivePinia(createPinia())
+    const chat = useChatStore()
+
+    await chat.openSession('s-empty')
+    assert.equal(chat.turns.length, 0, '★★ 未开始的会话不许铺出任何消息（那些「消息」是开场白，走 opening）')
+    assert.equal(chat.showOpening, true, '★ 开场卡仍然要显示 —— 这就是「切回来还是一样的界面」')
+  } finally {
+    if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window
+    else (globalThis as { window?: unknown }).window = originalWindow
+  }
 })
 
 /* ------------------------------------------------------------------ *
@@ -229,19 +371,21 @@ test('★★ 空开场语 → `showOpening` 为假（服务端说「这次不发
 
 function installBridge(opening: string, openingKpId: string): void {
   const api = {
-    // ★ 冷启动那条路**不发**开场（主进程 `session:state` 的注释）：回空开场 + 空正文。
-    //   所以本组用例里「开场引导」只可能来自 `openSession` / `startNewSession`。
+    // ★ 冷启动那条路与切换共用同一个判据（`resolveSessionPrelude`）：未开始的会话
+    //   一样会带来开场引导 —— 这里回 `started: false` + 空正文 + 开场白。
     getSessionState: () => ({
       ok: true,
       current: { sessionId: 's1', title: '', messageCount: 0 },
       messages: [],
-      opening: '',
-      openingKpId: ''
+      started: false,
+      opening,
+      openingKpId
     }),
     openSession: () => ({
       ok: true,
       current: { sessionId: 's1', title: '', messageCount: 0 },
       messages: [],
+      started: false,
       opening,
       openingKpId
     }),
@@ -249,6 +393,7 @@ function installBridge(opening: string, openingKpId: string): void {
       ok: true,
       current: { sessionId: 's2', title: '', messageCount: 0 },
       messages: [],
+      started: false,
       opening,
       openingKpId
     }),
@@ -256,6 +401,7 @@ function installBridge(opening: string, openingKpId: string): void {
     //   有它，缺一个整个桥就是 `ready:false` —— 而那时**所有**会话动作都会失败
     //   （实测踩到过：漏了这个假实现，本组用例全红，错误信息与开场语毫无关系）。
     branchSession: () => ({ ok: false, message: '未接线' }),
+    deleteSession: () => ({ ok: false, message: '未接线' }),
     onSessionChanged: () => () => {},
     onChatEvent: () => () => {},
     onGradeChanged: () => () => {},
@@ -335,6 +481,7 @@ test('★ 开场引导只在**会话为空**时随切换落库（有内容的会
         ok: true,
         current: { sessionId: 's1', title: '', messageCount: 2 },
         messages: [],
+        started: true,
         opening: '',
         openingKpId: ''
       }),
@@ -345,11 +492,13 @@ test('★ 开场引导只在**会话为空**时随切换落库（有内容的会
           { role: 'user', text: '以前问的', at: 1 },
           { role: 'assistant', text: '以前答的', at: 2 }
         ],
+        started: true,
         opening: '',
         openingKpId: ''
       }),
       startNewSession: () => ({ ok: false, message: '未接线' }),
       branchSession: () => ({ ok: false, message: '未接线' }),
+      deleteSession: () => ({ ok: false, message: '未接线' }),
       onSessionChanged: () => () => {},
       onChatEvent: () => () => {},
       onGradeChanged: () => () => {},

@@ -30,6 +30,10 @@
  */
 
 import type { SessionInfo } from '@earendil-works/pi-coding-agent'
+// ★ `isInside` 是纯路径判定（只用 `node:path`），所以可以静态引入 ——
+//   它把「这条路径真的在当前学生的会话目录里吗」收口成一个可单测的纯函数，
+//   **删除会话**（本项目唯一的破坏性文件操作）靠的正是它。
+import { isInside } from '../agent/pi-paths.ts'
 
 /** 会话列表里的一项（**给界面看的投影**，不是 Pi 的原始 `SessionInfo`）。 */
 export interface SessionSummary {
@@ -402,9 +406,65 @@ function extractText(content: unknown): string {
  *
  * ★ 这是「只接受 id」那条安全约束的落点：`readTranscript` 拿到 id 后**必须**先过这里，
  *   拿到的 `path` 由 Pi 提供（而不是前端给的字符串）。
+ * ★ 泛型只为**参数放宽**：调用方传 `SessionInfo[]` 拿到的仍是 `SessionInfo | null`，
+ *   而删除判据（只需要 id + path）可以在测试里造两条最小数据就调用它。
  */
-export function findSessionById(infos: SessionInfo[], id: string): SessionInfo | null {
+export function findSessionById<T extends { id: string }>(infos: readonly T[], id: string): T | null {
   return infos.find((info) => info.id === id) ?? null
+}
+
+/**
+ * ★★ **删除一条会话前的两道防线**（纯函数；`session:delete` 的唯一判据实现）。
+ *
+ * 为什么必须收口成一个纯函数、而不是写在 `handlers.ts` 的处理器里：
+ *   这是全项目**唯一一处破坏性文件操作**（`unlink`），而它的安全判据必须能被
+ *   `node --test` 直接测 —— 处理器里那句 `await unlink(...)` 是不可单测的
+ *   （它会真的删文件），判据本身却是纯的。分开之后：判据有单测与负向对照，
+ *   副作用留在处理器里，只有一行。
+ *
+ * 两道防线（缺一不可）：
+ *   ① **白名单对齐**：`id` 必须在 `SessionManager.list()` 的结果里 ——
+ *      拿到的 `path` 是 **Pi 自己给的**，渲染进程递进来的字符串永远只是 id；
+ *   ② **目录包含**：那条 `path` 必须落在**当前学生**的 `sessionDir` 内
+ *      （`isInside`）。单靠 ① 不够：列表是「当下的观测」，而路径是字符串 ——
+ *      这一条挡的是「有人绕过调用方，直接拿一个手造的 `info` 进来」。
+ *
+ * ★ 「找不到这条」按**幂等成功**回（`path: null`，什么都不删）：目标状态已经达成
+ *   （另一处删过 / 上次删到一半）。把它报成失败只会让学生反复重试一条不存在的会话。
+ * ⚠️ 也因此**不区分**「id 打错了」与「别的学生的 id」：两者在这里同形，
+ *   而唯一能造成的后果都是「什么都没删」。
+ */
+export type SessionDeletionTarget =
+  | { ok: true; path: string | null }
+  | { ok: false; message: string }
+
+/**
+ * 删除判据只需要 `id` 与 `path` 两个字段 —— 不必是完整的 `SessionInfo`。
+ *
+ * ★ 这样写是为了让判据**真的可单测**（造两条最小数据就能跑一遍两道防线），
+ *   而生产路径传进来的就是 Pi 的 `SessionInfo[]`（结构上多几个字段，照样满足它）。
+ */
+export interface DeletionCandidate {
+  id: string
+  path: string
+}
+
+export function resolveDeletionTarget(options: {
+  infos: readonly DeletionCandidate[]
+  id: string
+  sessionDir: string
+}): SessionDeletionTarget {
+  const id = options.id.trim()
+  if (!id) return { ok: false, message: '删除失败：没有给出会话 id。' }
+  const info = findSessionById(options.infos, id)
+  if (!info) return { ok: true, path: null }
+  if (!isInside(options.sessionDir, info.path)) {
+    return {
+      ok: false,
+      message: '删除失败：这条对话不在当前学生的会话目录里（已拒绝）。'
+    }
+  }
+  return { ok: true, path: info.path }
 }
 
 /**

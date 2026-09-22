@@ -213,8 +213,13 @@ function pickBranch(): void {
 
 <template>
   <article class="turn" :data-status="turn.status" data-testid="chat-turn">
-    <!-- 学生消息：右侧气泡 + 轮次时间戳（时间锚点让「隔了多久」一眼可见） -->
-    <div class="turn__user" data-testid="user-message">
+    <!-- 学生消息：右侧气泡 + 轮次时间戳（时间锚点让「隔了多久」一眼可见）
+         ★★ **没有学生文字就不渲染这一块**：恢复出来的「开场白」是**助手**先说的那条
+           （`restoreConversation` 会给它单独一轮，`userText` 是空串），无条件渲染会在
+           问候语上方挂出一个**空气泡** —— 实测截图里就是它。
+           判据是「这一轮有没有学生的话」，不是「这条消息是谁发的」：轮次里
+           assistant 那半永远有正文，user 那半可以合理地空着（开场白 / 上一轮失败）。 -->
+    <div v-if="turn.userText" class="turn__user" data-testid="user-message">
       <p class="bubble">{{ turn.userText }}</p>
     </div>
 
