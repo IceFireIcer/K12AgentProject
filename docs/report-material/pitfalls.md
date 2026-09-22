@@ -2740,3 +2740,62 @@ assert.match(macro[1], /!insertmacro\s+MUI_PAGE_WELCOME/, '空宏等于没加欢
 
 > 定位手段没有任何技巧：**把修复改回坏写法，看它红不红**。
 > 这一步不做，上面那条断言会一直绿着，且看起来完全合理。
+
+## P-117 ★ 把 vite 的「入口桩 + worker 实体」误判成构建残留 —— 差点把一个不存在的现象写进决策记录
+
+**现象**：拆 asar 时看到 `out/renderer/assets/` 里有两个 `editor.worker-*.js`
+（`BwBjdhCz` 与 `pDQdyQEP`）。当时的判据是"同名不同 hash 的文件数 > 1" →
+判定「上一轮构建残留下来的死文件」，并据此给 renderer 段加了 `build: { emptyOutDir: true }`，
+还把「**实测**多出一个 0.56MB 的死文件」写进了配置注释与守卫说明。
+
+**真相**：vite 对 `?worker` 的产物**本来就是两个文件**：
+
+| 文件 | 大小 | 是什么 |
+| --- | --- | --- |
+| `editor.worker-BwBjdhCz.js` | 584,829 B | worker **实体**（真正跑在 worker 线程里的代码） |
+| `editor.worker-pDQdyQEP.js` | **208 B** | **入口桩**，主 bundle `import` 的正是它，它再 re-export 实体 |
+
+两个 hash 不同是**设计如此**，不是残留。三处实测：大小、时间戳（同一秒，都是本次构建）、
+引用关系（在 `index-*.js` 里 grep 到的 worker 文件名是那个 208 字节的桩）。
+
+**为什么差点写错**：判据只用了"文件名像不像"——没看**大小**、没看**引用关系**、没做**对照实验**。
+若照此写进 D-068，后人会继承一个**不存在的现象**（"monaco 换 hash 会留死文件"）
+和一个错误因果，而且**复现不出来**。
+
+**怎么暴露的**：因为要在文档里写下"实测"两个字，才去补对照实验 ——
+往 `out/renderer/assets/` 放一个假文件，分别在 `emptyOutDir: false` / `true` 下构建：
+前者它**还在**、后者被清掉。这一下就把"真残留"与"正常的两文件结构"分开了。
+
+**留下的有效结论**：`emptyOutDir` 仍然要设（vite 的 outDir 在项目 root 之外时它默认是 `false`，
+残留**是**真实存在的口子，只是我举的例子错了），但理由换成了正确的那个。**判据没变，理由换了。**
+
+**报告用法**：与 AGENTS.md §7 里那两条"量法本身的 bug"（直接量 `<input type=radio>` 得到 13×13、
+把 24×28 的列头判成过小）同一类。一句话：*判断"重复"要证明到「同一份内容出现了两次」，
+而不是「看到两个相似的文件名」—— 后者连大小都不看，就只是个猜测。*
+
+## P-118 ★★ 顶层 `node_modules` 里的包**不等于**本项目的直接依赖 —— 删依赖前必须算闭包
+
+**现象**：清点 asar 时看到 `openai`(7.3MB)、`@google/genai`(11.8MB)、`@anthropic-ai/sdk`(6.8MB)、
+`web-streams-polyfill`(8.5MB)、整片 `@aws-sdk/*` 与 `@smithy/*` 都躺在**顶层** `node_modules` 里
+—— 而 `package.json` 里根本没有这些名字。一个很自然的判断是"这是 devDependencies 漏进来的，可以删"。
+
+**真相**：它们是 **Pi 的依赖被 npm hoist 上来的**。证据有三条：
+① Pi 自带 `npm-shrinkwrap.json`（依赖被锁定）；② `scripts/pi-import-graph.mjs`
+（只跑**包根**导入）**看不到**它们，说明不在急切导入图上；③ electron-builder 真机日志里的
+`duplicate dependency references` 列出的正是这一批 —— 它们属于 Pi 的 **provider 懒加载路径**。
+所以删掉它们有相当的风险：**可能不影响 DeepSeek，但会让别的 provider 在真正被用到时崩**。
+
+**根因（判据层面）**：`node_modules` 的**物理布局**（在顶层还是嵌套）
+**不表达"谁依赖谁"**。npm 的 hoisting 会把深层依赖提到顶层，
+于是"在顶层"既可能是本项目的直接依赖，也可能是**任何**传递依赖 —— 从外观上无法区分。
+
+**解法**：**算闭包，不看位置**。`scripts/check-bundle-size.mjs` 从 `package.json` 的
+`dependencies` 出发，按 Node 的解析规则（从包所在目录向上找 `node_modules/<name>`）
+求传递闭包；asar 里**不在闭包里**的包才是"不该进包的"。
+排查阶段也是先用这套算法，才敢把"**31 个包 / 167MB**"这个结论说出口 ——
+否则那 167MB 里到底哪些是垃圾、哪些是 Pi 的依赖，只能靠猜。
+
+**报告用法**：依赖治理里最容易犯、也最贵的一种错 —— 按"名字眼熟不眼熟"删包：
+删对了省体积，删错了**只有当学生用到那条路径时才崩**（演示现场才炸的那种）。
+一句话：*要判断一个包该不该在包里，问的是「**谁依赖它**」，
+而这个答案在 `package.json` 的依赖图里，不在 `node_modules` 的目录树里。*

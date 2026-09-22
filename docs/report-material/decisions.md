@@ -1916,3 +1916,163 @@ Release 页就是「拿到安装包」这条路径的最短入口，也是报告
 
 **服务哪条评分**：用户体验 15%（安装向导是评委的第一次接触面）+ 设计合理性 25%
 （版本号可追溯 / 数据不丢是「产品化」而非「作业」的判据）。
+
+## D-068 ★★ 安装包体积治理：167MB 的渲染依赖打了两遍 + 语言包 49MB + pyodide 15.7MB
+
+**背景**：用户原话 ——
+> 「我们现在优化一下应用体积 我发现有一些重复的依赖或者什么会被重复引用打包进 asar」
+
+**先说结论**（两个数字都要看，**别只报磁盘降幅**）：
+
+| | 优化前 | 优化后 | 变化 |
+| --- | --- | --- | --- |
+| **安装包 `setup.exe`**（学生下载的那一个） | 272.2 MB | **211.8 MB** | **−60.4 MB（−22%）** |
+| **安装后占盘 `win-unpacked`** | 921 MB | **671 MB** | **−250 MB（−27%）** |
+| `app.asar` | 287.9 MB | 117.4 MB | −170.5 MB |
+| `locales/` | 49 MB | 1.2 MB | −47.8 MB |
+| `app.asar.unpacked` | 32 MB | 15.4 MB | −16.6 MB |
+| `resources/server`（Python sidecar） | 234 MB | 217 MB | −17 MB |
+
+⚠️ **为什么两个降幅差这么远**：asar 里删掉的主要是 **JS 源码**（压缩率极高 —— 167MB
+压进安装包只剩十几 MB），而真正"压缩不动"的是 Electron 本体（246MB 的 exe）、
+90MB 的 ONNX 模型与 onnxruntime —— **那些一个都不能删**。
+**没有删掉任何能力**（下面每条都有实证验证）。
+
+### ① 头号浪费：渲染进程的依赖在 `node_modules` 里又打了一遍（31 个包 / 167MB）
+
+| 包 | asar 内体积 |
+| --- | --- |
+| `monaco-editor` | 93.51 MB |
+| `element-plus` | 35.55 MB |
+| `lucide-vue-next` | 22.92 MB |
+| `@fontsource-variable/*`（3 个） | 6.67 MB |
+| `@element-plus/icons-vue` | 3.04 MB |
+| 其余（element-plus 的传递依赖、pinia、animejs…） | ~5.4 MB |
+
+**根因**（两句话）：
+① `electron.vite.config.ts` 的 **renderer 段没有 `externalizeDepsPlugin()`** ——
+   渲染进程的字面量 `import` 全部被 vite 内联进 `out/renderer`（含 `await import('monaco-editor/editor/editor.api')`
+   这种**字面量动态 import**，vite 照样切 chunk 打进产物）；
+② 而 `electron-builder` **只打包 `package.json` 的 `dependencies`** ——
+   那些包只要还留在 `dependencies` 里，就会被原样再收进 asar 一份。
+
+于是同一份代码在包里躺了两遍，而**运行期只用得到 `out/renderer` 那一份**
+（打包态页面是 `file://…/app.asar/out/renderer/index.html`，主进程一行都不 import 它们）。
+
+**改动**：把 9 个**只被渲染进程使用**的包从 `dependencies` **移到 `devDependencies`**
+（`element-plus` / `monaco-editor` / `lucide-vue-next` / `pinia` / `animejs` /
+`@element-plus/icons-vue` / 3 个 `@fontsource-variable/*`）。
+`dependencies` 从 13 个降到 **4 个**，每个都有"主进程/preload 运行时真的要它"的理由：
+
+| 保留的依赖 | 为什么不能挪 |
+| --- | --- |
+| `@earendil-works/pi-coding-agent` | 主进程 `await import()`（纯 ESM、只有 `import` 条件；`externalizeDepsPlugin()` 把它留成运行期解析） |
+| `@electron-toolkit/utils` / `@sinclair/typebox` | 主进程**静态 import**（产物里能 grep 到） |
+| `@electron-toolkit/preload` | preload 那一侧要用 |
+
+★ **这就是"进不进包"的全部机制**：**`dependencies` = 会进包，`devDependencies` = 不进包**。
+一句话记住：**往 `dependencies` 里加东西 = 它会被打进安装包**。
+
+### ② Electron 自带 55 个语言包（49MB），而产品只有中文界面
+
+`locales/*.pak` 的唯一作用是 Electron 界面文本（原生对话框按钮等）。
+本应用**只有一处**用到原生对话框（导出学习档案的 `dialog.showSaveDialog`），
+所以保留 `zh-CN` + `en-US` 就够 —— 用 **`electronLanguages`（electron-builder 内建选项）**
+而不是 after-pack 手写 `rm`（内建的会在升级 electron-builder 后继续管用）。
+
+⚠️ **英文包必须留**：学生的系统若是英文 Windows，删了它连「保存 / 取消」都会是别的语言。
+**这是这次裁剪里唯一有用户可见后果的一条**，专门有守卫盯着。
+
+### ③ pyodide 打了两遍（15.7MB）—— `resources/` 的双重身份
+
+`desktop/resources/` 同时是**两件事**：vite 的 `publicDir`（构建时**整份**拷进 `out/renderer`）
+**和** electron-builder 会收进 asar 的项目目录。于是 `resources/pyodide/` 被打了两次：
+
+- `out/renderer/pyodide/**`（asar 内）← **运行期读的是这一份**
+  （`pyodide-runner.ts` 的 `PYODIDE_INDEX_URL = './pyodide/'` 在打包态解析成 `file://…/out/renderer/pyodide/`）
+- `resources/pyodide/**`（还因 `asarUnpack: resources/**` 解包了）← **没有任何代码读它**
+
+**改动**：`files` 加 `!resources/pyodide/**`；
+★ 同时立下一条规矩：**`resources/` 下只放"主进程亲自读"的东西**
+（现在只有 `brand/` —— 窗口图标），给渲染进程的资源由 vite 从 publicDir 拷。
+
+### ④ 顺带清掉与预防
+
+- `!*tsbuildinfo`：`tsc --composite` 的增量状态（实测 0.38MB）不是程序的一部分；
+- renderer 构建加 **`build: { emptyOutDir: true }`**：vite 的 outDir 在项目 root
+  （= `src/renderer`）**之外**时它默认**不清空** —— 产物目录会累积历史 chunk，
+  而 electron-builder 会把那些没人引用的文件一并收进 asar
+  （`files` 拦的是我们预期的文件名，拦不住一个我们没预料到的 hash 文件）。
+
+### ⑤ sidecar 侧：清掉**运行期用不到**的两个 `.pyd`（16.6MB）
+
+| 文件 | 体积 | 为什么运行期不需要它 |
+| --- | --- | --- |
+| `hf_xet/hf_xet.pyd` | 9.1 MB | HuggingFace 的**下载加速器**（Xet 存储协议）。模型是**随包分发**的，运行期不再下载；而 `huggingface_hub` 在它缺失时会**降级到普通 HTTP 下载**并打一条 warning（`file_download.py` 的 else 分支写明了这条退路，不是抛错） |
+| `PIL/_avif.*.pyd` | 7.5 MB | AVIF 图片格式的 codec。PIL 是被 fastembed **顶层**拉进来的（`fastembed/common/types.py` 的 `from PIL import Image`），**不能整个排除**；但本项目只做**文本**嵌入、从不碰 fastembed 的图像模型，而 PIL 的 codec 是懒加载的（`Image.open` 时才 import），缺一种格式只意味着打不开那种图 |
+
+**改法**：`server/packaging/k12-agent-server.spec` 的 `excludes` 加这两个名字 ——
+那个列表本来就排着 torch / scipy / matplotlib，属同一类"运行期用不到"的判断。
+
+**实证**（重打后）：**26 项产物自检全过**，其中两条正好命中嵌入链路 ——
+`embedderReady: true`、`POST /api/rag/search query="什么是循环" → degraded=vector hits=5`
+（走的是 vector **主路径**，不是降级）；产物 `_internal` **221MB → 205MB**。
+
+⚠️ **这一项的判据比前面几项脆**，必须说清楚：排除的是**运行期真可能被 import 的模块**
+（不像渲染依赖那样"在包里根本没人 import"）。所以验证只能看**打包产物的自检**
+（它真启动 sidecar、真跑一次检索），**不能看单测** —— 单测跑的是源码态，压根不经过 PyInstaller。
+
+### 实证验证（都是在**打包产物**上做的，不是本地 dev）
+
+| 验的是什么 | 判据与结果 |
+| --- | --- |
+| Pi 在包里能加载 | 打包版日志：`主 Agent 扩展：已注册 8 个扩展（animation, coding, quiz, profile, grade, learning-log, rag-search, trace）` |
+| asar 依赖树完整 | 用打包产物的 `ELECTRON_RUN_AS_NODE` 解析：**13 个** Pi 依赖 CJS + clipboard `.node` 实体 + Pi 包根 ESM 导入（**151 个导出**，`createAgentSession`/`SessionManager`/`ModelRuntime`/`DefaultResourceLoader`/`defineTool` 全在） |
+| 界面渲染完整 | `npm run ux:pages`（指向打包版）：**六页 24 项全过**；CDP 读 DOM：lucide 图标 26 个、三种字体已加载、设计令牌 `--k12-fs-md: 16px` 生效、**console 零 error/warn** |
+| Monaco 可用 | `.monaco-editor` 已创建、`self.MonacoEnvironment.getWorker` 是函数（editor.api chunk 从 asar 加载成功） |
+| Pyodide 可用 | 从 asar 加载 `pyodide.mjs`(6ms) → `loadPyodide()` 完整启动(1288ms, v314.0.7) → 执行 Python 返回 `42`；另逐项 fetch 验证 5 个资源字节数与磁盘原件一致（含 9.6MB 的 wasm） |
+| **未覆盖** | **真实对话往返**：打包版是全新 userData、没有配 Key（与既有的 Key 阻塞一致）。首轮真跑一次 DeepSeek 之后才谈得上"Pi 的 provider 路径已验证" |
+
+### 被否决的方案
+
+① **在 `files` 里逐条排除那 31 个包** —— 要维护一份包清单，而 element-plus 换代就会换传递依赖
+   （实测它的传递依赖贡献了约 5MB），这份清单必然漂移；而且那会成为"哪些包该排除"的**第二处真相**
+   （第一处是 package.json）。移到 `devDependencies` 是**机制**，排除清单是**台账**。
+② **`files` 改成白名单**（只列 Pi 与 out/）—— Pi 的依赖树有 **173 个包**且随版本变，
+   漏一个就是运行期 `Cannot find package`；宁可多带，不可少带。
+③ **删掉 Pi 的 provider SDK**（`@google/genai` 11.8 + `web-streams-polyfill` 8.5 + `openai` 7.3
+   + `@anthropic-ai/sdk` 6.8 + `protobufjs` 2.8 + `@aws-sdk/*` + `google-auth-library` ≈ **42MB**）——
+   它们**不在** Pi 包根导入图上（`scripts/pi-import-graph.mjs` 实测），但从真机抓到的
+   `duplicate dependency references` 看它们是 Pi 的 provider 懒加载路径。**风险的形状很差**：
+   只有当学生真用某个 provider 时才暴露，而当前 Key 阻塞、无法做这个验证。
+   收益 42MB < 一次"演示时调不通"的代价 —— **留着**，等真实性往返验证过再谈。
+④ **删 `LICENSES.chromium.html`（20.4MB）/ `dxcompiler.dll`（25.7MB）/ `vk_swiftshader.dll`（5.5MB）** ——
+   都是 Electron 发行版自带的大文件，但分别是**合规要求**与**GPU 渲染路径**；
+   这个项目要交给评委评审，20MB 换一次"许可证缺失"或"某台机器上白屏"不划算。
+⑤ **保留 `@esbuild/win32-x64`（11.1MB，已解包）** —— 票 03 明确解包的"保险丝"，
+   实测不在 Pi 的导入图上，但它是"将来用 chord 打包扩展"的退路；11MB 换这条退路是值的。
+
+### 守卫
+
+- `desktop/tests/bundle-budget.test.ts` —— **9 条**（G24-1…G24-9）：`dependencies` 恰好是那 4 个、
+  9 个渲染包必须在 devDependencies、主进程/preload 源码不得 import 它们、
+  `electronLanguages` 必须含 en-US、`resources/pyodide/**` 必须被排除、`resources/brand/**` 不得被排除、
+  `emptyOutDir` 必须在、`resources/` 下每一项要么主进程读要么已排除、`publicDir` 仍指向 resources；
+- `guards:mutation` **4 条**变异（㊲ 渲染依赖回归 / ㊳ 删 en-US / ㊴ pyodide 重复 / ㊵ 撤 emptyOutDir）——
+  全部当场变红 ✅；
+- ★ **产物级**：`npm run check:bundle`（`scripts/check-bundle-size.mjs`）—— **拆开 asar 数字节**，
+  并**动态求生产依赖闭包**（不维护第二份包清单），任何"不在闭包里却进了包"的包都报出来并非零退出；
+  它同时检查 **sidecar 产物**里没有 `hf_xet` / `PIL/_avif`（用前缀匹配，不写死 `cp312` 这类会漂的标签）。
+  为什么不能只靠单测：单测管的是"配置写对没有"，而**决定安装包大小的是产物里的字节** ——
+  asar 那一段隔着整套 electron-builder 的依赖收集逻辑，sidecar 那一段隔着 PyInstaller 的
+  hook 与 `collect_all`；**两段都只有把产物拆开才看得见**。
+
+★ **本决策也修掉了自己写错的一处**：最初判定 `out/renderer/assets/` 里的两个
+`editor.worker-*.js` 是"上一轮构建的残留"，后来发现那是 vite 对 `?worker` 的**正常两文件结构**
+（0.56MB 的 worker 实体 + 208 字节的入口桩）。`emptyOutDir` 仍然要设（对照实验：`false` 时
+往产物里放的假文件**确实留存**），但理由换成了正确的那个。过程见 **P-117**。
+
+**服务哪条评分**：用户体验 15% —— 安装包体积是评委/学生的**第一次接触面**
+（921MB 的绿色版 vs 687MB 的，下载与解压的体感完全不同）；
+设计合理性 25% —— 「为什么会重复打包」的答案（vite 内联 + electron-builder 只认 `dependencies`）
+是一次真实构建链分析，不是试出来的。

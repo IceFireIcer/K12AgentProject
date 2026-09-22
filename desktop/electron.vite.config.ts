@@ -49,6 +49,17 @@ export default defineConfig({
     // ★ 票 18：自托管的 Pyodide 运行时放在 desktop/resources/pyodide/，
     //   必须拷进渲染产物才可能离线可用（任何 CDN 引用都会在断网演示时白屏）。
     publicDir: resolve('resources'),
+    // ★★ 每次构建**清空** out/renderer（D-068）。
+    //   为什么必须显式写：vite 的 outDir 落在项目 root（= `src/renderer`）**之外**时，
+    //   `emptyOutDir` 默认就是 **false**（不推荐改成 false 的写法没有 warning，静默照做）。
+    //   对照实测：往 `out/renderer/assets/` 放一个假文件再构建 ——
+    //     `emptyOutDir: false` → 它**还在**；改成 `true` → 它被清掉。
+    //   不清空的后果是**产物目录会累积历史文件**：vite 的 chunk 名带内容 hash，
+    //   改动后可能换名，而旧文件谁都不会去删、也没有任何东西引用它 ——
+    //   它**照样会被 electron-builder 收进 asar**（`files` 拦的是我们预期的文件名，
+    //   拦不住一个我们没预料到的 hash 文件）。让构建自己清干净是唯一可靠的修法。
+    //   ⚠️ 只影响 renderer：`out/main` / `out/preload` 是各自独立的构建目标，不在这个目录下。
+    build: { emptyOutDir: true },
     resolve: {
       alias: {
         ...sharedAlias,

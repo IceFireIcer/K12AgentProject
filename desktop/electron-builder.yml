@@ -6,10 +6,30 @@ appId: com.k12agent.desktop
 #   把 userData 钉在固定 slug 上，否则改一次名字就等于把学生的
 #   config.json / learning.db / Pi 会话整体搬家（见那里的注释）。
 productName: 智团团
+
+# ★★ 只保留中文与英文的界面语言包（D-068）。
+#   Electron 发行版自带 **55 个** `locales/*.pak`，解压后 **49MB** —— 而本应用只有中文界面、
+#   只有一处用到原生对话框（`dialog.showSaveDialog`，导出学习档案），那两三个按钮文本
+#   就是这些 pak 唯一的作用。保留 zh-CN + en-US 后 locales 降到约 1.9MB。
+#   ⚠️ **英文包必须留**：学生的系统若是英文 Windows，删了它连「保存 / 取消」都会是别的语言。
+#   ★ 这是 electron-builder 的**内建**选项（`ElectronFramework.removeUnusedLanguagesIfNeeded`），
+#   不是 after-pack 里手写 rm —— 所以升级 electron-builder 时它仍然管用。
+electronLanguages:
+  - zh-CN
+  - en-US
+
 directories:
   buildResources: build
   output: dist
 files:
+  # ★★ 这里**没有**一条「排除 element-plus / monaco-editor…」的规则，是有意的（D-068）：
+  #   渲染进程的依赖**全部由 vite 从 node_modules 打进 out/renderer**（renderer 段**没有**
+  #   `externalizeDepsPlugin()`，见 electron.vite.config.ts），运行期不再需要 node_modules 里的副本。
+  #   所以那 9 个渲染专用包被移进了 `devDependencies` —— electron-builder 只打包
+  #   `dependencies`，一处改动净减 **31 个包 / 167MB**（含 element-plus 的传递依赖）。
+  #   ⚠️ **不要**为了「整齐」把它们移回 dependencies；反过来，往 `dependencies` 里加东西
+  #   就等于「它会进包」，只该加**主进程 / preload 运行时真正 require 的**那几个。
+  #   守卫：`tests/bundle-budget.test.ts`。
   - '!**/.vscode/*'
   - '!src/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
@@ -17,6 +37,15 @@ files:
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
   - '!tests/*'
   - '!scripts/*'
+  # 构建缓存（`tsc --composite` 的增量状态，实测 0.38MB）—— 不是程序的一部分
+  - '!*tsbuildinfo'
+  # ★★ 渲染进程的资源**已经有一份**在 `out/renderer/` 里：vite 把 `publicDir`（= `resources/`）
+  #   整份拷进去，运行期读的也正是那一份（`pyodide-runner.ts` 的 `PYODIDE_INDEX_URL = './pyodide/'`
+  #   在打包态解析成 `file://…/out/renderer/pyodide/`）。所以这里再收一份是**纯重复**：
+  #   实测这一份 15.73MB，而且因为 `asarUnpack: resources/**` 还实占磁盘。
+  #   ⚠️ `resources/brand/**` **必须留** —— 主进程的窗口图标亲自读它（`src/main/index.ts` 的 icon）。
+  #   规矩：`resources/` 下只放**主进程亲自读**的东西；给渲染进程的资源由 vite 从 publicDir 拷。
+  - '!resources/pyodide/**'
   # ── 按架构分发（票 03）──
   # npm 把**所有平台**的可选原生包都装了下来（实测：`@esbuild/win32-arm64/esbuild.exe`
   # 10,404,864 B、`@mariozechner/clipboard-*` 11 个平台包 ≈ 14MB），与本机 win32-x64 无关。

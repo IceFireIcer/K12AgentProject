@@ -177,6 +177,20 @@ excludes = [
     # 测试框架
     "pytest",
     "unittest",
+    # ★★ 运行期用不到的 HuggingFace **下载加速器**（实测 9.1MB）。
+    #   它的唯一用途是「从 HuggingFace 拉模型」（Xet 存储协议）—— 而模型是**随包分发**的
+    #   （见上面的 datas: resources/），运行期不再下载。证据是 huggingface_hub 自己：
+    #   file_download.py 在 hf_xet 缺失时会**降级到普通 HTTP 下载**并打一条 warning
+    #   （"... Falling back to regular HTTP download ..."），不是抛错。
+    #   所以最坏情况是「模型缺失时下载慢」，不是崩。
+    "hf_xet",
+    # ★★ AVIF 图片格式的 codec（实测 7.5MB）。PIL 是被 fastembed **顶层**拉进来的
+    #   （fastembed/common/types.py 的 `from PIL import Image`），不能整个排除；
+    #   但本项目只做**文本**嵌入，从不碰 fastembed 的图像模型 —— 而 PIL 的 codec 是
+    #   懒加载的（Image.open 时才 import），缺一种格式只意味着打不开那种图。
+    #   ⚠️ 若打包后产物里它仍然存在，说明它是被 PyInstaller 的 PIL hook 当作
+    #   **二进制资产**收集的（excludes 管不到那一路），此时改用 a.binaries 过滤。
+    "PIL._avif",
 ]
 
 a = Analysis(  # noqa: F821

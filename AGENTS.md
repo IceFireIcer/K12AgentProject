@@ -640,6 +640,53 @@ Pi 会话正好就在那儿（userData slug 钉在 `k12-agent-desktop`，与 APP
 >
 > 守卫：`desktop/tests/build-pipeline.test.ts`（G20-1…G20-8）+ `server/tests/test_build_info.py`（25 条）。
 
+### ★★ 安装包体积：什么会进包 + 改打包配置前必读的三条（D-068，2026-09-21）
+
+**唯一机制**：**electron-builder 只打包 `package.json` 的 `dependencies`** ——
+所以「一个包运行时到底要不要」就等价于「它在 `dependencies` 还是 `devDependencies`」。
+**往 `dependencies` 里加东西 = 它会被打进安装包**；渲染进程的依赖请放 `devDependencies`
+（它们的代码已经由 vite 打进 `out/renderer` —— renderer 段**没有** `externalizeDepsPlugin()`）。
+
+| 砍掉的 | 省（磁盘） | 怎么砍的 |
+| --- | --- | --- |
+| 渲染依赖 **31 个包**（element-plus / monaco-editor / lucide 及其传递依赖） | 167 MB | 移到 `devDependencies` |
+| Electron 自带 55 个语言包 | 48 MB | `electronLanguages: [zh-CN, en-US]`（**内建选项**） |
+| `resources/pyodide/**` 的第二份副本 | 15.7 MB | `files` 加 `!resources/pyodide/**` |
+| sidecar 里的 `hf_xet` + `PIL/_avif` | 16 MB | spec 的 `excludes` |
+| `tsc` 增量缓存 | 0.4 MB | `files` 加 `!*tsbuildinfo` |
+
+**结果**：安装包 `setup.exe` **272.2 → 211.8 MB**；安装后占盘 `win-unpacked` **921 → 671 MB**。
+⚠️ **量体积要等文件安静下来**：`electron-builder` 的 `signtool` 签名是在压缩**之后**再改一次文件 ——
+实测构建进程报 exit 0 时读到 216.5MB，几分钟后稳定在 211.8MB。**早量会读到一个偏大的中间值**，
+容易得出"优化没生效"的错误结论。
+⚠️ **两个数字差这么远是有原因的，别只报磁盘降幅**：asar 里删掉的主要是 JS 源码（压缩率极高），
+而真正"压缩不动"的是 Electron 本体（246MB 的 exe）、90MB 的 ONNX 模型与 onnxruntime —— **一个都没删**。
+
+★★ **三条硬纪律**：
+
+1. **`resources/` 下只放「主进程亲自读」的东西**（现在只有 `brand/`）。它同时是 vite 的 `publicDir`
+   （构建时整份拷进 `out/renderer`，**运行期读的是那一份**）**和** electron-builder 会收进 asar 的项目目录
+   —— 两边各一份 = 同一份资源打两遍（pyodide 就这么白打了 15.7MB）。给渲染进程的资源由 vite 从 publicDir 拷。
+2. **`emptyOutDir: true` 不能删**：vite 的 outDir 在项目 root 之外时它默认**不清空**（对照实测：
+   放个假文件进 `out/renderer/assets/` 再构建，false 时它还在）—— 产物目录会累积历史 chunk，
+   而 electron-builder 会把那些没人引用的文件一并收进 asar。
+3. **删依赖前必须算闭包**：`node_modules` 的物理布局（顶层/嵌套）**不表达「谁依赖谁」** ——
+   npm 的 hoisting 会把 Pi 的深层依赖提到顶层，所以"在顶层"既可能是本项目直接依赖、也可能是别人的
+   （`openai` / `@google/genai` / `@anthropic-ai/sdk` / `aws-sdk` ≈ 42MB 就是这么来的，**不能删**：
+   它们不在 Pi 包根导入图上，但在 provider 的懒加载路径上）。详见 P-118。
+
+**改打包配置后按顺序跑**（`check:bundle` **不属于 `npm test`**，它要产物）：
+
+```bash
+cd desktop
+npm test                  # tests/bundle-budget.test.ts（G24-1…G24-9，源码级）
+npm run guards:mutation   # ㊲㊳㊴㊵ 四条变异：验上面那些守卫真的会红
+npm run build:unpack && npm run check:bundle   # 产物级：拆 asar 数字节 + 查 sidecar 不该带的文件
+```
+
+★ `check:bundle` 管的那两段（**electron-builder 的依赖收集**、**PyInstaller 的 hook 与 `collect_all`**）
+是单测**结构上覆盖不到**的地方 —— 它们只在产物里留痕。
+
 ### ★ CI / CD（`.github/workflows/`，2026-09-19 起）
 
 | 文件 | 触发 | 干什么 | 多久 |

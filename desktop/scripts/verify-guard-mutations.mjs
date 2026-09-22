@@ -358,7 +358,44 @@ const MUTATIONS = [
     find: '        run: npm run version:stamp',
     replace: '        run: echo "变异：不盖版本号"',
     expect: 'G21-7'
-  }
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 安装包体积（2026-09-21 / D-068）—— 守卫在 tests/bundle-budget.test.ts
+   * 这四条守的都是「**跑应用看不出来**」的事：包多打一份照跑，只是安装包变胖。
+   * ------------------------------------------------------------------ */
+  {
+    name: '㊲ 渲染依赖回归：把 element-plus 从 devDependencies 删掉（它已经进过一次包，167MB）',
+    testFile: 'tests/bundle-budget.test.ts',
+    file: 'package.json',
+    find: '    "element-plus": "^2.14.5",\n',
+    replace: '',
+    expect: 'G24-2'
+  },
+  {
+    name: '㊳ 语言包裁剪被去掉：electronLanguages 里删掉 en-US（英文系统上原生对话框缺文本）',
+    testFile: 'tests/bundle-budget.test.ts',
+    file: 'electron-builder.yml',
+    find: '  - en-US\n',
+    replace: '',
+    expect: 'G24-4'
+  },
+  {
+    name: '㊴ pyodide 重复副本回归：files 里去掉 !resources/pyodide/**（同一份 15.7MB 资源打两遍）',
+    testFile: 'tests/bundle-budget.test.ts',
+    file: 'electron-builder.yml',
+    find: "  - '!resources/pyodide/**'\n",
+    replace: '',
+    expect: 'G24-5'
+  },
+  {
+    name: '㊵ 产物累积口子重开：撤掉 renderer 的 emptyOutDir（历史 chunk 又留在产物目录里）',
+    testFile: 'tests/bundle-budget.test.ts',
+    file: 'electron.vite.config.ts',
+    find: 'build: { emptyOutDir: true },',
+    replace: 'build: {},',
+    expect: 'G24-7'
+  },
 ]
 
 let failures = 0
