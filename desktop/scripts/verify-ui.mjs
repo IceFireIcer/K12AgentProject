@@ -111,7 +111,7 @@ const LEAKY_GLOBALS = ['require', 'process', 'ipcRenderer', 'electron', 'Buffer'
 /** sidecar 阶段文案与 `data-phase` 取值（与 SidecarBadge.vue 一致）。 */
 const EXPECTED_PHASE_TEXT = ['等待启动', '启动中', '已就绪', '启动失败', '已停止']
 const EXPECTED_PHASE_ATTR = ['idle', 'starting', 'ready', 'failed', 'stopped']
-/** 四学段中文名（指示器文案只允许出现这四个 + 「待判定」）。 */
+/** 四学段中文名（指示器文案只允许出现这四个 + 「还没认出年级」）。 */
 const GRADE_LABELS = ['小学低年级', '小学高年级', '初中', '高中']
 /**
  * 四学段**机器字面量**（与 `data-grade` 属性同源）。
@@ -121,7 +121,16 @@ const GRADE_LABELS = ['小学低年级', '小学高年级', '初中', '高中']
  *   「data-grade 恒为空」的年代**假装通过**（双方都是 falsy），学段一真判出来就暴露了。
  */
 const GRADE_LEVELS = ['primary_low', 'primary_high', 'junior', 'senior']
-const GRADE_UNKNOWN_LABEL = '待判定'
+/**
+ * 还没判出学段时指示器上的字（**必须与 `src/renderer/src/labels.ts` 的
+ * `GRADE_UNKNOWN_LABEL` 逐字一致**，否则下面那条「指示器文案可读」会在未判定状态下假红）。
+ *
+ * ★ 2026-09-22（报告 0.2 术语表）：原词「待判定」改成「还没认出年级」——
+ *   旧词是后端规则引擎视角（「判定」是 `rules.py` 的动作），学生读到的是自己没做过的事。
+ *   ⚠️ 这个探针**不在 CI 里**（`npm run test` 不跑它），所以它是最容易漏同步的一处：
+ *   改词时如果只跑单测，这条会在真机上安静地报假红。
+ */
+const GRADE_UNKNOWN_LABEL = '还没认出年级'
 /** 无 Key / 供应商不可用时，主进程给学生的**可读**文案判据（`agent/events.ts` / `runtime.ts`）。 */
 const DEGRADED_NOTICE_MARKERS = [
   // 正常路径：缺 Key 或连不上模型（describeProviderError / MISSING_KEY_MESSAGE）
@@ -921,13 +930,13 @@ if (gradeProbe?.present !== true) {
     `grade-selector=${gradeProbe.hasLegacySelector}，grade-option=${gradeProbe.hasLegacyOption}`
   )
   check(
-    '指示器文案可读（四学段中文名之一，或「待判定」）',
+    '指示器文案可读（四学段中文名之一，或「还没认出年级」）',
     GRADE_LABELS.includes(gradeProbe.badgeText) || gradeProbe.badgeText === GRADE_UNKNOWN_LABEL,
     `显示「当前：${gradeProbe.badgeText}」；旁边说明「${gradeProbe.hintText}」`
   )
   check(
     '★ 来源标签说清了「怎么定下来的」（手动选中 / AI 引擎判定 / 本地规则判定）',
-    // 待判定时不显示这句（还没定下来的东西没有「怎么定下来的」可言），
+    // 未判定时不显示这句（还没定下来的东西没有「怎么定下来的」可言），
     // 所以判据分两支：判出来了必须有来源标签；没判出来必须**没有**。
     gradeProbe.grade === ''
       ? gradeProbe.originText === ''
@@ -998,7 +1007,7 @@ if (gradeProbe?.present !== true) {
 
   if (gradeProbe.grade === '' && gradeProbe.missingChannelNote) {
     info(
-      '学段判定通道尚未接线（指示器显示「待判定」）：' +
+      '学段判定通道尚未接线（指示器显示「还没认出年级」）：' +
         `${gradeProbe.missingChannelNote.slice(0, 80)}… —— 需要主进程提供 grade:changed 推送（见 src/renderer/src/api/grade.ts 的通道说明）`
     )
   }
@@ -1105,7 +1114,7 @@ if (gradeProbe?.present !== true) {
         `列表仍展开=${after?.optionsStillOpen}`
       )
       info(
-        `端到端学段切换：${before || '（待判定）'} → ${after?.grade}` +
+        `端到端学段切换：${before || '（还没认出年级）'} → ${after?.grade}` +
           `（这次会写进本机学生的 learning.db，属预期副作用）`
       )
     }
@@ -1392,7 +1401,7 @@ if (gradeProbe?.present !== true) {
               )
               const secondText = readFileSync(promptFile, 'utf8')
               if (gradeNow !== gradeBefore) {
-                info(`逐字节稳定：跳过（两轮之间学段从 ${gradeBefore || '（待判定）'} 变成 ${gradeNow}，学段段理应变化）`)
+                info(`逐字节稳定：跳过（两轮之间学段从 ${gradeBefore || '（还没认出年级）'} 变成 ${gradeNow}，学段段理应变化）`)
               } else {
                 check(
                   '★★ 同一章节下两轮 prompt 逐字节相同（D-032：块里没有每轮会变的字节）',

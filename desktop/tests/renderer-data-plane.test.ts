@@ -73,7 +73,8 @@ registerHooks({
   }
 })
 
-const { resolveDataBridge, dataBridgeMissingHint } = await import('../src/renderer/src/api/data.ts')
+const { resolveDataBridge } = await import('../src/renderer/src/api/data.ts')
+const { resetWiringNotices } = await import('../src/renderer/src/api/wiring-notice.ts')
 
 /* ------------------------------------------------------------------ *
  * 装一个假的 window.api（preload 白名单），带调用计数
@@ -285,16 +286,42 @@ function defaultResponse(method: string, payload?: Record<string, unknown>): unk
  * 1. 能力探测：缺方法时给能照着接线的提示
  * ------------------------------------------------------------------ */
 
-test('★ 桥缺失时给出「缺的是哪个方法」的可读提示，而不是让界面弹 TypeError', () => {
-  installFakeBridge(['rebuildKnowledge'])
-  const lookup = resolveDataBridge()
+test('★★ 桥缺失时：屏幕上是学生话、缺哪个方法进控制台，不让界面弹 TypeError', () => {
+  // 故意缺**两个**：下面还要断「控制台把缺的全列出来」（不是遇到第一个就收工）
+  installFakeBridge(['rebuildKnowledge', 'readQuizBank'])
+  // ★★ 2026-09-22 改口径（设计评审报告 0.2 + 双视角 D-063），**不是放宽**：
+  //   原来这里要 `lookup.message` **包含 `rebuildKnowledge`** —— 而 message 是渲染给学生看的
+  //   （各页的错误位）。现在细节走控制台、屏幕上只剩学生话，所以两边分别钉：
+  //     ① 屏幕上是干净的学生话（无方法名 / preload / window.api / 反引号）；
+  //     ② 控制台仍点名缺哪个方法（运行时真的 warn 出来，且是**完整清单**）。
+  const warnings: string[] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => String(arg)).join(' '))
+  }
+  let lookup: ReturnType<typeof resolveDataBridge>
+  try {
+    resetWiringNotices() // warn 按 key 去重：不清的话本文件先跑过的用例会把它吃掉
+    lookup = resolveDataBridge()
+  } finally {
+    console.warn = originalWarn
+  }
   assert.equal(lookup.ready, false)
+  const message = lookup.ready === false ? lookup.message : ''
+  assert.ok(message.length > 0, '缺桥时要有一句学生能读的话')
+  for (const forbidden of ['rebuildKnowledge', 'readQuizBank', 'window.api', 'preload', '`']) {
+    assert.ok(!message.includes(forbidden), `学生面那句话里出现了「${forbidden}」：${message}`)
+  }
+  assert.ok(/[\u4e00-\u9fff]/.test(message), '学生面必须是中文人话')
   assert.ok(
-    lookup.ready === false && lookup.message.includes('rebuildKnowledge'),
-    `提示里必须点名缺哪个方法（照它就能把线接上）：${lookup.ready === false ? lookup.message : ''}`
+    warnings.some((line) => line.includes('rebuildKnowledge')),
+    `接线细节必须进控制台（照它就能把线接上）：实际 warn = ${JSON.stringify(warnings)}`
   )
-  // 提示文案本身也是契约的一部分（别的桥用同一套口径）
-  assert.equal(dataBridgeMissingHint('readQuizBank').includes('readQuizBank'), true)
+  // ★ 一次把缺的全列出来（不是「改一个再来一次」）：清单里两条都要有
+  assert.ok(
+    warnings.some((line) => line.includes('readQuizBank') && line.includes('rebuildKnowledge')),
+    '控制台那句要列出**所有**缺失方法（数据面是整块能力，不全列会让接线的人来回跑）'
+  )
 })
 
 test('window.api 整个缺失时（preload 没加载）也给可读中文，不抛', () => {

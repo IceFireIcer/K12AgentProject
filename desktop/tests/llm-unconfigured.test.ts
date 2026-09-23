@@ -60,6 +60,34 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const DESKTOP = join(HERE, '..')
 const read = (rel: string): string => readFileSync(join(DESKTOP, rel), 'utf8')
 
+/**
+ * 取「以某个标签为根的那个元素」的整段源码（含全部子节点）。
+ *
+ * ★ 为什么需要它：下面要断「入口卡**在空态里**」，而空态是一个四层嵌套的
+ *   `<div data-testid="chat-empty">`。用「往后找第一个 `</div>`」会切在内层，
+ *   用固定字符数切片又会被下一次改动的排版绊倒（多写两行注释就假红、少写就假绿）。
+ *   所以按 `<div` / `</div>` 配对计数，一路走到它的闭合处。
+ * ⚠️ 只在**模板**区用：`<div` 若出现在属性值或注释里会算错（本项目当前没有这种写法，
+ *   下面那条 `doesNotMatch(/<ChatMessage/)` 是防「切多了」的自检）。
+ */
+function divBlockAt(source: string, markerIndex: number): string {
+  const open = source.lastIndexOf('<div', markerIndex)
+  if (open < 0) return ''
+  const tags = /<div(?=[\s/>])|<\/div>/g
+  tags.lastIndex = open
+  let depth = 0
+  let match: RegExpExecArray | null
+  while ((match = tags.exec(source)) !== null) {
+    if (match[0] === '</div>') {
+      depth -= 1
+      if (depth === 0) return source.slice(open, tags.lastIndex)
+    } else {
+      depth += 1
+    }
+  }
+  return ''
+}
+
 const MODEL_STORE = 'src/renderer/src/stores/model.ts'
 const TOPBAR = 'src/renderer/src/components/AppTopbar.vue'
 const COMPOSER = 'src/renderer/src/components/MessageComposer.vue'
@@ -213,7 +241,38 @@ test('★★ 对话页空态：进门就说清「还答不了」+ 现在能用�
   const at = source.indexOf('data-testid="chat-llm-unconfigured"')
   const block = source.slice(at, at + 1600)
   assert.match(block, /viewMode\.isTeacher/, '★ 两半各说各的话（老师看「填什么」、学生看「找谁」）')
-  assert.match(block, /动画 \/ 编程 \/ 闯关不依赖模型/, '★ 要指出现在就能用的功能（否则学生以为整个应用都不能用）')
+  // 「还答不了」：学生打出去之前唯一一次说清楚的机会（等他打完整句话再报错就晚了）
+  assert.match(block, /答不了/, '★ 学生那半要直说「现在问不了问题」')
+  // 「去设置」：给的是**去哪配**（学生那半说「找老师或家长」，不是「填什么」）
+  assert.match(block, /设置/, '★ 要指出去哪配置（学生视角下这是唯一能做的动作）')
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ★★ 「现在还能干什么」由**空态里的入口卡**兑现，不由黄条复述
+  //     （2026-09-22 设计评审报告 C3；这条守卫的意图没变，变的是它的兑现者）
+  // ══════════════════════════════════════════════════════════════════════
+  // 旧写法：黄条末句再写一遍「下面的动画 / 编程 / 闯关不依赖模型，现在就能用」。
+  // 事实：**正下方就是那几张入口卡**，同一件事在同一屏说两遍（报告 0.1-2：
+  // 同一事实全局只出现一处）。所以那句话被删了 —— 但**不是**这条守卫可以少守一件事：
+  // 学生进门仍然要同时知道 ① 现在问不了问题；② 现在还能干什么；③ 去哪配。
+  // 只是②的兑现者从「黄条里的一句话」换成了「真的渲染出来的入口卡」，
+  // 所以下面断的是「入口卡在空态里、且三个本地页面真的挂在上面」。
+  // ⚠️ 别把那句文案加回黄条：它一加回来，②就又有了两个来源（这正是这段注释要拦的事）。
+  const emptyAt = source.indexOf('data-testid="chat-empty"')
+  assert.ok(emptyAt > 0, '对话页必须有空态容器（data-testid="chat-empty"）')
+  const empty = divBlockAt(source, emptyAt)
+  assert.ok(empty.length > 0, '空态容器的闭合标签必须能配对（改了嵌套结构就同步 `divBlockAt` 的取块方式）')
+  assert.doesNotMatch(empty, /<ChatMessage/, '取块必须停在空态里 —— 把消息列表（`v-else` 那一支）也算进来会让下面几条假绿')
+  assert.match(empty, /data-testid="chat-llm-unconfigured"/, '★ 黄条本身也必须在空态里（飘到外面的话，没配模型的学生要打完一句话才看到它）')
+  assert.match(empty, /class="chat__entries"/, '★ 空态里必须有入口卡容器（「现在还能干什么」的兑现者）')
+  assert.match(empty, /v-for="e in entries"/, '★ 入口卡必须真的按 `entries` 渲染 —— 只留一个空容器等于什么都没说')
+  // 三个本地功能（动画 / 编程 / 闯关）真的挂在 entries 上：它们才是「不依赖模型也能用」的实体
+  for (const page of ['animation', 'coding', 'quiz']) {
+    assert.match(
+      source,
+      new RegExp(`to: '${page}'`),
+      `★ entries 里必须有去 ${page} 的入口 —— 黄条不再复述那三样，学生能不能知道「现在还能干什么」全靠这几张卡`
+    )
+  }
 })
 
 /* ------------------------------------------------------------------ *

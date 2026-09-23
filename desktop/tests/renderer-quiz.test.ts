@@ -53,6 +53,7 @@ registerHooks({
 })
 
 const chatModule = await import('../src/renderer/src/stores/chat.ts')
+const { resetWiringNotices } = await import('../src/renderer/src/api/wiring-notice.ts')
 
 /* ------------------------------------------------------------------ *
  * 固定样本
@@ -499,17 +500,39 @@ test('学段文案：四个中文名 + 判定提示语（只陈述「我按什�
   assert.equal(gradeAdaptNotice('senior'), '我按高中的说法来讲。')
 })
 
-test('学段推送通道缺失时：给出可读说明，界面不崩', () => {
+test('★★ 学段推送通道缺失时：屏幕上是学生话、细节进控制台、界面不崩', () => {
   const runtime = globalThis as unknown as { window: unknown }
   runtime.window = { api: { sendChat: async () => ({ ok: true, requestId: 'turn_x', message: null }), onChatEvent: () => () => {} } }
   setActivePinia(createPinia())
   const chat = chatModule.useChatStore()
 
-  chat.connect() // 不抛异常
+  // ★★ 2026-09-22 改口径（设计评审报告 0.2 + 双视角 D-063），**不是放宽**：
+  //   原来这里要 `gradeBridgeError` **包含 `onGradeChanged`** —— 而那个字段是渲染给学生看的
+  //   （学段那一栏的提示）。现在细节走控制台、屏幕上只剩学生话，所以两边分别钉：
+  //     ① `gradeBridgeError` 是干净的学生话（无方法名 / 通道名 / preload / window.api）；
+  //     ② 控制台仍有「缺 onGradeChanged」这条接线细节。
+  //   全量（4 个桥 × 每个常量）在 `tests/student-view-discipline.test.ts` 的 ⑱。
+  const warnings: string[] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => String(arg)).join(' '))
+  }
+  try {
+    resetWiringNotices() // warn 按 key 去重：不清的话本文件先跑过的用例会把它吃掉
+    chat.connect() // 不抛异常
+  } finally {
+    console.warn = originalWarn
+  }
   assert.equal(chat.currentGrade, null)
+  const notice = String(chat.gradeBridgeError ?? '')
+  assert.ok(notice.length > 0, '缺通道时学生面要有一句话（不能静默）')
+  for (const forbidden of ['onGradeChanged', 'grade:', 'preload', 'window.api', '`']) {
+    assert.ok(!notice.includes(forbidden), `学生面那句话里出现了「${forbidden}」：${notice}`)
+  }
+  assert.ok(/[\u4e00-\u9fff]/.test(notice), '学生面必须是中文人话')
   assert.ok(
-    typeof chat.gradeBridgeError === 'string' && chat.gradeBridgeError.includes('onGradeChanged'),
-    '缺通道要说清缺什么（照这句话就能把线接上）'
+    warnings.some((line) => line.includes('onGradeChanged')),
+    `接线细节必须进控制台（照它就能把线接上）：实际 warn = ${JSON.stringify(warnings)}`
   )
 })
 

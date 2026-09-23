@@ -874,9 +874,13 @@ test('★ 模板里没有凭据与宿主路径（API Key / baseURL / 绝对路�
   assert.deepEqual(offenders, [], `模板里出现凭据/宿主路径：${offenders.join('、')}`)
 })
 
-test('模板数量与覆盖：6–8 个内置模板，且都声明了知识点与降级文案', () => {
+test('模板数量不限：每份内置模板都必须声明 id/kp_ids/body/script 与 ≥30 字降级文案', () => {
   const files = readdirSync(TEMPLATES_ROOT).filter((name) => name.endsWith('.json'))
-  assert.ok(files.length >= 6 && files.length <= 8, `模板数应为 6–8 个，实际 ${files.length} 个`)
+  // ★ 2026-09-23（D-078）：旧约束「6–8 个」是原票据的时代限制，内容包接入后模板数按知识点覆盖
+  //   （206 份一 KP 一模板 + 既有 8 份手作）而定，**不再设上限/下限**。
+  // ⚠️ 只留 `> 0` 这一条地板：否则「目录被清空」会让下面的逐份循环空转成假绿。
+  //   真正的门是下面那份**逐份**断言 —— 每一份都得合格，数量是几与好坏无关。
+  assert.ok(files.length > 0, '一个模板都没有：TEMPLATES_ROOT 被清空或路径配错了（D-078：数量不设限，但一份都不许缺）')
 
   for (const name of files) {
     const template = JSON.parse(readFileSync(join(TEMPLATES_ROOT, name), 'utf8')) as Record<string, unknown>

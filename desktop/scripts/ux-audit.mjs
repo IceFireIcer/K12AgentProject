@@ -200,6 +200,148 @@ const send = async (cdp, text) => {
   await cdp.evaluate(`${Q.send}.click()`)
 }
 
+/**
+ * 「当前消息区里有多少轮可判的分叉场景」——**唯一一份口径**。
+ *
+ * ★★ 为什么抽成常量（2026-09-23）：D7 的前置条件与 D7 的断言必须用**同一份**
+ *   「有回答且已结束」的定义。两处各写一遍的话，前置按一种口径准备、断言按另一种口径数，
+ *   就会出现「前置说准备好了、断言说 0 轮」的新一类假红 —— 正是这一轮要修掉的那个病。
+ *
+ * ★ 判据是「**回答正文非空** 且已结束」：分叉按钮挂的是**助手那条回答**
+ *   （规范原文「每条 assistant 消息旁」），而一轮里可能只有学生的一句话
+ *   （那一轮失败 / 被拦下，没有回答），那种轮次没有回答可挂。
+ *   ⚠️ 踩过两次：初版按「所有已结束轮次」数（假红）；改成「有 assistant-message
+ *      元素」仍然假红 —— 那个元素**永远在**（回答为空时它渲染的是「正在查教材…」
+ *      占位）所以恒为真。真正有信息量的判据是**正文字符数 > 0**。
+ */
+const BRANCH_SNAPSHOT = `(() => {
+  const turns = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+  const btns = Array.from(document.querySelectorAll('[data-testid="branch-restart"]'))
+  const answerable = turns.filter(
+    (t) =>
+      t.getAttribute('data-status') !== 'streaming' &&
+      (t.querySelector('[data-testid="assistant-text"]')?.innerText ?? '').trim().length > 0
+  ).length
+  const box = btns[0]?.getBoundingClientRect()
+  return {
+    turns: turns.length,
+    answerable,
+    buttons: btns.length,
+    h: box ? Math.round(box.height) : 0,
+    // 反向对照：流式中的轮次里不该有按钮
+    inStreaming: Array.from(document.querySelectorAll('[data-testid="chat-turn"][data-status="streaming"] [data-testid="branch-restart"]')).length,
+    empty: Boolean(document.querySelector('[data-testid="chat-empty"]')),
+    current: Array.from(document.querySelectorAll('[data-testid^="session-item-"][aria-current="true"]'))
+      .map((el) => el.getAttribute('data-testid') ?? '')[0] ?? ''
+  }
+})()`
+
+/**
+ * 会话列表的**只读快照**（testid + 那一行的时间/条数注解 + 是不是当前这条）。
+ *
+ * ★ 为什么读 `.sl__item-meta` 而不是自己拼：它是界面上学生看到的那行字，
+ *   探针的输出行要能让人对上号（「为 D7 切到了 4 分钟前 · 3 条 那条」）。
+ *   ⚠️ 但**不拿它当判据** —— 一旦它改成「正在打开…」或换了文案，按它挑选就会静默失效
+ *   （D5 初版就吃过这个：按「N 条」挑，挑不到就退化成随便点一条空的）。
+ */
+const SESSION_ITEMS = `Array.from(document.querySelectorAll('[data-testid^="session-item-"]')).map((el) => ({
+  testid: el.getAttribute('data-testid'),
+  meta: (el.querySelector('.sl__item-meta')?.innerText ?? '').replace(/\\s+/g, ' ').trim(),
+  current: el.getAttribute('aria-current') === 'true'
+}))`
+
+/**
+ * 「这个实例现在能不能真的拿到回答」——**只用于诊断输出**，不参与任何断言。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么需要它（2026-09-23，实测踩到）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 本脚本的 A/B/G 段要**真发消息并等回答**，D7 还要「一条有回答的轮次」。
+ * 而模型没配好（一个 Key 都没填）时：主进程在「缺 Key」处早退 —— 轮次照旧出现，
+ * 但**回答正文是空的**（`data-status=done` + `assistant-text` 空 + 分叉按钮照旧渲染）。
+ * 于是：
+ *   · G 报「没能进入流式状态」（其实一句都没发出去）；
+ *   · H 报「『回到最新』没出现（内容不够长？）」（内容永远长不起来）；
+ *   · D7 报「0 轮（有回答且已结束 0）」——**看起来像分支功能坏了**。
+ * 三种表现、同一个原因，而输出里一个字都没提「模型没配」。
+ *
+ * ★ 判据取**输入条上的模型 chip**（`composer-model`，三态标签的唯一实现是
+ *   `labels.ts` 的 `llmDisplayLabel`）：未配置时它就是 `未配置`。
+ *   ⚠️ 别再用「页面里有没有『尚未配置 API Key』」那类字符串判断 —— 实测那句话只在
+ *   **设置页的高级区**里渲染，而本脚本跑在对话页，于是 `meta.key` 曾经**恒为 true**：
+ *   每次跑都印「已配置 Key：true」，与事实相反（旧的假判据，已一并换掉）。
+ */
+async function modelReadiness(cdp) {
+  const state = await cdp.evaluate(`(() => ({
+    chip: (document.querySelector('[data-testid="composer-model"]')?.innerText ?? '').replace(/\\s+/g, ' ').trim(),
+    composer: Boolean(document.querySelector('[data-testid="composer-input"]')),
+    needSetup: Boolean(document.querySelector('[data-testid="chat-llm-unconfigured"]')),
+    degraded: (document.querySelector('[data-testid="degraded-notice"]')?.innerText ?? '').trim().slice(0, 40)
+  }))()`)
+  // ⚠️ 先分清「不在对话页」与「模型没配」：两者都会让 chip 读不到，但处置完全不同
+  //    （前者是探针的前置条件没准备好，后者才是环境问题）。混在一起说会把人带去买 Key。
+  if (!state.composer) {
+    return {
+      ready: false,
+      note: '当前**不在对话页**（找不到输入条 `composer-input`）——本脚本假定停在对话页，先跑 `npm run ux:reload` 并点回「问问智团团」'
+    }
+  }
+  const unconfigured = state.needSetup || state.chip === '未配置'
+  if (unconfigured) {
+    return {
+      ready: false,
+      note: `模型未配置（输入条 chip = 「${state.chip || '（空）'}」）：A/B/G 段发出去的话**拿不到回答**，先配好模型再跑本脚本`
+    }
+  }
+  if (state.degraded) return { ready: false, note: `模型降级中（${state.degraded}）` }
+  return { ready: true, note: `模型已配置（chip = 「${state.chip}」）` }
+}
+
+/**
+ * ★★ 为「需要一条**已结束且有回答**的轮次」的断言**自己准备前置条件**（2026-09-23）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么必须自己准备（这是一条**探针侧**的修复，不是产品缺陷）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 实测（2026-09-22 一次真机跑）：D7 报「0 轮（有回答且已结束 0）· 按钮 0 个」——
+ * 而那时的会话列表里**确实有一条**「1 轮已完成 + 1 个分叉按钮」的会话，
+ * 只是前面的 D5 已经按它自己的规则把界面**切到了另一条还没开口的会话**，
+ * 于是到 D7 时当前消息区是空态 ⇒ `answerable === 0` ⇒ 断言空转失败。
+ * 那条红说的是「分支功能坏了」，而功能是好的 —— 属于**探针没有准备自己的前置条件**
+ * （与 P-120「探针里的假 CDP 方法」、P-121「变异里的 expect 其实是测试名」同一族）。
+ *
+ * ★ 做法（与「放宽断言」正相反）：
+ *   ① 当前会话里就有可判的轮次 → 直接用，不动界面；
+ *   ② 没有 → **逐条点过去找**（判据只看渲染出来的轮次，不看列表那行文案），
+ *      找到就停在那里并在输出里说明切到了哪一条；
+ *   ③ 整个应用里一条都没有（全新安装 / 数据被清）→ 返回 `ok:false`，
+ *      由调用方按本脚本既有的 SKIP 风格处理，**不算失败**。
+ * ⚠️ 它只点会话列表（与 D5/D5b 同一个动作），不改任何产品状态。
+ */
+async function ensureAnswerableTurn(cdp, label) {
+  const now = await cdp.evaluate(BRANCH_SNAPSHOT)
+  if (now.answerable > 0) return { ok: true, switched: false, state: now }
+
+  const items = await cdp.evaluate(SESSION_ITEMS)
+  const others = items.filter((item) => !item.current)
+  for (const item of others) {
+    const clicked = await cdp.evaluate(`(() => {
+      const el = document.querySelector('[data-testid="' + ${JSON.stringify(item.testid)} + '"]')
+      if (el) el.click()
+      return Boolean(el)
+    })()`)
+    if (!clicked) continue
+    // 切换 = dispose 旧会话 + 装配新的（真跑一次 Pi）——与 D5 用同一个等待
+    await sleep(3500)
+    const state = await cdp.evaluate(BRANCH_SNAPSHOT)
+    if (state.answerable > 0) return { ok: true, switched: true, item, state }
+    console.log(
+      `\u001b[2m  [${label} 前置] ${item.meta || item.testid} 没有「已回答且已结束」的轮次（${state.turns} 轮 / 空态=${state.empty}），继续找\u001b[0m`
+    )
+  }
+  return { ok: false, state: await cdp.evaluate(BRANCH_SNAPSHOT) }
+}
+
 /* ══════════════════════════════════════════════════════════════════ */
 
 async function main() {
@@ -209,6 +351,49 @@ async function main() {
   const visibility = await cdp.ensureRendering()
   if (visibility !== 'visible') {
     console.log(`[33m⚠️ 窗口仍是 ${visibility}：与渲染时序相关的断言可能失真（见 ensureRendering 的说明）[0m`)
+  }
+
+  /**
+   * ★★ 前置：**重载一次**，让脚本从一个确定的起点开始量（2026-09-23 实测定的口径）。
+   *
+   * 为什么不能只「点回对话页」：A1 量的是**打开应用时光标就在输入框里** ——
+   * 那是**挂载时**的行为（`onMounted` 里 focus）。而对话页被 KeepAlive 缓存
+   * （E1 钉着「切到设置再回来内容还在」），**点侧栏回来不会重挂**，focus 不会重跑：
+   * 实测四态 —— 刚 reload → `composer-input`；切到设置 → `BODY`；
+   * **点回对话页 → `BODY`**；再 reload → `composer-input`。
+   * 拿「点回去」当前置，等于**用一个到不了被测状态的前提去判 A1**，会稳定假红
+   * （与 D7 那条同源：前置条件必须与断言量的是**同一个状态**）。
+   *
+   * 为什么无条件重载（而不是「不在对话页才重载」）：只要不重载，A1 量的就是
+   * 「上一次挂载时的 focus」—— 上一个探针（`ux:pages` / `ux:layout` / `ux:student`
+   * 都会点侧栏）或人手一按都可能把焦点挪走，红绿取决于历史，不可复现。
+   * 这一条同时让本脚本**自足**：不必先跑 `npm run ux:reload` 也能从干净状态开始
+   * （README 里那句「先跑 ux:reload」现在是幂等的多余步骤）。
+   *
+   * ⚠️ 重载只影响**测量起点**，不改产品行为；产品的承诺是「打开应用就能直接打字」，
+   *   而「切页回来是否重新聚焦」不在本次范围内（那是 KeepAlive 的取舍，另有守卫）。
+   */
+  await cdp.evaluate(`(() => { location.reload(); return true })()`)
+  let onChat = false
+  for (let i = 0; i < 20; i += 1) {
+    await sleep(800)
+    try {
+      onChat = await cdp.evaluate(`Boolean(document.querySelector('[data-testid="chat-log"]'))`)
+    } catch {
+      // 重载期间执行上下文会被销毁，抛异常是常态 —— 继续等下一轮
+    }
+    if (onChat) break
+  }
+  if (!onChat) {
+    console.error(
+      '\u001b[31m✗ 前置失败：重载后仍找不到对话页（`chat-log`）\u001b[0m\n' +
+        '  本脚本假定从对话页开始量（A1–H 全都是对话页上的东西）。请确认：\n' +
+        '    · 应用真的起来了（`K12_DEBUG_PORT=9222 npm run dev`，端口对得上）\n' +
+        '    · 首屏没有卡在加载态（侧栏身份卡与右栏是否都出来了）\n' +
+        '  然后重跑 `npm run ux`。'
+    )
+    cdp.close()
+    process.exit(2)
   }
 
   /**
@@ -250,10 +435,15 @@ async function main() {
 
   const meta = await cdp.evaluate(`(() => ({
     w: window.innerWidth, h: window.innerHeight,
-    dpr: window.devicePixelRatio,
-    key: !document.body.innerText.includes('尚未配置 API Key')
+    dpr: window.devicePixelRatio
   }))()`)
-  console.log(`\u001b[2m视口 ${meta.w}×${meta.h} @${meta.dpr}x；已配置 Key：${meta.key}\u001b[0m`)
+  // ★★ 「模型配好了没有」必须按**对话页上真正可见的那个 chip** 判（见 `modelReadiness` 的说明）：
+  //   旧写法找的是「尚未配置 API Key」这句只在设置页出现的字符串，于是这里**恒印 true** ——
+  //   把「无 Key 环境下 G/H/D7 为什么会 SKIP/红」这条最关键的上下文反向写错了。
+  const readiness = await modelReadiness(cdp)
+  console.log(
+    `\u001b[2m视口 ${meta.w}×${meta.h} @${meta.dpr}x；${readiness.note}\u001b[0m`
+  )
 
   /* ── A. 打字与键盘 ───────────────────────────────────────────── */
   console.log('\n\u001b[1mA. 打字与键盘（学生最常做的动作）\u001b[0m')
@@ -263,9 +453,10 @@ async function main() {
     const el = ${Q.input}
     return { focused: document.activeElement === el }
   })()`)
-  check('A1', '打开对话页光标就在输入框里（不用先点一下才能打字）', autofocus.focused,
+  check('A1', '刚打开应用时光标就在输入框里（不用先点一下才能打字）', autofocus.focused,
     `activeElement 是输入框 = ${autofocus.focused}`,
-    '每次进应用都要先点一下输入框才开始打字，是最容易被忽略、也最常被嫌烦的一步')
+    '每次进应用都要先点一下输入框才开始打字，是最容易被忽略、也最常被嫌烦的一步' +
+      '（本脚本在开始量之前会**重载一次**，保证这一条量的是「刚打开」那个状态，而不是上次挂载时的残留焦点）')
 
   // A2 Shift+Enter 是换行、Enter 是发送
   //
@@ -601,42 +792,38 @@ async function main() {
    */
   console.log('\x1b[1mD7–D8. 从这里重新问（会话分叉）\x1b[0m')
 
-  const branchUi = await cdp.evaluate(`(() => {
-    const turns = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
-    const btns = Array.from(document.querySelectorAll('[data-testid="branch-restart"]'))
-    // ★★ 判据是「**回答正文非空** 且已结束」的轮次：
-    //   分叉按钮挂的是**助手那条回答**（规范原文「每条 assistant 消息旁」），
-    //   而一轮里可能只有学生的一句话（那一轮失败 / 被拦下，没有回答），
-    //   那种轮次没有回答可挂。
-    //   ⚠️ 踩过两次：初版按「所有已结束轮次」数（假红）；改成「有 assistant-message
-    //      元素」仍然假红 —— 那个元素**永远在**（回答为空时它渲染的是「正在查教材…」
-    //      占位）所以恒为真。真正有信息量的判据是**正文字符数 > 0**。
-    const answerable = turns.filter(
-      (t) =>
-        t.getAttribute('data-status') !== 'streaming' &&
-        (t.querySelector('[data-testid="assistant-text"]')?.innerText ?? '').trim().length > 0
-    ).length
-    const box = btns[0]?.getBoundingClientRect()
-    return {
-      turns: turns.length,
-      answerable,
-      buttons: btns.length,
-      h: box ? Math.round(box.height) : 0,
-      // 反向对照：流式中的轮次里不该有按钮
-      inStreaming: Array.from(document.querySelectorAll('[data-testid="chat-turn"][data-status="streaming"] [data-testid="branch-restart"]')).length
-    }
-  })()`)
+  // ★★ 先自己准备前置条件（见 `ensureAnswerableTurn` 的说明）：这一段要求
+  //    「当前消息区里至少有一条已结束且有回答的轮次」——前面的 D5/D5b 会把界面
+  //    切到一条还没开口的会话，那种状态下 D7 的判据是**空转**的（0 === 0 永远成立），
+  //    报出来的红说的是「分支功能坏了」，而功能是好的。
+  const prepared = await ensureAnswerableTurn(cdp, 'D7')
 
-  check('D7', '每条**已结束且有回答**的轮次旁都有「从这里重新问」', branchUi.answerable > 0 && branchUi.buttons === branchUi.answerable,
-    `${branchUi.turns} 轮（有回答且已结束 ${branchUi.answerable}）· 按钮 ${branchUi.buttons} 个`,
-    '缺按钮 = 学生没法换问法重开一条线（这是分支功能的唯一入口）')
-  check('D8', '流式输出途中不给分叉按钮（分支点不该是半句话）', branchUi.inStreaming === 0,
-    `流式轮次里的按钮数 = ${branchUi.inStreaming}`,
-    '回答还没写完就当分支点，复制出来的新会话会带着一段残缺的上下文')
-  if (branchUi.buttons > 0) {
-    check('D9', '分叉按钮的触控高度达标（≥28px）', branchUi.h >= 28,
-      `实测 ${branchUi.h}px`,
-      '它挂在每条回答下面，尺寸太小会让「换个问法」这个动作变得很难点')
+  if (!prepared.ok) {
+    // 整个应用里都没有可判的轮次（全新安装 / 数据被清 / 模型没配）——按本脚本的 SKIP 风格
+    // 处理，⚠️ 绝不改成「0 轮也算通过」：那会把这条断言变成永远绿的摆设。
+    // ★ 理由里必须带上**当前消息区的实际情况 + 模型状态**：只写「没有已回答的轮次可判」
+    //   会把人带去「那你发一条啊」，而真正的原因往往是「模型没配，发了也没有回答」。
+    const why = `消息区 ${prepared.state.turns} 轮、其中有回答 0 轮${prepared.state.empty ? '（当前是空态）' : ''}`
+    console.log(`\u001b[2m  [SKIP] D7 当前没有已结束且有回答的轮次可判（${why}）—— ${(await modelReadiness(cdp)).note}\u001b[0m`)
+    console.log('\u001b[2m  [SKIP] D8 同上：一条轮次都没有时，「流式里没有分叉按钮」是空转的\u001b[0m')
+  } else {
+    if (prepared.switched) {
+      console.log(
+        `\u001b[2m  [D7 前置] 当前会话（${prepared.state.empty ? '空态' : `${prepared.state.turns} 轮`}）没有已回答的轮次，已切到「${prepared.item.meta || prepared.item.testid}」\u001b[0m`
+      )
+    }
+    const branchUi = prepared.state
+    check('D7', '每条**已结束且有回答**的轮次旁都有「从这里重新问」', branchUi.answerable > 0 && branchUi.buttons === branchUi.answerable,
+      `${branchUi.turns} 轮（有回答且已结束 ${branchUi.answerable}）· 按钮 ${branchUi.buttons} 个`,
+      '缺按钮 = 学生没法换问法重开一条线（这是分支功能的唯一入口）')
+    check('D8', '流式输出途中不给分叉按钮（分支点不该是半句话）', branchUi.inStreaming === 0,
+      `流式轮次里的按钮数 = ${branchUi.inStreaming}`,
+      '回答还没写完就当分支点，复制出来的新会话会带着一段残缺的上下文')
+    if (branchUi.buttons > 0) {
+      check('D9', '分叉按钮的触控高度达标（≥28px）', branchUi.h >= 28,
+        `实测 ${branchUi.h}px`,
+        '它挂在每条回答下面，尺寸太小会让「换个问法」这个动作变得很难点')
+    }
   }
 
   /* ── D10–D12. 会话树（分支关系的展示）───────────────────────────
@@ -921,7 +1108,24 @@ async function main() {
       }
     }
     if (!streaming) {
-      console.log('\u001b[2m  [SKIP] 没能进入流式状态\u001b[0m')
+      // ★★ SKIP 的理由要能定位原因（2026-09-23）：光是「没能进入流式状态」会把
+      //    排查方向指向「流式实现坏了」，而实测最常见的两个原因是**探针/环境**问题：
+      //    ① 模型没配好（主进程在「缺 Key」处早退，轮次照样出现、回答正文为空）；
+      //    ② 这一轮直接以失败/撤回结束（`data-status` 不是 streaming）。
+      //    所以这里把「有几轮、最后一轮什么状态、回答多长、模型配没配」一并印出来。
+      const diag = await cdp.evaluate(`(() => {
+        const turns = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+        const last = turns[turns.length - 1]
+        return {
+          turns: turns.length,
+          status: last ? last.getAttribute('data-status') : '(没有轮次)',
+          answerLen: (last?.querySelector('[data-testid="assistant-text"]')?.innerText ?? '').trim().length,
+          notice: (document.querySelector('[data-testid="local-notice"]')?.innerText ?? '').trim().slice(0, 60)
+        }
+      })()`)
+      console.log(
+        `\u001b[2m  [SKIP] G 没能进入流式状态（发送后等 24s：${diag.turns} 轮，最后一轮 status=${diag.status}，回答正文 ${diag.answerLen} 字${diag.notice ? `，提示「${diag.notice}」` : ''}）—— ${(await modelReadiness(cdp)).note}\u001b[0m`
+      )
     } else {
       const before = await cdp.evaluate(`document.querySelectorAll('[data-testid="chat-turn"]').length`)
       await cdp.evaluate(setInput('那深度学习呢'))
@@ -984,12 +1188,19 @@ async function main() {
     //   实测它的下边缘（810px）压住了输入条上边缘（793px）—— **重叠 17px**。
     //   数字检查（「按钮存在吗」「点得动吗」）全都通过，只有量几何关系才发现。
     //   学生体感：想点输入框却点到按钮，然后被滚到底部，一脸茫然。
-    await cdp.evaluate(`(() => {
+    // ⚠️ 取不到 `chat-log` 时**不要**让求值抛异常（2026-09-23）：那会让整个脚本以
+    //    「脚本自身出错：TypeError: Cannot read properties of null」收场 ——
+    //    看起来像探针坏了，实际原因是界面被留在了非对话页（见 main() 开头的前置检查）。
+    //    返回 false 后下面的 `geometry.present === false` 会走本段既有的 SKIP 分支，
+    //    并由 `modelReadiness()` 说明「当前不在对话页」。
+    const scrolled = await cdp.evaluate(`(() => {
       const el = document.querySelector('[data-testid="chat-log"]')
+      if (!el) return false
       el.scrollTop = Math.max(0, el.scrollTop - 600)
       el.dispatchEvent(new Event('scroll', { bubbles: true }))
       return true
     })()`)
+    if (!scrolled) console.log('\u001b[2m  [H 前置] 找不到 [data-testid=chat-log]（不在对话页？）\u001b[0m')
     await sleep(600)
 
     const geometry = await cdp.evaluate(`(() => {
@@ -1023,7 +1234,22 @@ async function main() {
     })()`)
 
     if (!geometry.present) {
-      console.log('\u001b[2m  [SKIP] 「回到最新」没出现（内容不够长？）\u001b[0m')
+      // ★★ SKIP 的理由要能定位原因（2026-09-23）：这个按钮**只在学生自己往上翻时出现**，
+      //    而「翻得动」的前提是消息区真的比视口高。所以把「几轮 / 内容多高 / 视口多高 /
+      //    模型配没配」一并印出来：只写「内容不够长？」会让人以为要手动多聊几句，
+      //    而模型没配好时内容**永远**长不起来（G 段那句也拿不到回答）。
+      const scrollDiag = await cdp.evaluate(`(() => {
+        const el = document.querySelector('[data-testid="chat-log"]')
+        return {
+          turns: document.querySelectorAll('[data-testid="chat-turn"]').length,
+          contentH: el ? Math.round(el.scrollHeight) : 0,
+          viewH: el ? Math.round(el.clientHeight) : 0,
+          top: el ? Math.round(el.scrollTop) : 0
+        }
+      })()`)
+      console.log(
+        `\u001b[2m  [SKIP] H 「回到最新」没出现（消息区 ${scrollDiag.turns} 轮 / 内容高 ${scrollDiag.contentH}px ≤ 可视高 ${scrollDiag.viewH}px，往上翻 600px 后 scrollTop=${scrollDiag.top}）—— 没有可滚的距离时学生根本翻不上去，这个按钮也就无从出现；${(await modelReadiness(cdp)).note}\u001b[0m`
+      )
     } else {
       /**
        * ★★ H1/H2 的前置条件：**必须真的量到了被测对象**。

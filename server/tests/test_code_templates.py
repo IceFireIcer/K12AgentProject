@@ -65,9 +65,10 @@ CODE_ROUTE_FILE = ROOT / "app" / "routes" / "code.py"
 #: ★ 哨兵：只可能来自模板里的参照实现。它一旦出现在响应里，就说明参照实现泄漏了。
 SENTINEL_SOLUTION = "哨兵参照实现-SOL91-不得出现在响应里"
 
-#: ★ **随包分发的全部模板**（2026-09-19 起只剩这三份，全部初中）：
-#: 变量（平均分）/ 循环（冒泡排序）/ 列表（BMI 特征）。
+#: ★ 随包**必需**的三份模板（全部初中）：变量（平均分）/ 循环（冒泡排序）/ 列表（BMI 特征）。
 #: 用的是教材里真实存在的 kp_id（``server/knowledge/junior/``），不是现编的名字。
+#: 2026-09-22 起目录里还有内容包导入的其余模板（数量不做限制：用户裁决，见 D-078），
+#: 本清单只登记「缺了必红」的三份底座，**不再是**「目录里恰好这几份」。
 #:
 #: ⚠️ 旧知识库那一代还有两份非编程概念的模板（决策树 / 神经网络），
 #: 已随旧知识库一起删除 —— 新库（K12KnowledgeBase）里没有对应的编程正文，
@@ -110,21 +111,41 @@ class CodeTemplateAssetTests(unittest.TestCase):
         self.assertEqual(TEMPLATES_DIR.name, "code-templates")
 
     def test_required_templates_present(self) -> None:
-        """随包模板**恰好**是清单里那三份：变量 / 循环 / 列表（少一份即红）。
+        """随包**必需**的三份模板（变量 / 循环 / 列表）必须都在：少一份即红。
 
-        判据是**集合相等**而不是「清单里的都在」：后者在「清单被打空」时恒成立
-        （一个把模板目录整个删掉的 bug 也能全绿）。所以两头都卡：
-        清单里的每一份都要在，且目录里**不许有清单外的第四份**（新加的模板必须登记）。
+        判据是「清单里的每一份都要在」，**不再是**「目录集合恰好等于清单」——
+        内容包落地后目录里有 200+ 份模板，「不许有清单外的第四份」在合法内容上
+        必然恒红（模板数不做限制：用户裁决，见 D-078）。
+
+        旧判据写成集合相等，是因为「清单里的都在」在**清单被打空**时恒成立
+        （连「把模板目录整个删掉」的 bug 都能全绿）。这个顾虑现在拆成两头盯，
+        哪一头都不依赖另一头：
+
+        - 目录侧：写死的 ``len(found) >= 3`` **不读清单** —— 清单被清空后逐份
+          ``assertIn`` 恒成立，只有不依赖清单的下限还能发现「目录被删空」；
+        - 清单侧：``len(REQUIRED_TEMPLATES) >= 3`` 盯住清单自己不被打空
+          （打空清单 = 把上面的循环整体废掉）。
+
+        另有两条**不依赖本清单**的交叉兜底：``test_every_solution_reaches_expected_output``
+        要求 ``records > 0``（目录整体空了必红），以及
+        ``test_every_template_kp_id_exists_in_knowledge_library``
+        要求每份模板的 kp_id 都在教材库里（凭空编 id 必红）。
         """
         found = sorted({record.kp_id for record in self.report.records})
-        self.assertEqual(
-            found,
-            sorted(REQUIRED_TEMPLATES),
-            f"随包模板集合与预期不符（实际 {found}，预期 {sorted(REQUIRED_TEMPLATES)}）",
-        )
         for kp_id, label in REQUIRED_TEMPLATES.items():
             with self.subTest(kp=label):
                 self.assertIn(kp_id, found, f"缺少「{label}」模板（{kp_id}）")
+        # 下限写死、不读清单：清单一旦被打空，逐份 assertIn 恒成立，
+        # 只有这个不依赖清单的下限还能盯住「目录被删空」（旧「集合相等」拦的就是它）。
+        self.assertGreaterEqual(
+            len(found), 3, f"模板集合只剩 {len(found)} 份 kp —— 随包必需的三份不该缺席"
+        )
+        # 清单自己也不许被打空（打空后上面的循环一次都不进 = 本测试整体失效）。
+        self.assertGreaterEqual(
+            len(REQUIRED_TEMPLATES),
+            3,
+            "REQUIRED_TEMPLATES 被打空了（它是随包三份的冻结登记，不是可裁剪的配置）",
+        )
 
     def test_every_template_kp_id_exists_in_knowledge_library(self) -> None:
         """★ 模板不许凭空造知识点：``kp_id`` 必须与教材 front matter 逐字一致。"""
@@ -164,20 +185,23 @@ class CodeTemplateAssetTests(unittest.TestCase):
                 self.assertTrue(record.expected_output.strip(), f"{record.kp_id} 缺 expected_output")
 
     def test_hints_are_graduated_and_never_leak_the_full_answer(self) -> None:
-        """★ 提示的价值在引导：level 1 不许出现答案骨架，且三级文本必须**逐级不同**。
+        """★ 分级提示只保留两条**结构性**判据：三级两两不同，且 level 1 不许泄漏代码。
 
-        判据是「结构性的」而不是「感觉上差不多」：
-          - 三级文本两两不同，且长度**严格递增**（越往后越具体）；
-          - level 1 不得出现 ``for `` / ``if `` / ``return `` / ``=`` 这类可直接照抄的语句片段
-            （只指方向的那一级不该给出代码）。
+        - 三级文本必须互不相同（同一句话复制三遍等于没有分级）；
+        - level 1 不得出现 ``for `` / ``if `` / ``return `` / ``= `` / ``np.`` / ``range(``
+          这类可直接照抄的片段 —— 那一级只该指方向，这是对学生的真实承诺
+          （学生拿到 hint 1 就被直接给了答案 = 提示机制失守）。
+
+        **长度不作判据**：「越往后越长」只是「越往后越具体」的代理指标，而内容包的
+        实际风格是「L1 指方向 → L2 给关键代码行 → L3 给下一行」—— L3 常比 L2 短，
+        代理会在**合法内容**上假红（干跑 228 份模板：442 条长度红、实质红只有
+        2 条 L1 泄漏），把真正的缺陷淹在噪声里。裁决见 D-078。
         """
         code_markers = ("for ", "if ", "return ", "= ", "np.", "range(")
         for record in self.report.records:
             with self.subTest(kp=record.kp_id):
                 hints = [record.hint_at(level).hint for level in (1, 2, 3)]  # type: ignore[union-attr]
                 self.assertEqual(len(set(hints)), 3, f"{record.kp_id} 的三级提示有重复")
-                self.assertLess(len(hints[0]), len(hints[1]), f"{record.kp_id} 的 level 2 不比 level 1 具体")
-                self.assertLess(len(hints[1]), len(hints[2]), f"{record.kp_id} 的 level 3 不比 level 2 具体")
                 for marker in code_markers:
                     self.assertNotIn(
                         marker,
@@ -503,9 +527,8 @@ class HintLevelTests(unittest.TestCase):
             with self.subTest(kp=record.kp_id):
                 texts = [record.hint_at(level).hint for level in (1, 2, 3)]  # type: ignore[union-attr]
                 self.assertEqual(len(set(texts)), 3)
-                # 级别越高文本越长（更具体），这是「递进」的可测代理
-                self.assertLess(len(texts[0]), len(texts[1]))
-                self.assertLess(len(texts[1]), len(texts[2]))
+                # 长度不作「递进」的代理：内容包风格是 L1 指方向 → L2 关键代码行 →
+                # L3 下一行，L3 常比 L2 短（详见 test_hints_are_graduated…，D-078）
 
 
 # ====================================================================== *

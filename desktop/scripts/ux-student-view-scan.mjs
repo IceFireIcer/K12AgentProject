@@ -17,6 +17,11 @@
  * 但拼装出来的句子（`${label}` 插值）在源码里看不到全貌。
  * 所以这一份专门扫**这些位置的真实 DOM**。
  *
+ * ★ 它还多扫一条**排版标记纪律**（`**` / 反引号 / `——`，报告 1.8 与第 3 章）：
+ *   源码版（`student-view-discipline.test.ts` 的 ⑰）扫的是我们自己写的文案，
+ *   而这条在真机上还能抓到它看不见的两类 —— 模板 JSON 里的 `fallback_text`、
+ *   后端推来的文案。判据逐字相同，见 {@link TEXT_HYGIENE}。
+ *
  * ══════════════════════════════════════════════════════════════════════════
  * ★★ 反向对照（本脚本最重要的一半）
  * ══════════════════════════════════════════════════════════════════════════
@@ -49,6 +54,37 @@ const LEAK_PATTERNS = [
   [/\bundefined\b|\[object Object\]|\bNaN\b/, '未处理的值'],
   [/TypeError|ReferenceError|Cannot read prop/, '异常堆栈']
 ]
+
+/**
+ * 学生面**排版标记**纪律（真机 DOM 版）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 与源码版的分工（两边都要，别只留一边）
+ * ══════════════════════════════════════════════════════════════════════════
+ * `tests/student-view-discipline.test.ts` 的 ⑰ 两条守卫扫的是**源码**里的
+ * 学生可见文本（模板文本节点 / 面向用户的属性 / 字符串字面量）—— 它能在 CI 里跑、
+ * 覆盖所有分支，但看不见**拼装出来的句子**（`${label}` 插值、后端推来的文案、
+ * 模板 JSON 里的 `fallback_text`）。
+ * 这里扫的是**合成结果**：真机上学生此刻看得见的那些字。两者互补。
+ *
+ * ★ 判据（与源码版同口径，逐字一样）：
+ *   · `**`  —— 裸插值渲染的文案里它会**原样上屏**（报告 1.8 的那张动画页截图）；
+ *   · 反引号 —— 同理（只有走 markdown 渲染的通路才会变成等宽字体）；
+ *   · `——`  —— 学生文案的 LLM 指纹（报告第 3 章），除数学区间 / 专有名词外禁用。
+ * ⚠️ 扫之前先剔掉**代码块**（`pre` / `code` / `kbd` / `samp`）与 `[data-teacher]`：
+ *   代码里的 `**` 是 Python 幂运算、反引号是模板串，它们**不是**忘了渲染的标记；
+ *   教师证据区本来就允许有这些字符。见 `READ_STATE` 里的 `plainText`。
+ */
+const TEXT_HYGIENE = [
+  [/\*\*/, '未渲染的加粗星号'],
+  [/`/, '未渲染的等宽反引号'],
+  [/——/, '破折号连接（学生文案的 LLM 指纹）']
+]
+
+/** 对一段文本跑排版纪律，返回命中的类别名。 */
+function hygieneIn(text) {
+  return TEXT_HYGIENE.filter(([re]) => re.test(text)).map(([, name]) => name)
+}
 
 class Cdp {
   #ws
@@ -171,15 +207,36 @@ function leaksIn(text) {
   return LEAK_PATTERNS.filter(([re]) => re.test(text)).map(([, name]) => name)
 }
 
-/** 读某个容器（或整页）的可见文本 + 教师视角证据节点数。 */
+/**
+ * 读某个容器（或整页）的可见文本 + 教师视角证据节点数 + **排版标记扫描用的纯文本**。
+ *
+ * ★ `plainText` 与 `text` 的差别：把代码块与教师证据**临时藏掉**再读一次 `innerText`。
+ *   · 代码块（`pre` / `code` / `kbd` / `samp`）里的 `**` 是**代码**（Python 幂运算）、
+ *     反引号也是**代码**（模板串）—— 它们不是「忘了渲染的标记」，扫进来只会造成假红；
+ *   · `[data-teacher]` 是教师视角证据，本来就允许带破折号。
+ *   ⚠️ 为什么不是「clone 一份再读」：脱离文档的节点没有布局，`innerText` 会退化成
+ *     `textContent`（把 `display: none` 收起的栏也算进来，那是假红制造机）。
+ *     所以这里就地藏、读完在 `finally` 里**原样还原**（探针只改测量环境，不改产品行为）。
+ */
 const READ_STATE = (selector) => `(() => {
   const root = ${selector === null ? 'document.body' : `document.querySelector(${JSON.stringify(selector)})`}
   if (!root) return null
   const text = (root.innerText || '').replace(/\\s+/g, ' ').trim()
+  let plain = text
+  const hidden = Array.from(root.querySelectorAll('pre, code, kbd, samp, [data-teacher]'))
+  const saved = hidden.map((el) => el.style.display)
+  try {
+    for (const el of hidden) el.style.display = 'none'
+    plain = (root.innerText || '').replace(/\\s+/g, ' ').trim()
+  } finally {
+    hidden.forEach((el, i) => { el.style.display = saved[i] })
+  }
   return {
     text: text.slice(0, 4000),
     len: text.length,
-    teacherNodes: root.querySelectorAll('[data-teacher]').length
+    teacherNodes: root.querySelectorAll('[data-teacher]').length,
+    plainText: plain.slice(0, 8000),
+    plainLen: plain.length
   }
 })()`
 
@@ -234,6 +291,13 @@ async function main() {
     if (!state) continue
     const leaks = leaksIn(state.text)
     check(label, '不含开发者术语', leaks.length === 0, leaks.length ? `出现：${leaks.join('、')}` : `正文 ${state.len} 字`)
+    const marks = hygieneIn(state.plainText)
+    check(
+      label,
+      '★ 不含未渲染的排版标记（** / 反引号 / 破折号）',
+      marks.length === 0,
+      marks.length ? `出现：${marks.join('、')}` : `正文 ${state.plainLen} 字（已剔掉代码块与教师证据）`
+    )
     check(label, '不含教师视角证据块', state.teacherNodes === 0, `data-teacher 节点 ${state.teacherNodes} 个`)
   }
   if (!railSeen) check('右栏', '三个页签都可点开', false, '没找到 rail-tabs（应用起了吗？）')
@@ -273,7 +337,12 @@ async function main() {
         // 兜底：按 aria-expanded + 文案（不同窗口宽度下组件形态不同）
         const byExpanded = candidates.filter((el) => el.hasAttribute('aria-expanded'))
         return '${kind}' === 'grade'
-          ? byExpanded.find((el) => /学段|手动选中|AI 引擎判定|本地规则判定|待判定/.test(el.textContent || ''))
+          // ⚠️ 学段这一串是**兜底**用的，所以四个档位的说法一个都不能少：
+          //    「手动选中 / AI 引擎判定 / 本地规则判定」+ 未判定时的词。
+          //    ★ 2026-09-22（报告 0.2 术语表）：未判定那档从「待判定」改成「还没认出年级」——
+          //    它挂在 labels.ts 的 GRADE_UNKNOWN_LABEL 上，改名时这里会静默失效
+          //    （触发器点不到 → 浮层报「未打开」→ 该浮层**其实没被覆盖**却看不出来）。
+          ? byExpanded.find((el) => /学段|手动选中|AI 引擎判定|本地规则判定|还没认出年级/.test(el.textContent || ''))
           : byExpanded.find((el) => /章节|不限章节|正在学/.test(el.textContent || ''))
       })()
       if (!trigger) return 'no-trigger'
@@ -290,6 +359,13 @@ async function main() {
     }
     const leaks = leaksIn(state.text)
     check(label, '不含开发者术语', leaks.length === 0, leaks.length ? `出现：${leaks.join('、')}` : `正文 ${state.len} 字`)
+    const marks = hygieneIn(state.plainText)
+    check(
+      label,
+      '★ 不含未渲染的排版标记（** / 反引号 / 破折号）',
+      marks.length === 0,
+      marks.length ? `出现：${marks.join('、')}` : `正文 ${state.plainLen} 字（已剔掉代码块与教师证据）`
+    )
     check(label, '不含教师视角证据块', state.teacherNodes === 0, `data-teacher 节点 ${state.teacherNodes} 个`)
     await cdp.evaluate(
       `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`
@@ -302,6 +378,16 @@ async function main() {
   if (chat) {
     const leaks = leaksIn(chat.text)
     check('对话正文', '整页可见文本不含开发者术语', leaks.length === 0, leaks.length ? `出现：${leaks.join('、')}` : `正文 ${chat.len} 字`)
+    // ★ 排版标记纪律：整页可见文本（**合成结果**，也就是学生此刻真的看到的那些字）。
+    //   源码版在 `tests/student-view-discipline.test.ts` 的 ⑰；这一条是它的真机对照 ——
+    //   它能抓到源码版看不见的两种：模板 JSON 里的 `fallback_text`、后端推来的文案。
+    const marks = hygieneIn(chat.plainText)
+    check(
+      '对话正文',
+      '★ 整页不含未渲染的排版标记（** / 反引号 / 破折号）',
+      marks.length === 0,
+      marks.length ? `出现：${marks.join('、')}` : `正文 ${chat.plainLen} 字（已剔掉代码块与教师证据）`
+    )
     check('对话正文', '整页不含教师视角证据块', chat.teacherNodes === 0, `data-teacher 节点 ${chat.teacherNodes} 个`)
   }
 

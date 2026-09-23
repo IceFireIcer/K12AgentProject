@@ -52,11 +52,63 @@ registerHooks({
 const { normalizeChapterState, resolveChapterBridge, CHAPTER_SET_MISSING_HINT } = await import(
   '../src/renderer/src/api/chapter.ts'
 )
+const { resetWiringNotices } = await import('../src/renderer/src/api/wiring-notice.ts')
 const { CHAPTER_NONE_LABEL, chapterLineLabel } = await import('../src/renderer/src/labels.ts')
 const { useChatStore } = await import('../src/renderer/src/stores/chat.ts')
 
-/** 章节被清空时那句一次性提示（唯一实现内联在 store 的 `applyChapterState` 里）。 */
-const CLEARED_NOTICE = '学段变了，之前选的教材章节已清空 —— 可以重新选一章，或直接自由问答。'
+/**
+ * 跑一段会 `resolveChapterBridge()` 的代码，**同时**收下它打出的接线诊断与返回值。
+ *
+ * ★ 每次都要先 `resetWiringNotices()`：warn 按 key 去重（同一个渲染进程里每个 key 只打一次），
+ *   不清的话「本文件里先跑过的用例」会把这条 warn 吃掉，断言就变成看谁先跑 —— 典型的假绿。
+ * ★ 返回值由闭包给出（而不是让外部 `let x` 再赋值）：那样写 TS 会把变量收窄成 `null`，
+ *   于是 `lookup.ready` 报「Property 'ready' does not exist on type 'never'」（typecheck 会红）。
+ */
+function captureWiring<T>(start: () => T): { value: T; warnings: string[] } {
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => String(arg)).join(' '))
+  }
+  try {
+    resetWiringNotices()
+    return { value: start(), warnings }
+  } finally {
+    console.warn = original
+  }
+}
+
+/**
+ * 学生面文案里**不许**出现的东西：方法名 / 通道名 / preload / `window.api` / markdown 标记。
+ *
+ * ★ 为什么把这条清单写死在这里（而不是只断言「等于某个常量」）：断言等于常量只证明
+ *   「实现与常量一致」，常量里塞满方法名它也照样绿。清单钉的是**给学生看到的那串字**。
+ */
+const STUDENT_FACING_FORBIDDEN = [
+  'onChapterChanged',
+  'getChapter',
+  'setChapter',
+  'chapter:',
+  'preload',
+  'window.api',
+  '`',
+  '**'
+]
+
+/** 仓库里定位源码用（与 `renderer-grade.test.ts` 同一写法）。 */
+const DESKTOP = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
+/**
+ * 章节被清空时那句一次性提示（唯一实现内联在 store 的 `applyChapterState` 里）。
+ *
+ * ★★ 写成字面量是刻意的：这条守卫要钉住**学生读到的那句话**。
+ * ★★ 2026-09-22 改句（设计评审报告 C16 / 第 3 章「破折号专项」）：原来那句用
+ *   `——` 把两个短句串起来（「…已清空 —— 可以重新选一章…」）。破折号长句是这个
+ *   产品学生文案的 LLM 指纹，报告要求全文替换成两句短句，所以现在是一个句号。
+ *   ⚠️ 这类「删除连接符」的改句由 `tests/student-view-discipline.test.ts` 里那条
+ *   「学生可见文本不得含 `——`」的源码级守卫兜底 —— 谁把破折号加回来，那边会先红。
+ */
+const CLEARED_NOTICE = '学段变了，之前选的教材章节已清空。可以重新选一章，或直接自由问答。'
 
 /** 让被 `void` 掉的 promise 链跑完（`refreshChapter` 是 fire-and-forget）。 */
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
@@ -113,13 +165,24 @@ test('chapterLineLabel：有章写「正在学：…」、没章写「未选择�
  * 3. 桥探测：缺哪半说哪半
  * ------------------------------------------------------------------ */
 
-test('resolveChapterBridge：缺 onChapterChanged（整块没接线）时给可读中文，不抛异常', () => {
+test('resolveChapterBridge：缺 onChapterChanged（整块没接线）时给可读中文、细节进控制台、不抛异常', () => {
   ;(globalThis as unknown as { window: unknown }).window = { api: { getGrade: async () => ({ ok: true, data: null }) } }
-  const lookup = resolveChapterBridge()
+  const { value: lookup, warnings } = captureWiring(() => resolveChapterBridge())
   assert.equal(lookup.ready, false)
   assert.ok(
-    'message' in lookup && lookup.message.includes('onChapterChanged'),
-    `缺失说明要指出缺的是哪个方法：${JSON.stringify(lookup)}`
+    'message' in lookup && typeof lookup.message === 'string' && lookup.message.length > 0,
+    `整块没接线时也要有一句可读中文：${JSON.stringify(lookup)}`
+  )
+  // ★ 屏幕上是学生话（旧口径是「指出缺的是哪个方法」，那属于控制台 —— 见下面那条）
+  const message = 'message' in lookup ? String(lookup.message) : ''
+  for (const forbidden of STUDENT_FACING_FORBIDDEN) {
+    assert.ok(!message.includes(forbidden), `学生面那句话里出现了「${forbidden}」：${message}`)
+  }
+  assert.ok(/[\u4e00-\u9fff]/.test(message), '学生面必须是中文人话')
+  // ★ 接线细节没丢，只是换了通路
+  assert.ok(
+    warnings.some((line) => line.includes('onChapterChanged')),
+    `接线细节必须进控制台（照它就能把线接上）：实际 warn = ${JSON.stringify(warnings)}`
   )
 })
 
@@ -274,21 +337,49 @@ test('★ setChapter 失败：返回可读中文，且**一点都不许改**本�
   assert.equal(chat.currentChapter, '第2章 数据从哪里来')
 })
 
-test('桥缺 setChapter（只有只读那半）：不抛、给可读中文、界面状态不变', async () => {
+test('★★ 桥缺 setChapter（只有只读那半）：屏幕上是学生话、接线细节进控制台、界面状态不变', async () => {
   installFakeBridge({ withSetChapter: false })
   setActivePinia(createPinia())
   const chat = useChatStore()
 
-  const lookup = resolveChapterBridge()
+  // ★★ 这条断言 2026-09-22 改口径（设计评审报告 0.2 + 双视角 D-063），**不是放宽**：
+  //   原来它要 `result.message` **包含 `setChapter`**（「失败说明要指出缺的是哪个方法」）——
+  //   而那句话是渲染在界面上的（章节那一栏的提示），于是学生读到的是
+  //   「……preload 白名单缺少 setChapter……接线后刷新页面即可生效。」：他既看不懂，
+  //   也做不到（他没有线要接，刷新也确实不会生效 —— 那是假承诺）。
+  //   现在同一件事**分两条通路**，这条用例把两边都钉住：
+  //     ① 屏幕上（message）必须是**干净的学生话**：说清用不了什么、还能做什么、找谁；
+  //     ② 控制台上必须仍有**接线细节**（缺哪个方法、要注册哪条通道）——
+  //        「照它就能把线接上」这个意图一个字都没丢，只是从屏幕挪到了 DevTools。
+  const { value: lookup, warnings } = captureWiring(() => resolveChapterBridge())
   assert.equal(lookup.ready, true, '只读那半在的话桥就该就绪')
 
   const result = await chat.setChapter('第4章 用 Python 处理数据') // 不许抛
 
   assert.equal(result.ok, false)
   assert.equal(result.message, CHAPTER_SET_MISSING_HINT)
+  // ① 学生面：不许出现方法名 / 通道名 / preload / window.api / markdown 标记
+  for (const forbidden of STUDENT_FACING_FORBIDDEN) {
+    assert.ok(
+      !String(result.message).includes(forbidden),
+      `学生面那句话里出现了「${forbidden}」：${String(result.message)}`
+    )
+  }
+  assert.ok(/[\u4e00-\u9fff]/.test(String(result.message)), '学生面必须是中文人话')
+  // ② 控制台面：缺的是哪个方法要点名（运行时真的 warn 出来，不是只写在源码里）
   assert.ok(
-    typeof result.message === 'string' && result.message.includes('setChapter'),
-    `失败说明要指出缺的是哪个方法（照它就能把线接上）：${String(result.message)}`
+    warnings.some((line) => line.includes('setChapter')),
+    `接线细节必须进控制台（照它就能把线接上）：实际 warn = ${JSON.stringify(warnings)}`
+  )
+
+  // ②' 源码级对照：`api/chapter.ts` 里必须有一处接线诊断**点名 setChapter**。
+  //     为什么源码这条也要留：运行时那条只在「这次真的缺 setChapter」时才触发，
+  //     而源码这条钉住的是**文案本身**（谁把细节删干净，这里立刻红）。
+  const chapterSource = readFileSync(join(DESKTOP, 'src/renderer/src/api/chapter.ts'), 'utf8')
+  assert.match(
+    chapterSource,
+    /warnWiring\([\s\S]{0,200}?setChapter/,
+    '接线诊断里必须点名 setChapter（它是「照它就能把线接上」的唯一落点）'
   )
   assert.equal(chat.currentChapter, '', '没成功就不许改状态')
 })

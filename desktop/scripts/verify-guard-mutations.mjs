@@ -494,10 +494,111 @@ const MUTATIONS = [
     name: '㊾ 未开始的会话又把开场白当普通消息铺回去（界面进不了空态）',
     testFile: 'tests/opening-guidance.test.ts',
     file: 'src/main/ipc/handlers.ts',
-    find: `    return { started: false, messages: [], opening: fetched.text, openingKpId: fetched.kpId }`,
-    replace: `    return { started: false, messages: [...instance.restoredMessages], opening: fetched.text, openingKpId: fetched.kpId }`,
+    // ⚠️ 锚点跟着源码的**换行形态**走过一次：这条 return 以前写成一行
+    //    （`return { started: false, messages: [], opening: fetched.text, openingKpId: fetched.kpId }`），
+    //    后来多了一个 `openingKpName` 字段并被格式化成分行对象字面量 ——
+    //    旧锚点于是「找不到」，这条变异**静默失效**（脚本会报 ⚠️ 并计入失败，所以不会被当成通过）。
+    //    改成按「对象字面量的前几行」定位：`opening: fetched.text` 是这条分支独有的。
+    find: `    return {
+      started: false,
+      messages: [],
+      opening: fetched.text,`,
+    replace: `    return {
+      started: false,
+      messages: [...instance.restoredMessages],
+      opening: fetched.text,`,
     // 同一条用例（判据那条）里的断言 —— 它同时守着两件事：判据 + 未开始时不铺消息
     expect: '学生开口了没有'
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 学生面**排版标记**纪律（2026-09-22 报告 1.8 + 第 3 章「破折号专项」）
+   * —— 守卫在 `tests/student-view-discipline.test.ts` 的 ⑰（两条 + 凭据那条）
+   * 与 `tests/llm-unconfigured.test.ts` 的空态那条。
+   * 这几条守的都是「字面标记被印到学生眼前」：跑起来一切正常，只有学生读到的字不对
+   * （动画页那句「一串**是 / 否**问题」就是这么来的）。
+   * ------------------------------------------------------------------ */
+  {
+    name: '51 排版标记：把 `**加粗**` 写进学生可见文案（裸插值路径原样上屏）',
+    file: 'src/renderer/src/views/Quiz.vue',
+    find: "const UNNAMED_POINT = '未命名知识点'",
+    replace: "const UNNAMED_POINT = '**未命名**知识点'",
+    expect: '未渲染的 Markdown 标记'
+  },
+  {
+    name: '52 破折号：把「章节已清空」那句改回 `——` 连接（学生文案的 LLM 指纹）',
+    file: 'src/renderer/src/stores/chat.ts',
+    find: "'学段变了，之前选的教材章节已清空。可以重新选一章，或直接自由问答。'",
+    replace: "'学段变了，之前选的教材章节已清空 —— 可以重新选一章，或直接自由问答。'",
+    expect: '不得用破折号'
+  },
+  {
+    name: '53 例外的凭据：把高级区那处破折号搬进**学生那一节**（按文件豁免会假绿）',
+    file: 'src/renderer/src/views/Settings.vue',
+    find: '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">',
+    replace:
+      '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">\n        <!-- 变异：学生那一节多了一句带破折号的说明 -->\n        <p>学段与章节随时可以换 —— 之前学过的记录都还在</p>',
+    expect: '例外表必须名副其实'
+  },
+  {
+    name: '54 对话页空态：入口卡改成渲染空数组（「现在还能干什么」没了兑现者）',
+    testFile: 'tests/llm-unconfigured.test.ts',
+    file: 'src/renderer/src/views/Chat.vue',
+    find: '                v-for="e in entries"',
+    replace: '                v-for="e in []"',
+    expect: '还答不了'
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 桥没接上时的两条通路（2026-09-22 报告 0.2 / D-063）
+   * —— 守卫在 `tests/student-view-discipline.test.ts` 的 ⑱ 与
+   * `tests/renderer-chapter.test.ts` 的「桥缺 setChapter」那条。
+   * 一条守**屏幕**（不许有方法名 / 通道名），一条守**控制台**（接线细节一个字都不许丢）。
+   * ------------------------------------------------------------------ */
+  {
+    name: '55 桥文案：把接线说明塞回学生面那句（方法名 + preload 又印给学生）',
+    file: 'src/renderer/src/api/chapter.ts',
+    find: "export const CHAPTER_SET_MISSING_HINT = '暂时换不了章节。先直接问问题就好，需要时请老师帮忙看看。'",
+    replace:
+      "export const CHAPTER_SET_MISSING_HINT =\n" +
+      "  '选择章节还没有接线：preload 白名单缺少 setChapter，需要先在主进程注册' +\n" +
+      "  '「章节设定」通道（invoke，带回执），再由 preload 暴露 `setChapter`。接线后刷新页面即可生效。'",
+    expect: '屏幕上是学生话'
+  },
+  {
+    name: '56 接线诊断：把「缺哪个方法」从控制台那句里删掉（意图丢了，屏幕也没补回来）',
+    file: 'src/renderer/src/api/chapter.ts',
+    // ⚠️ 要把**两处**都换掉才算真删：这句 detail 里方法名出现了两次
+    //   （「缺少 setChapter」+「再由 preload 暴露 setChapter」）。只改一处时守卫照样绿 ——
+    //   第一版变异就是这么写的，结果「没抓到」的其实是变异自己没生效（不是守卫失灵）。
+    find:
+      "      'preload 白名单缺少 setChapter：需要主进程注册 chapter:set（invoke，带回执 —— 学生要看到改没改成），' +\n" +
+      "        '再由 preload 暴露 setChapter。接线后重启渲染进程即可生效；在那之前界面只读（能看到正在学哪一章、换不了）。'",
+    replace:
+      "      'preload 白名单缺少写入方法：需要主进程注册那条 invoke 通道（带回执 —— 学生要看到改没改成），' +\n" +
+      "        '再由 preload 暴露它。接线后重启渲染进程即可生效；在那之前界面只读（能看到正在学哪一章、换不了）。'",
+    expect: '屏幕上是学生话'
+  },
+  {
+    name: '57 数据面桥文案：把「缺的是哪个方法」写回学生面那句（又印给学生）',
+    file: 'src/renderer/src/api/data.ts',
+    find: "export const DATA_BRIDGE_MISSING_HINT = '这部分内容暂时打不开。先回对话页就好，需要时请老师帮忙看看。'",
+    replace:
+      "export const DATA_BRIDGE_MISSING_HINT =\n" +
+      "  '本地数据通道未接通：主进程没有提供 window.api.readQuizBank。' +\n" +
+      "  '（分步接线时的老产物，或测试替身没装全。）'",
+    expect: '屏幕上是学生话'
+  },
+  {
+    name: '58 api/settings.ts 的豁免：把技术词塞进学生那句（豁免理由不再成立）',
+    file: 'src/renderer/src/api/settings.ts',
+    // 这个文件仍在 `TERM_EXEMPT_FILES` 里（技术词守卫整份跳过它），
+    // 所以这条只有**豁免的凭据**能抓到 —— 抓不到就说明那段理由又是一纸空文。
+    find: "export const SETTINGS_BRIDGE_MISSING_HINT = '设置暂时打不开。先回对话页就好，需要时请老师帮忙看看。'",
+    replace:
+      "export const SETTINGS_BRIDGE_MISSING_HINT =\n" +
+      "  '设置暂时打不开。先回对话页就好 —— 云端 embedding 端点也没配上，需要时请老师帮忙看看。'",
+    expect: '豁免必须名副其实'
   }
 ]
 

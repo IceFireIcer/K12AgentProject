@@ -3,8 +3,10 @@
 
 本文件盯住六条（每条对应票据里的一条验收口径）：
 
-1. ★ **模板落位与覆盖**：6–8 个模板，至少覆盖「排序 / 神经网络 / 决策树 / 梯度下降 / 循环 / 变量」，
-   且每个都声明了参数 schema 与**非空降级文案**；
+1. ★ **模板落位与覆盖**：模板数量不做限制（用户裁决 2026-09-22，一 KP 一模板会到 200+ 份），
+   但**每份都要能被加载**（一个都不许被跳过），且至少覆盖
+   「排序 / 神经网络 / 决策树 / 梯度下降 / 循环 / 变量」，
+   每个都声明了参数 schema 与**非空降级文案**；
 2. ★ **零外部引用**：模板文件与**渲染产物**里都不许出现 `http(s)://` / `unpkg` / `jsdelivr` / `cdn`；
 3. ★ **凭据不进产物**：产物里不得出现 API Key、baseURL、宿主绝对路径（票 17 的硬要求）；
 4. **库与运行时都内联**：产物里能找到动画库与沙箱运行时的标记，且有 `ready` 上报与 `payload_id`；
@@ -84,11 +86,19 @@ class TestTemplatesDirectory(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.templates = R.load_templates(TEMPLATES_DIR)
 
-    def test_directory_exists_and_has_six_to_eight_templates(self) -> None:
+    def test_directory_exists_and_every_template_loads(self) -> None:
+        """模板目录要在，且**每一份**都要能被 ``load_templates`` 加载。
+
+        模板数量不做限制（用户裁决 2026-09-22，一 KP 一模板会到 200+ 份，
+        旧「6–8 个」的上下限已作废）。但「一份都没有」不是数量问题而是事故：
+        目录被清空 / 导入没落盘时，本文件里按模板遍历的断言会**空转全绿**
+        （循环体一次都不进）。所以下限写死「至少 1 份」兜住空跑，并与
+        ``test_required_themes_are_covered``（六个点名主题必须有模板覆盖）
+        互为兜底 —— 后者在空目录上同样必红。
+        """
         self.assertTrue(TEMPLATES_DIR.is_dir(), f"模板目录不存在：{TEMPLATES_DIR}")
         count = len(list(TEMPLATES_DIR.glob("*.json")))
-        self.assertGreaterEqual(count, 6, f"模板太少（{count} 个）：票据要求 6–8 个")
-        self.assertLessEqual(count, 8, f"模板太多（{count} 个）：票据要求 6–8 个")
+        self.assertGreater(count, 0, "一个模板都没有（目录被清空了？模板 JSON 没落盘？）")
         self.assertEqual(len(self.templates), count, "有模板被 load_templates 跳过了（模板本身不合格）")
 
     def test_required_themes_are_covered(self) -> None:
@@ -721,7 +731,7 @@ class TestInternalRoutes(unittest.TestCase):
         response = self.client.get("/api/animation/templates")
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertGreaterEqual(body["total"], 6)
+        self.assertGreater(body["total"], 0, "一个模板都没有：列表端点的 total 必须为正")
         self.assertEqual(len(body["matched"]), body["total"], "不过滤时应返回全部模板")
 
         filtered = self.client.get(

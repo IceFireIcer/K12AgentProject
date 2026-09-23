@@ -413,12 +413,39 @@ test('★ 缺通道时给一句可照着做的话（不是把整页打空）', a
     // 只有 window，没有那四条方法
     ;(globalThis as { window?: unknown }).window = { api: {} }
     const { useChatStore } = await import('../src/renderer/src/stores/chat.ts')
+    const { resetWiringNotices } = await import('../src/renderer/src/api/wiring-notice.ts')
     setActivePinia(createPinia())
     const chat = useChatStore()
 
-    const result = await chat.openSession('sess-1')
+    // ★★ 2026-09-22 改口径（设计评审报告 0.2 + 双视角 D-063），**不是放宽**：
+    //   原来这句断的是 `message` 要匹配 `/openSession|白名单/`（缺什么、怎么接）——
+    //   而 message 是渲染在侧栏上给学生看的。现在细节走控制台，所以分开钉：
+    //     ① 屏幕上是干净的学生话（无方法名 / 通道名 / preload / window.api）；
+    //     ② 控制台仍有「缺 openSession」这条接线细节。
+    //   全量（4 个桥 × 每个常量）在 `tests/student-view-discipline.test.ts` 的 ⑱。
+    const warnings: string[] = []
+    const originalWarn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((arg) => String(arg)).join(' '))
+    }
+    let result: { ok: boolean; message?: string }
+    try {
+      resetWiringNotices() // warn 按 key 去重：不清的话本文件先跑过的用例会把它吃掉
+      result = await chat.openSession('sess-1')
+    } finally {
+      console.warn = originalWarn
+    }
+
     assert.equal(result.ok, false)
-    assert.match(String(result.message), /openSession|白名单/, '缺通道要说清缺什么、怎么接')
+    const message = String(result.message ?? '')
+    for (const forbidden of ['openSession', 'session:', 'preload', 'window.api', '`']) {
+      assert.ok(!message.includes(forbidden), `学生面那句话里出现了「${forbidden}」：${message}`)
+    }
+    assert.ok(/[\u4e00-\u9fff]/.test(message), '学生面必须是中文人话')
+    assert.ok(
+      warnings.some((line) => line.includes('openSession')),
+      `接线细节必须进控制台（照它就能把线接上）：实际 warn = ${JSON.stringify(warnings)}`
+    )
   } finally {
     if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window
     else (globalThis as { window?: unknown }).window = originalWindow

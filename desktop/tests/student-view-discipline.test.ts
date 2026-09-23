@@ -140,6 +140,13 @@ function visibleText(file, source) {
   // ⚠️ console.* 的输出**不是界面文本**（它去终端/DevTools，学生看不到）。
   //    排障话本来就该写在 console 里，把它们算成「泄露」会逼着人删掉排障信息。
   scriptBody = scriptBody.replace(/console\.\w+\([^;]*\)/g, ' ').replace(/console\.\w+\([\s\S]*?\)\n/g, ' ')
+  // ⚠️ 同一条纪律也适用于**接线诊断**：`api/wiring-notice.ts` 的 `warnWiring(key, detail)`
+  //    只把 detail 转给 `console.warn`（凭据见文件末尾「接线诊断只在控制台」那条测试里
+  //    对它的函数体做的断言），所以**实参里的方法名 / 通道名 / `window.api`** 都不是界面文本。
+  //    ★ 2026-09-22 补这条：这四个桥的接线细节刚从 `*_HINT`（学生会看到的字符串）挪到
+  //      `warnWiring(...)` 的实参里 —— 不剥的话，守卫会把「写给接线人的话」当成学生面泄露，
+  //      而那种假红的下场通常是把真正有用的排障信息删掉（这正是上面 console 那条注释的教训）。
+  scriptBody = scriptBody.replace(/warnWiring\([\s\S]*?\)\n/g, ' ')
   for (const match of scriptBody.matchAll(/'([^'\\\n]*(?:\\.[^'\\\n]*)*)'|"([^"\\\n]*(?:\\.[^"\\\n]*)*)"|`([^`]*)`/g)) {
     // ⚠️ 模板字符串里 `${…}` 是**表达式**（`${item.kpId}` 渲染出来是主键的值，
     //    而 `kpId` 这三个字符本身不显示）—— 与 `.vue` 里剥 mustache 是同一个道理。
@@ -215,10 +222,20 @@ const TERM_EXEMPT_FILES = new Set([
   'stores/knowledge.ts',
   'stores/settings.ts',
   'stores/sidecar.ts',
-  'api/settings.ts',
-  'api/data.ts',
   'api/events.ts',
-  'api/http.ts'
+  'api/http.ts',
+  /**
+   * ★★ `api/settings.ts` 的豁免理由 2026-09-23 **实测重写**（旧理由「自己一个字都不渲染」已不成立：
+   * 它现在有学生可见的桥缺失提示，也持有渲染在设置页上的标签）。拿掉它试过 —— 这条守卫会红 4 处，
+   * 那 4 处**两类都不在学生眼前**，两类都由下面「豁免必须名副其实」里的凭据逐条兑现：
+   *   ① 类型名字符串 `components['schemas']['EmbeddingConfig']`（**类型索引**，一个字都不渲染）；
+   *   ② 嵌入模式的中文标签（`EMBEDDING_MODE_LABELS`）：只在设置页**高级设置**区渲染
+   *      （`viewMode.isTeacher` 或学生主动点开才出现 —— 与 `views/Settings.vue` 的豁免同一性质）。
+   * ⚠️ 谁把这两类搬到别处（例如把标签挪进学生那一节），下面那条凭据会立刻变红。
+   * ★ 同批 `api/data.ts` 已从名单里**删掉**（实测：拿掉后这条守卫仍全绿 —— 它剩下的串只有
+   *   学生话与 `warnWiring` 实参，后者按控制台通路被剥离）。
+   */
+  'api/settings.ts'
 ])
 
 /**
@@ -411,6 +428,49 @@ test('★★ 豁免必须名副其实：被豁免的词要真的落在「只给�
   )
   assert.match(kb, /导入教材/, '两个按钮的可见文案也要在（教师看得到才谈得上能用）')
   assert.match(kb, /重建索引/, '「重建索引」的文案要在')
+
+  // ⑥ `api/settings.ts` 的豁免（★ 2026-09-23 实测重写理由，见 `TERM_EXEMPT_FILES` 的注释）：
+  //    它是**按文件**豁免的，而新理由说的是「命中分两类，两类都不在学生眼前」。
+  //    按本仓纪律，这个理由必须被机械兑现 —— 否则它就是一句新的「大概是给人看的」。
+  const apiSettingsSource = read('src', 'renderer', 'src', 'api', 'settings.ts')
+  const apiSettingsLines = stripComments(apiSettingsSource).split('\n')
+  const labelStart = apiSettingsLines.findIndex((line) => line.includes('export const EMBEDDING_MODE_LABELS'))
+  const labelEnd = apiSettingsLines.findIndex((line, index) => index > labelStart && line.startsWith('}'))
+  assert.ok(labelStart > 0 && labelEnd > labelStart, '`EMBEDDING_MODE_LABELS` 必须还是一个独立的值映射（凭据的锚点）')
+  const strayTerms: string[] = []
+  for (const chunk of visibleText('api/settings.ts', apiSettingsSource)) {
+    const terms = ['Embedding', 'embedding', '兜底', '端点', '契约', '分块', '已嵌入', '进程号', '端口号'].filter((term) =>
+      chunk.includes(term)
+    )
+    if (terms.length === 0) continue
+    const where = apiSettingsLines.findIndex((line) => line.includes(chunk))
+    const isTypeIndex = where >= 0 && apiSettingsLines[where].includes("components['schemas']")
+    const isModeLabel = where > labelStart && where < labelEnd
+    if (!isTypeIndex && !isModeLabel) {
+      strayTerms.push(`${terms.join('/')} → ${chunk.slice(0, 80)}（第 ${where + 1} 行）`)
+    }
+  }
+  assert.deepEqual(
+    strayTerms,
+    [],
+    'api/settings.ts 里出现了「既不是类型索引、也不在 EMBEDDING_MODE_LABELS 里」的技术词 ——\n' +
+      '那说明豁免理由（两类都不在学生眼前）不再成立：要么把它挪走，要么重写这条豁免的理由与凭据'
+  )
+  // ② 那一类的兑现：标签只在设置页的**高级区**渲染，且别处不许消费
+  const settingsView = stripComments(read('src', 'renderer', 'src', 'views', 'Settings.vue'))
+  assert.ok(settingsView.includes('EMBEDDING_MODE_LABELS['), '嵌入模式标签必须仍由设置页渲染（否则豁免该删）')
+  assert.ok(
+    settingsView.indexOf('EMBEDDING_MODE_LABELS[') > settingsView.indexOf('data-testid="settings-advanced"'),
+    '嵌入模式标签必须在**高级区**里渲染（学生默认看不到 —— 这正是豁免的理由）'
+  )
+  for (const file of rendererFiles()) {
+    const name = rel(file)
+    if (name === 'api/settings.ts' || name === 'views/Settings.vue') continue
+    assert.ok(
+      !readFileSync(file, 'utf8').includes('EMBEDDING_MODE_LABELS'),
+      `${name} 也消费了 EMBEDDING_MODE_LABELS —— 那「只在高级区」这条豁免理由就不成立了`
+    )
+  }
 })
 
 test('★★ 右栏的豁免必须真的有 `<TeacherGate>` 兜着（免得豁免变成后门）', () => {
@@ -1322,4 +1382,564 @@ test('★★ 页面标题与分组：去课程色彩 + 三组（只改给人看�
   for (const id of ["'chat'", "'animation'", "'coding'", "'quiz'", "'study'", "'settings'", "'knowledge'", "'dependency'"]) {
     assert.ok(ui.includes(id), `内部 id ${id} 必须保留（改名会牵动一大片，且学生看不见）`)
   }
+})
+
+/* ================================================================== *
+ * ⑰ 学生可见文本的**排版纪律**：不写未渲染的 Markdown 标记、不用破折号连接句子
+ *    （2026-09-22 设计评审报告 1.8「Markdown 泄漏」+ 第 3 章「破折号专项」）
+ * ================================================================== */
+
+/**
+ * 会被**原样印上屏**的两种标记写法。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 为什么要有这两条（真事，不是排版洁癖）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 动画页的 `fallback_text` 与编程页的反馈都是**裸插值**渲染的
+ * （`{{ }}` + `white-space: pre-wrap`，**不经** `markdown.ts`），所以文案里写的
+ * `**加粗**` 会原样上屏 —— 走查截图里学生读到的正是「一串**是 / 否**问题」那一堆字面星号
+ * （报告 1.8）。反引号同理：它只有在走 Markdown 渲染的通路里才会变成等宽字体，
+ * 在裸插值的文案里就是两个反引号字符。`views/Quiz.vue` 里留了一句人工纪律注释
+ * （「纯文本插值不许写星号」）—— 注释拦不住下一个人，所以这里补一条机器守卫。
+ *
+ * ★ 分工（别把这条守卫误读成「全仓禁用星号」）：
+ *   · **模型输出**走 `ChatMessage` → `markdown.ts`，那里的 `**` 会被解析成 `<strong>`，
+ *     那是**该有的** Markdown；`src/main/agent/prompts/**` 的提示词同理，不在本守卫范围
+ *     （本文件的扫描范围本来就只有 `src/renderer/src`）；
+ *   · 本条守的是**我们自己写给学生的文案**：模板文本节点 + 面向用户的属性 + 字符串字面量。
+ */
+const MARK_SYNTAX = ['**', '`'] as const
+
+/**
+ * 破折号（报告第 3 章「破折号专项」）。
+ *
+ * ★ 它是**本产品学生文案的 LLM 指纹**：除数学区间、专有名词外，不许用 `——` 作句间连接。
+ *   处置方式永远是「改成两句短句 / 逗号 / 直接删掉后半个安抚句」，
+ *   而不是「把破折号换个写法」（`–` `—` 只是换个字符，读起来还是同一股味）。
+ */
+const DASH_MARK = '——'
+
+/** 一条命中（哪个文件、哪个标记、命中在哪段文本里）。 */
+interface MarkHit {
+  file: string
+  mark: string
+  text: string
+}
+
+/**
+ * 复用本文件既有的 {@link visibleText} 提取机制，扫**全部**渲染进程文件。
+ *
+ * ★ 与技术词守卫（第 ① 条）共用同一份「这里没有学生可见文案」的名单
+ *   （`TERM_EXEMPT_FILES`）：那份名单的含义就是「这些文件里的字到不了学生眼前」，
+ *   对排版标记同样成立。两份名单**故意不分家** —— 分开维护一定会漂移。
+ */
+function scanVisibleMarks(marks: readonly string[]): MarkHit[] {
+  const hits: MarkHit[] = []
+  for (const file of rendererFiles()) {
+    const name = rel(file)
+    if (TERM_EXEMPT_FILES.has(name)) continue
+    const source = readFileSync(file, 'utf8')
+    for (const text of visibleText(file, source)) {
+      for (const mark of marks) {
+        if (text.includes(mark)) hits.push({ file: name, mark, text: text.trim().slice(0, 110) })
+      }
+    }
+  }
+  return hits
+}
+
+/** 命中是否被例外表放行（**逐条按文件 + 标记**，不是「整个文件不算」之外还放行别的标记）。 */
+function exempted(hits: readonly MarkHit[], table: ReadonlyArray<{ file: string; marks: string[] }>): MarkHit[] {
+  return hits.filter((hit) => !table.some((entry) => entry.file === hit.file && entry.marks.includes(hit.mark)))
+}
+
+/** 报错信息里一行一条（`文件 出现「标记」 → 命中原文`）。 */
+const describeHits = (hits: readonly MarkHit[]): string[] =>
+  hits.map((hit) => `${hit.file} 出现「${hit.mark}」 → ${hit.text}`)
+
+/**
+ * 例外表（**欠债清单，不是许可清单**）—— 每条都必须能回答：
+ * **这段字到底会不会出现在学生眼前？** 答不上来就去改源码，别加条目。
+ *
+ * ★ 三条纪律（下面那条「例外必须名副其实」的测试会逐条机械复核）：
+ *   ① 表长**按现状封顶**：想加一条，必须先删一条（也就是先修掉一处源码）；
+ *   ② 每条理由 ≥40 字，且要指出**为什么到不了学生眼前**（或哪条通路才到得了）；
+ *   ③ 条目一旦用不上（源码已经清干净了）就必须删掉 —— 留着就是假豁免。
+ */
+const MARK_EXEMPT: Array<{ file: string; marks: string[]; why: string }> = [
+  {
+    file: 'markdown.ts',
+    marks: ['**', '`'],
+    why:
+      '这是 **Markdown 解析器本身**（`parseInline` / `parseMarkdown`）：`**` 与反引号在这里是**被查找的标记**' +
+      '（`startsWith` / `indexOf` 的比较串，以及「未闭合围栏照原样当段落」的字节保留），不是文案 —— ' +
+      '它恰恰决定了模型正文里的 `**` 会被渲染成 `<strong>`。从这里把这些标记删掉，等于把渲染关掉。'
+  },
+  {
+    file: 'study/report-markdown.ts',
+    marks: ['**'],
+    why:
+      '这是**导出那份 .md 的拼装器**：`**` 只出现在喂给 `lines.push(...)` 的文档行里' +
+      '（`- 平均掌握度：**62%**`），而导出物的消费方是 Markdown 阅读器 —— 文件头第 3 条纪律写着' +
+      '「导出物是给学生/家长看的：中文、分节、可用 Markdown 阅读器打开」，`**` 在那里是**正确语法**，不是泄漏。' +
+      '⚠️ 它与屏幕文案**共用同一份字**（`STAGE_LABELS` 等），所以「只在文档行里」这条必须由下面那条凭据断言钉住。'
+  }
+]
+
+/**
+ * 破折号的例外表（同上，逐条带理由）。
+ *
+ * ★ 报告允许「数学区间、专有名词」例外 —— 但**当前一处都没有**，所以表里没有数学区间的条目。
+ *   真出现时按同样格式加一条（写清为什么这里必须用破折号），别把断言改松。
+ */
+const DASH_EXEMPT: Array<{ file: string; marks: string[]; why: string }> = [
+  {
+    file: 'labels.ts',
+    marks: ['——'],
+    why:
+      '唯一一处 `——` 在 `llmChipTitle()` 的**教师半**（`isTeacher ? … : …`）：「还没配置模型 —— 在设置页填写 API Key 后就能对话」。' +
+      '学生半由 `llm-unconfigured.test.ts` 钉着（不含 API Key / 不含「点击更换」），下面那条凭据断言再用**行为面**复核一次' +
+      '（真的调 `llmChipTitle(llm, false)`，看学生那半有没有破折号）。'
+  },
+  {
+    file: 'views/Settings.vue',
+    marks: ['——'],
+    why:
+      '五处 `——` 全都只出现在**高级设置**里：模板那三处在 `v-if="advancedVisible"` 区内（供应商 / 嵌入模型 / 隐私与本地服务三块的说明，' +
+      '是教师视角的技术文案）；脚本那两处是 `presetHint` / `probeSummary`（供应商目录与连通探测的白话结论），也只在高级区渲染。' +
+      '报告的破折号专项只约束学生面，学生那三节（学段 / 教材章节 / 外观）里一个 `——` 都没有 —— ' +
+      '下面那条凭据断言按**区域 + 持有者**复核（与技术词那条「豁免必须名副其实」同一手法）。'
+  },
+  {
+    file: 'sandbox/pyodide.worker.ts',
+    marks: ['——'],
+    why:
+      '唯一一处 `——` 在 `capability.detail`（「SharedArrayBuffer 不可用（需要主进程开启 enable-features=…）——本次只能靠主线程的墙钟超时」）：' +
+      '它的**唯一消费点**是 `pyodide-runner.ts` 里那句 console 排障日志，从不上屏（界面只读 `capability.interruptible`）。'
+  }
+]
+
+test('★★ 学生可见文本里不得出现未渲染的 Markdown 标记（`**` / 反引号）', () => {
+  // 先钉住例外表本身：它一旦长大，这条守卫就退化成「例外清单」（与技术词那张表同一纪律）
+  // ★★ 2026-09-22：原来这里还有 4 条 `api/{chapter,grade,study,sessions}.ts` 的例外
+  //    （接线诊断里的反引号）。那一族已经**改源码**处理掉了：屏幕上是学生话、
+  //    细节走 `warnWiring`（控制台），所以表里只剩下面两条「标记语法的主人」。
+  //    封顶数跟着降到**实际条数**：想加一条就必须先删一条（先修掉一处源码）。
+  assert.ok(
+    MARK_EXEMPT.length <= 2,
+    `Markdown 标记的例外已经有 ${MARK_EXEMPT.length} 条 —— 超过 2 条说明多半是「改文案」被换成了「加例外」。`
+  )
+  for (const entry of MARK_EXEMPT) {
+    assert.ok(entry.why.length >= 40, `${entry.file} 的例外理由太短 —— 要写清「它为什么到不了学生眼前」`)
+    assert.ok(entry.marks.length > 0, `${entry.file} 的例外没写标记`)
+  }
+
+  const hits = scanVisibleMarks(MARK_SYNTAX)
+  // ★ 例外必须**确实用得上**：源码清干净之后还留着条目，就是一条假豁免（会掩护下一次泄漏）
+  for (const entry of MARK_EXEMPT) {
+    assert.ok(
+      hits.some((hit) => hit.file === entry.file && entry.marks.includes(hit.mark)),
+      `${entry.file} 的例外已经用不上了（那个标记在该文件里找不到了）—— 请删掉这条条目，别留着`
+    )
+  }
+
+  const real = exempted(hits, MARK_EXEMPT)
+  assert.deepEqual(
+    real.map((hit) => `${hit.file} 出现「${hit.mark}」 → ${hit.text}`),
+    [],
+    '学生看到的会是**字面星号 / 字面反引号**：这些文本走的不是 Markdown 渲染通路\n' +
+      '（动画页 `fallback_text`、编程页反馈、闯关反馈都是裸插值 `{{ }}` + `white-space: pre-wrap`）。\n' +
+      '处置：① 换成 `<strong>` / 等宽类名（走模板）；② 或者把这段文案交给 `markdown.ts` 渲染。\n' +
+      '**不要**在裸插值的文案里写 `**加粗**` —— 报告 1.8 的那张截图就是这么来的。\n' +
+      `命中 ${real.length} 处：\n  ${describeHits(real).join('\n  ')}`
+  )
+})
+
+test('★★ 学生可见文本里不得用破折号连接句子（报告第 3 章「破折号专项」）', () => {
+  assert.ok(
+    DASH_EXEMPT.length <= 3,
+    `破折号的例外已经有 ${DASH_EXEMPT.length} 条 —— 超过 3 条说明多半是「改文案」被换成了「加例外」。`
+  )
+  for (const entry of DASH_EXEMPT) {
+    assert.ok(entry.why.length >= 40, `${entry.file} 的例外理由太短 —— 要写清「它为什么到不了学生眼前」`)
+  }
+
+  const hits = scanVisibleMarks([DASH_MARK])
+  // 同上：用不上的例外必须删掉（否则改回破折号时它会被「反正有例外」混过去）
+  for (const entry of DASH_EXEMPT) {
+    assert.ok(
+      hits.some((hit) => hit.file === entry.file),
+      `${entry.file} 的例外已经用不上了（该文件里没有 \`——\` 了）—— 请删掉这条条目，别留着`
+    )
+  }
+
+  const real = exempted(hits, DASH_EXEMPT)
+  assert.deepEqual(
+    real.map((hit) => `${hit.file} → ${hit.text}`),
+    [],
+    '`——` 是本产品学生文案的 **LLM 指纹**（报告第 3 章）：除数学区间 / 专有名词外禁用。\n' +
+      '处置：改成两句短句、逗号，或者直接删掉后半个安抚句（C16 就是这么处理的）。\n' +
+      '⚠️ 换个字符（`–` / `—`）不算修好 —— 读起来还是同一股味。\n' +
+      `命中 ${real.length} 处：\n  ${describeHits(real).join('\n  ')}`
+  )
+})
+
+/* ================================================================== *
+ * ⑱ 「桥没接上」时：屏幕上是学生话，接线细节只在控制台
+ *    （2026-09-22 设计评审报告 0.2 + 双视角 D-063）
+ * ================================================================== */
+
+/**
+ * 取一个 `export const NAME = …` 里**拼出来的字符串值**（把跨行拼接的字面量接起来）。
+ *
+ * ★ 为什么要这么取（而不是断言「等于某个常量」）：断言等于常量只证明「实现与常量一致」，
+ *   常量里塞满方法名它也照样绿。这里要判的是**学生看到的那串字本身**。
+ * ⚠️ 取法是「从声明处到下一个空行」——这四句都是紧跟着空行的普通常量；
+ *   改形状（包进函数 / 加三元）会让这里取到空串，那时下面的「找不到」会立刻报出来。
+ */
+function constStringValue(source: string, name: string): string {
+  const at = source.indexOf(`export const ${name} =`)
+  if (at < 0) return ''
+  const end = source.indexOf('\n\n', at)
+  const decl = source.slice(at, end > at ? end : at + 1200)
+  return [...decl.matchAll(/'([^']*)'/g)].map((match) => match[1]).join('')
+}
+
+/**
+ * 每个「桥没接上」的落点：**学生可见文本**不许有什么、**控制台**必须点什么名。
+ *
+ * ★ 它们该出现在两处、不该出现在第三处：
+ *   · ✅ `warnWiring(…)` 的实参里（接线的人在 DevTools 看）；
+ *   · ✅ 文件头的注释里（读代码的人看 —— 注释本来就被 `visibleText()` 剥掉）；
+ *   · ❌ **学生可见文本里**（`*_HINT` 常量、模板文本、面向用户的属性）——
+ *     那是这次改口的全部意义：学生读到「preload 白名单缺少 setChapter」既看不懂也管不着。
+ *
+ * 字段：
+ *   · `tokens` = 一律不许出现在学生可见文本里的（含运行时动态拼的那批方法名）；
+ *   · `wiredByKey` = **每个 `warnWiring` 分支各自**必须在自己的 detail 里点名的东西；
+ *   · `hints`（可选）= 该文件里承载学生话的常量名（有就顺带断言「存在 + 是中文人话」——
+ *     没写常量的（学生话内联在 store / 模板里）靠 `tokens` 那一半兜）；
+ *   · `wiringFile`（可选）= 接线诊断**不在本文件**时去哪读（`views/Chat.vue` 的细节
+ *     由 `stores/chat.ts` 的 `connect()` 打 —— 同一件事只在有能力的那一层 warn 一次）。
+ *
+ * ⚠️ 为什么按 **key** 而不是「整个文件里出现过」：变异验证当场抓到过假绿 ——
+ *   把 `chapter.set` 那句里的方法名删掉之后守卫照样绿，因为**另一个分支**（push 那句）
+ *   顺带列着 `onChapterChanged / getChapter / setChapter` 这一族。一句话的意义在于
+ *   「**这一条**缺的是哪一个」，所以判据必须落在**同一个 key 的 detail** 上。
+ */
+const BRIDGE_WIRING_TOKENS: ReadonlyArray<{
+  file: string
+  hints?: string[]
+  tokens: string[]
+  wiredByKey: ReadonlyArray<{ key: string; tokens: string[] }>
+  wiringFile?: string
+}> = [
+  {
+    file: 'src/renderer/src/api/chapter.ts',
+    hints: ['CHAPTER_BRIDGE_MISSING_HINT', 'CHAPTER_SET_MISSING_HINT'],
+    tokens: ['onChapterChanged', 'getChapter', 'setChapter', 'chapter:changed', 'chapter:get', 'chapter:set', 'preload', 'window.api'],
+    wiredByKey: [
+      { key: 'chapter', tokens: ['window.api'] },
+      { key: 'chapter.push', tokens: ['onChapterChanged', 'chapter:changed'] },
+      { key: 'chapter.set', tokens: ['setChapter', 'chapter:set'] }
+    ]
+  },
+  {
+    file: 'src/renderer/src/api/grade.ts',
+    hints: ['GRADE_BRIDGE_MISSING_HINT', 'GRADE_SET_MISSING_HINT'],
+    tokens: ['onGradeChanged', 'getGrade', 'setGrade', 'grade:changed', 'grade:get', 'grade:set', 'preload', 'window.api'],
+    wiredByKey: [
+      { key: 'grade', tokens: ['window.api'] },
+      { key: 'grade.push', tokens: ['onGradeChanged', 'grade:changed'] },
+      { key: 'grade.set', tokens: ['setGrade', 'grade:set'] }
+    ]
+  },
+  {
+    file: 'src/renderer/src/api/study.ts',
+    hints: ['STUDY_BRIDGE_MISSING_HINT'],
+    tokens: [
+      'readStudyReport',
+      'readStudyMistakes',
+      'readStudyChapters',
+      'readStudyGraph',
+      'listSessions',
+      'readSessionTranscript',
+      'searchSessions',
+      'exportMarkdown',
+      'study:',
+      'session:',
+      'file:export',
+      'preload',
+      'window.api'
+    ],
+    wiredByKey: [
+      { key: 'study', tokens: ['window.api'] },
+      { key: 'study.methods', tokens: ['study:', 'file:export'] }
+    ]
+  },
+  {
+    file: 'src/renderer/src/api/sessions.ts',
+    hints: ['SESSION_BRIDGE_MISSING_HINT'],
+    tokens: [
+      'getSessionState',
+      'openSession',
+      'startNewSession',
+      'branchSession',
+      'deleteSession',
+      'onSessionChanged',
+      'session:open',
+      'session:new',
+      'session:branch',
+      'session:delete',
+      'session:state',
+      'session:changed',
+      'preload',
+      'window.api'
+    ],
+    wiredByKey: [
+      { key: 'session', tokens: ['window.api'] },
+      { key: 'session.methods', tokens: ['session:open', 'session:changed'] }
+    ]
+  },
+  {
+    file: 'src/renderer/src/api/data.ts',
+    hints: ['DATA_BRIDGE_MISSING_HINT'],
+    tokens: ['getStudent', 'readProfile', 'readQuizBank', 'gradeQuiz', 'readCodeHint', 'hostAnimation', 'rebuildKnowledge', 'onTraceChanged', 'window.api', 'preload'],
+    wiredByKey: [
+      { key: 'data', tokens: ['window.api'] },
+      { key: 'data.methods', tokens: ['preload'] }
+    ]
+  },
+  {
+    file: 'src/renderer/src/api/settings.ts',
+    hints: ['SETTINGS_BRIDGE_MISSING_HINT'],
+    tokens: ['readSettings', 'saveSettings', 'probeSettings', 'readProviderCatalog', 'fetchProviderModels', 'window.api', 'preload', 'IPC'],
+    wiredByKey: [
+      { key: 'settings', tokens: ['window.api'] },
+      { key: 'settings.methods', tokens: ['preload', 'IPC'] }
+    ]
+  },
+  {
+    // ★ 学生会话两条提示（`localNotice`）内联在 store 里（没有 `*_HINT` 常量）——
+    //   所以这里只靠 `tokens` 那一半（`visibleText()` 会扫到 `localNotice.value = '…'`）。
+    file: 'src/renderer/src/stores/chat.ts',
+    tokens: ['window.api', 'preload'],
+    wiredByKey: [
+      { key: 'chat.connect', tokens: ['window.api', 'preload'] },
+      { key: 'chat.send', tokens: ['window.api', 'preload'] }
+    ]
+  },
+  {
+    // ★ 侧栏状态位那一句（`AppSidebar` 的 `data-testid="sidecar-error"`）
+    file: 'src/renderer/src/stores/sidecar.ts',
+    tokens: ['window.api', 'preload'],
+    wiredByKey: [{ key: 'sidecar', tokens: ['window.api', 'preload'] }]
+  },
+  {
+    // ★★ 这个文件里**只有学生话**（模板文本）：接线细节在 store 里（见 `wiringFile`）——
+    //    同一件事只在有能力的那一层 warn 一次（`warnWiring` 按 key 去重）。
+    file: 'src/renderer/src/views/Chat.vue',
+    tokens: ['window.api', 'preload'],
+    wiredByKey: [{ key: 'chat.connect', tokens: ['window.api', 'preload'] }],
+    wiringFile: 'src/renderer/src/stores/chat.ts'
+  }
+]
+
+test('★★ 桥没接上时：屏幕上是学生话，缺哪个方法 / 哪条通道只在控制台（`warnWiring`）', () => {
+  // ══════════════════════════════════════════════════════════════════════
+  // 这条守卫守的是什么（与它换掉的那条旧断言的关系）
+  // ══════════════════════════════════════════════════════════════════════
+  // 在此之前，`*_MISSING_HINT`（会渲染给学生的那句话）本身就是**接线说明**：
+  // 「preload 白名单缺少 setChapter，需要先在主进程注册「章节设定」通道（invoke，带回执）……
+  //   接线后刷新页面即可生效。」——对**接线的人**这是最有用的那句话，
+  // 对**学生**是：他看不懂的词 + 一件他做不到的事（「刷新页面」对「线没接」是假承诺）。
+  // 现在同一件事分两条通路，这条守卫**同时钉住两边**（少一边都不算改好）：
+  //   ① 屏幕：`*_HINT` 必须是中文学生话，且**一个机器 token 都不许有**；
+  //   ② 控制台：那些 token 必须仍写在一个 `warnWiring(…)` 调用里（意图一个字都没丢）。
+  // ⚠️ 「实参不算界面文本」的凭据在下面那条「例外表必须名副其实」里（读 warnWiring 的函数体）。
+  const problems: string[] = []
+  for (const entry of BRIDGE_WIRING_TOKENS) {
+    const source = read(...entry.file.split('/'))
+    // ① 学生面：常量值必须存在、是中文人话、且不含任何机器 token
+    for (const name of entry.hints ?? []) {
+      const value = constStringValue(source, name)
+      if (value.length === 0) {
+        problems.push(`${entry.file} 取不到 ${name} 的值（改形状就同步 constStringValue 的取法）`)
+        continue
+      }
+      if (!/[\u4e00-\u9fff]/.test(value)) problems.push(`${entry.file} 的 ${name} 不是中文人话：${value}`)
+      for (const token of entry.tokens) {
+        if (value.includes(token)) problems.push(`${entry.file} 的 ${name} 里出现了「${token}」→ ${value}`)
+      }
+    }
+    // ② 学生可见文本（整份文件，含模板 / 属性 / 其它字面量）里也不许有 ——
+    //    这一半顺带是「剥离规则没漏」的自检：`warnWiring(...)` 若没被剥干净，token 会在这里冒出来。
+    //    ⚠️ 只看**含中文的**片段：这些文件里纯 ASCII 的字面量大多是**代码**（模块路径
+    //    `'../../../preload/index'`、`REQUIRED_METHODS` 那张方法名清单、
+    //    `components['schemas']['EmbeddingConfig']` 这种类型索引）—— 它们一个字都印不到屏幕上，
+    //    只是恰好也是「字符串字面量」（`visibleText()` 抽的是字符串，不区分用途）。
+    //    「我们写给学生的文案」在这个仓里一律是中文 ⇒ **带中文 + 带机器 token** 才是真泄露。
+    for (const chunk of visibleText(entry.file, source)) {
+      if (!/[\u4e00-\u9fff]/.test(chunk)) continue
+      for (const token of entry.tokens) {
+        if (chunk.includes(token)) problems.push(`${entry.file} 的学生可见文本里出现了「${token}」→ ${chunk.slice(0, 90)}`)
+      }
+    }
+    // ③ 控制台面：**每个分支各自**点出自己缺的那一个（见 `wiredByKey` 的说明）。
+    //    ⚠️ 接线诊断可能不在本文件（`wiringFile`：`views/Chat.vue` 的细节在 store 里 ——
+    //    同一件事只在有能力的那一层 warn 一次，靠 key 去重）。
+    const wiringSource = read(...(entry.wiringFile ?? entry.file).split('/'))
+    const wiringWhere = entry.wiringFile ?? entry.file
+    const wiringCalls = [...wiringSource.matchAll(/warnWiring\(\s*'([^']+)',\s*([\s\S]*?)\)\n/g)].map((match) => ({
+      key: match[1],
+      span: match[0]
+    }))
+    for (const expectation of entry.wiredByKey) {
+      const call = wiringCalls.find((item) => item.key === expectation.key)
+      if (!call) {
+        problems.push(`${wiringWhere} 少了 \`warnWiring('${expectation.key}', …)\` 这条接线诊断（${entry.file} 的细节就靠它）`)
+        continue
+      }
+      for (const token of expectation.tokens) {
+        if (!call.span.includes(token)) {
+          problems.push(`${wiringWhere} 的 \`warnWiring('${expectation.key}', …)\` 里没点名「${token}」—— 那句话是「照它就能把线接上」的唯一落点`)
+        }
+      }
+    }
+  }
+  assert.deepEqual(
+    problems,
+    [],
+    '屏幕面向学生、控制台面向接线人 —— 这一族文案必须分两条通路：\n' +
+      '  · 学生面（`*_HINT`）：只说他能感知的三件事（什么用不了 / 还能做什么 / 找谁），\n' +
+      '    写法参照对话页空态那句「请老师或家长在『设置 → 高级设置』里配置一下」；\n' +
+      '  · 控制台（`warnWiring(key, detail)`，见 `api/wiring-notice.ts`）：缺哪个方法、要注册哪条通道、\n' +
+      '    接完为什么要重启渲染进程 —— 「照它就能把线接上」这个意图**不许丢**，只是不许印给学生。\n' +
+      `命中 ${problems.length} 处：\n  ${problems.join('\n  ')}`
+  )
+})
+
+test('★★ 上面两张例外表必须名副其实（逐条机械复核，不写「大概是给人看的」）', async () => {
+  // ══════════════════════════════════════════════════════════════════════
+  // 为什么必须另起一条
+  // ══════════════════════════════════════════════════════════════════════
+  // 例外表最容易变成**后门**：理由写得很像那么回事（「这是导出的」「这是给老师看的」），
+  // 而哪天有人把那段字搬到了学生那一半，判据不会发现 —— 它只看「这个文件在表里」。
+  // 所以每条例外都要在这里被**再验一次**，而且尽量验在**行为 / 区域**上，不是再读一遍理由。
+  // （与技术词那张表的「豁免必须名副其实」同一条纪律，别删。）
+
+  // ① markdown.ts：带标记的字面量里**不许有中文**。
+  //    解析器处理的是标记本身（`'**'`、反引号那个单字符字面量、'```'，长度都 ≤3、无中文）；
+  //    「拼出来的句子」才会带中文 —— 而那正是要拦的写法。
+  const parser = read('src', 'renderer', 'src', 'markdown.ts')
+  assert.match(parser, /export function parseMarkdown/, 'markdown.ts 仍必须是解析入口（例外的前提）')
+  const parserProse = visibleText('markdown.ts', parser).filter((text) => /[`*]/.test(text) && /[\u4e00-\u9fff]/.test(text))
+  assert.deepEqual(
+    parserProse,
+    [],
+    'markdown.ts 里出现了「带标记 + 带中文」的字面量 —— 那是在拼句子，不是在处理标记（例外不再成立）'
+  )
+
+  // ② report-markdown.ts：`**` 只许落在喂给 `lines.push(...)` 的文档行里（±3 行窗口）。
+  //    这一条卡的是「屏幕上与导出物共用同一份字」那个坑：谁把 `**` 写进 `summaryLine()` 之类
+  //    会被页面直接渲染的函数，窗口里就看不到 `lines.push(`，这里立刻红。
+  const reportLines = stripComments(read('src', 'renderer', 'src', 'study', 'report-markdown.ts')).split('\n')
+  const strayBold: string[] = []
+  for (const [index, line] of reportLines.entries()) {
+    if (!line.includes('**')) continue
+    const window = reportLines.slice(Math.max(0, index - 3), index + 2).join('\n')
+    if (!/lines\.push\(/.test(window)) strayBold.push(`${index + 1}: ${line.trim()}`)
+  }
+  assert.deepEqual(strayBold, [], 'report-markdown.ts 的 `**` 必须写在导出文档行里（`lines.push(...)`）')
+
+  // ③ `warnWiring(...)` 的实参凭什么不算界面文本（见 `visibleText()` 里那条剥离规则）。
+  //    凭据 = 读 `api/wiring-notice.ts` 的**函数体本身**：它的输出只能进 console，
+  //    一个字节都到不了 DOM（有 `console.warn`、没有任何写 DOM / 返回值）。
+  //    ⚠️ 这条不是「大概给人看的」：谁把这个函数改成会渲染（或让它 return 一段字给界面用），
+  //       下面两条断言立刻红 —— 那时「接线细节不算学生可见文本」就不再成立。
+  const wiring = stripComments(read('src', 'renderer', 'src', 'api', 'wiring-notice.ts'))
+  const warnBody = wiring.slice(
+    wiring.indexOf('export function warnWiring'),
+    wiring.indexOf('export function resetWiringNotices')
+  )
+  assert.ok(warnBody.length > 0, 'api/wiring-notice.ts 里必须有 warnWiring（接线诊断的唯一出口）')
+  assert.match(warnBody, /console\.warn\(/, 'warnWiring 必须把 detail 交给 console.warn')
+  for (const domSink of ['innerText', 'textContent', 'innerHTML', 'document.', 'return ']) {
+    assert.ok(
+      !warnBody.includes(domSink),
+      `warnWiring 里出现了「${domSink}」—— 它一旦能把字交回界面，接线细节就不再是「只在控制台」了`
+    )
+  }
+
+  // ④ labels.ts：**行为面** —— 学生那一半不许有破折号，教师那一半有（两半本来就该不同）。
+  const labels = await import('../src/renderer/src/labels.ts')
+  const forStudent = labels.llmChipTitle({ hasKey: false, modelId: 'deepseek-v4-flash' }, false)
+  const forTeacher = labels.llmChipTitle({ hasKey: false, modelId: 'deepseek-v4-flash' }, true)
+  assert.ok(!forStudent.includes(DASH_MARK), `学生看到的模型说明里出现了破折号：${forStudent}`)
+  assert.ok(forTeacher.includes(DASH_MARK), '教师那一半仍是带破折号的原句（例外就是为它开的）')
+
+  // ⑤ Settings.vue：破折号全部落在高级设置里。
+  //    ★ 分两半判，因为两半的「在高级区」是两件事：
+  //      · **模板**里的破折号 → 按**区域**判（它就在高级区那一段里）；
+  //      · **脚本**里的破折号（`presetHint` / `probeSummary` 这两句白话结论）→ 按**持有者**判：
+  //        持有它的 computed 必须在高级区被渲染（`{{ presetHint }}`），学生那三节里没有它。
+  //    只按文件豁免是假绿：那段字随时可能被搬到学生那一节去（这正是技术词那条守卫踩过的坑）。
+  const settings = stripComments(read('src', 'renderer', 'src', 'views', 'Settings.vue'))
+  const advancedAt = settings.indexOf('data-testid="settings-advanced"')
+  assert.ok(advancedAt > 0, '设置页必须有高级设置区（例外的前提）')
+  const advancedEnd = settings.indexOf('<!-- ── 高级设置结束', advancedAt)
+  const advancedRegion =
+    advancedEnd > advancedAt ? settings.slice(advancedAt, advancedEnd) : settings.slice(advancedAt, settings.lastIndexOf('</template>'))
+  const templateAt = settings.indexOf('<template>')
+  assert.ok(
+    templateAt > 0 && advancedAt > templateAt,
+    `设置页必须是「script 在前、高级区在 template 里」的形状（实测 template 在 ${templateAt}、高级区在 ${advancedAt}）`
+  )
+  const dashes = [...settings.matchAll(/——/g)].map((match) => match.index)
+  assert.ok(dashes.length > 0, '这条例外的前提是「破折号都在高级区里」—— 现在一个都没有了，请删掉这条条目')
+  for (const at of dashes.filter((index) => index > templateAt)) {
+    assert.ok(
+      at > advancedAt && at < advancedAt + advancedRegion.length,
+      '设置页的模板里出现了**高级区之外**的破折号（学生默认就能看到那一块）—— 例外不再成立'
+    )
+  }
+  /**
+   * 脚本里那几处破折号的持有者（`const X = computed(() => …)`）。
+   * ⚠️ 找的是**它前面最近的那个 computed**：`presetHint` / `probeSummary` 都是这一形状。
+   */
+  const holders = [...settings.slice(0, templateAt).matchAll(/const (\w+) = computed\(/g)].map((match) => ({
+    name: match[1],
+    at: match.index
+  }))
+  const dashHolders: string[] = []
+  for (const at of dashes.filter((index) => index < templateAt)) {
+    const holder = holders.filter((entry) => entry.at < at).pop()
+    assert.ok(holder, '脚本里的破折号必须落在一个 computed 里（找不到持有者就说明形状变了，同步这条凭据）')
+    dashHolders.push(holder.name)
+    assert.match(
+      advancedRegion,
+      new RegExp(`\\{\\{\\s*${holder.name}\\s*\\}\\}`),
+      `破折号在 \`${holder.name}\` 里，但高级区没有渲染它 —— 那它渲染到哪去了？`
+    )
+  }
+  for (const section of ['grade', 'chapter', 'theme']) {
+    const at = settings.indexOf(`data-section="${section}"`)
+    const end = settings.indexOf('</SurfacePanel>', at)
+    const region = settings.slice(at, end > at ? end : at + 4000)
+    assert.ok(!region.includes(DASH_MARK), `学生那一节「${section}」里出现了破折号 —— 它没有例外`)
+    for (const holder of dashHolders) {
+      assert.ok(!region.includes(holder), `学生那一节「${section}」渲染了 \`${holder}\`（那里面有破折号）`)
+    }
+  }
+
+  // ⑥ pyodide.worker.ts：`capability.detail` 的唯一消费点必须是**一句 console**（从不上屏）。
+  const runner = stripComments(read('src', 'renderer', 'src', 'sandbox', 'pyodide-runner.ts'))
+  const detailLines = runner.split('\n').flatMap((line, index) => (line.includes('capability.detail') ? [index] : []))
+  assert.ok(detailLines.length > 0, 'pyodide-runner.ts 仍要读 capability.detail（例外的前提）')
+  for (const index of detailLines) {
+    const around = runner.split('\n').slice(Math.max(0, index - 6), index + 2).join('\n')
+    assert.match(around, /log\(/, '`capability.detail` 必须仍只进 console 日志（`log(...)`）—— 它一旦上屏，这条例外就不成立')
+  }
+  const card = read('src', 'renderer', 'src', 'cards', 'CodingCard.vue')
+  assert.ok(!card.includes('capability.detail'), '关卡卡片只许读 `capability.interruptible`，不许把 detail 渲染出来')
 })

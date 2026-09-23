@@ -54,6 +54,7 @@ registerHooks({
 const { normalizeGradeState, resolveGradeBridge } = await import('../src/renderer/src/api/grade.ts')
 const { GRADE_LABELS, GRADE_UNKNOWN_LABEL, gradeAdaptNotice, gradeManualNotice, gradeOriginLabel } =
   await import('../src/renderer/src/labels.ts')
+const { resetWiringNotices } = await import('../src/renderer/src/api/wiring-notice.ts')
 const { useChatStore } = await import('../src/renderer/src/stores/chat.ts')
 
 /* ------------------------------------------------------------------ *
@@ -62,7 +63,7 @@ const { useChatStore } = await import('../src/renderer/src/stores/chat.ts')
 
 test('normalizeGradeState：★ 五态都认（explicit / llm / rules / inferred / 其它 → default）', () => {
   // ★ 2026-09-21（D-066）：`rules`（本地规则判定）与 `llm`（AI 引擎判定）是**新增**的两种 ——
-  //   漏掉它们，「本地规则判定」这条推送会被整条丢掉，界面永远停在「待判定」。
+  //   漏掉它们，「本地规则判定」这条推送会被整条丢掉，界面永远停在「还没认出年级」。
   assert.deepEqual(normalizeGradeState({ gradeLevel: 'junior', origin: 'rules' }), {
     gradeLevel: 'junior',
     origin: 'rules'
@@ -81,7 +82,7 @@ test('normalizeGradeState：★ 五态都认（explicit / llm / rules / inferred
     gradeLevel: 'senior',
     origin: 'explicit'
   })
-  // 认不出的来源一律按 `default`（宁可显示「待判定」，也不假装系统判过）
+  // 认不出的来源一律按 `default`（宁可显示「还没认出年级」，也不假装系统判过）
   assert.deepEqual(normalizeGradeState({ gradeLevel: 'junior', origin: 'college' }), {
     gradeLevel: 'junior',
     origin: 'default'
@@ -117,7 +118,7 @@ test('gradeOriginLabel：★ 每一档都说清「谁定的」，且不拿冷启
   assert.equal(
     gradeOriginLabel('default'),
     GRADE_UNKNOWN_LABEL,
-    '还没判过就必须说「待判定」，不许替 AI 认领'
+    '还没判过就必须说「还没认出年级」，不许替 AI 认领'
   )
   assert.equal(gradeOriginLabel(null), GRADE_UNKNOWN_LABEL, '没收到推送时同理')
   // 两个引擎层级分得清（报告要讲「第 3 轮本地规则判定 → 第 12 轮 AI 引擎判定」）
@@ -131,8 +132,24 @@ test('gradeOriginLabel：★ 每一档都说清「谁定的」，且不拿冷启
   // 历史值折算：`inferred` = 规则判过
   assert.equal(gradeOriginLabel('inferred'), '本地规则判定')
   // 与「还没判出来」的说法不撞车（那句只用于学段本身）
-  assert.equal(GRADE_UNKNOWN_LABEL, '待判定')
+  //
+  // ★★ 2026-09-22 改词（设计评审报告 0.2 术语表）：「待判定」→「还没认出年级」。
+  //   「判定」是后端规则引擎的动作（`rules.py` 视角），而学生读到的是三个自己没做过、
+  //   也不知道谁在做的事；新词只说**现在是什么状态**，不点破机制。
+  // ★★ 这里**故意把字面量写死**，不是引用 `GRADE_UNKNOWN_LABEL` 去比它自己：
+  //   这条断言守的就是「学生眼睛看到的到底是哪几个字」——写成引用常量的话，
+  //   谁把常量改坏，守卫会跟着一起变，等于没有守卫（改词时必须有人来改这一行）。
+  assert.equal(GRADE_UNKNOWN_LABEL, '还没认出年级')
   assert.ok(!Object.values(GRADE_LABELS).includes(gradeOriginLabel(null)))
+
+  // ★ 上面是逐档断言，这里把**学生看得见的那张词表**一次钉全（四档一个不少、一个不错位）：
+  //   手动选中 / AI 引擎判定 / 本地规则判定 / 还没认出年级。
+  //   一次钉全的好处是：改词的人不可能只改掉其中一句而让这条守卫漏过去。
+  assert.deepEqual(
+    [gradeOriginLabel('explicit'), gradeOriginLabel('llm'), gradeOriginLabel('rules'), gradeOriginLabel('default')],
+    ['手动选中', 'AI 引擎判定', '本地规则判定', '还没认出年级'],
+    '四档说法就是学生看到的四个词 —— 改词要连这一行一起改（改完跑 scripts/ux-student-view-scan.mjs 的学段浮层兜底正则）'
+  )
 })
 
 test('两句一次性提示各有主语：系统自己适配 ≠ 学生自己选的', () => {
@@ -229,17 +246,34 @@ test('★ setGrade 失败：返回可读中文，且**一点都不许改**本地
   assert.equal(chat.gradeNotice, noticeBefore)
 })
 
-test('桥缺 setGrade（分步接线的老产物）：不抛、给可读中文、界面状态不变', async () => {
+test('★★ 桥缺 setGrade（分步接线的老产物）：屏幕上是学生话、细节进控制台、界面状态不变', async () => {
   installFakeBridge({ withSetGrade: false })
   setActivePinia(createPinia())
   const chat = useChatStore()
 
+  // ★★ 2026-09-22 改口径（设计评审报告 0.2 + 双视角 D-063），**不是放宽**：
+  //   原来它要 `result.message` **包含 `setGrade`** —— 而那句话是渲染给学生的
+  //   （学段那一栏的提示）。现在同一件事分两条通路，这条用例把两边都钉住：
+  //     ① 屏幕（message）是**干净的学生话**（无方法名 / 通道名 / preload / window.api）；
+  //     ② 控制台仍有接线细节（缺哪个方法）—— 「照它就能把线接上」这个意图没丢。
+  //   全量（4 个桥 × 每个常量）的那一份在 `tests/student-view-discipline.test.ts` 的 ⑱。
+  let bridging: ReturnType<typeof resolveGradeBridge> | null = null
+  const warnings: string[] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => String(arg)).join(' '))
+  }
+  try {
+    resetWiringNotices() // 去重记忆清掉，否则本文件先跑过的用例会把这条 warn 吃掉
+    bridging = resolveGradeBridge()
+  } finally {
+    console.warn = originalWarn
+  }
   // 只读能力还在：桥本身是就绪的（这条要能建起来，否则下面的断言会掩盖真正的问题）
-  const lookup = resolveGradeBridge()
-  assert.equal(lookup.ready, true, 'onGradeChanged 在的话桥就该就绪（只是暂时不能手动设定）')
-  assert.equal(typeof lookup.bridge.getGrade, 'function')
+  assert.equal(bridging.ready, true, 'onGradeChanged 在的话桥就该就绪（只是暂时不能手动设定）')
+  assert.equal(typeof bridging.bridge.getGrade, 'function')
   assert.equal(
-    lookup.bridge.setGrade,
+    bridging.bridge.setGrade,
     undefined,
     'window.api 上没有 setGrade 时，桥也不该凭空长出一个'
   )
@@ -247,9 +281,16 @@ test('桥缺 setGrade（分步接线的老产物）：不抛、给可读中文�
   const result = await chat.setGrade('junior') // 不许抛
 
   assert.equal(result.ok, false)
+  for (const forbidden of ['setGrade', 'grade:', 'preload', 'window.api', '`']) {
+    assert.ok(
+      !String(result.message).includes(forbidden),
+      `学生面那句话里出现了「${forbidden}」：${String(result.message)}`
+    )
+  }
+  assert.ok(/[\u4e00-\u9fff]/.test(String(result.message)), '学生面必须是中文人话')
   assert.ok(
-    typeof result.message === 'string' && result.message.includes('setGrade'),
-    `失败说明要指出缺的是哪个方法（照它就能把线接上）：${String(result.message)}`
+    warnings.some((line) => line.includes('setGrade')),
+    `接线细节必须进控制台（照它就能把线接上）：实际 warn = ${JSON.stringify(warnings)}`
   )
   assert.equal(chat.currentGrade, null, '没成功就不许改状态（尤其不许拿默认值顶上）')
   assert.equal(chat.gradeOrigin, null)
