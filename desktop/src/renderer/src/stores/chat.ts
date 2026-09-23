@@ -57,6 +57,7 @@ import {
   type InlineCard
 } from '../api/events'
 import { resolveSessionBridge } from '../api/sessions'
+import { warnWiring } from '../api/wiring-notice'
 
 export const useChatStore = defineStore('chat', () => {
   const conversation = ref<ConversationState>(emptyConversation())
@@ -337,7 +338,15 @@ export const useChatStore = defineStore('chat', () => {
     if (unsubscribe !== null) return
     if (typeof window === 'undefined' || typeof window.api === 'undefined') {
       bridgeReady.value = false
-      localNotice.value = '预加载脚本未生效（window.api 缺失），对话通道不可用。'
+      // ★★ 2026-09-22 改口（报告 0.2 + 双视角 D-063）：屏幕上是学生话，
+      //    「缺什么 / 怎么接」进控制台（`warnWiring`，见 `api/wiring-notice.ts` 的文件头）。
+      //    ⚠️ 这一句也是 `views/Chat.vue` 那条「对话暂时用不了」的接线细节 ——
+      //    两处说的是同一件事（对话桥缺失），所以**只在 store 这里 warn 一次**（key 去重）。
+      warnWiring(
+        'chat.connect',
+        'window.api 缺失：preload 没有加载（对话事件流整块不可用）。检查 preload 入口与 contextIsolation / sandbox 配置。'
+      )
+      localNotice.value = '对话暂时用不了，可以先看看别的页面；需要时请老师帮忙看看。'
       return
     }
     bridgeReady.value = true
@@ -888,7 +897,7 @@ export const useChatStore = defineStore('chat', () => {
     // 只在「从有到无」时给那句话（学生自己选「不限章节」时不该报「被清空了」——
     // 那是他刚做的选择，回执由 setChapter 给）
     if (hadChapter && next.chapterTitle === '') {
-      chapterNotice.value = '学段变了，之前选的教材章节已清空 —— 可以重新选一章，或直接自由问答。'
+      chapterNotice.value = '学段变了，之前选的教材章节已清空。可以重新选一章，或直接自由问答。'
     }
   }
 
@@ -1064,7 +1073,12 @@ export const useChatStore = defineStore('chat', () => {
     openingDismissed.value = true
     if (typeof window === 'undefined' || typeof window.api === 'undefined') {
       bridgeReady.value = false
-      localNotice.value = '预加载脚本未生效（window.api 缺失），无法发送。'
+      // 同 `connect()`：屏幕学生话 + 控制台接线细节（这条是「发送」那条线缺了）
+      warnWiring(
+        'chat.send',
+        'window.api 缺失：preload 没有加载（sendChat 那条 invoke 通道不可用，这一句发不出去）。检查 preload 入口与 contextIsolation / sandbox 配置。'
+      )
+      localNotice.value = '这句话没能发出去。可以再试一次，还不行就请老师帮忙看看。'
       return
     }
 

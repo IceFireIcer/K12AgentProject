@@ -4,8 +4,10 @@
  *
  * 这一页是两份东西的**合体**（用户裁决：合并进既有的 report 分页，不新开第六个分页）：
  *
- * ① 原有的**学习报告**：四张统计磁贴、每日明细、掌握度、章节进度、闯关计数、学段轨迹
+ * ① 原有的**学习报告**：四个关键数字、每日明细、掌握度、章节进度、闯关计数、学段轨迹
  *    —— 数据来自 `GET /api/profile/{id}/report`（`stores/study.ts`）。
+ *    ⚠️ **全 0 时不摆仪表盘**（报告 1.6）：没有任何学习活动时只渲染一个空态
+ *    （一句话 + 一个主行动），有数据后才渲染这些区块 —— 判据是 `hasActivity`。
  * ② 原型里的**概览**：平均掌握度、近 N 日学习量图、继续学习（推荐）、逐关进度、
  *    学段判定信号、学段变化时间线 —— 数据来自 `useInsightStore`
  *    （画像 / 推荐 / 学段信号 / 学段轨迹）与 `useQuizStore`（闯关进度）。
@@ -40,12 +42,15 @@ import { useUiStore } from '../stores/ui'
 import {
   SIGNAL_TYPE_LABELS,
   STAGE_LABELS,
+  STUDENT_FALLBACK_NAME,
   formatMs,
+  hasLearningActivity,
   masteryLabel,
   summaryLine
 } from './report-markdown'
 import { kpLabel, UNKNOWN_KP_LABEL } from './kp-label'
 import TeacherGate from '../components/TeacherGate.vue'
+import EmptyState from '../components/EmptyState.vue'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL, gradeOriginLabel } from '../labels'
 // `GradeOrigin` 的唯一来源是 `main/ipc/channels.ts`，由 `api/grade.ts` re-export
 // （与 labels.ts 同一写法）；`GradeSignalsView` 是生成物别名，在 `api/data.ts`。
@@ -63,18 +68,47 @@ const chat = useChatStore()
 const ui = useUiStore()
 
 const report = computed(() => study.report)
+
+/**
+ * ★★ **「当前学段」只有一个来源**（报告 2.2 明令禁止「大字给值、小字否定值」）。
+ *
+ * 这一块此前是**跨源拼装**：大字取报告端点的 `gradeLevel`、小字取 chat store 的
+ * `gradeOrigin`。两者不同步时（服务端冷启动会先落一行基线值）就会拼出
+ * 「初中 + 还没认出年级」这种自相矛盾的组合。
+ *
+ * 现在两行**同源**，都取 `chat`（主进程推来的实时学段状态 —— 侧栏与指示器读的
+ * 也是同一处，符合报告 2.1 的「全局唯一状态源」）：
+ *   · 大字：判定出来了才显示具体学段，否则 `GRADE_UNKNOWN_LABEL`；
+ *   · 小字（来源）：**未判定时整行不显示**（那时没有来源可说，硬写一句只会打架）。
+ *
+ * ⚠️ `chat.gradeOrigin` 里不会出现 `'default'`：冷启动基线被 store 整条丢掉
+ *    （见 `stores/chat.ts` 的 `applyGradeState`），所以「有值」就等于「真的定下来了」。
+ * ★ 中文说法一律交给 `gradeOriginLabel()`（唯一实现），本文件不写第二份映射。
+ *   ⚠️ 这里曾经写死一句「由系统自动判定」：D-037 之后学生可以手动指定学段，
+ *   那句话在手动选中后就成了一句假话。
+ */
 const gradeLabel = computed(() => {
-  const level = report.value?.gradeLevel
+  const level = chat.currentGrade
   return level ? (GRADE_LABELS[level] ?? level) : GRADE_UNKNOWN_LABEL
 })
+const gradeOriginHint = computed(() =>
+  chat.gradeOrigin === null ? '' : gradeOriginLabel(chat.gradeOrigin)
+)
+
 /**
- * 「当前学段是怎么定下来的」——取 `chat.gradeOrigin`（主进程推来的**实时**值）。
+ * ★ 有没有**任何学习活动** —— 空态与仪表盘的分界（报告 1.6）。
  *
- * ⚠️ 这里曾经写死一句「由系统自动判定」：D-037 之后学生可以手动指定学段，
- *    那句话在手动选中后就成了一句假话。中文说法一律交给 `gradeOriginLabel()`
- *    （唯一实现，指示器与设置页也调它），本文件不写第二份映射。
+ * ★ 判据只有一份实现：`./report-markdown.ts` 的 `hasLearningActivity()`
+ *   —— 导出摘要行（报告 C9）问的是同一个问题。两处各写一份，迟早会拼出
+ *   「页面说『还没有学习记录』、摘要行却在报三个 0」这种自相矛盾的屏。
+ * ★ 全 0 时界面只给一个空态（一句话 + 一个主行动），绝不摆一排 0 的仪表盘。
  */
-const gradeOrigin = computed(() => gradeOriginLabel(chat.gradeOrigin))
+const hasActivity = computed(() => (report.value ? hasLearningActivity(report.value) : false))
+
+/** 空态的主行动：去闯关做第一道题（导航只有 `stores/ui.ts` 一处真相）。 */
+function startFirstQuiz(): void {
+  ui.go('quiz')
+}
 const summary = computed(() =>
   report.value ? summaryLine(report.value, study.reportDays) : ''
 )
@@ -273,7 +307,7 @@ function openRecommendation(): void {
 const recommendationEmpty = computed(
   () =>
     insight.recommendation?.summary ||
-    '暂时没有推荐 —— 先在对话里聊几句，系统会按依赖图与掌握度给出下一步。'
+    '暂时没有推荐。先在对话里聊几句，系统会按依赖图与掌握度给出下一步。'
 )
 
 /* ------------------------------------------------------------------ *
@@ -518,305 +552,336 @@ onMounted(() => {
     </p>
 
     <template v-else-if="report">
-      <!-- 概览 hero：全页唯一的 22px（平均掌握度）。其余数字一律 16px 及以下。 -->
-      <div class="hero" data-testid="report-hero">
-        <div class="hero__top">
-          <div class="hero__id">
-            <p class="hero__name">{{ report.nickname || report.studentId }}</p>
-            <p class="hero__grade">近 {{ study.reportDays }} 天的学习报告</p>
-          </div>
-          <div class="hero__mastery">
-            <p class="hero__num k12-num" data-testid="report-mastery-average">
-              <!-- 没有掌握度时不摆一个「0%」：那会被读成「全都没学会」，是假结论 -->
-              <template v-if="hasMastery"
-                >{{ masteryAveragePercent }}<span class="hero__unit">%</span></template
-              >
-              <template v-else>—</template>
-            </p>
-            <p class="hero__cap" data-testid="report-mastery-summary">
-              <template v-if="hasMastery">
-                平均掌握度 · 共 {{ masterySummary.total }} 个知识点（已掌握 {{ masterySummary.mastered }} ·
-                待加强 {{ masterySummary.needWork }}）
-              </template>
-              <template v-else>还没有掌握度记录 —— 做几道题之后这里会显示平均掌握度</template>
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <!-- 概览部分取数失败：如实说清哪一块没读上来，但**不遮住**报告本身 -->
-      <p v-if="insightIssue" class="state state--warn" data-testid="report-insight-error">
-        概览的部分数据没读上来（下面的报告不受影响）：{{ insightIssue }}
-      </p>
-
-      <div class="cards">
-        <div class="card">
-          <p class="card__label">学习活动</p>
-          <p class="card__value k12-num" data-testid="report-total">{{ report.totalActivities }}</p>
-          <p class="card__hint">近 {{ study.reportDays }} 天</p>
-        </div>
-        <div class="card">
-          <p class="card__label">练习题</p>
-          <p class="card__value k12-num" data-testid="report-quiz">
-            {{ report.quizCorrect }}/{{ report.quizTotal }}
-          </p>
-          <p class="card__hint">
-            {{
-              report.quizTotal > 0
-                ? `正确率 ${Math.round((report.quizCorrect / report.quizTotal) * 100)}%`
-                : '还没有作答'
-            }}
-          </p>
-        </div>
-        <div class="card">
-          <p class="card__label">连续学习</p>
-          <p class="card__value k12-num" data-testid="report-streak">{{ report.streakDays }} 天</p>
-          <p class="card__hint">{{ report.todayStudied ? '今天已学习' : '今天还没开始' }}</p>
-        </div>
-        <div class="card">
-          <p class="card__label">当前学段</p>
-          <p class="card__value" data-testid="report-grade">{{ gradeLabel }}</p>
-          <!-- 来源取自主进程推来的实时值：手动选中 / AI 引擎推算（唯一实现是 gradeOriginLabel） -->
-          <p class="card__hint">{{ gradeOrigin }}</p>
-        </div>
-      </div>
-
-      <p class="summary" data-testid="report-summary">{{ summary }}</p>
-
-      <!-- 继续学习：推荐来自唯一出口（/recommendation），本页不算、只展示 -->
-      <h3 class="section">继续学习</h3>
-      <div v-if="recommended" class="reco" data-testid="report-recommendation">
-        <span class="reco__pill" :title="recommended.kpId">{{ recommendedName }}</span>
-        <p class="reco__desc">{{ recommended.reason }}</p>
-        <span class="reco__meta k12-num">当前掌握度 {{ percentOf(recommended.mastery) }}%</span>
-        <el-button
-          type="primary"
-          size="small"
-          data-testid="report-recommendation-cta"
-          @click="openRecommendation()"
+      <!-- ★★ 空态（报告 1.6）：**没有任何学习活动时只给这句话 + 一个主行动**。
+           以前这里照样渲染四张 metric 卡（全 0）、「继续学习」卡、章节进度列表 ——
+           一屏 0 的仪表盘，学生读到的不是「还没开始」，而是「软件坏了」。
+           判据是真实数据：`hasActivity` → `hasLearningActivity()`（唯一实现，见
+           `./report-markdown.ts`）。⚠️ 章节目录与冷启动铺的关卡**不算**活动。 -->
+      <EmptyState
+        v-if="!hasActivity"
+        data-testid="report-empty"
+        mascot
+        title="还没有学习记录"
+        desc="去闯关做第一道题，或者在对话里问一句，这里就会开始有内容。"
+      >
+        <button
+          class="k12-cta"
+          type="button"
+          data-testid="report-empty-cta"
+          @click="startFirstQuiz()"
         >
-          {{ recommendationCta }}
-        </el-button>
-      </div>
-      <p v-else class="state" data-testid="report-recommendation-empty">
-        {{ recommendationEmpty }}
-      </p>
+          去做第一道题
+        </button>
+      </EmptyState>
 
-      <!-- 每日学习：图 + 表。★ 图只画 daily 里有的三个数，不虚构动画/编程的分类。 -->
-      <h3 class="section">每日学习</h3>
-      <p v-if="report.daily.length === 0" class="state">这段时间还没有学习记录。</p>
       <template v-else>
-        <div class="chart" data-testid="report-activity-chart">
-          <div class="chart__head">
-            <span class="chart__title">近 {{ study.reportDays }} 天学习量</span>
-            <span class="chart__meta k12-num" data-testid="report-activity-summary">
-              合计 {{ weeklyTotal }} 次<template v-if="peakDay">
-                · 峰值 {{ peakDay.day }}（{{ peakDay.total }} 次）</template
-              >
-            </span>
-          </div>
-          <div class="chart__bars" role="img" :aria-label="chartLabel">
-            <div
-              v-for="bar in dayBars"
-              :key="bar.day"
-              class="chart__bar"
-              :data-testid="`report-activity-${bar.day}`"
-              :title="barTitle(bar)"
-            >
-              <span class="chart__stack">
-                <span class="chart__seg chart__seg--other" :style="{ height: barHeight(bar.other) }"></span>
-                <span class="chart__seg chart__seg--wrong" :style="{ height: barHeight(bar.quizWrong) }"></span>
-                <span class="chart__seg chart__seg--ok" :style="{ height: barHeight(bar.correct) }"></span>
-              </span>
-              <span class="chart__day">{{ dayLabel(bar.day) }}</span>
+        <!-- 概览 hero：全页唯一的 hero 数字（平均掌握度）。其余数字一律 18px 及以下。 -->
+        <div class="hero" data-testid="report-hero">
+          <div class="hero__top">
+            <div class="hero__id">
+              <p class="hero__name">{{ report.nickname || STUDENT_FALLBACK_NAME }}</p>
+              <p class="hero__grade">近 {{ study.reportDays }} 天的学习报告</p>
+            </div>
+            <div class="hero__mastery">
+              <p class="hero__num k12-num" data-testid="report-mastery-average">
+                <!-- 没有掌握度时不摆一个「0%」：那会被读成「全都没学会」，是假结论 -->
+                <template v-if="hasMastery"
+                  >{{ masteryAveragePercent }}<span class="hero__unit">%</span></template
+                >
+                <template v-else>—</template>
+              </p>
+              <p class="hero__cap" data-testid="report-mastery-summary">
+                <template v-if="hasMastery">
+                  平均掌握度 · 已掌握 {{ masterySummary.mastered }} /
+                  {{ masterySummary.total }} 个知识点，待加强 {{ masterySummary.needWork }} 个
+                </template>
+                <template v-else>还没有掌握度记录。</template>
+              </p>
             </div>
           </div>
-          <div class="legend">
-            <!-- 图例顺序 = 柱子里从上到下的分段顺序（对不上会让人以为读到别的色块）。
-                 ★ 每段的色块与柱子里那一段**同款**（含「练习没答对」的斜纹）：
-                   颜色不是唯一的区分手段，灰度打印或色觉差异下三段照样分得开。 -->
-            <span class="legend__i"><i class="dot dot--other" aria-hidden="true"></i>其他活动</span>
-            <span class="legend__i"><i class="dot dot--wrong" aria-hidden="true"></i>练习没答对</span>
-            <span class="legend__i"><i class="dot dot--ok" aria-hidden="true"></i>练习答对</span>
+        </div>
+
+        <!-- 概览部分取数失败：如实说清哪一块没读上来，但**不遮住**报告本身 -->
+        <p v-if="insightIssue" class="state state--warn" data-testid="report-insight-error">
+          概览的部分数据没读上来（下面的报告不受影响）：{{ insightIssue }}
+        </p>
+
+        <!-- 四个关键数字：**无框一排**（报告 4.1 / 4.3）—— 它们是纯说明，
+             不是可操作对象，所以不给卡片（边框 = 层级，卡片只留给能点的东西）。 -->
+        <div class="stats">
+          <div class="stat">
+            <p class="stat__label">学习活动</p>
+            <p class="stat__value k12-num" data-testid="report-total">{{ report.totalActivities }}</p>
+            <p class="stat__hint">近 {{ study.reportDays }} 天</p>
           </div>
-          <!-- 给学生的一句话（原来这里是一段解释后端字段的「开发笔记」：
-               「端点只给…三个数…不做拆分」—— 那是设计说明，不该出现在学生眼前）。
-               口径本身没丢：它移进了下面的教师视角块。 -->
-          <p class="chart__note">把鼠标停在柱子上，就能看到当天的具体数字。</p>
-          <TeacherGate label="为什么图上只有这三段">
-            <p class="chart__note">
-              学习报告端点（<code>LearningReport.daily</code>）每天只回三个数：
-              活动总量 <code>count</code> / 练习数 <code>quizCount</code> / 答对数
-              <code>correctCount</code>，没有「问答 / 动画 / 编程」的分类维度，
-              所以图上只分这三段 —— 数据里没有的色块不画（画出来就是假统计）。
+          <div class="stat">
+            <p class="stat__label">练习题</p>
+            <p class="stat__value k12-num" data-testid="report-quiz">
+              答对 {{ report.quizCorrect }} / {{ report.quizTotal }}
             </p>
-          </TeacherGate>
-        </div>
-
-        <h4 class="subsection">每日明细</h4>
-        <table class="table" data-testid="report-daily">
-          <thead>
-            <tr><th>日期</th><th class="num">活动</th><th class="num">练习</th><th class="num">答对</th></tr>
-          </thead>
-          <tbody>
-            <tr v-for="day in report.daily" :key="day.day">
-              <td>{{ day.day }}</td>
-              <td class="num">{{ day.count }}</td>
-              <td class="num">{{ day.quizCount }}</td>
-              <td class="num">{{ day.correctCount }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </template>
-
-      <!-- 掌握度 -->
-      <h3 class="section">
-        知识点掌握
-        <span v-if="report.mastery.length > 0" class="section__meta">
-          按掌握度从高到低 · 共 {{ report.mastery.length }} 个
-        </span>
-      </h3>
-      <p v-if="report.mastery.length === 0" class="state">还没有掌握度记录。</p>
-      <ul v-else class="list" data-testid="report-mastery">
-        <li v-for="item in report.mastery" :key="item.kpId" class="row">
-          <!-- 知识点名优先（与闯关 / 错题本同一来源）；取不到时显示中性标签、
-               原始标识只进 title —— 不编名字，也不把 slug 摆到学生眼前
-               （口径见 `study/kp-label.ts`：`learning.db` 里可能有上一代教材的残留行） -->
-          <span class="row__name" :title="item.kpId">{{ nameOf(item.kpId) }}</span>
-          <span class="bar"><span class="bar__fill" :style="{ width: barWidth(item.score) }"></span></span>
-          <span class="row__score">{{ item.score.toFixed(2) }}</span>
-          <span class="row__tag">{{ masteryLabel(item.score) }}</span>
-          <span class="row__meta">{{ item.correct }}/{{ item.attempts }} 次答对</span>
-        </li>
-      </ul>
-
-      <!-- 章节进度 -->
-      <h3 class="section">章节进度</h3>
-      <p v-if="report.chapters.length === 0" class="state">还没有章节进度记录。</p>
-      <ul v-else class="list" data-testid="report-chapters">
-        <li v-for="chapter in report.chapters" :key="chapter.chapterTitle" class="row">
-          <span class="row__name">{{ chapter.chapterTitle }}</span>
-          <span class="bar">
-            <span
-              class="bar__fill"
-              :style="{
-                width: chapter.kpCount > 0
-                  ? `${Math.round((chapter.masteredCount / chapter.kpCount) * 100)}%`
-                  : '0%'
-              }"
-            ></span>
-          </span>
-          <span class="row__score">{{ chapter.masteredCount }}/{{ chapter.kpCount }}</span>
-          <span class="row__meta">已测验 {{ chapter.quizzedCount }}</span>
-        </li>
-      </ul>
-
-      <!-- 闯关 + 徽章 + 逐关进度 -->
-      <h3 class="section">闯关与徽章</h3>
-      <p v-if="Object.keys(report.stageCounts).length === 0" class="state">还没有开始闯关。</p>
-      <ul v-else class="list" data-testid="report-stages">
-        <li v-for="(count, stage) in report.stageCounts" :key="stage" class="row">
-          <span class="row__name">{{ stageLabel(stage) }}</span>
-          <span class="row__score">{{ count }}</span>
-          <span class="row__meta">个知识点</span>
-        </li>
-      </ul>
-      <p v-if="report.badges.length > 0" class="badges" data-testid="report-badges">
-        已获得徽章：{{ report.badges.join('、') }}
-      </p>
-
-      <!-- 逐关进度：`quiz.levels` 是服务端按依赖图排好的顺序，这里**一行排序都不做**。
-           关卡徽章不在这里重复渲染 —— 它的展示位是闯关页的关卡条（本页的徽章来自报告端点）。 -->
-      <h4 class="subsection">
-        逐关进度
-        <span v-if="quizLevels.length > 0" class="section__meta">
-          {{ quizSummary.mastered }}/{{ quizSummary.total }} 已掌握
-        </span>
-      </h4>
-      <p v-if="quizLevels.length === 0" class="state" data-testid="report-quiz-progress-empty">
-        还没有可闯的关卡 —— 知识库就绪后，服务端会按依赖图为这名学生播种关卡路径。
-      </p>
-      <div v-else class="rows" data-testid="report-quiz-progress">
-        <div
-          v-for="level in quizLevels"
-          :key="level.kpId"
-          class="row"
-          :data-testid="`report-quiz-level-${level.kpId}`"
-          :data-stage="level.stage"
-        >
-          <span
-            class="row__name"
-            :title="nameResolved(level.kpId) ? undefined : level.kpId"
-          >{{ nameOf(level.kpId) }}</span>
-          <el-tag size="small" effect="plain" :type="stageTag(level.stage)">
-            {{ stageLabel(level.stage) }}
-          </el-tag>
-          <el-progress
-            class="row__bar"
-            :percentage="percentOf(level.mastery)"
-            :stroke-width="7"
-            :show-text="false"
-            color="var(--k12-accent)"
-          />
-          <span class="row__score k12-num">{{ percentOf(level.mastery) }}%</span>
-        </div>
-      </div>
-
-      <!-- 学段依据：判定信号 + 变化轨迹（全部只读，本页没有任何学段写入口） -->
-      <h3 class="section">
-        学段依据
-        <span v-if="confidencePercent !== null" class="section__meta">
-          置信度 {{ confidencePercent }}% · 只读
-        </span>
-      </h3>
-      <div v-if="signals.length > 0" class="signals" data-testid="report-grade-signals">
-        <div
-          v-for="signal in signals"
-          :key="signal.signalType"
-          class="sig"
-          :data-testid="`report-grade-signal-${signal.signalType}`"
-          :data-signal-type="signal.signalType"
-        >
-          <div class="sig__top">
-            <span class="sig__type">{{ signalLabel(signal.signalType) }}</span>
-            <span class="sig__val k12-num">{{ percentOf(signal.value) }}%</span>
+            <p class="stat__hint">
+              {{
+                report.quizTotal > 0
+                  ? `正确率 ${Math.round((report.quizCorrect / report.quizTotal) * 100)}%`
+                  : '还没有作答'
+              }}
+            </p>
           </div>
-          <el-progress
-            :percentage="percentOf(signal.value)"
-            :stroke-width="7"
-            :show-text="false"
-            color="var(--k12-accent)"
-          />
-          <p v-if="signal.raw" class="sig__raw">{{ signal.raw }}</p>
+          <div class="stat">
+            <p class="stat__label">连续学习</p>
+            <p class="stat__value k12-num" data-testid="report-streak">{{ report.streakDays }} 天</p>
+            <p class="stat__hint">{{ report.todayStudied ? '今天已学习' : '今天还没开始' }}</p>
+          </div>
+          <div class="stat">
+            <p class="stat__label">当前学段</p>
+            <p class="stat__value" data-testid="report-grade">{{ gradeLabel }}</p>
+            <!-- 来源小字与上面的学段**同源**（chat store）且只在真的判定出来之后显示：
+                 那时它说的是「谁定的」（手动选中 / AI 引擎判定 / 本地规则判定）。
+                 ★ 未判定时整行不出现 —— 绝不出现「大字给值、小字否定值」（报告 2.2）。 -->
+            <p v-if="gradeOriginHint" class="stat__hint">{{ gradeOriginHint }}</p>
+          </div>
         </div>
-      </div>
-      <!-- 端点给的是「最近 N 条读数」而不是四个汇总值：把口径写明，
-           免得家长把「每类一张卡」读成「一共只有四条信号」 -->
-      <p v-if="signals.length > 0 && signalReadingCount > signals.length" class="chart__note">
-        判定依据共 {{ signalReadingCount }} 条读数，上面每类显示最近的一次。
-      </p>
-      <p v-else-if="signals.length === 0" class="state" data-testid="report-grade-signals-empty">
-        还没有学段判定信号 —— 系统会在几轮对话之后开始收集判定依据。
-      </p>
 
-      <h4 class="subsection">变化轨迹（最近一次在最上面）</h4>
-      <el-timeline v-if="gradeTrail.length > 0" class="trail" data-testid="report-grade-history">
-        <el-timeline-item
-          v-for="(entry, index) in gradeTrail"
-          :key="`${entry.turn}-${index}`"
-          :timestamp="`第 ${entry.turn} 轮 · ${formatMs(entry.ts)}`"
-          placement="top"
-        >
-          <p class="trail__move">
-            {{ trailFrom(entry.fromLevel) }} → {{ GRADE_LABELS[entry.toLevel] ?? entry.toLevel }}
-          </p>
-          <p class="trail__meta">
-            来源 {{ gradeOriginLabel(originOf(entry.source, entry.decidedBy)) }} · 置信度
-            {{ entry.confidence.toFixed(2) }}
-          </p>
-        </el-timeline-item>
-      </el-timeline>
-      <p v-else class="state" data-testid="report-grade-history-empty">还没有学段变化记录。</p>
+        <p class="summary" data-testid="report-summary">{{ summary }}</p>
+
+        <!-- 继续学习：推荐来自唯一出口（/recommendation），本页不算、只展示。
+             ★ 它是**可操作**的一块（里面有按钮），所以保留卡片（报告 4.3 的同一口径）。 -->
+        <h3 class="section">继续学习</h3>
+        <div v-if="recommended" class="reco" data-testid="report-recommendation">
+          <span class="reco__pill" :title="recommended.kpId">{{ recommendedName }}</span>
+          <p class="reco__desc">{{ recommended.reason }}</p>
+          <span class="reco__meta k12-num">当前掌握度 {{ percentOf(recommended.mastery) }}%</span>
+          <el-button
+            type="primary"
+            size="small"
+            data-testid="report-recommendation-cta"
+            @click="openRecommendation()"
+          >
+            {{ recommendationCta }}
+          </el-button>
+        </div>
+        <p v-else class="state" data-testid="report-recommendation-empty">
+          {{ recommendationEmpty }}
+        </p>
+
+        <!-- 每日学习：图 + 表。★ 图只画 daily 里有的三个数，不虚构动画/编程的分类。 -->
+        <h3 class="section">每日学习</h3>
+        <p v-if="report.daily.length === 0" class="state">这段时间还没有学习记录。</p>
+        <template v-else>
+          <div class="chart" data-testid="report-activity-chart">
+            <div class="chart__head">
+              <span class="chart__title">近 {{ study.reportDays }} 天学习量</span>
+              <span class="chart__meta k12-num" data-testid="report-activity-summary">
+                合计 {{ weeklyTotal }} 次<template v-if="peakDay">
+                  · 峰值 {{ peakDay.day }}（{{ peakDay.total }} 次）</template
+                >
+              </span>
+            </div>
+            <div class="chart__bars" role="img" :aria-label="chartLabel">
+              <div
+                v-for="bar in dayBars"
+                :key="bar.day"
+                class="chart__bar"
+                :data-testid="`report-activity-${bar.day}`"
+                :title="barTitle(bar)"
+              >
+                <span class="chart__stack">
+                  <span class="chart__seg chart__seg--other" :style="{ height: barHeight(bar.other) }"></span>
+                  <span class="chart__seg chart__seg--wrong" :style="{ height: barHeight(bar.quizWrong) }"></span>
+                  <span class="chart__seg chart__seg--ok" :style="{ height: barHeight(bar.correct) }"></span>
+                </span>
+                <span class="chart__day">{{ dayLabel(bar.day) }}</span>
+              </div>
+            </div>
+            <div class="legend">
+              <!-- 图例顺序 = 柱子里从上到下的分段顺序（对不上会让人以为读到别的色块）。
+                   ★ 每段的色块与柱子里那一段**同款**（含「练习没答对」的斜纹）：
+                     颜色不是唯一的区分手段，灰度打印或色觉差异下三段照样分得开。 -->
+              <span class="legend__i"><i class="dot dot--other" aria-hidden="true"></i>其他活动</span>
+              <span class="legend__i"><i class="dot dot--wrong" aria-hidden="true"></i>练习没答对</span>
+              <span class="legend__i"><i class="dot dot--ok" aria-hidden="true"></i>练习答对</span>
+            </div>
+            <!-- 给学生的一句话（原来这里是一段解释后端字段的「开发笔记」：
+                 「端点只给…三个数…不做拆分」—— 那是设计说明，不该出现在学生眼前）。
+                 口径本身没丢：它移进了下面的教师视角块。 -->
+            <p class="chart__note">把鼠标停在柱子上，就能看到当天的具体数字。</p>
+            <TeacherGate label="为什么图上只有这三段">
+              <p class="chart__note">
+                学习报告端点（<code>LearningReport.daily</code>）每天只回三个数：
+                活动总量 <code>count</code> / 练习数 <code>quizCount</code> / 答对数
+                <code>correctCount</code>，没有「问答 / 动画 / 编程」的分类维度，
+                所以图上只分这三段 —— 数据里没有的色块不画（画出来就是假统计）。
+              </p>
+            </TeacherGate>
+          </div>
+
+          <h4 class="subsection">每日明细</h4>
+          <table class="table" data-testid="report-daily">
+            <thead>
+              <tr><th>日期</th><th class="num">活动</th><th class="num">练习</th><th class="num">答对</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="day in report.daily" :key="day.day">
+                <td>{{ day.day }}</td>
+                <td class="num">{{ day.count }}</td>
+                <td class="num">{{ day.quizCount }}</td>
+                <td class="num">{{ day.correctCount }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+
+        <!-- 掌握度 -->
+        <h3 class="section">
+          知识点掌握
+          <span v-if="report.mastery.length > 0" class="section__meta">
+            按掌握度从高到低 · 共 {{ report.mastery.length }} 个
+          </span>
+        </h3>
+        <p v-if="report.mastery.length === 0" class="state">还没有掌握度记录。</p>
+        <ul v-else class="list" data-testid="report-mastery">
+          <li v-for="item in report.mastery" :key="item.kpId" class="row">
+            <!-- 知识点名优先（与闯关 / 错题本同一来源）；取不到时显示中性标签、
+                 原始标识只进 title —— 不编名字，也不把 slug 摆到学生眼前
+                 （口径见 `study/kp-label.ts`：`learning.db` 里可能有上一代教材的残留行） -->
+            <span class="row__name" :title="item.kpId">{{ nameOf(item.kpId) }}</span>
+            <span class="bar"><span class="bar__fill" :style="{ width: barWidth(item.score) }"></span></span>
+            <span class="row__score">{{ item.score.toFixed(2) }}</span>
+            <span class="row__tag">{{ masteryLabel(item.score) }}</span>
+            <span class="row__meta">{{ item.correct }}/{{ item.attempts }} 次答对</span>
+          </li>
+        </ul>
+
+        <!-- 章节进度 -->
+        <h3 class="section">章节进度</h3>
+        <p v-if="report.chapters.length === 0" class="state">还没有章节进度记录。</p>
+        <ul v-else class="list" data-testid="report-chapters">
+          <li v-for="chapter in report.chapters" :key="chapter.chapterTitle" class="row">
+            <span class="row__name">{{ chapter.chapterTitle }}</span>
+            <span class="bar">
+              <span
+                class="bar__fill"
+                :style="{
+                  width: chapter.kpCount > 0
+                    ? `${Math.round((chapter.masteredCount / chapter.kpCount) * 100)}%`
+                    : '0%'
+                }"
+              ></span>
+            </span>
+            <!-- 进度数字**只有一种格式**：`已掌握 N / M`（报告 2.3）——
+                 与「逐关进度」「章节进度页」「学习地图」写的是同一句话。 -->
+            <span class="row__score">已掌握 {{ chapter.masteredCount }} / {{ chapter.kpCount }}</span>
+            <span class="row__meta">已测验 {{ chapter.quizzedCount }}</span>
+          </li>
+        </ul>
+
+        <!-- 闯关 + 徽章 + 逐关进度 -->
+        <h3 class="section">闯关与徽章</h3>
+        <p v-if="Object.keys(report.stageCounts).length === 0" class="state">还没有开始闯关。</p>
+        <ul v-else class="list" data-testid="report-stages">
+          <li v-for="(count, stage) in report.stageCounts" :key="stage" class="row">
+            <span class="row__name">{{ stageLabel(stage) }}</span>
+            <span class="row__score">{{ count }}</span>
+            <span class="row__meta">个知识点</span>
+          </li>
+        </ul>
+        <p v-if="report.badges.length > 0" class="badges" data-testid="report-badges">
+          已获得徽章：{{ report.badges.join('、') }}
+        </p>
+
+        <!-- 逐关进度：`quiz.levels` 是服务端按依赖图排好的顺序，这里**一行排序都不做**。
+             关卡徽章不在这里重复渲染 —— 它的展示位是闯关页的关卡条（本页的徽章来自报告端点）。 -->
+        <h4 class="subsection">
+          逐关进度
+          <span v-if="quizLevels.length > 0" class="section__meta">
+            已掌握 {{ quizSummary.mastered }} / {{ quizSummary.total }}
+          </span>
+        </h4>
+        <p v-if="quizLevels.length === 0" class="state" data-testid="report-quiz-progress-empty">
+          还没有可闯的关卡。教材就绪后，系统会按依赖图为你铺好关卡路径。
+        </p>
+        <div v-else class="rows" data-testid="report-quiz-progress">
+          <div
+            v-for="level in quizLevels"
+            :key="level.kpId"
+            class="row"
+            :data-testid="`report-quiz-level-${level.kpId}`"
+            :data-stage="level.stage"
+          >
+            <span
+              class="row__name"
+              :title="nameResolved(level.kpId) ? undefined : level.kpId"
+            >{{ nameOf(level.kpId) }}</span>
+            <el-tag size="small" effect="plain" :type="stageTag(level.stage)">
+              {{ stageLabel(level.stage) }}
+            </el-tag>
+            <el-progress
+              class="row__bar"
+              :percentage="percentOf(level.mastery)"
+              :stroke-width="7"
+              :show-text="false"
+              color="var(--k12-accent)"
+            />
+            <span class="row__score k12-num">{{ percentOf(level.mastery) }}%</span>
+          </div>
+        </div>
+
+        <!-- 学段依据：判定信号 + 变化轨迹（全部只读，本页没有任何学段写入口） -->
+        <h3 class="section">
+          学段依据
+          <span v-if="confidencePercent !== null" class="section__meta">
+            置信度 {{ confidencePercent }}% · 只读
+          </span>
+        </h3>
+        <div v-if="signals.length > 0" class="signals" data-testid="report-grade-signals">
+          <div
+            v-for="signal in signals"
+            :key="signal.signalType"
+            class="sig"
+            :data-testid="`report-grade-signal-${signal.signalType}`"
+            :data-signal-type="signal.signalType"
+          >
+            <div class="sig__top">
+              <span class="sig__type">{{ signalLabel(signal.signalType) }}</span>
+              <span class="sig__val k12-num">{{ percentOf(signal.value) }}%</span>
+            </div>
+            <el-progress
+              :percentage="percentOf(signal.value)"
+              :stroke-width="7"
+              :show-text="false"
+              color="var(--k12-accent)"
+            />
+            <p v-if="signal.raw" class="sig__raw">{{ signal.raw }}</p>
+          </div>
+        </div>
+        <!-- 端点给的是「最近 N 条读数」而不是四个汇总值：把口径写明，
+             免得家长把「每类一张卡」读成「一共只有四条信号」 -->
+        <p v-if="signals.length > 0 && signalReadingCount > signals.length" class="chart__note">
+          判定依据共 {{ signalReadingCount }} 条读数，上面每类显示最近的一次。
+        </p>
+        <p v-else-if="signals.length === 0" class="state" data-testid="report-grade-signals-empty">
+          还没有学段判定信号。多聊几轮之后，系统会开始收集判定依据。
+        </p>
+
+        <h4 class="subsection">变化轨迹（最近一次在最上面）</h4>
+        <el-timeline v-if="gradeTrail.length > 0" class="trail" data-testid="report-grade-history">
+          <el-timeline-item
+            v-for="(entry, index) in gradeTrail"
+            :key="`${entry.turn}-${index}`"
+            :timestamp="`第 ${entry.turn} 轮 · ${formatMs(entry.ts)}`"
+            placement="top"
+          >
+            <p class="trail__move">
+              {{ trailFrom(entry.fromLevel) }} → {{ GRADE_LABELS[entry.toLevel] ?? entry.toLevel }}
+            </p>
+            <p class="trail__meta">
+              来源 {{ gradeOriginLabel(originOf(entry.source, entry.decidedBy)) }} · 置信度
+              {{ entry.confidence.toFixed(2) }}
+            </p>
+          </el-timeline-item>
+        </el-timeline>
+        <p v-else class="state" data-testid="report-grade-history-empty">还没有学段变化记录。</p>
+      </template>
     </template>
   </section>
 </template>
@@ -872,17 +937,12 @@ onMounted(() => {
   font-weight: 600;
 }
 
-/* ── 概览 hero：全页唯一的 22px（平均掌握度）──────────────────────────────
- * ⚠️ 版式契约 §1/§4：22px 只属于「页面身份行 / hero 数字」，
- *    下面那些磁贴数字一律 `--k12-fs-lg`（16px），不许跟着放大。 */
-.hero {
-  padding: 14px 16px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-card);
-  background: var(--k12-surface);
-  box-shadow: var(--k12-shadow-card);
-}
-
+/* ── 概览 hero：**页级分区，无卡片框**（报告 4.1 / 4.3）────────────────────
+ * ★ 边框 = 层级：页级分区（标题区 / 工作区 / 次要列表）靠留白分工，
+ *   卡片只留给**可操作对象**。这一块以前是一张白卡（border + 圆角 + 投影），
+ *   与下面那些磁贴叠在一起，让「页面标题」看起来与「一个数据块」同级。
+ * ⚠️ 版式契约 §1/§4：`--k12-fs-xl` 只属于「页面身份行 / hero 数字」，
+ *    下面那些数字一律 `--k12-fs-lg`，不许跟着放大。 */
 .hero__top {
   display: flex;
   flex-wrap: wrap;
@@ -935,37 +995,31 @@ onMounted(() => {
   color: var(--k12-muted);
 }
 
-.cards {
+/* ── 四个关键数字：**无框一排**（报告 4.1 / 4.3）──────────────────────────
+ * ★ 它们是纯说明，不是可操作对象 —— 所以不给卡片（边框 = 层级）。
+ *   原来的四张「统计磁贴」（白面 + 边框 + 投影）已按报告拆掉。 */
+.stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: var(--k12-gap);
-  margin-top: 12px;
+  margin-top: 16px;
 }
 
-/* 统计磁贴 = 一张卡片（E2：白面 + 可见边框 + 浅投影） */
-.card {
-  padding: 10px 12px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-card);
-  background: var(--k12-surface);
-  box-shadow: var(--k12-shadow-card);
-}
-
-.card__label {
+.stat__label {
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
 }
 
-/* ⚠️ 磁贴里的数字**不用 22px**（版式契约 §1 明确列为反例）：
- * 22px（`--k12-fs-xl`）只留给页面身份行与 hero。 */
-.card__value {
-  margin-top: 4px;
+/* ⚠️ 这里的数字**不用 xl**（版式契约 §1 明确列为反例）：
+ * `--k12-fs-xl` 只留给页面身份行与 hero。 */
+.stat__value {
+  margin-top: 2px;
   font-size: var(--k12-fs-lg);
   font-weight: 650;
   color: var(--k12-fg);
 }
 
-.card__hint {
+.stat__hint {
   margin-top: 2px;
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted-2);
@@ -1039,15 +1093,9 @@ onMounted(() => {
   color: var(--k12-muted);
 }
 
-/* ── 近 N 日学习量柱状图（只画数据里有的三段）────────────────────────── */
-.chart {
-  padding: 12px 14px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-card);
-  background: var(--k12-surface);
-  box-shadow: var(--k12-shadow-card);
-}
-
+/* ── 近 N 日学习量柱状图（只画数据里有的三段）──────────────────────────
+ * ★ **无框**（报告 4.1 / 4.3 的同一口径）：图是纯说明，不是可操作对象 ——
+ *   柱子的「轨道」（`.chart__stack`）自己有一层底色，足够划出边界，不需要再套一张卡。 */
 .chart__head {
   display: flex;
   align-items: baseline;
@@ -1111,8 +1159,9 @@ onMounted(() => {
  *   · 练习答对  → `--k12-good`（绿 = 好，语义与其它地方一致）
  * ★ **颜色不是唯一的区分手段**（本项目的明文规则）：中间那段用「斜纹」纹理，
  *   灰度打印或色觉差异下三段仍分得开；图例里的色块与柱子用**同一套**配方。
- * ⚠️ 斜纹的底色用 `--k12-surface`（卡片自身底色），不引入新的灰 ——
- *   换成任何硬编码的 rgba 都是「新色值」。
+ * ⚠️ 斜纹的底色用 `--k12-surface-2`：那是这一段**真正画在谁身上**的那层底色
+ *   （柱子的轨道 `.chart__stack`），不引入新的灰。
+ *   它此前写的是 `--k12-surface`（已被拆掉的图表卡片底色），卡片一去就对不上了。
  */
 .chart__seg--other {
   background: var(--k12-cyan);
@@ -1122,7 +1171,7 @@ onMounted(() => {
   background-color: var(--k12-accent);
   background-image: repeating-linear-gradient(
     45deg,
-    var(--k12-surface) 0 2px,
+    var(--k12-surface-2) 0 2px,
     transparent 2px 5px
   );
 }
@@ -1175,7 +1224,7 @@ onMounted(() => {
   background-color: var(--k12-accent);
   background-image: repeating-linear-gradient(
     45deg,
-    var(--k12-surface) 0 2px,
+    var(--k12-surface-2) 0 2px,
     transparent 2px 5px
   );
 }
@@ -1216,6 +1265,10 @@ onMounted(() => {
 
 .row__score {
   min-width: 68px;
+  /* 进度数字**不换行也不缩**：`已掌握 3 / 5` 比原来的 `3/5` 长，
+   * 让它参与压缩会把这一列挤成两行（同一屏的进度语言必须长一个样）。 */
+  flex: none;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   color: var(--k12-fg);

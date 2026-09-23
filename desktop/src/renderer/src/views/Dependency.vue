@@ -27,7 +27,7 @@ import { useUiStore } from '../stores/ui'
 import { UNKNOWN_KP_LABEL, kpLabel, kpLabelResolved } from '../study/kp-label'
 import ProgressBar from '../components/ProgressBar.vue'
 import TeacherGate from '../components/TeacherGate.vue'
-import { GRADE_LABELS } from '../labels'
+import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../labels'
 
 const study = useStudyStore()
 const insight = useInsightStore()
@@ -86,10 +86,10 @@ function masteryOf(kpId: string): number | null {
   return score === undefined ? null : Math.round(score * 100)
 }
 
-/** 学段名：以**图自己回显的学段**为准（服务端的产物），拿不到才退回待判定。 */
+/** 学段名：以**图自己回显的学段**为准（服务端的产物），拿不到才退回 `GRADE_UNKNOWN_LABEL`。 */
 const graphGrade = computed(() => study.graph?.gradeLevel ?? null)
 const gradeLabel = computed(() =>
-  graphGrade.value ? (GRADE_LABELS[graphGrade.value] ?? graphGrade.value) : '待判定'
+  graphGrade.value ? (GRADE_LABELS[graphGrade.value] ?? graphGrade.value) : GRADE_UNKNOWN_LABEL
 )
 
 /* ---------------------------------------------------------------- 分层 */
@@ -327,7 +327,7 @@ function walkTo(edge: GraphEdge) {
  * 学段 → 图 + 画像。
  *
  * ★ **不猜学段**：`currentGrade` 为 `null`（还没判定出来）时不发请求 ——
- *   拿一个默认学段去查会画出**别的学段**的图，比空着更糟（界面上会显示"待判定"）。
+ *   拿一个默认学段去查会画出**别的学段**的图，比空着更糟（界面上会显示"还没认出年级"）。
  * ★ `loadProfile` 是幂等的（已取到就不再发），所以每次学段变化顺手刷一遍画像的成本很低。
  */
 watch(
@@ -601,7 +601,7 @@ async function exportCsv(): Promise<void> {
     }
     if (result.canceled) {
       // 取消不是错误：说一句「没有导出」就够了，不弹「导出失败」
-      exportNotice.value = { text: '没有导出 —— 你在保存对话框里取消了。', tone: 'canceled' }
+      exportNotice.value = { text: '没有导出，你在保存对话框里取消了。', tone: 'canceled' }
       return
     }
     // ★ 写盘失败：给学生一句人话（不是把系统的 EPERM / 路径原文摆出来）——
@@ -613,7 +613,7 @@ async function exportCsv(): Promise<void> {
     }
   } catch (error) {
     exportNotice.value = {
-      text: '没能保存这个文件 —— 保存对话框这次没打开成功，再试一次。',
+      text: '没能保存这个文件。保存对话框这次没打开成功，再试一次。',
       tech: error instanceof Error ? error.message : String(error),
       tone: 'failed'
     }
@@ -646,7 +646,7 @@ async function exportCsv(): Promise<void> {
 
     <PageIdentity
       main="一个知识点，卡在它的前置上就学不动"
-      hint="先点一个知识点，再看它两侧的边 —— 切「前置 / 后继」换看的方向"
+      hint="先点一个知识点，再看它两侧的边，切「前置 / 后继」换看的方向"
     />
 
     <!-- ★ 数据来源那句（「节点、分层与依赖边都来自本地知识库 kb.sqlite」）
@@ -689,7 +689,7 @@ async function exportCsv(): Promise<void> {
         <EmptyState
           tone="empty"
           title="这个学段还没有知识点依赖"
-          desc="这一册教材的知识结构还没来得及编进来 —— 先问问智团团别的内容吧。"
+          desc="这一册教材的知识结构还没来得及编进来。先问问智团团别的内容吧。"
         />
         <TeacherGate label="处置">
           <p class="dg__tech">到「教材知识库」页导入教材并重建索引，这一页就会有内容。</p>
@@ -776,9 +776,11 @@ async function exportCsv(): Promise<void> {
             <!-- 当前方向上没有相邻边：这不是错误（依赖图是"部分有序"的），
                  但要说清是"它就到头了"还是"图上没连"，免得学生以为图坏了。
                  ⚠️ 画布**仍然画整张图** —— 这里只是一句说明，不替换画布。 -->
+            <!-- ⚠️ 两句必须写在同一行：原先它们是两行，Vue 会把换行折成一个空格，
+                 渲染出来是「…没有要学的东西。 它是这条链的末端。」—— 全角句号后面
+                 多一个半角空格（原句那里是 ` —— ` 的排版残留，标点换成句号后就露出来了）。 -->
             <p v-if="focusedEdges.length === 0" class="dg__none" data-testid="dependency-none">
-              「{{ nameOf(focus) }}」在{{ view === 'successor' ? '后面' : '前面' }}没有要学的东西 ——
-              {{ view === 'successor' ? '它是这条链的末端' : '它是这条链的起点' }}。
+              「{{ nameOf(focus) }}」在{{ view === 'successor' ? '后面' : '前面' }}没有要学的东西。{{ view === 'successor' ? '它是这条链的末端' : '它是这条链的起点' }}。
             </p>
 
             <!-- 连线层：绝对定位铺在画布上，pointer-events 关掉让点击穿过到节点。
@@ -903,7 +905,7 @@ async function exportCsv(): Promise<void> {
                 :done="masteryOf(focusedNode.kpId) ?? 0"
                 compact
               />
-              <p v-else class="insp__none">还没有练习记录 —— 做几道题就知道你到哪一步了。</p>
+              <p v-else class="insp__none">还没有练习记录，做几道题就知道你到哪一步了。</p>
             </div>
 
             <!-- ── 学习建议：把依赖数据翻成学生话 ──────────────────────────
@@ -927,7 +929,7 @@ async function exportCsv(): Promise<void> {
                     还有 {{ prerequisites.length - MAX_ADVICE }} 个
                   </span>
                 </template>
-                <span v-else class="insp__none">没有前置 —— 这是可以最先开始学的知识点。</span>
+                <span v-else class="insp__none">没有前置，这是可以最先开始学的知识点。</span>
               </div>
               <div class="advice__row">
                 <span class="insp__label">学完它就能学</span>
@@ -1065,8 +1067,7 @@ async function exportCsv(): Promise<void> {
                 跟着箭头走，就是一条能一步步学下去的路。
               </p>
               <p class="appendix__p">
-                切「前置 / 后继」不改变箭头方向，只是换个方向看 ——
-                「前置视图」回答「学它之前要先会什么」，「后继视图」回答「学完它然后呢」。
+                切「前置 / 后继」不改变箭头方向，只是换个方向看。「前置视图」回答「学它之前要先会什么」，「后继视图」回答「学完它然后呢」。
               </p>
               <p class="appendix__p">
                 每行是一层：越往下的知识点，要先会的东西越多。0 层是从头就能开始学的入口。
@@ -1075,8 +1076,7 @@ async function exportCsv(): Promise<void> {
             <section class="appendix__sec">
               <h3 class="appendix__h">加粗与虚线</h3>
               <p class="appendix__p">
-                与选中知识点相连的边会加粗变深 —— 那是「这个点连到哪」。
-                其余边照常画出来，它们是这张图的结构，只是不着墨。
+                与选中知识点相连的边会加粗变深，那是「这个点连到哪」。其余边照常画出来，它们是这张图的结构，只是不着墨。
               </p>
               <p class="appendix__p">
                 虚线是<strong>相关</strong>（学过它对你理解这个有帮助），

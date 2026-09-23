@@ -23,7 +23,7 @@ import { computed, onMounted } from 'vue'
 import { useStudyStore } from '../stores/study'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { kpLabelResolved } from '../study/kp-label'
-import { GRADE_LABELS } from '../labels'
+import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../labels'
 
 defineOptions({ name: 'StudyChaptersTab' })
 
@@ -31,9 +31,16 @@ const study = useStudyStore()
 const knowledge = useKnowledgeStore()
 
 const chapters = computed(() => study.chapters)
+/**
+ * 学段还没定下来时显示的**中性标签**。
+ *
+ * ★ 字面量只有一处实现（`labels.ts` 的 `GRADE_UNKNOWN_LABEL`）——
+ *   本文件以前写死了「待判定」那句中文，改词时就会漏掉这一页
+ *   （报告 0.2 的术语表已把学生面的说法改成「还没认出年级」）。
+ */
 const gradeLabel = computed(() => {
   const level = chapters.value?.gradeLevel
-  return level ? (GRADE_LABELS[level] ?? level) : '待判定'
+  return level ? (GRADE_LABELS[level] ?? level) : GRADE_UNKNOWN_LABEL
 })
 
 /**
@@ -91,8 +98,10 @@ function ratio(mastered: number, total: number): number {
         >
           <div class="chapter__head">
             <span class="chapter__title">{{ chapter.chapterTitle }}</span>
+            <!-- 进度数字只有一种格式：`已掌握 N / M`（报告 2.3）——
+                 概览页的章节列表、学习地图写的是同一句。 -->
             <span class="chapter__count">
-              {{ chapter.masteredCount }}/{{ chapter.kpCount }} 已掌握
+              已掌握 {{ chapter.masteredCount }} / {{ chapter.kpCount }}
             </span>
           </div>
           <div class="bar">

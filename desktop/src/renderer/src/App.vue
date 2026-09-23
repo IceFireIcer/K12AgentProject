@@ -100,8 +100,8 @@ watch(
  * ★★ 走 `useOnBackendReady` 而不是裸 `onMounted`：sidecar 是**另一个进程**，
  *   从启动到能应答要几秒，而渲染进程一挂载就发这批请求 ——
  *   冷启动几乎必然先撞一次「sidecar 尚未就绪」。
- *   只发一次的话那几个失败会**就地定格**（顶栏永远「未配置模型」、
- *   侧栏永远「学段待判定」），而服务其实几秒后就好了。
+ *   只发一次的话那几个失败会**就地定格**（顶栏永远「未配置」、
+ *   侧栏永远「还没认出年级」），而服务其实几秒后就好了。
  *   打包版冷启动实测踩到过，详见 `composables/useOnBackendReady.ts`。
  *
  * ★ 两个 `load()` 都幂等（已有数据就返回），所以重试不会重复请求、
@@ -157,8 +157,10 @@ onUnmounted(() => {
   <div class="app" data-testid="app-shell">
     <!-- 应用定位语：给读屏软件一句「这是什么应用」。
          侧栏也显示它，但侧栏是**视觉**的入口，读屏用户从应用根节点进来时
-         需要一个稳定的说明。文本来自 @shared/brand（品牌名的唯一来源）。 -->
-    <p class="sr-only">{{ BRAND_NAME }} —— {{ BRAND_TAGLINE }}</p>
+         需要一个稳定的说明。文本来自 @shared/brand（品牌名的唯一来源）。
+         ⚠️ 标点用逗号，**不要**用破折号：`——` 是本产品学生面文案里的 LLM 指纹
+         （报告 C16：除数学区间外不许拿它当句间连接）。 -->
+    <p class="sr-only">{{ BRAND_NAME }}，{{ BRAND_TAGLINE }}</p>
 
     <AppShell>
       <!-- 外壳级动作：三步循环（对话 → 学习档案 → 设置 → 对话） -->
@@ -223,19 +225,25 @@ onUnmounted(() => {
 }
 
 /* 三步循环按钮：它是**导航**（不是内容），所以走描边样式而不是主色填充 ——
- * 主色留给「这一页真正要做的事」。 */
+ * 主色留给「这一页真正要做的事」。
+ * ★★ 2026-09-22（报告 1.1）：再降一档。顶栏业务控件收敛成模型 chip + 学段 chip
+ *   两枚（见 `AppTopbar.vue`），而它是**外壳级跳转**、每一步都在换页 ——
+ *   不该与那两枚「当前环境」同级抢注意力：底透明、字重常规、内边距更小。
+ *   它与窗口按钮之间的间距由 `AppShell.vue` 的 `.shell__actions` 留出
+ *   （原先贴得很近，看着像窗控的一部分）。
+ * ⚠️ `-webkit-app-region: no-drag` 是**必须**的，别顺手删（见下面那条说明）。 */
 .cycle {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   align-self: center;
-  padding: 7px 12px;
+  padding: 4px 9px;
   border: 1px solid var(--k12-border);
   border-radius: var(--k12-r-control);
-  background: var(--k12-surface);
-  color: var(--k12-fg-2);
+  background: transparent;
+  color: var(--k12-muted);
   font-size: var(--k12-fs-xs);
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
   /* ★ 顶栏整行是窗口拖拽区（见 AppShell 的说明）——

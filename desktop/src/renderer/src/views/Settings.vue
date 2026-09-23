@@ -201,6 +201,16 @@ function setEmbeddingMode(value: unknown): void {
 const gradeBusy = ref(false)
 const gradeError = ref<string | null>(null)
 
+/**
+ * 「改一改」：四档收在标题行后面（报告 2.1 —— 这块原先把「当前学段」说了四遍：
+ * 标题 / `当前学段` 字段名 / chip 值 / 来源标签）。
+ *
+ * ★ 四档用 `v-show` 收起来而不是 `v-if`：`scripts/verify-ui.mjs` 一进设置页就按
+ *   `[data-testid^="settings-grade-option-"]` 取那四档，`v-if` 会让它一个都取不到
+ *   （那条探针会假红）。收起只是视觉上的，DOM 里始终在。
+ */
+const gradePickerOpen = ref(false)
+
 const gradeText = computed(() =>
   chat.currentGradeLabel === null ? GRADE_UNKNOWN_LABEL : chat.currentGradeLabel
 )
@@ -213,7 +223,12 @@ async function chooseGrade(level: GradeLevel): Promise<void> {
   gradeError.value = null
   try {
     const result = await chat.setGrade(level)
-    if (!result.ok) gradeError.value = result.message ?? '设定学段失败，请稍后再试。'
+    if (!result.ok) {
+      gradeError.value = result.message ?? '设定学段失败，请稍后再试。'
+    } else {
+      // 选成功了就把四档收回去：标题行已经写着当前值，留着选项等于把同一件事再说一遍
+      gradePickerOpen.value = false
+    }
   } finally {
     gradeBusy.value = false
   }
@@ -464,7 +479,7 @@ onBeforeUnmount(() => {
     <PageIdentity
       main="学段、教材章节与外观"
       meta="偏好存在本机，随时可以改回来"
-      hint="学段与章节随时可换 —— 之前学过的记录都还在"
+      hint="学段与章节随时可换，之前学过的记录都还在"
     />
 
     <!-- 三条全局状态：桥没接线 / 读写失败 / 正向提示。
@@ -481,9 +496,12 @@ onBeforeUnmount(() => {
 
     <div class="st__body">
       <!-- 左栏：章节索引（可点跳转，当前章节高亮）。
-           两段：学生段（学段 / 教材章节 / 外观主题）+ 高级段（仅展开时列出）。 -->
-      <nav class="nav" aria-label="设置章节">
-        <p class="k12-label nav__title">章节</p>
+           两段：学生段（学段 / 教材章节 / 外观主题）+ 高级段（仅展开时列出）。
+           ⚠️ 标题用「设置项」**不要**用「章节」：本产品里「章节」专指**教材章节**
+              （同页就有一节叫「教材章节」、一行叫「当前章节」），拿它当导航标题会让学生
+              以为这里列的是教材目录（见报告 0.2 术语表：同一个词只指一件事）。 -->
+      <nav class="nav" aria-label="设置项">
+        <p class="k12-label nav__title">设置项</p>
         <ul class="nav__list">
           <li v-for="s in LEARNER_SECTIONS" :key="s.id">
             <button
@@ -521,9 +539,8 @@ onBeforeUnmount(() => {
           :aria-expanded="advancedVisible"
           @click="openAdvancedArea"
         >
-          <SlidersHorizontal :size="13" />
-          <span>高级设置（教师 / 答辩）</span>
-          <ChevronRight :size="13" class="nav__advanced-ico" />
+          <span class="nav__advanced-text">高级设置（教师 / 答辩）</span>
+          <ChevronRight :size="12" class="nav__advanced-ico" />
         </button>
       </nav>
 
@@ -532,43 +549,62 @@ onBeforeUnmount(() => {
              （`derivedSection`）按 DOM 顺序取「最后一个越过判定线的章节」，
              一旦用 CSS `order` 调换视觉顺序，判定就会指向另一节。 -->
       <div class="st__sections">
-        <!-- ① 学段（第二个手动入口，D-037）：与对话页顶栏指示器**共用同一条写路径** -->
+        <!-- ① 学段（第二个手动入口，D-037）：与对话页顶栏指示器**共用同一条写路径**。
+             ★ 报告 2.1：这块原先把「当前学段」说了四遍（标题 / 字段名 / chip 值 / 来源）。
+               现在标题行直接写清当前值 + 来源，右侧只留一个「改一改」的动作入口。
+             ⚠️ 四档受 `v-show` 控制，**不是** `v-if`：见 `gradePickerOpen` 的说明。
+             ⚠️ 失败 / 回执那三行放在收起区**外面**：收起来时出错也要看得见
+               （静默失败会让学生以为「保存过了」）。 -->
         <SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">
           <header class="card__head">
             <GraduationCap :size="15" />
             <h2 class="card__title">学段</h2>
-            <span class="card__meta">系统自动判定，你也能自己指定</span>
-          </header>
-
-          <div class="field">
-            <p class="field__label">当前学段</p>
-            <div class="readonly">
-              <span class="k12-dot readonly__dot" />
+            <!-- 当前值 + 来源。来源文案的唯一实现仍是 labels.ts 的 `gradeOriginLabel()`；
+                 `settings-grade-source` 这个 testid 是 `scripts/verify-ui.mjs` 的取值锚点。
+                 ★ 未判定时**不显示来源**：那时 `gradeText` 与 `gradeSource` 都是
+                   `GRADE_UNKNOWN_LABEL`（「还没认出年级」），并排就是同一句话说两遍 ——
+                   正是报告 2.1 / 2.2 要消灭的形态「大字给值、小字否定值」。
+                 ⚠️ 用 `v-show` 而不是 `v-if`：`verify-ui.mjs` 会把那个节点的 textContent
+                   打进诊断行 —— `display:none` 不影响 `textContent`，删掉节点却会读成空串。 -->
+            <p class="card__now">
               <span class="readonly__text">{{ gradeText }}</span>
-              <span class="readonly__origin" data-testid="settings-grade-source">
+              <span
+                v-show="gradeSource !== gradeText"
+                class="readonly__origin"
+                data-testid="settings-grade-source"
+              >
                 {{ gradeSource }}
               </span>
-            </div>
-            <p class="hint">
-              学段由系统按你问的问题自动判断（判错了或还没判出来，就自己指定一档）。
-              自己指定后 10 轮内系统不再自动改，期满照旧按你的实际水平调整。
             </p>
-          </div>
-
-          <div class="opts">
             <button
-              v-for="level in GRADE_LEVELS"
-              :key="level"
               type="button"
-              class="opt"
-              :class="{ 'opt--on': chat.currentGrade === level }"
-              :data-testid="`settings-grade-option-${level}`"
-              :data-active="String(chat.currentGrade === level)"
-              :disabled="chat.streaming || gradeBusy"
-              @click="chooseGrade(level)"
+              class="card__act"
+              data-testid="settings-grade-edit"
+              :aria-expanded="gradePickerOpen"
+              @click="gradePickerOpen = !gradePickerOpen"
             >
-              {{ GRADE_LABELS[level] }}
+              改一改
             </button>
+          </header>
+
+          <div class="field field--grade">
+            <p class="hint">系统会自动跟着你的年级；也可以自己选，选了之后一段时间内保持不变。</p>
+
+            <div v-show="gradePickerOpen" class="opts">
+              <button
+                v-for="level in GRADE_LEVELS"
+                :key="level"
+                type="button"
+                class="opt"
+                :class="{ 'opt--on': chat.currentGrade === level }"
+                :data-testid="`settings-grade-option-${level}`"
+                :data-active="String(chat.currentGrade === level)"
+                :disabled="chat.streaming || gradeBusy"
+                @click="chooseGrade(level)"
+              >
+                {{ GRADE_LABELS[level] }}
+              </button>
+            </div>
           </div>
 
           <p v-if="gradeError" class="warn" data-testid="settings-grade-error">{{ gradeError }}</p>
@@ -594,8 +630,7 @@ onBeforeUnmount(() => {
               <span class="readonly__text" data-testid="settings-chapter-line">{{ chapterLine }}</span>
             </div>
             <p class="hint" data-testid="settings-chapter-hint">
-              选择章节不会改变学段 —— 章节只让回答与检索优先围绕这一章，问到别的章照常回答。
-              两件事各自独立：改学段会清空章节（那本教材不存在了），清空后回到自由问答。
+              选择章节不会改变学段，只影响优先讲哪一章，问到别的章也照常回答。
             </p>
             <p v-if="chapterListGrade" class="hint">
               清单来自{{ chapterListGrade }}的教材，与「学习档案 → 章节进度」是同一份。
@@ -666,10 +701,7 @@ onBeforeUnmount(() => {
               <span class="k12-dot readonly__dot" />
               <span class="readonly__text">{{ theme.gradeIndicatorText }}</span>
             </div>
-            <p class="hint">
-              强调色与页面底色跟着学段一起换。要改学段用上面的「学段」区块 —— 那一处与对话页
-              顶栏的指示器是同一个开关，改一次两处都变。
-            </p>
+            <p class="hint">颜色跟着学段换；要改年级请用上面的「学段」。</p>
           </div>
 
           <!-- ★★ 饱和度 = 三张**预览卡**，不是三个纯文字按钮。
@@ -714,7 +746,7 @@ onBeforeUnmount(() => {
                 <span class="sat__desc">{{ s.desc }}</span>
               </button>
             </div>
-            <p class="hint">{{ theme.satMeta.desc }} —— 点一下立刻生效，不用保存。</p>
+            <p class="hint">{{ theme.satMeta.desc }}。点一下立刻生效，不用保存。</p>
           </div>
         </SurfacePanel>
 
@@ -1236,14 +1268,25 @@ onBeforeUnmount(() => {
 }
 
 /* 「高级设置（教师 / 答辩）」入口：quiet 的一条 —— 它在左栏底部，
- * 是**次级**入口而不是第四个设置项，所以不用 `.nav__item` 那套高亮语言。 */
+ * 是**次级**入口而不是第四个设置项，所以不用 `.nav__item` 那套高亮语言。
+ *
+ * ★★ 这个串必须**一行放得下**（报告 1.9：180px 的左栏里它原来会折成两行）。
+ *    按字宽算账（左栏 180px）：13px 字号下「高级设置（教师 / 答辩）」约 141px
+ *    （10 个全角 + ` / `），再加两个 13px 图标 + 两处 6px 间距 + 22px 内边距
+ *    ≈ 203px > 180px —— 它折行不是窗口太窄，是这个串本身比左栏宽。
+ *    所以三处一起收：字号降到最小的一档 `--k12-fs-micro`（12px）、内边距 11px → 9px、
+ *    间距 6px → 4px，并去掉左边那个**纯装饰**的滑块图标（收完约 166px，放得下）。
+ *    （`ChevronRight` 留着 —— 它表达「点它是展开」，不是装饰；滑块图标那条语言
+ *    在展开区标题上仍然有。）`white-space: nowrap` 是**兜底**：即便换了字体、
+ *    某个学段配色的字宽略宽，也不会再折行（宁可挤，不许断）。
+ *    ⚠️ 别把滑块图标加回来：加回来就又会折行（这正是这一条要解决的事）。 */
 .nav__advanced {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   width: 100%;
   margin-top: 10px;
-  padding: 7px 11px;
+  padding: 7px 9px;
   /* 触控下限（守卫在 base.css 层给 Element Plus 与 `.k12-tap` 定 28px；
    * 这里是自绘按钮，自己也要够高） */
   min-height: 28px;
@@ -1252,9 +1295,10 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--k12-muted);
   font-family: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-micro);
   line-height: var(--k12-lh-ui);
   text-align: left;
+  white-space: nowrap;
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1262,6 +1306,11 @@ onBeforeUnmount(() => {
     border-color: var(--k12-accent-border);
     color: var(--k12-accent-ink);
   }
+}
+.nav__advanced-text {
+  /* ★ 与按钮上的 `white-space: nowrap` 成对：文案不参与收缩、也不折行 */
+  flex: none;
+  white-space: nowrap;
 }
 .nav__advanced-ico {
   margin-left: auto;
@@ -1291,6 +1340,39 @@ onBeforeUnmount(() => {
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
   text-align: right;
+}
+/* ★ 标题行里的「当前值 + 来源」（学段那一块）。
+ * 为什么放这儿：报告 2.1 要去掉的就是「标题 / 字段名 / chip 值 / 来源」四遍复读 ——
+ * 值既然是这一块唯一的状态，就写在标题后面，一块只读框与一行字段名都省掉。
+ * 里面复用 `.readonly__text` / `.readonly__origin`：与「外观主题」那张卡的只读行
+ * 是同一套字（同一个东西在两处必须长得一样）。 */
+.card__now {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+/* 标题行右缘的**唯一**动作入口（「改一改」= 展开下面那四档）。
+ * 与 `.card__meta` 同一格：本页「右侧那一格」只放一种东西。
+ * ⚠️ `min-height: 28px` 是触控下限（自绘按钮自己也要够高，与 `.adv__close` 同一配方）。 */
+.card__act {
+  flex: none;
+  margin-left: auto;
+  padding: 3px 11px;
+  min-height: 28px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-family: inherit;
+  font-size: var(--k12-fs-xs);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .card__act:hover {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
+  }
 }
 .card__foot {
   display: flex;
@@ -1413,7 +1495,12 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 6px;
 }
-/* 选项：与指示器上的选项同一视觉语言（选中 = 强调浅底 + 强调墨） */
+/* 选项：与指示器上的选项同一视觉语言（选中 = 强调浅底 + 强调墨）
+ * ★ 报告 4.1：卡内 chip 原来**自己带一圈描边**，而它已经坐在一张白卡里 ——
+ *   外框（SurfacePanel）+ 内框（chip）= 两层边框，层级被说糊了。现在
+ *   未选中**不描边**，只靠浅底把「这是一片可点的东西」说出来；描边留给选中态。
+ *   ⚠️ 用 `transparent` 而不是删掉 `border`：hover / 选中加边时**不挤动文字**，
+ *     几何一个字不变（与 `views/Quiz.vue` 的选项行同一手法）。 */
 .opt,
 .chip {
   padding: 4px 11px;
@@ -1424,9 +1511,9 @@ onBeforeUnmount(() => {
   min-height: 28px;
   display: inline-flex;
   align-items: center;
-  border: 1px solid var(--k12-border-strong);
+  border: 1px solid transparent;
   border-radius: var(--k12-r-pill);
-  background: var(--k12-surface);
+  background: var(--k12-surface-2);
   color: var(--k12-fg-2);
   font-family: inherit;
   font-size: var(--k12-fs-xs);
@@ -1523,6 +1610,11 @@ onBeforeUnmount(() => {
   font-size: var(--k12-fs-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
+}
+/* 学段那一块：标题行已经写了当前值，正文只剩「一句说明 + 四档」——
+ * 说明行的 `margin-top` 归零，否则卡片的 14px 与它的 6px 会叠出一个空档。 */
+.field--grade > .hint {
+  margin-top: 0;
 }
 .readonly {
   background: var(--k12-surface-2);

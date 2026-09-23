@@ -13,9 +13,18 @@
  *    校验逻辑全在 `AnimationSandboxHost.handleMessage()` 里（纯逻辑、可单测），
  *    本组件只负责把 window 事件转进去。
  *
- * 3. ★ **失败/超时一律降级成文字 + 静态图，绝不白屏**。
+ * 3. ★ **失败/超时一律降级成文字讲解，绝不白屏**。
  *    四条降级入口：载荷里 `html` 为空（编排层已降级）、iframe 5s 没 `ready`、
  *    沙箱自报 `error`、`resourceUrl` 与 `srcdoc` 都没有。四条都走同一个 {@link goDegraded}。
+ *
+ *    ⚠️ 2026-09-22（报告 1.8 / 4.3「动画内嵌白卡：删除」）：降级态原来还渲染一张
+ *    `<img class="anim__fallback-img">` —— 它是主进程按**同一段降级文案**生成的 SVG
+ *    （`src/main/agent/extensions/animation.ts` 的 `buildInlineFallbackImage`，
+ *    正文截 34 字），摆在完整文案下面等于同一段话说了两遍，第二遍还带截断。
+ *    现在删掉：降级态只剩「文字要点 + 一句提示」，学生读到的是一个说法而不是两个。
+ *    ⚠️ 主进程那段 SVG 生成**照旧保留**（它随载荷发给渲染端，也进对话历史与降级产物，
+ *    要删得先确认没有别的消费者 —— 那是载荷契约改动，不在本轮范围）；本卡片不再引用
+ *    `view.fallbackImage`（页面 `views/Animation.vue` 同理）。
  *
  * 展开/全屏：内联卡片受对话框宽度限制，全屏用 fixed 覆盖层（同一个 iframe 元素**移动**过去，
  * 不重建 —— 重建会让动画从头开始播，学生看到的是「一按全屏就重播」这种莫名其妙的行为）。
@@ -46,7 +55,7 @@ const payloadId = ref<string>(
 /** 挂 iframe 的条件：有 HTML **且**有可加载的地址/内联内容。 */
 const mountIframe = ref<boolean>(shouldMountIframe(view.html) && (view.resourceUrl !== null || view.html !== ''))
 
-/** 是否已进入降级视图（文字 + 静态图）。 */
+/** 是否已进入降级视图（文字讲解）。 */
 const degraded = ref<boolean>(false)
 /**
  * 降级的可读原因（**只进 `data-*` 属性**，不摆给学生看 —— 学生只该看到「能动/不能动」）。
@@ -59,6 +68,10 @@ const degradeReason = ref<string>('')
 //   （"没能加载"是系统的口径，不是学生关心的），而且听不出"我现在能做什么"。
 //   新句先说清楚**现在有什么**（文字讲解已经把这件事讲清楚了），再说**可以怎么办**
 //   （让智团团换个说法）—— 降级不是坏消息，只是换了种讲法。
+// ⚠️ 页面（`views/Animation.vue`）的同一句按报告 C15 改短成「动画没播出来，先看文字要点。」，
+//   这里**故意不改**：卡片上没有「再放一次」这类按钮，这句里的「想换个说法就问智团团」
+//   是本卡片降级态**唯一**的下一步。两处**不是**同一个组件的两份实现，别顺手统一 ——
+//   统一之后卡片会变成「只说坏消息、不给下一步」。
 const DEGRADED_NOTICE_TEXT = '这段动画这次没能播出来，下面这段文字已经把要点讲清楚了；想换个说法就问智团团。'
 /** 沙箱阶段（`loading` 时显示加载提示，而不是一块空白）。 */
 const phase = ref<'loading' | 'ready' | 'degraded'>('loading')
@@ -275,16 +288,14 @@ watch(iframeEl, (element) => {
       </div>
     </div>
 
-    <!-- ── 降级视图：文字 + 静态图（**这条分支的存在就是为了不白屏**） ── -->
+    <!-- ── 降级视图：文字讲解（**这条分支的存在就是为了不白屏**） ── -->
     <div v-else class="anim__fallback" data-testid="animation-fallback">
       <p class="anim__fallback-text" data-testid="animation-fallback-text">{{ view.fallbackText }}</p>
-      <img
-        v-if="view.fallbackImage"
-        class="anim__fallback-img"
-        :src="view.fallbackImage"
-        alt="概念静态示意图"
-        data-testid="animation-fallback-image"
-      />
+      <!-- ★ 这里原来还有一张 `<img class="anim__fallback-img">`：主进程按**同一段文案**
+           生成的静态 SVG（正文截 34 字，见 `src/main/agent/extensions/animation.ts` 的
+           `buildInlineFallbackImage`）。它与上面那段完整文案说的是同一件事，现在整段删掉 ——
+           降级说明只留一处（报告 1.8 / 4.3）。主进程那段生成照旧保留：载荷契约那一侧
+           还有别的消费者，要删得先确认；本卡片只是不再引用 `view.fallbackImage`。 -->
       <p
         v-if="degraded"
         class="anim__reason"
@@ -543,16 +554,9 @@ watch(iframeEl, (element) => {
   word-break: break-word;
 }
 
-.anim__fallback-img {
-  display: block;
-  width: 100%;
-  max-width: 480px;
-  height: auto;
-  margin-top: 10px;
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-inset);
-}
-
+/* ⚠️ `.anim__fallback-img` 已删（报告 1.8 / 4.3）：那张白卡是主进程按**同一段降级文案**
+ * 生成的 SVG（正文截 34 字），与上面那段完整文案重复。主进程仍在生成它（载荷契约的
+ * 一部分），本卡片不再引用 —— 见 `<script>` 里的说明。这里不留空容器。 */
 .anim__reason {
   margin-top: 10px;
   /* 降级气泡下的脚注 → meta 档（与 views/Animation.vue 的 `.anim__reason` 同一落点） */

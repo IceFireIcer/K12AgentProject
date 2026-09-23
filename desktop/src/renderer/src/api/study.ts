@@ -17,6 +17,7 @@
 import type { K12Api } from '../../../preload/index'
 import type { FileExportResult, StudyCallResult } from '../../../main/ipc/channels'
 import type { GradeLevel } from '@shared/ipc-events'
+import { warnWiring } from './wiring-notice'
 
 /** 四个档案端点 + 会话 + 导出在渲染进程侧需要的方法（**从 preload 白名单里挑**）。 */
 export interface StudyBridge {
@@ -34,11 +35,18 @@ export type StudyBridgeLookup =
   | { ready: true; bridge: StudyBridge }
   | { ready: false; message: string }
 
-/** 缺通道时给学生看的那句话（照它就能把线接上）。 */
-export const STUDY_BRIDGE_MISSING_HINT =
-  '学习档案还没有接线：preload 白名单缺少 readStudyReport 等 8 个方法 —— ' +
-  '需要先在主进程注册 `study:*` / `session:*` / `file:export` 通道' +
-  '（由 preload 白名单暴露，渲染进程不直接持有通道名）。接线后刷新页面即可生效。'
+/**
+ * 整块学习记录能力不可用时**给学生看的那句话**（学习记录页的错误行）。
+ *
+ * ★★ 2026-09-22 改口（设计评审报告 0.2 + 双视角 D-063）：原来这句是接线说明
+ *   （「preload 白名单缺少 readStudyReport 等 8 个方法，需要先在主进程注册
+ *   `study:*` / `session:*` / `file:export` 通道……接线后刷新页面即可生效」）——
+ *   学生会读到 8 个方法名、三条通道名和一句对他没意义的「刷新即可生效」。
+ *   现在只说三件事：打不开、还能做什么（回对话页问问题）、找谁（老师）。
+ *   ⚠️ 缺哪几个方法**不在这里**：它经 {@link resolveStudyBridge} 的 `warnWiring` 进控制台
+ *   （那是接线的人看的通路，也是「照它就能把线接上」这个意图的落点）。
+ */
+export const STUDY_BRIDGE_MISSING_HINT = '学习记录暂时打不开。先回对话页问问题就好，需要时请老师帮忙看看。'
 
 /** 这个方法名清单是本层**唯一**的必需能力（少一个就用不了）。 */
 const REQUIRED_METHODS = [
@@ -55,22 +63,33 @@ const REQUIRED_METHODS = [
 /**
  * 从 `window.api` 上取学习档案能力。
  *
+ * ★★ 缺方法时：**屏幕上是学生话**（{@link STUDY_BRIDGE_MISSING_HINT}），
+ *   **缺哪几个方法进控制台**（`warnWiring`，一次把清单列全）——
+ *   两条通路的分工见 `api/wiring-notice.ts` 的文件头。
+ *
  * ★ 逐方法确认后再显式拼桥：不写 `host as unknown as StudyBridge` ——
  *   那种双重断言会把 `window.api` 的真实签名整条抹掉，
  *   主进程改名或改签名时渲染侧一行都不会报错（`api/grade.ts` 里有同样的教训）。
  */
 export function resolveStudyBridge(host: K12Api | undefined = globalThis.window?.api): StudyBridgeLookup {
   if (typeof host === 'undefined') {
-    return { ready: false, message: '预加载脚本未生效（window.api 缺失），学习档案暂时读不到。' }
+    warnWiring(
+      'study',
+      'window.api 缺失：preload 没有加载（整块学习记录能力不可用）。检查 preload 入口与 contextIsolation / sandbox 配置。'
+    )
+    return { ready: false, message: STUDY_BRIDGE_MISSING_HINT }
   }
   const missing = REQUIRED_METHODS.filter(
     (name) => typeof (host as unknown as Record<string, unknown>)[name] !== 'function'
   )
   if (missing.length > 0) {
-    return {
-      ready: false,
-      message: `${STUDY_BRIDGE_MISSING_HINT}（缺：${missing.join(', ')}）`
-    }
+    warnWiring(
+      'study.methods',
+      `preload 白名单缺少这 ${missing.length} 个方法：${missing.join(' / ')}。` +
+        '需要先在主进程注册 study:* / session:* / file:export 三组通道（含 file:export 的保存对话框），' +
+        '再由 preload 白名单逐方法暴露。接线后重启渲染进程即可生效。'
+    )
+    return { ready: false, message: STUDY_BRIDGE_MISSING_HINT }
   }
   const api = host as K12Api
   return {

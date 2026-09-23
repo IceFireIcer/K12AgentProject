@@ -105,8 +105,8 @@ const needsSetup = computed(() => model.readyState === 'unconfigured')
 const currentLine = computed(() => {
   if (needsSetup.value) {
     return viewMode.isTeacher
-      ? '还没配置模型 —— 现在发消息收不到回答，先在这里把供应商与 API Key 填上。'
-      : '还没配置模型 —— 现在问问题还答不了。'
+      ? '还没配置模型。现在发消息收不到回答，先在这里把供应商与 API Key 填上。'
+      : '还没配置模型，现在问问题还答不了。'
   }
   if (active.value !== null) {
     return `当前：${active.value.providerName} · ${active.value.modelId}`
@@ -122,7 +122,7 @@ const emptyLine = computed(() => {
   // 「去设置页自填」这条指引只对教师 / 答辩视角成立：学生视角下那个入口不在界面上
   // （见文件头），所以这句话也要跟着换 —— 否则会把学生指到一个他看不到的地方。
   return viewMode.isTeacher
-    ? '这一家供应商没有候选模型 —— 用下面的入口去设置页自填 BaseURL / Model ID。'
+    ? '这一家供应商没有候选模型，可以用下面的入口去设置页自填 BaseURL / Model ID。'
     : '这一家供应商没有可选模型。'
 })
 

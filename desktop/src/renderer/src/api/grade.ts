@@ -50,6 +50,7 @@
 import type { K12Api } from '../../../preload/index'
 import type { GradeCallResult, GradeOrigin, GradeSetResult, GradeState } from '../../../main/ipc/channels'
 import type { GradeLevel } from '@shared/ipc-events'
+import { warnWiring } from './wiring-notice'
 
 /**
  * ★ 这三个类型**不在渲染进程重写一遍**（H12）：
@@ -79,34 +80,49 @@ export type GradeBridgeLookup =
   | { ready: true; bridge: GradeBridge }
   | { ready: false; message: string }
 
-/** 缺通道时给学生/开发者看的那句话（照它就能把线接上）。 */
-export const GRADE_BRIDGE_MISSING_HINT =
-  '学段自动判定还没有接线：preload 白名单缺少 onGradeChanged —— 需要先在主进程注册' +
-  '「学段推送」通道（由 preload 白名单暴露，渲染进程不直接持有通道名），再由 preload 暴露' +
-  ' `onGradeChanged` / `getGrade` / `setGrade`。接线后刷新页面即可生效。'
+/**
+ * 整块学段能力不可用时**给学生看的那句话**（指示器那一行）。
+ *
+ * ★★ 两种成因共用这一句：preload 没加载（`window.api` 缺失）与缺推送通道
+ *   （`onGradeChanged` 不在白名单里）—— 学生的可见后果一样（看不出年级），
+ *   区别只进控制台（见 {@link resolveGradeBridge}）。
+ *
+ * ★★ 2026-09-22 改口（设计评审报告 0.2 + 双视角 D-063）：原来这句是接线说明
+ *   （「preload 白名单缺少 onGradeChanged……接线后刷新页面即可生效」）——
+ *   学生读到的是两个他看不懂的词（preload / 方法名），而「刷新页面」对他也是假承诺。
+ *   现在只说三件事：看不出年级、问答照常、找谁。
+ *   ⚠️ 别写成「学段判定还没接上」这类系统口吻：「判定」是 `rules.py` 的动作（报告 0.2）。
+ */
+export const GRADE_BRIDGE_MISSING_HINT = '暂时看不出你的年级，我会照常回答。需要时请老师帮忙看看。'
 
 /**
- * 桥在、但**缺少写入方法**时的说明。
+ * 桥在、但**缺写入方法**（`setGrade`）时给学生看的那句话。
  *
  * ★ 单独一条的理由：读与写是**两条**分步接线的能力（`gradeGet` / `gradeSet`）。
- *   只有读能力时，指示器照常显示系统判出来的学段，只是「自己指定」这个动作不可用 ——
- *   这时必须说清**是写入没接线**，而不是让学生以为「学段整个功能坏了」。
+ *   只有读能力时，指示器照常显示系统认出来的学段，只是「我自己选年级」这个动作不可用 ——
+ *   这句话要说清「现在改不了、但系统仍会跟着你调整」，而不是让学生以为「学段整个坏了」。
+ *   （技术细节走控制台，见 `resolveGradeBridge`。）
  */
-export const GRADE_SET_MISSING_HINT =
-  '手动设定学段还没有接线：preload 白名单缺少 setGrade —— 需要先在主进程注册' +
-  '「学段设定」通道（invoke，带回执，学生要看到改没改成），再由 preload 暴露 `setGrade`。' +
-  '接线后刷新页面即可生效。'
+export const GRADE_SET_MISSING_HINT = '暂时改不了年级，我会自己跟着你的问题调整。需要时请老师帮忙看看。'
 
 /**
  * 从 `window.api` 上取学段能力。
  *
  * 为什么「按方法名探测」而不是直接调：学段判定（主进程）与只读指示器（渲染进程）
- * 是两条并行的改动，通道没落地时指示器必须显示「待判定 + 一句能照着做的话」，
+ * 是两条并行的改动，通道没落地时指示器必须显示「一句学生能读的话」，
  * 而不是抛 `window.api.onGradeChanged is not a function` 把整页打空。
+ *
+ * ★★ 缺哪一条线时，**接线细节进控制台**（`warnWiring`）、**屏幕上是学生话**
+ * （{@link GRADE_BRIDGE_MISSING_HINT} / {@link GRADE_SET_MISSING_HINT}）——
+ *   两条通路的分工见 `api/wiring-notice.ts` 的文件头。
  */
 export function resolveGradeBridge(): GradeBridgeLookup {
   if (typeof window === 'undefined' || typeof window.api === 'undefined') {
-    return { ready: false, message: '预加载脚本未生效（window.api 缺失），学段判定暂时读不到。' }
+    warnWiring(
+      'grade',
+      'window.api 缺失：preload 没有加载（整块学段能力不可用）。检查 preload 入口与 contextIsolation / sandbox 配置。'
+    )
+    return { ready: false, message: GRADE_BRIDGE_MISSING_HINT }
   }
 
   // ★ 结构检查替代双重断言（H12）：先按**主进程白名单的真实类型**拿到 `window.api`，
@@ -115,6 +131,11 @@ export function resolveGradeBridge(): GradeBridgeLookup {
   //   主进程把 `onGradeChanged` 改名或改签名，渲染侧一行都不会报错。
   const api: K12Api = window.api
   if (typeof api.onGradeChanged !== 'function') {
+    warnWiring(
+      'grade.push',
+      'preload 白名单缺少 onGradeChanged：需要主进程注册 grade:changed 推送通道' +
+        '（已登记进 PUSH_CHANNELS），再由 preload 暴露 onGradeChanged / getGrade / setGrade。接线后重启渲染进程即可生效。'
+    )
     return { ready: false, message: GRADE_BRIDGE_MISSING_HINT }
   }
 
@@ -122,10 +143,22 @@ export function resolveGradeBridge(): GradeBridgeLookup {
     // 包一层：不把白名单上的方法原样转出去（订阅的是「我们的回调」，不是别人的方法引用）
     onGradeChanged: (listener) => api.onGradeChanged(listener)
   }
-  if (typeof api.getGrade === 'function') bridge.getGrade = () => api.getGrade()
+  if (typeof api.getGrade === 'function') {
+    bridge.getGrade = () => api.getGrade()
+  } else {
+    warnWiring('grade.get', 'preload 白名单缺少 getGrade：挂载时拉不到当前学段（指示器要等一次推送才有值）。')
+  }
   // ★ 同样是「可选能力」：`grade:set` 晚一步接线时，界面照常展示（只是不能手动指定），
   //   不能因为缺这一个方法就把整块学段显示变成一句「未接线」。
-  if (typeof api.setGrade === 'function') bridge.setGrade = (level) => api.setGrade(level)
+  if (typeof api.setGrade === 'function') {
+    bridge.setGrade = (level) => api.setGrade(level)
+  } else {
+    warnWiring(
+      'grade.set',
+      'preload 白名单缺少 setGrade：需要主进程注册 grade:set（invoke，带回执 —— 学生要看到改没改成、冷却还剩几轮），' +
+        '再由 preload 暴露 setGrade。接线后重启渲染进程即可生效；在那之前界面只读（系统照样自动跟学段）。'
+    )
+  }
   return { ready: true, bridge }
 }
 

@@ -117,7 +117,8 @@ defineExpose({ scrollToTop: resetScroll })
  *     - 这里必须有 `-webkit-app-region: drag`（拖空白处即可移动窗口）；
  *     - 里面**每一个可交互元素**都必须 `no-drag`，否则点它会被当成拖窗口 ——
  *       表现成「按钮点不动」。已经标注的：`.cycle`（本文件）、`AppTopbar` 的模型 chip、
- *       `GradeIndicator` 的触发键与选项、`WindowControls` 整块。
+ *       `GradeIndicator` 的**合并 chip**（值 + 「我选年级」那一枚，2026-09-22 起
+ *       状态与动作合成一枚）与它的选项、`WindowControls` 整块。
  *   新增顶栏控件时**别忘了这一条**（漏了不会报错，只是点不动）。
  * ★ 高度由 `--k12-h-topbar` 定死（64px）：侧栏的品牌块用的是同一个令牌，
  *   两者的横向接缝才对得上（侧栏那一侧见 `AppSidebar.vue` 的 `min-height`）。 */
@@ -137,7 +138,11 @@ defineExpose({ scrollToTop: resetScroll })
 .shell__actions {
   display: flex;
   align-items: stretch;
-  gap: 8px;
+  /* ★ 12px（原 8px）：把**外壳级跳转**（`.cycle`）与窗口按钮分开。
+   * 两者都是「点一下换个地方」，但一个是应用内的导航、一个是窗口 chrome ——
+   * 贴在一起会读成同一组（报告 1.1 的「业务区顶到窗控正下方」）。
+   * 间距只在这一处给：窗控自己不许留白，否则「关闭」会离屏幕角差一截。 */
+  gap: 12px;
   flex: none;
   /* 右侧不留 padding-right：`WindowControls` 的三个键各自 44px 宽、贴到窗口右上角
    * （Windows 原生就是贴边的）。留白会让「关闭」离屏幕角差一截，看着像浮在中间。 */

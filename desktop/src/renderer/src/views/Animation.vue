@@ -44,25 +44,27 @@
  *
  *   现在的纪律（与 `views/Quiz.vue` 同一条）：**学生视角一个字不留，教师视角一条不删**。
  *   判据不是「这句话有没有用」，而是「它在向谁解释什么」：
- *     · 向学生解释**他看到的画面** → 留在页面上（「动画就在这台电脑上播放，断网也能看」）；
+ *     · 向学生解释**他看到的画面** → 留在页面上；
  *     · 向我们解释**怎么实现的** → 进 `<TeacherGate>`。
- *   ★ 唯一从技术说明里**留下来给学生**的是「断网也能看」那一句 ——
- *     它是真话（模板与动画库都随包内联，见 `server/app/routes/resources.py`），
- *     而且是家长最在意的一条，不是实现细节。
+ *
+ *   ★ 2026-09-22（报告 C7 / C8「安全声明全应用一份」）：原来学生面上还留着那句
+ *     「动画就在这台电脑上播放，画面不会跳到别的地方去；断网也能看」。它说的是**全应用
+ *     共用**的安全 / 隐私声明，与编程页页脚那一处常驻声明是同一件事 —— 同一件事说两遍
+ *     只会稀释它。按报告口径，那份声明**只在编程页页脚保留一处**，本页整句删掉。
+ *     （「断网也能演示」这条技术事实仍然完整地留在下面的 `<TeacherGate>` 里，评委看得到。）
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Library, Pause, Play, RotateCcw, Wand2 } from 'lucide-vue-next'
 import SurfacePanel from '@/components/SurfacePanel.vue'
 import PageIdentity from '@/components/PageIdentity.vue'
 import TeacherGate from '@/components/TeacherGate.vue'
-import { GRADE_LABELS } from '../labels'
+import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../labels'
 import { useAnimationStore } from '../stores/animation'
 import { useChatStore } from '../stores/chat'
 import {
   AnimationSandboxHost,
   SANDBOX_ATTRIBUTE,
   buildIframeAttributes,
-  readFallbackImage,
   shouldMountIframe
 } from '../sandbox/iframe-host'
 import type { GradeLevel } from '@shared/ipc-events'
@@ -190,11 +192,24 @@ const stageError = computed<string>(
  * ★ 从胶片条里那个「加载 xx 个模板」到舞台上一份真正能播的产物，中间每一步都可能失败 ——
  *   而失败原因全是**后端给的可读中文**（通道缺失 / 渲染不过 / 托管不过），
  *   这里只负责原样显示，不加工、不美化。
+ *
+ * ★ 降级提示只有一句（报告 1.8 / C15）：说清「没播出来」与「先看哪」就够了。
+ *   旧句「…下面这段文字把要点讲清楚了 —— 一样好学」是**破折号 + 安抚句**：
+ *   长，而且替学生下了「一样好学」这个结论（那不是界面该替他做的判断）。
  */
-const DEGRADED_NOTICE_TEXT = '这个动画这次没播出来，下面这段文字把要点讲清楚了 —— 一样好学。'
+const DEGRADED_NOTICE_TEXT = '动画没播出来，先看文字要点。'
 
-/** 静态图同样过一遍 scheme 白名单（载荷不可信，不该让降级视图替我们对外发请求）。 */
-const fallbackImage = computed(() => readFallbackImage(anim.payload?.fallbackImage ?? null))
+/* ★ 降级态**不再渲染静态图**（报告 1.8 / 4.3「动画内嵌白卡：删除」）。
+ *
+ *   那张「白卡」是服务端按**同一段降级文案**生成的 SVG ——
+ *   `server/app/routes/resources.py` 的 `build_fallback_svg`（把文案切成 4 行、放不下就截 `…`），
+ *   它原本摆在完整的降级文案**下面**：同一段话说了两遍，第二遍还是截断版，带着省略号。
+ *   所以这里连同 `readFallbackImage` 的白名单读取一起去掉：本页不再碰 `payload.fallbackImage`。
+ *
+ *   ⚠️ **服务端那段 SVG 生成照旧保留**：它是资源接口的一部分，可能有别的消费者
+ *      （对话内联卡的降级路径、接口的其它调用方）。要删它必须先确认没有别的消费者 ——
+ *      那属于接口契约改动，不在本轮范围；前端这边只是**不再用它**。
+ */
 
 const iframeAttrs = buildIframeAttributes()
 const iframeEl = ref<HTMLIFrameElement | null>(null)
@@ -363,20 +378,24 @@ const stageDuration = computed(() =>
  * ★ 原来这里是「本机 8 个模板 · 本次匹配 3 个（初中）」——「本机共几份」是**随包资产**
  *   的统计口径（后台目录的读法），学生关心的是「这里有几段是给我的」。
  *   原始口径进 `<TeacherGate>`，一个字没删。
+ * ★ 未判定时的学段名引用 `labels.ts` 的 `GRADE_UNKNOWN_LABEL`（唯一字面量来源）：
+ *   这里原来写死「学段还没定」，同一个状态在别的页面叫「还没认出年级」，等于两种说法。
  */
 const stripMeta = computed(() => {
   const matchedCount = anim.matched.length
   return gradeLabel.value === null
-    ? `共 ${matchedCount} 段（学段还没定，先都列出来）`
+    ? `共 ${matchedCount} 段（${GRADE_UNKNOWN_LABEL}，先都列出来）`
     : `适合${gradeLabel.value}的共 ${matchedCount} 段`
 })
 
-/** 胶片条上那句口径（**教师 / 答辩视角**）：本机共产出几份、本次匹配几份、按谁匹配的。 */
+/** 胶片条上那句口径（**教师 / 答辩视角**）：本机共产出几份、本次匹配几份、按谁匹配的。
+ *  ★ 未判定时的中文名同样引用 `labels.ts` 的 `GRADE_UNKNOWN_LABEL`（唯一字面量来源）——
+ *    这一句是教师视角，但「还没认出年级」是**产品术语**，两处各写一个说法就等于两个词。 */
 const stripMetaTeacher = computed(() => {
   const total = anim.availableIds.length
   const matchedCount = anim.matched.length
   return gradeLabel.value === null
-    ? `本机 ${total} 个模板 · 本次匹配 ${matchedCount} 个（学段待判定，按全部列出）`
+    ? `本机 ${total} 个模板 · 本次匹配 ${matchedCount} 个（${GRADE_UNKNOWN_LABEL}，按全部列出）`
     : `本机 ${total} 个模板 · 本次匹配 ${matchedCount} 个（${gradeLabel.value}）`
 })
 
@@ -465,14 +484,22 @@ const paramNote = computed(() => {
           <p class="anim__fallback-text" data-testid="animation-view-fallback-text">
             {{ anim.payload?.fallbackText }}
           </p>
-          <img
-            v-if="fallbackImage"
-            class="anim__fallback-img"
-            :src="fallbackImage"
-            alt="概念静态示意图"
-            data-testid="animation-view-fallback-image"
-          />
-          <p v-if="degradeReason" class="anim__reason" :data-degrade-reason="degradeReason">
+          <!-- ★ 这里原来还有一张 `<img class="anim__fallback-img">`（服务端按**同一段文案**
+               生成的静态 SVG，切 4 行、放不下就截 `…`）——同一段话说了两遍，第二遍还是
+               截断版。现在整段删掉，降级说明只留上面这一处（报告 1.8 / 4.3）。
+               ⚠️ 服务端**仍会生成**那张图（`server/app/routes/resources.py` 的
+               `build_fallback_svg`，资源接口的一部分，可能有别的消费者）：前端不再引用它，
+               要删服务端那段得先确认没有别的消费者 —— 见 `<script>` 里那段说明。 -->
+          <!-- 降级提示：**不设 `v-if`** —— 「这条路径本来就没有可播放的 HTML」时
+               `degradeReason` 是空的，旧写法于是整句提示都不出现，学生只看得到一段文字，
+               读不出「动画没播出来」（报告 1.8 要求降级态说清：没播出来 / 要点在下面 /
+               下一步能做什么 —— 下一步由舞台右上角那颗「再放一次」承担）。
+               原因本身只进 `data-*`（内部细节，不摆给学生看）。 -->
+          <p
+            class="anim__reason"
+            data-testid="animation-view-degrade-notice"
+            :data-degrade-reason="degradeReason || null"
+          >
             {{ DEGRADED_NOTICE_TEXT }}
           </p>
         </div>
@@ -499,7 +526,7 @@ const paramNote = computed(() => {
           v-else-if="stageState === 'empty'"
           tone="empty"
           title="这里还没有能放的动画"
-          :desc="`${gradeLabel ?? '你的学段'}这一档暂时没有配好的动画。先去对话里问问智团团，或者换一档学段再回来看看。`"
+          :desc="`${gradeLabel ?? GRADE_UNKNOWN_LABEL}这一档暂时没有配好的动画。先去对话里问问智团团，或者换一档学段再回来看看。`"
         />
         <EmptyState
           v-else
@@ -543,13 +570,11 @@ const paramNote = computed(() => {
       </p>
     </SurfacePanel>
 
-    <!-- 学生视角：一句人话（「断网也能看」对家长尤其重要，且它是**真的** ——
-         模板与动画库都随包内联，没有任何外链）。
-         ★★ 下面那段沙箱属性 / nonce 机制是**安全实现备忘**，此前直接印在学生页面上；
-            现在整段进 `<TeacherGate>`，一句话不删（评委要看的就是这段设计证据）。 -->
-    <p class="anim__note">
-      动画就在这台电脑上播放，画面不会跳到别的地方去；<strong>断网也能看</strong>。
-    </p>
+    <!-- ★ 2026-09-22（报告 C7 / C8）：这里原来还有一句学生面脚注
+         「动画就在这台电脑上播放，画面不会跳到别的地方去；断网也能看」。
+         它与编程页页脚的常驻声明讲的是**同一件事**（全应用的安全 / 隐私声明），
+         按报告口径全应用只保留那一处，本页整句删掉 —— 技术证据一个字没少，
+         全在下面这个 `<TeacherGate>` 里（沙箱属性 / 内联无外链 / 一次性 nonce）。 -->
     <TeacherGate label="动画是怎么安全播放的">
       <p class="anim__note anim__note--gate">
         舞台是 <strong>sandboxed iframe</strong>（沙箱属性只有 <code>allow-scripts</code>），
@@ -623,7 +648,7 @@ const paramNote = computed(() => {
         </button>
 
         <p v-if="anim.matched.length === 0" class="strip__empty">
-          这里还没有能放的动画 —— 先去对话里问问智团团，或者换一档学段再回来看看。
+          这里还没有能放的动画。先去对话里问问智团团，或者换一档学段再回来看看。
         </p>
       </div>
 
@@ -782,14 +807,10 @@ const paramNote = computed(() => {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.anim__fallback-img {
-  display: block;
-  width: 100%;
-  max-width: 480px;
-  height: auto;
-  margin-top: 12px;
-  border-radius: var(--k12-r-inset);
-}
+/* ⚠️ `.anim__fallback-img` 已删（报告 1.8 / 4.3）：那张白卡是服务端按**同一段降级文案**
+ * 生成的 SVG，摆在完整文案下面是重复陈述，还带 `…` 截断。
+ * 服务端仍会生成它（资源接口的一部分），本页不再引用 —— 见 `<script>` 里那段说明。
+ * 这里**不留空容器**：降级块现在只有「文字要点 + 一句提示」两块内容。 */
 .anim__reason {
   margin-top: 12px;
   font-size: var(--k12-fs-xs);

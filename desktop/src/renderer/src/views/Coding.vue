@@ -26,14 +26,17 @@
  * ★★ **受众分离（本条是这一页的读改纪律）**：
  *    上面那些机制（端点名 / Worker / 后端怎么归一）**只进教师视角**
  *    （`<TeacherGate>`，学生视角下不在 DOM 里），学生看到的是「你现在该做什么」：
- *      · 页面上的层级说明 → 折叠块里的**家长也能读懂**的一段话（默认收起）；
- *      · 底部那句运行说明 → 「只在这台电脑上运行、结果只用来给你中文解释」；
+ *      · 页面上的层级说明 → **已整块删除**（走查 C7：它与底部那句常驻声明是同一件事）；
+ *      · 底部那句运行说明 → 「只在这台电脑上运行、结果只用来给你中文解释」，
+ *        现在是全应用**唯一**一处常驻安全声明；
  *      · 关卡名 → 教材里的中文名（取不到用中性的「未命名知识点」，**绝不摆 kp id 这种 slug**）。
  *
  * ── 布局（改动前先读）────────────────────────────────────────────────
  *
- *   左 268px 任务简报（要做什么 / 学习路径（分三组收起）/ 卡住的求助 / 机制说明折叠）
- *   右侧主区（操作栏 → 身份行 → 编辑器 + 运行 + 输出 + 提示）
+ *   左 268px 任务简报（要做什么 / 学习路径（分三组收起）/ 一句「卡住了怎么办」）
+ *   右侧主区：**无题时只有一块空态**（一个主行动 + 一句话，报告 1.6）；
+ *             有题时（或在装配编辑器）才排满态框架：
+ *             操作栏 → 身份行 → 编辑器 + 运行 + 输出 + 提示 → 页脚那句安全声明。
  *
  * 内容区的最大字号（22px）落在身份行上：任务名 16px（块标题档）、正文 13–14px、
  * meta 12px —— 「这页在干什么」永远比「这题叫什么」重。
@@ -50,7 +53,6 @@ import {
   ChevronRight,
   Download,
   FileText,
-  FlaskConical,
   Lightbulb,
   RotateCcw
 } from 'lucide-vue-next'
@@ -184,7 +186,7 @@ const editorEmptyDesc = computed(() => {
   if (openLevels.value.length === 0) {
     return '左边的关卡都还没解锁。先把正在学的那一关通过，后面会一关一关打开。'
   }
-  return '在左边的「学习路径」里点一关，这里就会出现那一题的代码骨架 —— 标着 TODO 的地方就是你要补的地方。'
+  return '在左边的「学习路径」里点一关，这里就会出现那一题的代码骨架。标着 TODO 的地方就是你要补的地方。'
 })
 
 /**
@@ -222,6 +224,20 @@ async function openTask(kpId: string, force = false): Promise<void> {
   editor?.setValue(scaffold)
 }
 
+/**
+ * 重新读一次这一题的模板（取数失败后的**恢复动作**）。
+ *
+ * ★ 两个入口共用它：任务栏上的按钮（手里还有上一题草稿时用），
+ *   以及代码区空态里的那个主行动（手里什么都没有时用）——
+ *   「原因 + 恢复动作」必须在**同一栏**里闭环（走查 1.3：学生不该被指到左栏去找原因）。
+ * ★ 读不到就什么都不做（没有题目可重读时按下去也不该有假动作）。
+ */
+function retryTemplate(): void {
+  const kpId = selectedKpId.value !== '' ? selectedKpId.value : code.activeKpId
+  if (kpId === '') return
+  void openTask(kpId, true)
+}
+
 /* ------------------------------------------------------------------ *
  * 编辑器：Monaco（懒加载，卸载时释放）
  * ------------------------------------------------------------------ */
@@ -235,16 +251,19 @@ const editorReady = ref(false)
 const editorFailure = ref('')
 
 /**
- * 编辑框是否占位显示。
+ * 有没有「有活干」的编辑区 —— 也就是**右栏要不要排满态框架**（报告 1.6）。
  *
  * ★ 空态之外还有**一个必须一直能看见**的东西：Monaco 自己装配失败时的说明
  *   （`data-testid="coding-view-editor-failure"`）。它此前挂在一个总是可见的框里；
  *   现在这个框会被空态换掉，所以判据要把「有故障说明」也算进来 ——
  *   否则「编辑器起不来」这条最需要被看见的信息会跟着空态一起消失（白屏且无解释）。
+ * ★ 本判据现在管的是**整栏**（任务栏 / 身份行 / 代码盒 / 按钮行 / 页脚）：
+ *   为真时排满态框架，为假时整栏只有一块空态。所以它也决定了 Monaco 的宿主节点
+ *   在不在 DOM 里 —— 见文件末尾 `watch(editorVisible, …)` 里补的那次 `mountEditor()`。
  */
 const editorVisible = computed(() => editorHasWork.value || editorFailure.value !== '')
 
-/** 编辑器区的引导空态。与 {@link editorVisible} **互为补集**：两者不会同时出现（否则同一句话读两遍）。 */
+/** 右栏的引导空态。与 {@link editorVisible} **互为补集**：两者不会同时出现（否则同一句话读两遍）。 */
 const showEditorEmpty = computed(() => !editorHasWork.value && editorFailure.value === '')
 
 /**
@@ -310,15 +329,32 @@ const localHint = ref('')
 const runnerStatus = ref<RunnerStatus>(runnerStatusSnapshot())
 let unsubscribeStatus: (() => void) | null = null
 
+/**
+ * 编辑器工具条上的状态角标。
+ *
+ * ★ 角标只说「现在能不能跑」；「第一次点运行时才准备环境」是实现细节，
+ *   挪进 `title`（走查 0.2：把加载时机写在角标上等于把内部机制摆到学生面前）。
+ *   它仍然是**真话**（第一次点运行确实要等几秒），所以不删，改成第二层。
+ */
 const pyodideBadge = computed(() => {
   const status = runnerStatus.value
   if (status.phase === 'ready') {
     const seconds = status.loadMs === null ? null : (status.loadMs / 1000).toFixed(1)
-    return seconds === null ? 'Python 就绪' : `Python 就绪（${seconds} s）`
+    return {
+      text: seconds === null ? 'Python 就绪' : `Python 就绪（${seconds} s）`,
+      title: '可以点「运行」了。'
+    }
   }
-  if (status.phase === 'loading') return '正在准备 Python 环境…'
-  if (status.phase === 'failed') return 'Python 环境不可用'
-  return 'Python 待加载（第一次点运行时才加载）'
+  if (status.phase === 'loading') {
+    return { text: '正在准备 Python 环境…', title: '正在准备运行环境，要等几秒。' }
+  }
+  if (status.phase === 'failed') {
+    return { text: 'Python 环境不可用', title: '运行环境没能起来，可以让老师看看。' }
+  }
+  return {
+    text: '代码区就绪后可运行',
+    title: '运行环境会在你第一次点「运行」时准备，要等几秒。'
+  }
 })
 
 /**
@@ -380,6 +416,18 @@ async function askForHint(): Promise<void> {
   if (!code.canAskMoreHints || code.hintLoading) return
   await code.askForHint()
 }
+
+/**
+ * 「求助」按钮的 `title`（悬停可见）。
+ *
+ * ★ 按钮 label 只说「求助」（走查 1.4 / C12）：`求助（下一级：第 2 级）`把**提示栈机制**
+ *   写在了主行动上 —— 学生要的是「点一下会有人帮我」，不是「这个栈还有几格」。
+ *   分级那件事本身是**真状态**（左栏「已给到第 N 级」还在如实显示），所以它进 `title`，
+ *   不在界面上删掉。
+ */
+const hintButtonTitle = computed(
+  () => `提示共 ${CODE_HINT_MAX} 级，当前已给到第 ${code.currentHintLevel} 级。`
+)
 
 /** 回到这一题的起点（脚手架）。草稿会丢，所以只在学生自己按的时候做。 */
 function resetToScaffold(): void {
@@ -536,18 +584,24 @@ watch(
 )
 
 /**
- * ★ 编辑器容器从「藏起来」变回「看得见」时必须重算布局。
+ * ★ 编辑区从「空态」变回「有活干」时：先装配编辑器，再重算布局。
  *
- * 原因：没有题目时整个编辑区被空态换掉（容器尺寸 0×0，见 `editorVisible`），
- * 而 Monaco 的 `automaticLayout: false` 意味着**它自己不会去量**
- * （见 `sandbox/monaco-setup.ts` 的注释：布局由本页的 ResizeObserver 显式驱动）。
- * 不等 ResizeObserver 那一拍，学生点完关卡会先看到一帧**空白的编辑框**
- * （有时长到下一帧才恢复）—— 那正好是「我点了没反应」的观感。
- * 这里显式补一次，让它与脚手架同帧出现。
+ * ① **装配要在这里补一次**（本轮新增）：没有题目时右栏只渲染空态
+ *    （报告 1.6），代码壳连同 `editorHost` 都不在 DOM 里 —— 于是 `onMounted` 里那次
+ *    `mountEditor()` 拿不到宿主节点。学生点完关卡的那一拍宿主才出现，必须在这里补装配。
+ *    `mountEditor()` 是幂等的（`editor !== null` 直接返回），重复调用无副作用。
+ * ② **布局也要在这里补一次**：Monaco 的 `automaticLayout: false` 意味着**它自己不会去量**
+ *    （见 `sandbox/monaco-setup.ts` 的注释：布局由本页的 ResizeObserver 显式驱动）。
+ *    不等 ResizeObserver 那一拍，学生点完关卡会先看到一帧**空白的编辑框**
+ *    （有时长到下一帧才恢复）—— 那正好是「我点了没反应」的观感。
+ *    这里显式补一次，让它与脚手架同帧出现。
  */
 watch(editorVisible, (visible) => {
   if (!visible) return
-  void nextTick(() => editor?.layout())
+  void nextTick(() => {
+    void mountEditor()
+    editor?.layout()
+  })
 })
 </script>
 
@@ -583,19 +637,25 @@ watch(editorVisible, (visible) => {
         </el-descriptions>
       </template>
       <p v-else-if="code.templateLoading" class="code__desc">正在读这一题的脚手架…</p>
-      <p v-else-if="code.templateError" class="code__brief-err" data-testid="coding-view-template-error">
-        <AlertTriangle :size="14" />{{ code.templateError }}
-      </p>
+      <!-- ★ 模板读失败时这里**什么都不说**（走查 1.3）：原因与恢复动作一起放在右栏代码区里，
+           学生不必跨栏找原因。任务简报只保留「这一题是什么」这一类上下文。 -->
       <p v-else class="code__desc">从下面的学习路径里选一关，就会读来对应的脚手架。</p>
 
       <section class="code__sec">
         <span class="code__sec-label">学习路径</span>
         <!-- ★ 这一块是原型里那份写死的「完成步骤」的**真实版本**：顺序与阶段都来自
              服务端的闯关进度（按依赖图拓扑序排好），本页只显示、不重排。
-             这一行是「一眼答」：走过几关 / 在学几关 / 还锁着几关。 -->
-        <p class="code__sec-note" data-testid="coding-view-path-summary">
-          共 {{ levels.length }} 关 · 已经走过 {{ doneLevels.length }} 关 · 正在学
-          {{ openLevels.length }} 关 · 还有 {{ lockedLevels.length }} 关没解锁
+             ★ 进度数字**只有一种格式**（报告 2.3）：`已掌握 N / M`。
+               下面三组的标题（正在学 / 已经走过 / 还没解锁）是**导航分组**，不是第二个指标 ——
+               原来这里那句「共 N 关 · 已经走过 N 关 · 正在学 N 关 · 还有 N 关没解锁」
+               把同一批数字又说了一遍，已删。
+             ★ 没有关卡时整行不显示（空态下不该出现「已掌握 0 / 0」这种仪表盘读数）。 -->
+        <p
+          v-if="levels.length > 0"
+          class="code__sec-note"
+          data-testid="coding-view-path-summary"
+        >
+          已掌握 {{ doneLevels.length }} / {{ levels.length }}
         </p>
       </section>
 
@@ -704,317 +764,320 @@ watch(editorVisible, (visible) => {
       <p v-else-if="quiz.progressLoading || knowledge.pointsLoading" class="code__desc">正在读学习路径…</p>
       <p v-else class="code__brief-err" data-testid="coding-view-path-error">
         <AlertTriangle :size="14" />
-        {{ quiz.progressError ?? quiz.bridgeError ?? '学习路径里还没有关卡 —— 先去对话里问几句，让它把学段判出来。' }}
+        {{ quiz.progressError ?? quiz.bridgeError ?? '学习路径里还没有关卡。先去对话里问几句，让它把学段判出来。' }}
       </p>
 
-      <div class="code__hint-note">
+      <!-- ★ 一句话就够（走查 C11：这一块原来写着提示分级机制 + 「别急着一次点到底」，
+           属于把机制摆在学生面前；现在只留「卡住了该点哪」）。
+           分级机制本身是**真话**，所以挪进 `title`，不删。 -->
+      <div
+        class="code__hint-note"
+        title="提示是一级一级给的：先是方向，再具体一点，最后一级才会把写法写全。"
+      >
         <Lightbulb :size="15" />
         <div>
           <p class="code__hint-title">卡住了怎么办</p>
-          <!-- ★ 面向学生的说法：说清「提示是怎么给的」就够，不写级别编号、不说「跳级」这类规则词。 -->
-          <p class="code__hint-text">
-            先自己想一想，实在想不出来再点右边的「求助」。提示是一级一级给的：先是方向，
-            再具体一点，最后一级才会把写法写全 —— 所以别急着一次点到底。
-          </p>
+          <p class="code__hint-text">先自己想，想不出来再点右边的「求助」。</p>
           <p v-if="code.currentHintLevel > 0" class="code__hint-text" data-testid="coding-view-hint-progress">
             已给到第 {{ code.currentHintLevel }} 级（一共 {{ CODE_HINT_MAX }} 级）。
           </p>
         </div>
       </div>
 
-      <!-- ── 机制 / 合规说明：默认折叠 ─────────────────────────────────────
-           这是**有意披露**（学生好奇、家长关心），但必须是「点开才看」的第二层，
-           而且要说人话：一段给好奇的学生 / 家长读的说明，而不是架构备忘。
-           真正的技术口径（端点名 / Worker / 后端不做执行）压在下面的教师视角块里。 -->
-      <el-collapse class="code__fold">
-        <el-collapse-item name="runtime">
-          <template #title>
-            <span class="code__fold-t"><FlaskConical :size="14" />代码在哪里执行 · 安全边界</span>
-          </template>
-          <p class="code__fold-p">
-            你的代码在<strong>这台电脑上</strong>运行：用的是应用自带的一小套 Python，
-            <strong>不用联网</strong>，也不会跑到应用外面去。写错了、写了死循环也不要紧 ——
-            它最多跑一会儿就会被停下来。
-          </p>
-          <p class="code__fold-p">
-            跑完之后，只有「程序打印出来的内容」和「报错信息」会被送到<strong>同一台电脑上的</strong>学习服务：
-            它负责把报错翻成中文、挑下一条提示。它本身<strong>不会运行任何代码</strong>——
-            所以「谁会跑代码」和「谁会解释报错」是两件分开的事，跑代码这件事始终只在你的电脑里发生。
-          </p>
-          <p class="code__fold-p">
-            编辑器和这套 Python 都随应用一起装在本机上：<strong>断网也能用</strong>，
-            第一次点「运行」时它才会准备一下环境（要等几秒）。
-          </p>
-          <TeacherGate label="技术口径（教师 / 答辩）">
-            <p class="code__fold-p">
-              代码在<strong>渲染进程的 Pyodide Web Worker</strong> 里执行（带超时中断）：
-              既不进 Electron 主进程，也不进 Python 数据服务。Pyodide 资源本地自托管
-              （<code class="code__mono">desktop/resources/pyodide/</code>），无任何 CDN 引用。
-            </p>
-            <p class="code__fold-p">
-              运行完由渲染进程把 <code class="code__mono">stdout</code> /
-              <code class="code__mono">stderr</code> 经主进程 <code class="code__mono">code:run-hint</code>
-              转发给 sidecar 的 <code class="code__mono">POST /api/code/run-hint</code>：
-              该端点<strong>不执行任何代码</strong>（它连 <code class="code__mono">exec</code> /
-              <code class="code__mono">subprocess</code> 都不 import），只做报错归一与提示挑选，
-              且<strong>不调用任何 LLM</strong> —— 所以这一步不产生模型调用、也未把运行输出送给模型。
-            </p>
-          </TeacherGate>
-        </el-collapse-item>
-      </el-collapse>
+      <!-- ★ 这里原来有一个「代码在哪里执行 · 安全边界」折叠块 —— 整块删除（走查 C7）。
+           它和右栏页脚那句常驻声明说的是同一件事：同一个承诺说三遍，学生不会读三遍，
+           却要为另外两遍付出注意力（同一件安全承诺在左栏 + 页脚 + 对话卡上各写了一份）。
+           现在全应用只留**一处**常驻声明：右栏页脚的
+           `data-testid="coding-view-run-locally"`（学生话）+ 紧挨着它的 `<TeacherGate>`
+           （教师 / 答辩要的技术口径，学生视角下不在 DOM 里）。
+           ⚠️ 要往左栏加回这段话之前，先回答「页脚那句为什么不够」——
+              答不上来就会变成第二处同义声明（报告 4.3 也要求左栏只留任务简报 + 学习路径）。 -->
     </aside>
 
     <!-- 右：主区。PageActions 在这个滚动容器内 → 吸顶有效。 -->
     <section class="code__stage">
-      <PageActions>
-        <template #info>
-          <!-- ★ 题目名用**教材里的中文名**（`taskName`），不再摆 `template.kpId` 那种 slug。 -->
-          <span v-if="code.template !== null">
-            题目 {{ taskName }} · 期望 <code class="code__mono">{{ code.template.expectedBehavior }}</code>
-          </span>
-          <span v-else>还没有可做的题目</span>
-        </template>
-        <el-button
-          v-if="code.templateError !== null"
-          @click="openTask(selectedKpId !== '' ? selectedKpId : code.activeKpId, true)"
+      <!-- ── 还没有题目可做时的引导态（报告 1.6：空态 = 一个主行动 + 一句话）────
+           ★ 空态是**整栏**的，不再套在代码壳里：无题时任务栏 / 身份行 / 代码盒 /
+             运行·求助·重置按钮行 / 页脚安全声明**全部不渲染** ——
+             没有内容的页面不该排出满态的框架（那是「空仪表盘」）。
+           ★ 原因与恢复动作都在这块里（走查 1.3）：原因就是 `code.templateError`
+             （store 已经把技术原文换成学生话），恢复动作是下面那个按钮。
+             原来那句「左边写清了原因」已删 —— 它逼学生跨栏读，而左边现在**不再重复**这条警告。
+           · `data-testid="coding-view-editor-empty"` 仍落在这个空态上；
+           · 装配失败（`editorFailure` 非空）走 `<template v-else>` 那一支：
+             `showEditorEmpty` 与 `editorVisible` 互为补集，两边不会同时出现
+             （那条「编辑器起不来」的说明必须看得见）。 -->
+      <EmptyState
+        v-if="showEditorEmpty"
+        :tone="editorStage === 'error' ? 'error' : editorStage === 'loading' ? 'loading' : 'empty'"
+        :mascot="editorStage === 'empty'"
+        :title="
+          editorStage === 'loading'
+            ? '正在准备这一题的代码'
+            : editorStage === 'error'
+              ? '这道题还没读上来'
+              : '还没有选题目'
+        "
+        :desc="
+          editorStage === 'loading'
+            ? '马上就好。读完这里就会出现这一题的代码骨架。'
+            : editorStage === 'error'
+              ? code.templateError ?? editorEmptyDesc
+              : editorEmptyDesc
+        "
+        data-testid="coding-view-editor-empty"
+      >
+        <!-- 恢复动作只给**一个**：原因（上一行）→「重新读模板」。
+             「换一关」指的是左栏的学习路径，不在这里再排一个按钮（两个并列的主行动等于没有主行动）。 -->
+        <button
+          v-if="editorStage === 'error'"
+          class="k12-cta"
+          type="button"
+          data-testid="coding-view-empty-retry"
+          @click="retryTemplate"
         >
-          <RotateCcw :size="14" />
-          <span class="btn__label">重新读模板</span>
-        </el-button>
-        <el-button
-          :disabled="code.template === null || downloading"
-          :loading="downloading"
-          data-testid="coding-view-download"
-          @click="downloadCode"
-        >
-          <Check v-if="downloaded" :size="14" />
-          <Download v-else :size="14" />
-          <span class="btn__label">{{ downloaded ? '已下载' : '下载代码' }}</span>
-        </el-button>
-      </PageActions>
-      <!-- 导出回执（含「取消了」这一档：学生自己关掉对话框不该被当成出错） -->
-      <p v-if="downloadNote" class="code__download-note" data-testid="coding-view-download-note">
-        {{ downloadNote }}
-      </p>
+          重新读模板
+        </button>
+      </EmptyState>
 
-      <!-- 身份行（22px，全页唯一）：说的是「这页在干什么」，不是重复顶栏的「编程环境」。 -->
-      <PageIdentity
-        main="在这里把刚才学的写成代码"
-        meta="代码在学生机本地执行，不上传"
-        hint="先看任务要求，再在下面补全 TODO 并运行"
-      />
+      <!-- 有题可做（或编辑器装配中 / 装配失败）时才排满态框架 -->
+      <template v-else>
+        <PageActions>
+          <template #info>
+            <!-- ★ 题目名用**教材里的中文名**（`taskName`），不再摆 `template.kpId` 那种 slug。 -->
+            <span v-if="code.template !== null">
+              题目 {{ taskName }} · 期望 <code class="code__mono">{{ code.template.expectedBehavior }}</code>
+            </span>
+            <span v-else>还没有可做的题目</span>
+          </template>
+          <el-button
+            v-if="code.templateError !== null"
+            data-testid="coding-view-retry-template"
+            @click="retryTemplate"
+          >
+            <RotateCcw :size="14" />
+            <span class="btn__label">重新读模板</span>
+          </el-button>
+          <el-button
+            :disabled="code.template === null || downloading"
+            :loading="downloading"
+            data-testid="coding-view-download"
+            @click="downloadCode"
+          >
+            <Check v-if="downloaded" :size="14" />
+            <Download v-else :size="14" />
+            <span class="btn__label">{{ downloaded ? '已下载' : '下载代码' }}</span>
+          </el-button>
+        </PageActions>
+        <!-- 导出回执（含「取消了」这一档：学生自己关掉对话框不该被当成出错） -->
+        <p v-if="downloadNote" class="code__download-note" data-testid="coding-view-download-note">
+          {{ downloadNote }}
+        </p>
 
-      <SurfacePanel class="code__panel" padding="14px 16px">
-        <header class="code__panel-head">
-          <span class="code__panel-title">代码</span>
-          <span class="chip" :data-phase="runnerStatus.phase" data-testid="coding-view-pyodide">
-            {{ pyodideBadge }}
-          </span>
-          <span v-if="code.hintLoading" class="chip">正在取提示…</span>
-        </header>
-
-        <!-- ⚠️ 用 `v-show` 而**不是 `v-if`**：`mountEditor()` 在挂载时就要拿到宿主节点
-             （此时往往还什么题都没选），`v-if` 会让 `editorHost` 在那一刻是 null →
-             编辑器永远装配不起来（表现是「代码框一直空着，只有脚手架文本」）。 -->
-        <div v-show="editorVisible" class="code__editor-wrap">
-          <div ref="editorHost" class="code__editor" data-testid="coding-view-editor"></div>
-          <!-- 编辑器没装配好（还在加载 / 加载失败）时，脚手架以只读文本顶上 —— 保底可读 -->
-          <pre
-            v-if="!editorReady"
-            class="code__scaffold"
-            data-testid="coding-view-scaffold-raw"
-          >{{ code.draft }}</pre>
-          <p v-if="editorFailure" class="code__brief-err" data-testid="coding-view-editor-failure">
-            <AlertTriangle :size="14" />{{ editorFailure }}
-          </p>
-        </div>
-
-        <!-- ── 还没有题目可做时的引导态 ────────────────────────────────────
-             ★ 缺陷现场：这一页的默认状态（没选题目 / 这一关没有模板）右边是一个
-             **空的编辑器框**，旁边一行小字 —— 学生不知道下一步该动哪里。
-             现在编辑器区给一条明确的下一步，「智团团」也在（空态是引导，不是情绪）。
-             · `data-testid="coding-view-editor-empty"` 落在这个空态上；
-             · 取数失败那一支保持原有的两个 testid 不动
-               （左栏的 `coding-view-template-error`、编辑器框里的 `coding-view-editor-failure`），
-               所以这里**只指路不重复那句话说一遍**（左栏就在旁边）。
-             ⚠️ 与 `v-show="editorVisible"` 互为补集：编辑器装配失败时走的是上面那一支
-               （那条说明必须看得见），两边不会同时出现在屏幕上。 -->
-        <EmptyState
-          v-if="showEditorEmpty"
-          :tone="editorStage === 'error' ? 'error' : editorStage === 'loading' ? 'loading' : 'empty'"
-          :mascot="editorStage === 'empty'"
-          :title="
-            editorStage === 'loading'
-              ? '正在准备这一题的代码'
-              : editorStage === 'error'
-                ? '这道题还没读上来'
-                : '还没有选题目'
-          "
-          :desc="
-            editorStage === 'loading'
-              ? '马上就好 —— 读完这里就会出现这一题的代码骨架。'
-              : editorStage === 'error'
-                ? '左边写清了原因。可以点上面的「重新读模板」再试一次，或者换一关做。'
-                : editorEmptyDesc
-          "
-          data-testid="coding-view-editor-empty"
+        <!-- 身份行（22px，全页唯一）：说的是「这页在干什么」，不是重复顶栏的「编程环境」。 -->
+        <PageIdentity
+          main="在这里把刚才学的写成代码"
+          meta="代码在学生机本地执行，不上传"
+          hint="先看任务要求，再在下面补全 TODO 并运行"
         />
 
-        <!-- 操作栏。★ 原型上那个「提交批改」按钮**刻意不在这里**：
-             本项目没有教师批改端点（批改只有后端判客观题 `/api/quiz/grade` 与
-             本页的报错归一 `/api/code/run-hint` 这两条真实通道），所以与其摆一个
-             永远只会假装转 900ms 的按钮，不如不给 —— 要请老师看代码，真实路径是
-             在对话里说「帮我看看这段代码」（模型经 `evaluate_code` 走的那条线）。
-             ★★ 按钮走设计系统：几何 / 字重 / 焦点环 / 禁用观感全部来自 `.k12-cta`
-             （`assets/base.css` 里**唯一**的一套主行动配方，不再各页自己调色）。
-               · 「运行」= 这一屏的主行动（做完它这一轮就算完成）→ 实心主色，**只此一个**；
-               · 「求助」= 同一条路上的第二步 → 沿用 `.k12-cta` 的几何与交互态，
-                 填充改成描边（`code__act--quiet`）。base.css 的判据写得很明白：
-                 「同一屏里只允许一个主色填充按钮 —— 两个等于没有主色按钮」；
-               · 「重置代码」= 次要动作 → 保持 Element Plus 的默认观感（不给主色）。 -->
-        <div class="code__actions">
-          <button
-            class="k12-cta"
-            type="button"
-            :disabled="running || code.template === null"
-            data-testid="coding-view-run"
-            @click="run"
-          >
-            {{ running ? '正在运行…' : '运行' }}
-          </button>
-          <button
-            class="k12-cta code__act--quiet"
-            type="button"
-            :disabled="running || code.hintLoading || !code.canAskMoreHints"
-            data-testid="coding-view-hint"
-            @click="askForHint"
-          >
-            {{
-              code.hintLoading
-                ? '正在取提示…'
-                : code.canAskMoreHints
-                  ? `求助（下一级：第 ${Math.min(code.currentHintLevel + 1, CODE_HINT_MAX)} 级）`
-                  : '提示已给完'
-            }}
-          </button>
-          <el-button :disabled="running || code.template === null" data-testid="coding-view-reset" @click="resetToScaffold">
-            <RotateCcw :size="14" />
-            <span class="btn__label">重置代码</span>
-          </el-button>
-          <span v-if="attempts > 0" class="code__attempts k12-num">第 {{ attempts }} 次运行</span>
-        </div>
-
-
-        <p v-if="localHint" class="code__local-hint" data-testid="coding-view-local-hint">{{ localHint }}</p>
-        <p v-if="code.hintError" class="code__local-hint" data-testid="coding-view-hint-error">
-          {{ code.hintError }}
-        </p>
-
-        <!-- ── 运行结果：本地产出的原文 + 后端给的中文反馈 ───────────────── -->
-        <section v-if="result !== null" class="out" data-testid="coding-view-output">
-          <header class="out__head">
-            <span class="chip" :class="result.ok ? 'chip--ok' : 'chip--warn'" data-testid="coding-view-verdict">
-              {{ verdictLabel }}
+        <SurfacePanel class="code__panel" padding="14px 16px">
+          <header class="code__panel-head">
+            <span class="code__panel-title">代码</span>
+            <!-- 状态角标：`title` 里那句「第一次点运行时才准备环境」= 学生在意但不该占位的信息 -->
+            <span
+              class="chip"
+              :data-phase="runnerStatus.phase"
+              :title="pyodideBadge.title"
+              data-testid="coding-view-pyodide"
+            >
+              {{ pyodideBadge.text }}
             </span>
-            <span class="chip k12-num" data-testid="coding-view-elapsed">
-              {{ formatRunMeta(result.elapsedMs, result.interrupted) }}
-            </span>
-            <span v-if="code.analyzing" class="chip">正在请后端分析…</span>
+            <span v-if="code.hintLoading" class="chip">正在取提示…</span>
           </header>
 
-          <!-- 运行器故障（不是学生的报错）：单独一条，别和学生报错混在一起 -->
-          <p v-if="localFailure" class="out__failure" data-testid="coding-view-runner-failure">
-            {{ localFailure }}
-          </p>
-
-          <!-- ★ 后端归一化后的中文解释：界面上的主角 -->
-          <p v-if="result.error" class="out__error" data-testid="coding-view-error">
-            {{ result.error.type }}：{{ result.error.message }}
-            <span v-if="result.error.line !== null && result.error.line !== undefined">
-              （第 {{ result.error.line }} 行）
-            </span>
-          </p>
-          <p v-if="result.feedback" class="out__feedback" data-testid="coding-view-feedback">
-            {{ result.feedback }}
-          </p>
-
-          <!-- stdout：程序真实打印出来的东西 -->
-          <div v-if="result.stdout" class="block">
-            <span class="block__label">程序输出</span>
-            <pre class="block__code" data-testid="coding-view-stdout">{{ result.stdout }}</pre>
+          <!-- ★ 这里是 Monaco 的宿主节点，`mountEditor()` 必须拿得到它。
+               ⚠️ 本块只在「有活干」（`editorVisible`）时渲染 —— 原来它靠 `v-show` 常驻 DOM
+                  来保证挂载那一刻宿主存在，现在空态是**整栏的另一个分支**，宿主会跟着这一支
+                  一起出现/消失。所以装配不能只靠 `onMounted` 那一次：`editorVisible` 变真时
+                  由文件末尾那个 watch 补一次 `mountEditor()`（幂等）。
+                  ⚠️ 别把它改成只在别处装配：宿主要么在这一支里，要么装配时机必须跟着它走。 -->
+          <div class="code__editor-wrap">
+            <div ref="editorHost" class="code__editor" data-testid="coding-view-editor"></div>
+            <!-- 编辑器没装配好（还在加载 / 加载失败）时，脚手架以只读文本顶上 —— 保底可读 -->
+            <pre
+              v-if="!editorReady"
+              class="code__scaffold"
+              data-testid="coding-view-scaffold-raw"
+            >{{ code.draft }}</pre>
+            <p v-if="editorFailure" class="code__brief-err" data-testid="coding-view-editor-failure">
+              <AlertTriangle :size="14" />{{ editorFailure }}
+            </p>
           </div>
 
-          <!-- ★ 原始 traceback 默认折叠：给学生看的是中文解释，原文留给家长 / 老师排查 -->
-          <details v-if="result.rawTraceback" class="raw" data-testid="coding-view-raw-details">
-            <summary>原始报错（给老师 / 家长看）</summary>
-            <pre class="block__code" data-testid="coding-view-traceback">{{ result.rawTraceback }}</pre>
-          </details>
-
-          <p v-if="result.nextHint" class="out__next" data-testid="coding-view-next-hint">
-            <span class="chip chip--accent">第 {{ result.nextHint.level }} 级提示</span>
-            {{ result.nextHint.hint }}
-          </p>
-
-          <p v-if="code.analyzeError" class="out__failure" data-testid="coding-view-analyze-error">
-            这一轮的反馈没拿到：{{ code.analyzeError }}（上面的运行输出是真的，不受影响）
-          </p>
-        </section>
-
-        <!-- ── 已给过的分级提示：1 → 2 → 3 累积显示 ─────────────────────── -->
-        <section v-if="code.hints.length > 0" class="hints" data-testid="coding-view-hints">
-          <span class="block__label">已给的提示（越往下越具体）</span>
-          <ol class="hints__list">
-            <li
-              v-for="hint in code.hints"
-              :key="hint.level"
-              class="hint"
-              :data-level="hint.level"
-              data-testid="coding-view-hint-item"
+          <!-- 操作栏。★ 原型上那个「提交批改」按钮**刻意不在这里**：
+               本项目没有教师批改端点（批改只有后端判客观题 `/api/quiz/grade` 与
+               本页的报错归一 `/api/code/run-hint` 这两条真实通道），所以与其摆一个
+               永远只会假装转 900ms 的按钮，不如不给 —— 要请老师看代码，真实路径是
+               在对话里说「帮我看看这段代码」（模型经 `evaluate_code` 走的那条线）。
+               ★★ 按钮走设计系统：几何 / 字重 / 焦点环 / 禁用观感全部来自 `.k12-cta`
+               （`assets/base.css` 里**唯一**的一套主行动配方，不再各页自己调色）。
+                 · 「运行」= 这一屏的主行动（做完它这一轮就算完成）→ 实心主色，**只此一个**；
+                 · 「求助」= 同一条路上的第二步 → 沿用 `.k12-cta` 的几何与交互态，
+                   填充改成描边（`code__act--quiet`）。base.css 的判据写得很明白：
+                   「同一屏里只允许一个主色填充按钮 —— 两个等于没有主色按钮」；
+                 · 「重置代码」= 次要动作 → 保持 Element Plus 的默认观感（不给主色）。
+               ★ 「求助」的 label **就是两个字**（走查 1.4 / C12）：提示分级机制（下一级是第几级）
+                 进 `title`（`hintButtonTitle`），不占主行动的 label ——
+                 学生要的是「点一下会有人帮我」，不是「这个提示栈还有几格」。
+               ⚠️ 空态里的「重新读模板」也用 `.k12-cta`，但它与这里**不同屏**
+                 （空态是整栏的另一个分支，见上面的 `EmptyState`）：同一屏仍然只有一个主色按钮。 -->
+          <div class="code__actions">
+            <button
+              class="k12-cta"
+              type="button"
+              :disabled="running || code.template === null"
+              data-testid="coding-view-run"
+              @click="run"
             >
-              <span class="chip chip--accent">第 {{ hint.level }} 级</span>
-              <span class="hint__text">{{ hint.hint }}</span>
-            </li>
-          </ol>
-        </section>
+              {{ running ? '正在运行…' : '运行' }}
+            </button>
+            <button
+              class="k12-cta code__act--quiet"
+              type="button"
+              :disabled="running || code.hintLoading || !code.canAskMoreHints"
+              :title="hintButtonTitle"
+              data-testid="coding-view-hint"
+              @click="askForHint"
+            >
+              {{ code.hintLoading ? '正在取提示…' : code.canAskMoreHints ? '求助' : '提示已给完' }}
+            </button>
+            <el-button :disabled="running || code.template === null" data-testid="coding-view-reset" @click="resetToScaffold">
+              <RotateCcw :size="14" />
+              <span class="btn__label">重置代码</span>
+            </el-button>
+            <span v-if="attempts > 0" class="code__attempts k12-num">第 {{ attempts }} 次运行</span>
+          </div>
 
-        <p v-if="code.bridgeError" class="code__brief-err" data-testid="coding-view-bridge-error">
-          <AlertTriangle :size="14" />{{ code.bridgeError }}
-        </p>
-      </SurfacePanel>
 
-      <!-- ── 运行说明 ──────────────────────────────────────────────────────
-           ★★ 这一行为什么必须分开写两版（本条是受众分离的落点）：
-           原来它直接摆在页面上，写的是「代码经 POST /api/code/run-hint 之外的两条本地链路完成：
-           执行在本页的 Pyodide Worker 里，报错归一与提示挑选在后端 —— 发送给模型的内容里不含
-           你的运行输出」。这是**设计说明**（HTTP 动词、端点路径、Worker、什么没发给模型），
-           学生读了只会想「我是不是哪里搞错了」；它同时是「设计合理性」的证据，不能删。
-           所以分成两层：
-             · 学生看见的那一句 —— 只留**他真正在意的两个承诺**，学生话；
-             · 原句 —— 原样进 `<TeacherGate>`（学生视角下不在 DOM 里）。
-           ⚠️ 这两句都逐条对着代码核过（只说自己真的做到的事）：
-             ① 「只在这台电脑上运行」= 渲染进程的 Pyodide Worker，资源本地自托管
-                （`sandbox/pyodide-runner.ts`，无 CDN 引用）；
-             ② 「不会上传」= 没有任何一条链路把代码送出这台机器（sidecar 只监听**回环地址**，
-                不对局域网开放 —— 地址本身只在主进程的 `sidecar/manager.ts` 里出现）；
-             ③ 「结果只用来给你中文解释」= 本页的运行结果只走 `code:run-hint` →
-                `/api/code/run-hint`，那个端点只做报错归一与提示挑选，**不调用任何 LLM**
-                （`server/app/routes/code.py` 连 `exec` / `subprocess` 都不 import）。
-           ⚠️ **刻意不写「不会发给智团团」**：那句话在**本页**成立（本页的「求助」只送
-              `kpId + level`，见 `stores/code.ts` 的 `askForHint`），但学生在对话里
-              点编程卡的「求助」时走的是另一条路（`buildHintRequestMessage` 会带上
-              代码前 400 字）—— 同一句话在一个地方成立、在另一个地方不成立，
-              就不该印在面板上。**本页这句话是准确的**：执行在本机沙箱、
-              运行结果只送到本机 sidecar 做报错归一（那个端点不调 LLM）。 -->
-      <p class="code__foot-note" data-testid="coding-view-run-locally">
-        你的代码只在<strong>这台电脑上</strong>运行，不会上传；运行结果只用来给你中文解释。
-      </p>
-      <TeacherGate>
-        <p class="code__foot-note" data-testid="coding-view-run-note-teacher">
-          代码经 <code class="code__mono">POST /api/code/run-hint</code> 之外的两条本地链路完成：
-          执行在本页的 Pyodide Worker 里，报错归一与提示挑选在后端 ——
-          发送给模型的内容里不含你的运行输出。
+          <p v-if="localHint" class="code__local-hint" data-testid="coding-view-local-hint">{{ localHint }}</p>
+          <p v-if="code.hintError" class="code__local-hint" data-testid="coding-view-hint-error">
+            {{ code.hintError }}
+          </p>
+
+          <!-- ── 运行结果：本地产出的原文 + 后端给的中文反馈 ───────────────── -->
+          <section v-if="result !== null" class="out" data-testid="coding-view-output">
+            <header class="out__head">
+              <span class="chip" :class="result.ok ? 'chip--ok' : 'chip--warn'" data-testid="coding-view-verdict">
+                {{ verdictLabel }}
+              </span>
+              <span class="chip k12-num" data-testid="coding-view-elapsed">
+                {{ formatRunMeta(result.elapsedMs, result.interrupted) }}
+              </span>
+              <span v-if="code.analyzing" class="chip">正在请后端分析…</span>
+            </header>
+
+            <!-- 运行器故障（不是学生的报错）：单独一条，别和学生报错混在一起 -->
+            <p v-if="localFailure" class="out__failure" data-testid="coding-view-runner-failure">
+              {{ localFailure }}
+            </p>
+
+            <!-- ★ 后端归一化后的中文解释：界面上的主角 -->
+            <p v-if="result.error" class="out__error" data-testid="coding-view-error">
+              {{ result.error.type }}：{{ result.error.message }}
+              <span v-if="result.error.line !== null && result.error.line !== undefined">
+                （第 {{ result.error.line }} 行）
+              </span>
+            </p>
+            <p v-if="result.feedback" class="out__feedback" data-testid="coding-view-feedback">
+              {{ result.feedback }}
+            </p>
+
+            <!-- stdout：程序真实打印出来的东西 -->
+            <div v-if="result.stdout" class="block">
+              <span class="block__label">程序输出</span>
+              <pre class="block__code" data-testid="coding-view-stdout">{{ result.stdout }}</pre>
+            </div>
+
+            <!-- ★ 原始 traceback 默认折叠：给学生看的是中文解释，原文留给家长 / 老师排查 -->
+            <details v-if="result.rawTraceback" class="raw" data-testid="coding-view-raw-details">
+              <summary>原始报错（给老师 / 家长看）</summary>
+              <pre class="block__code" data-testid="coding-view-traceback">{{ result.rawTraceback }}</pre>
+            </details>
+
+            <p v-if="result.nextHint" class="out__next" data-testid="coding-view-next-hint">
+              <span class="chip chip--accent">第 {{ result.nextHint.level }} 级提示</span>
+              {{ result.nextHint.hint }}
+            </p>
+
+            <p v-if="code.analyzeError" class="out__failure" data-testid="coding-view-analyze-error">
+              这一轮的反馈没拿到：{{ code.analyzeError }}（上面的运行输出是真的，不受影响）
+            </p>
+          </section>
+
+          <!-- ── 已给过的分级提示：1 → 2 → 3 累积显示 ─────────────────────── -->
+          <section v-if="code.hints.length > 0" class="hints" data-testid="coding-view-hints">
+            <span class="block__label">已给的提示（越往下越具体）</span>
+            <ol class="hints__list">
+              <li
+                v-for="hint in code.hints"
+                :key="hint.level"
+                class="hint"
+                :data-level="hint.level"
+                data-testid="coding-view-hint-item"
+              >
+                <span class="chip chip--accent">第 {{ hint.level }} 级</span>
+                <span class="hint__text">{{ hint.hint }}</span>
+              </li>
+            </ol>
+          </section>
+
+          <p v-if="code.bridgeError" class="code__brief-err" data-testid="coding-view-bridge-error">
+            <AlertTriangle :size="14" />{{ code.bridgeError }}
+          </p>
+        </SurfacePanel>
+
+        <!-- ── 运行说明 ──────────────────────────────────────────────────────
+             ★★ **全应用只此一处**常驻安全声明（走查 C7）：同一件事原来写了三遍
+             （左栏「代码在哪里执行 · 安全边界」折叠块 + 本句 + 对话卡脚注），
+             三遍里学生一遍都不会记住。现在：
+               · 左栏那个折叠块**整块删除**（报告 4.3 也要求左栏只留任务简报 + 学习路径）；
+               · 对话卡 `cards/CodingCard.vue` 只留「求助会把你的几行发给智团团」那条**行为告知**
+                 （它是另一件事，不是这句的复读）。
+             ⚠️ 想再加一处同义声明之前，先回答「这一处为什么不够」。
+             ★★ 这一行为什么必须分开写两版（本条是受众分离的落点）：
+             原来它直接摆在页面上，写的是「代码经 POST /api/code/run-hint 之外的两条本地链路完成：
+             执行在本页的 Pyodide Worker 里，报错归一与提示挑选在后端 —— 发送给模型的内容里不含
+             你的运行输出」。这是**设计说明**（HTTP 动词、端点路径、Worker、什么没发给模型），
+             学生读了只会想「我是不是哪里搞错了」；它同时是「设计合理性」的证据，不能删。
+             所以分成两层：
+               · 学生看见的那一句 —— 只留**他真正在意的两个承诺**，学生话；
+               · 原句 —— 原样进 `<TeacherGate>`（学生视角下不在 DOM 里）。
+             ⚠️ 这两句都逐条对着代码核过（只说自己真的做到的事）：
+               ① 「只在这台电脑上运行」= 渲染进程的 Pyodide Worker，资源本地自托管
+                  （`sandbox/pyodide-runner.ts`，无 CDN 引用）；
+               ② 「不会上传」= 没有任何一条链路把代码送出这台机器（sidecar 只监听**回环地址**，
+                  不对局域网开放 —— 地址本身只在主进程的 `sidecar/manager.ts` 里出现）；
+               ③ 「结果只用来给你中文解释」= 本页的运行结果只走 `code:run-hint` →
+                  `/api/code/run-hint`，那个端点只做报错归一与提示挑选，**不调用任何 LLM**
+                  （`server/app/routes/code.py` 连 `exec` / `subprocess` 都不 import）。
+             ⚠️ **刻意不写「不会发给智团团」**：那句话在**本页**成立（本页的「求助」只送
+                `kpId + level`，见 `stores/code.ts` 的 `askForHint`），但学生在对话里
+                点编程卡的「求助」时走的是另一条路（`buildHintRequestMessage` 会带上
+                代码前 400 字）—— 同一句话在一个地方成立、在另一个地方不成立，
+                就不该印在面板上。**本页这句话是准确的**：执行在本机沙箱、
+                运行结果只送到本机 sidecar 做报错归一（那个端点不调 LLM）。 -->
+        <p class="code__foot-note" data-testid="coding-view-run-locally">
+          你的代码只在<strong>这台电脑上</strong>运行，不会上传；运行结果只用来给你中文解释。
         </p>
-      </TeacherGate>
+        <TeacherGate>
+          <p class="code__foot-note" data-testid="coding-view-run-note-teacher">
+            代码经 <code class="code__mono">POST /api/code/run-hint</code> 之外的两条本地链路完成：
+            执行在本页的 Pyodide Worker 里，报错归一与提示挑选在后端 ——
+            发送给模型的内容里不含你的运行输出。
+          </p>
+        </TeacherGate>
+      </template>
     </section>
   </div>
 </template>
@@ -1252,14 +1315,14 @@ watch(editorVisible, (visible) => {
   font-weight: 650;
 }
 
+/* ── 「卡住了怎么办」：caption 档的说明文字，**不成框** ──────────────────
+ * ★ 报告 C11 / 4.3：它原来是一个 warn 底 + 1px warn 边的圆角盒，和真正的警报
+ *   （`.code__brief-err`）长一样 —— 而它说的只是「想不出来再点求助」。
+ *   现在去框、去告警色，退成普通说明文字；提示分级机制在 `title` 里（模板上）。 */
 .code__hint-note {
   display: flex;
-  gap: 10px;
-  padding: 12px;
-  border-radius: var(--k12-r-card);
-  background: var(--k12-warn-soft);
-  border: 1px solid var(--k12-warn-border);
-  color: var(--k12-warn);
+  gap: 8px;
+  color: var(--k12-muted);
 }
 .code__hint-note svg {
   flex: none;
@@ -1268,50 +1331,13 @@ watch(editorVisible, (visible) => {
 .code__hint-title {
   font-size: var(--k12-fs-xs);
   font-weight: 650;
-  color: var(--k12-warn);
+  color: var(--k12-fg-2);
 }
 .code__hint-text {
-  margin-top: 4px;
+  margin-top: 2px;
   font-size: var(--k12-fs-xs);
   line-height: var(--k12-lh-body);
-  color: var(--k12-fg-2);
-}
-
-/* ── 折叠：机制 / 合规说明（默认折叠，标题 13px / 内容 12px）────────── */
-.code__fold {
-  border: none;
-}
-.code__fold :deep(.el-collapse-item__header) {
-  min-height: 44px;
-  line-height: var(--k12-lh-ui);
-  border-top: 1px solid var(--k12-border);
-  border-bottom: none;
-}
-.code__fold :deep(.el-collapse-item__wrap) {
-  border-bottom: none;
-}
-.code__fold-t {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: var(--k12-fs-sm);
-  font-weight: 650;
-  color: var(--k12-fg-2);
-}
-.code__fold :deep(.el-collapse-item__content) {
-  padding-bottom: 12px;
-}
-.code__fold-p {
-  font-size: var(--k12-fs-xs);
-  line-height: var(--k12-lh-body);
-  color: var(--k12-fg-2);
-}
-.code__fold-p + .code__fold-p {
-  margin-top: 6px;
-}
-.code__fold-p strong {
-  color: var(--k12-fg);
-  font-weight: 650;
+  color: var(--k12-muted);
 }
 
 /* ── 主区 ──────────────────────────────────────────────────────────── */

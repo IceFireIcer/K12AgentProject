@@ -20,6 +20,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watchEffect } from 'vue'
 import type { GradeLevel } from '@shared/ipc-events'
+import { GRADE_UNKNOWN_LABEL } from '../labels'
 import { useChatStore } from './chat'
 
 /** 配色轴上的学段键。⚠️ 用连字符（CSS 口味），与契约的下划线写法见 {@link GRADE_AXIS_OF}。 */
@@ -108,9 +109,11 @@ export const useThemeStore = defineStore('theme', () => {
   /** 是否正在做设计系统预览（配色总览 / 四学段对照两页）。 */
   const previewing = computed(() => previewGrade.value !== null)
 
-  /** 学生端只读指示器文案，例如「当前：初中」；未判定时为「待判定」 */
+  /** 学生端只读指示器文案，例如「当前：初中」；未判定时为 `GRADE_UNKNOWN_LABEL`。
+   *  ★ 那句话的**字面量只在 `labels.ts` 一处**（这里是 store，不是文案表）——
+   *    写死一遍就会出现「指示器说 A、侧栏说 B」。 */
   const gradeIndicatorText = computed(() =>
-    isRealGrade.value ? `当前：${displayGradeMeta.value.label}` : '待判定'
+    isRealGrade.value ? `当前：${displayGradeMeta.value.label}` : GRADE_UNKNOWN_LABEL
   )
 
   /** 把两轴写进 <html> 的 data 属性，CSS 侧由 tokens.generated.css 消费 */

@@ -25,9 +25,10 @@
  * ── 学段与章节：各出现一次，各在自己的位置 ────────────────────────────────
  * 学段是**全局环境**（「按什么年级的口吻讲」）→ 顶栏那一枚紧凑指示器（含手动入口），
  * 本页**不再**渲染它（同一件事出现两次就是「界面错位」本身）。
- * 章节是**这段对话在学什么** → 消息区上方那一行（`chat__indicators`）。
- * 对话正文不再被横幅挤掉一屏；空态里那一句「由系统根据对话自动判定，你也可以自己指定。」
- * 就是学段的说明（顶栏只留状态，不摊说明）。
+ * 章节是**这段对话在学什么** → 消息区上方那条信息条（`.chat__bar`，与「本轮对话」同一行）。
+ * 对话正文不再被横幅挤掉一屏；空态里只剩**一句事实**：「当前按〈哪个年级〉的讲法回答。」
+ * （还没判出来时是「先随便问两句，我就能认出你的年级。」）—— 来源（手动选中 / AI 引擎推算）
+ * 不在这里复读，只在侧栏身份卡一处（2026-09-22 报告 2.1；见模板里 `.chat__hello-grade` 的说明）。
  *
  * ── 右栏折叠 ──────────────────────────────────────────────────────────────
  * ≥1280 常驻（可收），<1280 变浮层（进入该区间自动收起）。断点判断写在 CSS 里，
@@ -66,9 +67,11 @@ import { useStudentStore } from '../stores/student'
 import { useTraceStore } from '../stores/trace'
 import { useUiStore, type PageName } from '../stores/ui'
 import { useViewModeStore } from '../stores/viewMode'
-// ★ 来源说法（手动选中 / AI 引擎推算）只有 `labels.ts` 一处实现 ——
-//   本页与右栏各写一份映射迟早对不上，而那种不一致是「界面自相矛盾」。
-import { gradeOriginLabel } from '../labels'
+// ★ 学段名（还没判出来时是「还没认出年级」）只有 `labels.ts` 一处实现 ——
+//   本页与右栏各写一份字面量迟早对不上，而那种不一致是「界面自相矛盾」。
+// ★★ 本页**不再**引用 `gradeOriginLabel`：空态那一行不再复读「来源」
+//   （手动选中 / AI 引擎推算）—— 见模板里 `.chat__hello-grade` 的说明（报告 2.1）。
+import { GRADE_UNKNOWN_LABEL } from '../labels'
 // ★ 品牌 logo 的 URL 只有 `brand-logo.ts` 一处实现（侧栏 / 空态 / 头像共用一张图）
 import { DEFAULT_LOGO_URL } from '../brand-logo'
 
@@ -92,8 +95,11 @@ const viewMode = useViewModeStore()
  * 才以一种技术口吻的降级提示出现（「本机还没有配置 API Key…」）—— 学生已经把问题
  * 打完了、按下发送、等了一会儿才被告知「答不了」。而顶栏与输入条那时还显示着一个
  * 模型名，看起来像「配好了」。
- * 现在：进门就在空态里说清「现在还答不了、为什么、找谁」，并指出**哪些功能本来就能用**
- * （动画 / 编程 / 闯关都在本地跑，不依赖模型）—— 这样他知道该去点哪儿。
+ * 现在：进门就在空态里说清「现在还答不了、为什么、找谁」。
+ * ★★ 2026-09-22 设计评审（C3）：末句「（下面那三样本地功能现在就能用）」已删 ——
+ *   紧挨着的**四张能力入口卡**本身就是「现在能干什么」的证明，在提示里复述一遍是重复
+ *   （报告 3 章的删改规则：解释机制的、复读同一件事的一律降级或删）。
+ *   ⚠️ `tests/llm-unconfigured.test.ts` 里还钉着那句被删的文案（本次**未改测试**）。
  */
 const needsLlmSetup = computed(() => model.readyState === 'unconfigured')
 
@@ -525,35 +531,6 @@ const recommendedName = computed(() => {
 const hasRecommended = computed(() => recommendedName.value !== null)
 
 const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended.value)
-
-/**
- * 空态里那句「这个学段是怎么定下来的」。
- *
- * ★ 三档说法（`gradeOriginLabel()` 是来源说法的**唯一实现**）：
- *   - 学生手动选的（`explicit`）→ 如实说「你选的」（否则与顶栏的「手动选中」当场矛盾）；
- *   - **判过的**（`llm` / `rules` / `inferred`）→ 说出是哪一层判的，并提醒**学生可以自己改**
- *     （D-037 之后确实可以，这句是入口的提示）；
- *   - 冷启动基线（`default`，`applyGradeState` 会把它整条丢掉，理论上到不了这里）
- *     → 按「还没判出来」的口径说，**不冒充判定结果**。
- *
- * ⚠️ 2026-09-22 修：这里原先只列了 `explicit` / `inferred` 两档，而 D-066 之后
- *   origin 的实际取值是 `explicit` / `llm` / `rules` / `inferred` ——
- *   于是 `rules` / `llm` 会掉进 `default` 分支，屏幕上一行写「当前：初中 · 本地规则判定」、
- *   下一行写「（还没判出来，系统会先看几轮你的提问。）」**自相矛盾**（新装首屏就是这样）。
- *   现在把「判过的」那三档并列，标签一律来自 `gradeOriginLabel()`（唯一实现）。
- */
-const gradeSourceSentence = computed(() => {
-  switch (chat.gradeOrigin) {
-    case 'explicit':
-      return `（这是你自己选的 · ${gradeOriginLabel('explicit')}）想换个年级的话，点上面的学段指示器。`
-    case 'llm':
-    case 'rules':
-    case 'inferred':
-      return `（${gradeOriginLabel(chat.gradeOrigin)}）你也可以自己指定。`
-    default:
-      return '（还没判出来，系统会先看几轮你的提问。）'
-  }
-})
 </script>
 
 <template>
@@ -574,15 +551,15 @@ const gradeSourceSentence = computed(() => {
 
     <!-- ── 主列 ─────────────────────────────────────────────────────── -->
     <div class="chat__main">
-      <!-- 教材章节指示器：**这一页只放它**。
-           学段是全局环境（在哪一页都成立）→ 已经在顶栏；
-           章节是「这轮对话围绕哪一章」→ 与消息区同处一列。
-           两者都放这里 = 同一件事出现两次、还白占一整行（就是这次报的错位）。 -->
-      <div class="chat__indicators">
-        <ChapterIndicator />
-      </div>
-
-      <!-- 会话工具条：会话状态 + 左栏开关 + 新会话 + 右栏开关 -->
+      <!-- ★★ 信息条：**一条**（教材章节 + 本轮对话 + 两个栏开关同处一行）。
+           ⚠️ 2026-09-22 设计评审（4.1 / 4.4）前这里是**两条并排、各画一条下划线**
+             （`.chat__indicators` + `.chat__bar`）：加上侧栏竖线与顶栏下线，
+             到内容之前先有 3 条线，而这两条说的本是同一件事（这段对话在什么状态）。
+           现在合成一行、只留**一条**线；顺序读起来就是一句话：
+           「正在学第 4 章 · 本轮对话 3 轮」。
+           ★ 不变量（守卫钉住）：章节指示器 `data-testid="chapter-indicator"`、
+             左栏开关 `history-toggle`、右栏开关 `rail-toggle`（含 `aria-pressed`）、
+             以及「尚未开始 / N 轮」那两段文字，全都还在这一行里。 -->
       <div class="chat__bar">
         <div class="chat__bar-left">
           <!-- ★ 左栏开关在**最左端**（挨着它控制的那一列），右栏开关在最右端 ——
@@ -609,6 +586,11 @@ const gradeSourceSentence = computed(() => {
             <span class="chat__bar-meta">{{ isEmpty ? '尚未开始' : `${turnCount} 轮` }}</span>
           </span>
         </div>
+
+        <!-- 教材章节指示器：**与上面的信息并排**（它原来是独立的一行，见本容器开头的说明）。
+             ★ 它自己刻意不画下划线（见 `ChapterIndicator.vue` 的注释）—— 线由这一行画。 -->
+        <ChapterIndicator class="chat__bar-chapter" />
+
         <div class="chat__bar-right">
           <button
             type="button"
@@ -690,42 +672,45 @@ const gradeSourceSentence = computed(() => {
               <img class="chat__hello-mark" :src="DEFAULT_LOGO_URL" :alt="''" aria-hidden="true" draggable="false" />
               <h2 class="chat__hello-title">你好，{{ student.nickname }}</h2>
               <p class="chat__hello-sub">
-                我是智团团。你可以直接提问，也可以让我换个方式讲 —— 我会按你的学段来回答。
+                我是智团团。你可以直接提问，也可以让我换个方式讲。我会按你的学段来回答。
               </p>
             </div>
 
             <!-- ★ 学段那一行**两种情况都要在**：它是「按哪个年级讲」的状态说明，
                  与「谁在打招呼」无关 —— 有开场语时把它一起藏掉，学生就看不到
-                 当前是哪个学段在给他讲课了。 -->
-            <div class="chat__hello-grade">
-              <span class="k12-dot chat__hello-dot" />
-              <p class="chat__hello-grade-text">
-                当前按<strong>{{ chat.currentGradeLabel ?? '待判定' }}</strong>的讲法回答。
-                <!-- ★ 括号里那句必须**跟着来源走**：学生手动选过之后，
-                     写死「由系统根据对话自动判定」会与顶栏的「手动选中」当场矛盾
-                     （实测截图里就是这句话自相矛盾）。来源说法只有 labels.ts 一处实现。 -->
-                <template v-if="chat.currentGrade">{{ gradeSourceSentence }}</template>
-                <template v-else>系统会先看几轮你的提问，再定成哪个年级。</template>
-              </p>
-            </div>
+                 当前是哪个学段在给他讲课了。
+                 ★★ 它只说**事实**，不复读**来源**（报告 2.1 / C2）：
+                   此前这里还有一句括号里的「（这是你自己选的 · 手动选中）」/「（AI 引擎判定）」，
+                   而同一个状态在一屏里已经说了三四遍（侧栏身份卡 / 顶栏 / 这里）——
+                   来源说法现在只在**侧栏身份卡**一处出现（`gradeOriginLabel()` 仍是唯一实现）。
+                 ★ 未判定时给的是学生话（「先随便问两句，我就能认出你的年级。」）：
+                   「判定」这类系统口吻与「大字给值、小字否定值」都要去掉（报告 2.2 / C2）；
+                   学段名本身来自 `labels.ts` 的 `GRADE_UNKNOWN_LABEL`（唯一字面量）。
+                 ★ 视觉上按报告 2.1 / 4.2 收成**一行灰字**：无底卡、无绿点 ——
+                   那颗绿点在一屏里与黄条、蓝主操作抢注意力（报告 2.4）。 -->
+            <p class="chat__hello-grade">
+              <template v-if="chat.currentGrade">
+                当前按<strong>{{ chat.currentGradeLabel ?? GRADE_UNKNOWN_LABEL }}</strong>的讲法回答。
+              </template>
+              <template v-else>先随便问两句，我就能认出你的年级。</template>
+            </p>
 
             <!-- ★★ 还没配置模型（没填 Key）：**进门就说清**，而不是等学生打完整句话、
                  按下发送、等一会儿才收到一句技术口吻的失败提示（实测缺陷，见
                  `needsLlmSetup` 的注释）。
                  ★ 两半各说各的话（双视角纪律）：老师看到「去填什么」，
-                   学生看到「找谁」，并且**指出现在就能用的功能** —— 空态里那三张
-                   （动画 / 编程 / 闯关）都在本地跑，不依赖模型。 -->
+                   学生看到「找谁」。
+                 ★★ 2026-09-22 设计评审（C3）：末句「下面那三样本地功能现在就能用」
+                   **已删** —— 正下方就是四张能力入口卡，它们本身就是那个证明；
+                   提示里再复述一遍只是把同一件事说两遍。破折号长句也改成两句短句（C16）。 -->
             <div v-if="needsLlmSetup" class="chat__llm-note" data-testid="chat-llm-unconfigured">
               <TriangleAlert :size="14" class="chat__llm-ico" />
               <p class="chat__llm-text">
                 <template v-if="viewMode.isTeacher">
                   还没配置模型：在设置页填上供应商与 API Key 并保存，就能正常对话。
-                  下面的动画 / 编程 / 闯关不依赖模型，现在就能用。
                 </template>
                 <template v-else>
-                  智团团还没接上云端大脑，现在问问题还答不了 —— 请老师或家长在
-                  「设置 → 高级设置（教师 / 答辩）」里配置一下。
-                  下面的动画 / 编程 / 闯关不依赖模型，现在就能用。
+                  智团团还没接上云端大脑，现在问问题还答不了。请老师或家长在「设置 → 高级设置」里配置一下。
                 </template>
               </p>
               <button
@@ -767,10 +752,6 @@ const gradeSourceSentence = computed(() => {
                 {{ s }}
               </button>
             </div>
-
-            <p class="k12-path">
-              直接提问就能开始 · 想要动画 / 编程 / 闯关，说一句或点上面的入口
-            </p>
           </div>
 
           <!-- ── 消息列表 ─────────────────────────────────────────────── -->
@@ -857,9 +838,13 @@ const gradeSourceSentence = computed(() => {
         <ShieldAlert :size="13" />
         <span>{{ chat.localNotice }}</span>
       </p>
+      <!-- ★★ 这一句是**学生面**：原来写「对话通道未接通（preload 没有加载）。」——
+           `preload` 这个词学生读不懂。接线细节（preload 没加载 / 检查 contextIsolation）
+           由 `stores/chat.ts` 的 `connect()` 经 `warnWiring('chat.connect', …)` 打进控制台，
+           这里只说学生能感知的事（2026-09-22 报告 0.2 + 双视角 D-063）。 -->
       <p v-else-if="!chat.bridgeReady" class="chat__notice" data-testid="local-notice">
         <TriangleAlert :size="13" />
-        <span>对话通道未接通（preload 没有加载）。</span>
+        <span>对话暂时用不了，需要时请老师帮忙看看。</span>
       </p>
     </div>
 
@@ -900,27 +885,30 @@ const gradeSourceSentence = computed(() => {
   flex-direction: column;
 }
 
-/* 指示器行：**只有教材章节**（学段在顶栏，见模板里的说明）。
- * 分隔线由这一行画、不由指示器自己画 —— 各画一条就会叠成双线（「错位」观感的一半）。
- * 底色**不铺白**：这一行和下面的会话工具条同属「桌面层」（透出页面底色），
- * 白色只留给纸张（消息与卡片）；铺白会把顶栏那条 chrome 一路拖到内容区里。 */
-.chat__indicators {
-  flex: none;
-  border-bottom: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
-}
-
-/* ── 会话工具条 ───────────────────────────────────────────────────────── */
+/* ── 信息条：章节 + 本轮对话 + 两个栏开关，**同一行** ────────────────────
+ * ★★ 这一条取代了原来的**两条**（`.chat__indicators` + `.chat__bar`）：报告 4.1 的原话是
+ *   「侧栏竖线 + 顶栏下线 + 章节条下线 + 本轮对话条下线，才到内容」—— 4 条线里
+ *   有两条说的是同一件事（这段对话在什么状态），合成一条即可（4.4 的示意同此）。
+ * ★ 底色**不铺白**：这一行属于「桌面层」（透出页面底色），白色只留给纸张（消息与卡片）。
+ * ★ 分隔线由这一行画、不由指示器自己画 —— 各画一条就会叠成双线（「错位」观感的一半，
+ *   见 `ChapterIndicator.vue` 的同名说明）。 */
 .chat__bar {
   flex: none;
   display: flex;
-  align-items: center;
+  /* ★★ 首行对齐用 `flex-start`（不是 `center`）：章节目录展开时这一条会长高，
+   *   `center` 会把 32px 的开关与「本轮对话」一起拽到那一大块中间。
+   *   各组的首行自然落在同一条线上（左 / 右组的内容本来就 32px 高，
+   *   章节那一项的首行在 `ChapterIndicator.vue` 里钉成 32px）。 */
+  align-items: flex-start;
   gap: 12px;
-  padding: 10px 24px;
+  padding: 8px 24px 9px;
   /* 工具条属于桌面层，不铺纸 —— 它是「桌上的工具」，不是内容 */
   border-bottom: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
 }
 .chat__bar-left {
-  flex: 1;
+  /* `none` 而不是 `flex: 1`：让出中段给章节指示器 —— 章节名可以截断，
+   * 而「本轮对话 / N 轮」这几个字不该被压（它们是这一条的读法起点）。 */
+  flex: none;
   min-width: 0;
   display: flex;
   /* ★ 这一行里既有 32px 的图标开关、也有两段文字 —— **按中心线对齐**，
@@ -928,6 +916,12 @@ const gradeSourceSentence = computed(() => {
    *   ⚠️ 别改回 `baseline`：图标按钮的「基线」是盒子底边，会高出文字 4px（实测）。 */
   align-items: center;
   gap: 10px;
+}
+/* 章节指示器占中段（`ChapterIndicator` 的根元素）：宽度富余时它左对齐，
+ * 不够时**它可以被压**（`min-width: 0`）—— 章节名截断比把开关挤出去好。 */
+.chat__bar-chapter {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 /* 两段文字的小容器：内部仍按**基线**对齐（13px 标题 + 12px 元信息） */
 .chat__bar-titles {
@@ -1182,33 +1176,26 @@ const gradeSourceSentence = computed(() => {
   color: var(--k12-fg-2);
   max-width: 58ch;
 }
+/* 学段那一行：**一行灰字**（报告 2.1 的「最多一行灰字」+ 4.2 的
+ * 「纯说明 → caption 灰字、无框」）。
+ * ★ 此前它是一个灰底圆角盒 + 一颗绿点；报告 2.4 说得很具体：一屏里黄（配置）、
+ *   绿（本地）、蓝（主操作）同时抢注意力，而这行只是**状态说明**，不是状态告警。
+ *   所以底卡与绿点一起去掉，只留一句灰字（`--k12-muted`）。
+ * ★ 来源（手动选中 / AI 引擎推算）不在这里复读 —— 只在侧栏身份卡一处出现（2.1）。 */
 .chat__hello-grade {
-  background: var(--k12-surface-2);
-  border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
-  border-radius: var(--k12-r-inset);
-
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 11px 13px;
-  max-width: 72ch;
-}
-.chat__hello-dot {
-  margin-top: 7px;
-  background: var(--k12-good);
-}
-.chat__hello-grade-text {
   font-size: var(--k12-fs-xs);
   line-height: var(--k12-lh-body);
-  color: var(--k12-fg-2);
+  color: var(--k12-muted);
+  max-width: 72ch;
 }
-.chat__hello-grade-text strong {
+.chat__hello-grade strong {
   color: var(--k12-fg);
   font-weight: 650;
 }
 
-/* 「还没配置模型」那条提示：与上面那行学段状态同一块版式，但用**暖色**而不是灰 ——
- * 它不是状态说明，而是「现在就答不了」的原因。
+/* 「还没配置模型」那条提示：**这一屏里唯一的黄**（报告 2.4 的收敛口径：
+ * 「黄条仅保留『模型未就绪且阻断对话』一种」）—— 上面的学段行已改成灰字，
+ * 所以它不再需要跟一块同版式的灰盒并排。
  * ★ 不用红色：这不是故障，是「还差一步配置」（红会让老师以为软件坏了）。 */
 .chat__llm-note {
   background: var(--k12-warn-soft);

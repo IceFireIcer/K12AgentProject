@@ -49,7 +49,7 @@ export const STUDY_TABS: readonly StudyTabEntry[] = [
   {
     id: 'mistakes',
     label: '错题本',
-    hint: '哪些知识点答错过、错了多少次 —— 可以一键回对话里再练一遍。',
+    hint: '哪些知识点答错过、错了多少次，可以一键回对话里再练一遍。',
     component: MistakesTab
   },
   {
@@ -67,7 +67,7 @@ export const STUDY_TABS: readonly StudyTabEntry[] = [
   {
     id: 'sessions',
     label: '历史会话',
-    hint: '以前聊过什么 —— 可以搜索，也可以点开回看（只读）。',
+    hint: '以前聊过什么，可以搜索，也可以点开回看（只读）。',
     component: SessionsTab
   }
 ]

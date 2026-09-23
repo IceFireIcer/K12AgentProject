@@ -328,19 +328,35 @@ async function copyScaffold(): Promise<void> {
   }
 }
 
-/** 加载状态的展示文案（含懒加载耗时 —— 票 18 要求记录"进卡片才加载"的证据）。 */
+/**
+ * 加载状态的展示文案（含懒加载耗时 —— 票 18 要求记录"进卡片才加载"的证据）。
+ *
+ * ★ 待加载那一档只说「什么时候能跑」（角标不该摆加载时机这类实现细节），
+ *   与编程页 `views/Coding.vue` 的 `pyodideBadge` **同一口径**：
+ *   两处同义角标写两种话，学生只会以为其中一个是另一种故障。
+ *   细节（第一次点运行时才准备环境）进 `title`。
+ */
 const pyodideBadge = computed(() => {
   const status = runnerStatus.value
   if (status.phase === 'ready') {
     const seconds = status.loadMs === null ? null : (status.loadMs / 1000).toFixed(1)
     return {
       text: seconds ? `Python 就绪（${seconds} s）` : 'Python 就绪',
-      tone: 'ok' as const
+      tone: 'ok' as const,
+      title: '可以点「运行」了。'
     }
   }
-  if (status.phase === 'loading') return { text: '正在准备 Python 环境…', tone: 'busy' as const }
-  if (status.phase === 'failed') return { text: 'Python 环境不可用', tone: 'warn' as const }
-  return { text: 'Python 待加载', tone: 'idle' as const }
+  if (status.phase === 'loading') {
+    return { text: '正在准备 Python 环境…', tone: 'busy' as const, title: '正在准备运行环境，要等几秒。' }
+  }
+  if (status.phase === 'failed') {
+    return { text: 'Python 环境不可用', tone: 'warn' as const, title: '运行环境没能起来，可以让老师看看。' }
+  }
+  return {
+    text: '代码区就绪后可运行',
+    tone: 'idle' as const,
+    title: '运行环境会在你第一次点「运行」时准备，要等几秒。'
+  }
 })
 
 /** ★ 中断能力自检结果（拿不到 SharedArrayBuffer 时必须如实告知"无法中断"）。 */
@@ -370,7 +386,12 @@ const interruptNotice = computed(() => {
            取不到名字时**整个 chip 不出现**（不回落成 slug）。
            原始 id 仍在容器的 `data-kp-id` 上（排障与断言要用，但不渲染）。 -->
       <span v-if="kpName" class="chip tool" data-testid="coding-kp" :title="view.kpId">{{ kpName }}</span>
-      <span class="chip" :class="`chip--${pyodideBadge.tone}`" data-testid="coding-pyodide">
+      <span
+        class="chip"
+        :class="`chip--${pyodideBadge.tone}`"
+        :title="pyodideBadge.title"
+        data-testid="coding-pyodide"
+      >
         {{ pyodideBadge.text }}
       </span>
     </header>
@@ -486,19 +507,18 @@ const interruptNotice = computed(() => {
     </p>
 
     <p v-if="localHint" class="coding__hint" data-testid="coding-hint-local">{{ localHint }}</p>
-    <!-- ★★ 这句话必须与**同一张卡片上的「求助」按钮**保持一致（走查后修正）。
-         原来写的是「…运行，不会上传、也碰不到学习数据。卡住就点「求助」」——
-         两句互相打脸：点「求助」会把**学生代码的前 400 字**发给智团团
-         （见 `cards/coding.ts` 的 `buildHintRequestMessage` + `codePreview`）。
-         一个把字面意思当真、刚读完「不会上传」就去点求助的 10 岁学生，
+    <!-- ★★ 这一行只剩下**真实的行为告知**（走查 C7：同一件安全承诺说三遍 = 一遍都记不住）。
+         原来前半句还写着「代码在你电脑上的沙箱里运行，不会上传」，与编程页页脚那句重复；
+         现在**全应用只留一处**常驻安全声明 = `views/Coding.vue` 页脚
+         （`data-testid="coding-view-run-locally"`），这里不再复读。
+         保留下来的这半句是**必须说**的（走查后修正、且 D-063 要求承诺与实际一致）：
+         点「求助」会把**学生代码的前 400 字**发给智团团
+         （见 `cards/coding.ts` 的 `buildHintRequestMessage` + `codePreview`）——
+         一个把字面意思当真的 10 岁学生，若只读到「不会上传」就去点求助，
          会以为求助也是本地的。
-         现在拆成两件**各自都成立**的事：
-           · 运行 / 执行 —— 只在这台电脑的沙箱里，不联网；
-           · 求助 —— 会把你写的那几行发给智团团（它要靠这个才能帮你找问题）。
          ⚠️ 改这句话之前先读 `buildHintRequestMessage`：它带 `codePreview(code)`。 -->
     <p class="coding__foot">
-      代码在你电脑上的沙箱里运行，不会上传。点「求助」时，会把你写的那几行发给智团团看 ——
-      它是靠这个帮你找问题的。
+      点「求助」时，会把你写的那几行发给智团团看。它是靠这个帮你找问题的。
     </p>
   </article>
 
@@ -883,7 +903,7 @@ const interruptNotice = computed(() => {
 
 .coding__foot {
   margin-top: 12px;
-  /* 卡片脚注（沙箱说明）→ meta 档 */
+  /* 卡片脚注（「求助会把你的代码发给智团团」这条行为告知）→ meta 档 */
   font-size: var(--k12-fs-xs);
   line-height: 1.6;
   color: var(--k12-muted-2);

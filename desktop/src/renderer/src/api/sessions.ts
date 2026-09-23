@@ -25,6 +25,7 @@ import type {
   SessionOpenResult,
   SessionStateResult
 } from '../../../main/ipc/channels'
+import { warnWiring } from './wiring-notice'
 
 /** 会话切换在渲染进程侧需要的方法（**从 preload 白名单里挑**）。 */
 export interface SessionBridge {
@@ -43,12 +44,16 @@ export type SessionBridgeLookup =
   | { ready: true; bridge: SessionBridge }
   | { ready: false; message: string }
 
-/** 缺通道时给学生看的那句话（照它就能把线接上）。 */
-export const SESSION_BRIDGE_MISSING_HINT =
-  '还不能切换会话：preload 白名单缺少 openSession / startNewSession / branchSession / ' +
-  'deleteSession / getSessionState / onSessionChanged —— 需要先在主进程注册 `session:open` / ' +
-  '`session:new` / `session:branch` / `session:delete` / `session:state` / `session:changed` ' +
-  '六条通道（由 preload 白名单暴露，渲染进程不直接持有通道名）。接线后刷新页面即可生效。'
+/**
+ * 整块会话切换能力不可用时**给学生看的那句话**（侧栏历史对话那一行的提示）。
+ *
+ * ★★ 2026-09-22 改口（设计评审报告 0.2 + 双视角 D-063）：原来这句把
+ *   `openSession` / `startNewSession` / … 六个方法名与 `session:open` / `session:state`
+ *   六条通道名一起印在侧栏上（学生看得到），末尾还写「接线后刷新页面即可生效」。
+ *   现在只说三件事：历史对话打不开、**当前这段还能接着聊**、需要时找老师。
+ *   ⚠️ 缺哪几个方法不在这里 —— 它经 {@link resolveSessionBridge} 的 `warnWiring` 进控制台。
+ */
+export const SESSION_BRIDGE_MISSING_HINT = '历史对话暂时打不开，当前这段还能接着聊。需要时请老师帮忙看看。'
 
 /** 这一层**唯一**的必需能力（少一个就用不了「切会话续聊 / 删会话」）。 */
 const REQUIRED_METHODS = [
@@ -63,6 +68,10 @@ const REQUIRED_METHODS = [
 /**
  * 从 `window.api` 上取会话切换能力。
  *
+ * ★★ 缺方法时：**屏幕上是学生话**（{@link SESSION_BRIDGE_MISSING_HINT}），
+ *   **缺哪几个方法进控制台**（`warnWiring`，一次把清单列全）——
+ *   两条通路的分工见 `api/wiring-notice.ts` 的文件头。
+ *
  * ★ 逐方法确认后再显式拼桥：不写 `host as unknown as SessionBridge` ——
  *   那种双重断言会把 `window.api` 的真实签名整条抹掉，主进程改签名时渲染侧一行都不会报错。
  */
@@ -70,16 +79,24 @@ export function resolveSessionBridge(
   host: K12Api | undefined = globalThis.window?.api
 ): SessionBridgeLookup {
   if (typeof host === 'undefined') {
-    return { ready: false, message: '预加载脚本未生效（window.api 缺失），会话切换暂时不可用。' }
+    warnWiring(
+      'session',
+      'window.api 缺失：preload 没有加载（整块会话切换能力不可用）。检查 preload 入口与 contextIsolation / sandbox 配置。'
+    )
+    return { ready: false, message: SESSION_BRIDGE_MISSING_HINT }
   }
   const missing = REQUIRED_METHODS.filter(
     (name) => typeof (host as unknown as Record<string, unknown>)[name] !== 'function'
   )
   if (missing.length > 0) {
-    return {
-      ready: false,
-      message: `${SESSION_BRIDGE_MISSING_HINT}（缺：${missing.join(', ')}）`
-    }
+    warnWiring(
+      'session.methods',
+      `preload 白名单缺少这 ${missing.length} 个方法：${missing.join(' / ')}。` +
+        '需要先在主进程注册 session:open / session:new / session:branch / session:delete / ' +
+        'session:state / session:changed 六条通道（前五条 invoke 带回执、最后一条是推送，' +
+        '已登记进 PUSH_CHANNELS），再由 preload 白名单逐方法暴露。接线后重启渲染进程即可生效。'
+    )
+    return { ready: false, message: SESSION_BRIDGE_MISSING_HINT }
   }
   const api = host as K12Api
   return {

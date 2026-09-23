@@ -14,17 +14,22 @@ import type { GradeLevel, TraceSnapshot } from '@shared/ipc-events'
 // ★ 相对路径 **type-only** import（编译后完全擦除，运行时不加载主进程代码）：
 //   与 `api/study.ts` / `api/grade.ts` 同一手法，守卫 G2/G3 允许。
 import type { K12Api } from '../../../preload/index'
+import { warnWiring } from './wiring-notice'
 
 /** 新增数据面通道的通用回执（与 `StudyCallResult` 同形）。 */
 export type DataCallResult<T = unknown> = { ok: true; data: T } | { ok: false; message: string }
 
-/** 桥不可用时的统一说明（**要说清缺的是哪个方法**，照它就能把线接上）。 */
-export function dataBridgeMissingHint(method: string): string {
-  return (
-    `本地数据通道未接通：主进程没有提供 window.api.${method}。` +
-    '（分步接线时的老产物，或测试替身没装全。）'
-  )
-}
+/**
+ * 数据面桥不可用时**给学生看的那句话**（会渲染在编程 / 闯关 / 动画 / 记录各页的错误位上）。
+ *
+ * ★★ 2026-09-22 改口（设计评审报告 0.2 + 双视角 D-063）：原来这里给的是
+ *   「本地数据通道未接通：主进程没有提供 window.api.readQuizBank。（分步接线时的老产物，
+ *   或测试替身没装全。）」——方法名、`window.api`、「测试替身」全印在学生的屏幕上，
+ *   而「分步接线时的老产物」更是把他当成了接线的人。
+ *   现在只说他能感知的事：这块打不开、还能回对话页、需要时找老师。
+ * ★ 缺哪些方法**不在这里**：它经 `resolveDataBridge` 的 `warnWiring` 进控制台。
+ */
+export const DATA_BRIDGE_MISSING_HINT = '这部分内容暂时打不开。先回对话页就好，需要时请老师帮忙看看。'
 
 /**
  * 新增数据面桥的能力面。
@@ -114,13 +119,24 @@ const REQUIRED_METHODS = [
  */
 export function resolveDataBridge(host: unknown = globalThis.window?.api): DataBridgeLookup {
   if (typeof host !== 'object' || host === null) {
-    return { ready: false, message: '本地数据通道未接通：window.api 不存在（preload 没有加载）。' }
+    warnWiring(
+      'data',
+      'window.api 缺失：preload 没有加载（整块数据面不可用）。检查 preload 入口与 contextIsolation / sandbox 配置。'
+    )
+    return { ready: false, message: DATA_BRIDGE_MISSING_HINT }
   }
   const api = host as Partial<K12Api>
-  for (const method of REQUIRED_METHODS) {
-    if (typeof api[method] !== 'function') {
-      return { ready: false, message: dataBridgeMissingHint(method) }
-    }
+  // ★★ 一次把**缺的全列出来**（不是遇到第一个就返回）——与 `api/study.ts` / `api/sessions.ts`
+  //   同一个手法：接线的人需要的是完整清单，而不是「改一个再来一次」的体验。
+  const missing = REQUIRED_METHODS.filter((method) => typeof api[method] !== 'function')
+  if (missing.length > 0) {
+    warnWiring(
+      'data.methods',
+      `preload 白名单缺少这 ${missing.length} 个方法：${missing.join(' / ')}。` +
+        '需要主进程逐个注册数据面通道（画像 / 闯关 / 编程 / 动画 / 知识库五组），' +
+        '再由 preload 白名单暴露同名方法。接线后重启渲染进程即可生效。'
+    )
+    return { ready: false, message: DATA_BRIDGE_MISSING_HINT }
   }
   return {
     ready: true,

@@ -30,7 +30,7 @@ import { useQuizStore } from '../../stores/quiz'
 import { useUiStore } from '../../stores/ui'
 import { useReducedMotion } from '../../composables/useReducedMotion'
 import { UNKNOWN_KP_LABEL, kpLabel } from '../kp-label'
-import { GRADE_LABELS } from '../../labels'
+import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../../labels'
 import GraphMap from './GraphMap.vue'
 import { layoutGraph } from './layout'
 
@@ -44,9 +44,16 @@ const ui = useUiStore()
 const reducedMotion = useReducedMotion()
 
 const graph = computed(() => study.graph)
+/**
+ * 学段还没定下来时显示的**中性标签**。
+ *
+ * ★ 字面量只有一处实现（`labels.ts` 的 `GRADE_UNKNOWN_LABEL`）——
+ *   本文件以前写死了「待判定」那句中文，改词时就会漏掉这一页
+ *   （报告 0.2 的术语表已把学生面的说法改成「还没认出年级」）。
+ */
 const gradeLabel = computed(() => {
   const level = graph.value?.gradeLevel
-  return level ? (GRADE_LABELS[level] ?? level) : '待判定'
+  return level ? (GRADE_LABELS[level] ?? level) : GRADE_UNKNOWN_LABEL
 })
 
 /** 画布容器（**唯一**的滚动者 —— 定位只改它的 scrollLeft / scrollTop，不动 SVG）。 */
@@ -303,7 +310,8 @@ function chapterNumber(title: string): number {
       <p class="summary" data-testid="map-summary">
         {{ gradeLabel }}知识结构 · {{ graph.nodes.length }} 个知识点 ·
         {{ graph.edges.length }} 条依赖 ·
-        已掌握 <strong>{{ masteredCount }}</strong> 个
+        <!-- 进度数字只有一种格式：`已掌握 N / M`（报告 2.3） -->
+        已掌握 <strong>{{ masteredCount }} / {{ graph.nodes.length }}</strong>
       </p>
 
       <p v-if="graph.nodes.length === 0" class="state" data-testid="map-empty">
@@ -369,7 +377,7 @@ function chapterNumber(title: string): number {
                 {{ item.name }}
               </button>
             </template>
-            <span v-else class="detail__none">没有前置 —— 这是可以最先开始学的知识点。</span>
+            <span v-else class="detail__none">没有前置，这是可以最先开始学的知识点。</span>
           </div>
 
           <div class="detail__actions">

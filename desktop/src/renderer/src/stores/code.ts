@@ -216,7 +216,8 @@ export const useCodeStore = defineStore('code', () => {
     if (!kpId) return
     if (hintLoading.value) return
     if (!canAskMoreHints.value) {
-      hintError.value = `提示已经给到第 ${CODE_HINT_MAX} 级了 —— 再往下就等于直接给答案，先按这个方向试一试。`
+      // ★ 学生面不用破折号（走查 C16）：两句短句比一个「——」更好读。
+      hintError.value = `提示已经给到第 ${CODE_HINT_MAX} 级了。再往下就等于直接给答案，先按这个方向试一试。`
       return
     }
     const lookup = resolveDataBridge()

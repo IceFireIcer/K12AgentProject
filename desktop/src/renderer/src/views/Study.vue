@@ -154,10 +154,12 @@ watch(
   min-height: 0;
 }
 
+/* ★ 这条 `border-bottom` 已按报告 4.1 删掉：窗口级横线（侧栏竖线 + 顶栏下线 +
+ *   章节条下线 + 「本轮对话」条下线 + 这一条）「不携带层级」——
+ *   它们只是让内容区看起来像被一层层框住。页级分区靠留白分工。 */
 .study__head {
   padding: 14px 24px 10px;
-  border-bottom: 1px solid var(--k12-border);
-  /* 这一条是**纸**（本页的头部横条，带一条细线收口），不是身后的桌面 ——
+  /* 这一条是**纸**（本页的头部横条），不是身后的桌面 ——
    * 桌面底色已经由 `.shell__content` 铺好（`--k12-page`） */
   background: var(--k12-surface);
 }

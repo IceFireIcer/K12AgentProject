@@ -47,6 +47,7 @@ import type {
   ChapterState
 } from '../../../main/ipc/channels'
 import { readGradeLevel } from './grade'
+import { warnWiring } from './wiring-notice'
 
 /**
  * ★ 这三个类型**不在渲染进程重写一遍**：唯一来源是 `src/main/ipc/channels.ts`
@@ -75,30 +76,42 @@ export type ChapterBridgeLookup =
   | { ready: true; bridge: ChapterBridge }
   | { ready: false; message: string }
 
-/** 缺推送通道时给学生/开发者看的那句话（照它就能把线接上）。 */
-export const CHAPTER_BRIDGE_MISSING_HINT =
-  '教材章节还没有接线：preload 白名单缺少 onChapterChanged —— 需要先在主进程注册' +
-  '「章节推送」通道（chapter:changed，由 preload 白名单暴露，渲染进程不直接持有通道名），' +
-  '再由 preload 暴露 `onChapterChanged` / `getChapter` / `setChapter`。接线后刷新页面即可生效。'
+/**
+ * 整块章节能力不可用时**给学生看的那句话**（会渲染在学段/章节那两处提示上）。
+ *
+ * ★★ 两种成因共用这一句：preload 没加载（`window.api` 缺失）与缺推送通道
+ *   （`onChapterChanged` 不在白名单里）—— 对学生的可见后果**完全一样**（章节读不到），
+ *   所以屏幕上也该是同一句话；两种成因的区别只进控制台（见 {@link resolveChapterBridge}）。
+ *
+ * ★★ 2026-09-22 改口（设计评审报告 0.2 + 双视角 D-063）：原来这句是接线说明
+ *   （「preload 白名单缺少 onChapterChanged……接线后刷新页面即可生效」），
+ *   既把方法名/通道名印给学生，又对他承诺了一件他做不到的事（他没有线要接、刷新也没用）。
+ *   现在只说他能感知的三件事：什么用不了（章节读不到）、还能做什么（照样问问题）、
+ *   找谁（老师）—— 与对话页空态那句「请老师或家长在『设置 → 高级设置』里配置一下」同一口径。
+ */
+export const CHAPTER_BRIDGE_MISSING_HINT = '教材章节暂时读不到。先直接问问题就好，需要时请老师帮忙看看。'
 
 /**
- * 桥在、但**缺少写入方法**时的说明。
+ * 桥在、但**缺写入方法**（`setChapter`）时给学生看的那句话。
  *
  * ★ 单独一条的理由：读与写是**两条**分步接线的能力（`chapterGet` / `chapterSet`）。
  *   只有读能力时，指示器照常显示「正在学：第X章」，只是「选章节」这个动作不可用 ——
- *   这时要让学生知道**是写入没接线**，而不是以为「章节功能整个坏了」。
+ *   这句话要说清「现在换不了」，而不是让学生以为「章节功能整个坏了」。
+ *   （技术细节 —— 缺的是哪个方法、要注册哪条通道 —— 走控制台，见 `resolveChapterBridge`。）
  */
-export const CHAPTER_SET_MISSING_HINT =
-  '选择章节还没有接线：preload 白名单缺少 setChapter —— 需要先在主进程注册' +
-  '「章节设定」通道（invoke，带回执：学生要看到改没改成），再由 preload 暴露 `setChapter`。' +
-  '接线后刷新页面即可生效。'
+export const CHAPTER_SET_MISSING_HINT = '暂时换不了章节。先直接问问题就好，需要时请老师帮忙看看。'
 
 /**
  * 从 `window.api` 上取章节能力。
  *
  * 为什么「按方法名探测」而不是直接调：主进程的章节能力与只读指示器是并行落地的两条改动，
- * 通道没落地时界面必须显示「未选择章节 + 一句能照着做的话」，
+ * 通道没落地时界面必须显示「未选择章节 + 一句学生能读的话」，
  * 而不是抛 `window.api.onChapterChanged is not a function` 把整页打空。
+ *
+ * ★★ 缺哪一条线时，**接线细节进控制台**（`warnWiring`）、**屏幕上是学生话**
+ * （{@link CHAPTER_BRIDGE_MISSING_HINT} / {@link CHAPTER_SET_MISSING_HINT}）——
+ *   两条通路的分工见 `api/wiring-notice.ts` 的文件头。这里一句大实话：
+ *   以前那句「接线后刷新页面即可生效」是写给接线人的，现在它回到它该在的地方（控制台）。
  *
  * ★ 逐方法确认后**显式拼桥**，不写 `host as unknown as ChapterBridge`：
  *   那种双重断言会把 `window.api` 的真实签名整条抹掉，主进程改名或改签名时渲染侧一行都不报错。
@@ -107,11 +120,20 @@ export function resolveChapterBridge(
   host: K12Api | undefined = globalThis.window?.api
 ): ChapterBridgeLookup {
   if (typeof host === 'undefined') {
-    return { ready: false, message: '预加载脚本未生效（window.api 缺失），当前教材章节暂时读不到。' }
+    warnWiring(
+      'chapter',
+      'window.api 缺失：preload 没有加载（整块章节能力不可用）。检查 preload 入口与 contextIsolation / sandbox 配置。'
+    )
+    return { ready: false, message: CHAPTER_BRIDGE_MISSING_HINT }
   }
 
   const api: K12Api = host
   if (typeof api.onChapterChanged !== 'function') {
+    warnWiring(
+      'chapter.push',
+      'preload 白名单缺少 onChapterChanged：需要主进程注册 chapter:changed 推送通道' +
+        '（已登记进 PUSH_CHANNELS），再由 preload 暴露 onChapterChanged / getChapter / setChapter。接线后重启渲染进程即可生效。'
+    )
     return { ready: false, message: CHAPTER_BRIDGE_MISSING_HINT }
   }
 
@@ -120,8 +142,20 @@ export function resolveChapterBridge(
     onChapterChanged: (listener) => api.onChapterChanged(listener)
   }
   // ★ 可选能力：读/写各自晚一步接线时，界面照常展示（只是对应的动作不可用）
-  if (typeof api.getChapter === 'function') bridge.getChapter = () => api.getChapter()
-  if (typeof api.setChapter === 'function') bridge.setChapter = (title) => api.setChapter(title)
+  if (typeof api.getChapter === 'function') {
+    bridge.getChapter = () => api.getChapter()
+  } else {
+    warnWiring('chapter.get', 'preload 白名单缺少 getChapter：挂载/学段变化后拉不到当前章节，先靠 chapter:changed 推送兜着。')
+  }
+  if (typeof api.setChapter === 'function') {
+    bridge.setChapter = (title) => api.setChapter(title)
+  } else {
+    warnWiring(
+      'chapter.set',
+      'preload 白名单缺少 setChapter：需要主进程注册 chapter:set（invoke，带回执 —— 学生要看到改没改成），' +
+        '再由 preload 暴露 setChapter。接线后重启渲染进程即可生效；在那之前界面只读（能看到正在学哪一章、换不了）。'
+    )
+  }
   return { ready: true, bridge }
 }
 

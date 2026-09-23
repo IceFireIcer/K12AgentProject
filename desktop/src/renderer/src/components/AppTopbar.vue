@@ -6,17 +6,31 @@
  *   不再来自 `route.meta` —— 本项目没有路由（见 `stores/ui.ts` 头部理由）。
  *
  * ★ 学习类页面（对话 / 动画 / 编程 / 闯关）的副标题是**当前在学什么**，
- *   接真实数据：教材章节（`chat.currentChapter`，来自服务端）+ 下一个推荐知识点
- *   （`insight.recommended`，来自画像端点）。两者都没有时回落成页面清单里的
- *   静态副标题 —— 而不是编一句「主题：XXX」出来（原型里那句来自一个已删除的造数模块）。
+ *   接真实数据：教材章节（`chat.currentChapter`，来自服务端）。
+ *   没有章节时回落成页面清单里的静态副标题 —— 而不是编一句「主题：XXX」出来
+ *   （原型里那句来自一个已删除的造数模块）。
+ *
+ * ★★ 2026-09-22（报告 C1 / 1.2）：副标题里原先把画像端点给的推荐知识点也拼进来
+ *   （`建议接着练：<知识点>`），于是它钉在**四页**标题下，而学习记录页的「继续学习」
+ *   与对话空态各还有一份 —— 同一事实三处同时可见，且只有后两处是**可点**的。
+ *   现在这里**只留章节**（那是环境信息：这段对话在学什么）；练习建议留在能点它的地方。
+ *   ⚠️ 别把它加回来：一次行动推荐钉在全局 chrome 上，等于每换一页复读一遍同一个建议。
  *
  * ⚠️ 这一行**只放「当前环境」**：学段（按什么年级的口吻讲）+ 模型（用哪个模型回答）。
  *   **教材章节不在顶栏**：它是「这段对话在学什么」，跟着对话走
- *   （`views/Chat.vue` 的 `.chat__indicators` 行）。两者都放顶栏 = 同一件事出现两次。
+ *   （`views/Chat.vue` 的信息条 `.chat__bar` 里，与「本轮对话」同一行 ——
+ *   2026-09-22 起那两条并成了一条）。两者都放顶栏 = 同一件事出现两次。
  *   学段的手动入口在 `GradeIndicator` 内部（D-037），**不在**这条顶栏上另开一个控件。
  *
+ * ★★ 2026-09-22（报告 1.1）：顶栏业务控件**恰好两枚** —— 模型 chip + 学段 chip。
+ *   此前学段是两枚并列控件（实底 badge + 描边触发器「自己指定」），右上角于是挤着
+ *   四个同级胶囊（模型 / 学段状态 / 学段动作 / 外壳级跳转），学生分不清哪个是状态。
+ *   现在 `GradeIndicator` 自己把状态与动作合成**一枚**可点 chip（见该组件文件头）。
+ *   外壳级跳转钮（`view-entry`）仍由 `App.vue` 塞进 actions 插槽，但它已被降权成
+ *   描边小按钮 —— 它是**导航**，不与这两枚「当前环境」chip 抢同一档视觉权重。
+ *
  * ★ 顶栏是**单行 chrome**（64px，还要与外壳级动作 / 窗口按钮共处一行），所以：
- *   · 学段指示器用 `compact`（只留 chip + 短触发器，长说明不进这里）；
+ *   · 学段指示器用 `compact`（只留「学段值 + 我选年级」这一枚 chip，长说明不进这里）；
  *   · 标题与副标题都允许截断（`min-width: 0` + 省略号），
  *     宁可截断标题，也不让右边那枚按钮被挤出窗口（那正是「右侧控件被切掉」的样子）；
  *   · 这一行是窗口拖拽区（无边框窗口）：**每个可点元素**都在各自组件里
@@ -35,7 +49,6 @@ import GradeIndicator from './GradeIndicator.vue'
 import { PAGES, useUiStore } from '../stores/ui'
 import type { PageName } from '../stores/ui'
 import { useChatStore } from '../stores/chat'
-import { useInsightStore } from '../stores/insight'
 import { useModelStore } from '../stores/model'
 import { useSettingsStore } from '../stores/settings'
 import { useViewModeStore } from '../stores/viewMode'
@@ -43,7 +56,6 @@ import { chapterLineLabel, llmChipTitle } from '../labels'
 
 const ui = useUiStore()
 const chat = useChatStore()
-const insight = useInsightStore()
 const model = useModelStore()
 const settings = useSettingsStore()
 const viewMode = useViewModeStore()
@@ -54,21 +66,15 @@ const title = computed(() => PAGES[ui.page].title)
 const TOPIC_PAGES = new Set<PageName>(['chat', 'animation', 'coding', 'quiz'])
 
 /**
- * 真实的「正在学什么」：章节 + 推荐知识点。
+ * 真实的「正在学什么」：**只有章节那一截**（推荐那截已删，见文件头 ★★）。
  *
- * 每一截都**只在有数据时**才写出来（没有就不写那一截，也没有占位符）：
- *   - 章节用 `chapterLineLabel()`（与章节指示器同一句，唯一实现）；
- *   - 推荐取画像里的第一条（`insight.recommended` 本身就是"没有就不渲染"的口径）。
- * 这里**不发起取数**：章节由对话链路带入、推荐由右栏/档案页拉，顶栏只读，
- * 免得每换一页就多打两次请求。
+ * 只在有数据时才写出来（没有就不写，也没有占位符）：章节用 `chapterLineLabel()`
+ * （与章节指示器同一句，唯一实现）。
+ * 这里**不发起取数**：章节由对话链路带入，顶栏只读，免得每换一页就多打一次请求。
  */
 const topic = computed(() => {
-  const parts: string[] = []
   const chapter = chat.currentChapter.trim()
-  if (chapter.length > 0) parts.push(chapterLineLabel(chapter))
-  const next = insight.recommended
-  if (next) parts.push(`建议接着练：${next.name}`)
-  return parts.join(' · ')
+  return chapter.length > 0 ? chapterLineLabel(chapter) : ''
 })
 
 const subtitle = computed(() => {
@@ -108,7 +114,8 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
         <Cpu :size="13" />
         <span class="tb__model-name">{{ model.shortLabel }}</span>
       </button>
-      <!-- 紧凑形态：顶栏这一格只给「当前档位 + 来源 + 短触发器」。
+      <!-- 学段 chip（合并形态）：一枚可点 chip，点开仍是那个四档抽屉。
+           顶栏这一格只显示学段值 —— 来源挪去侧栏身份卡（全应用唯一说来源的地方，报告 2.1）；
            长说明与选项面板要么不进顶栏、要么浮在内容上（见组件内注释）。 -->
       <GradeIndicator compact />
     </div>
@@ -176,8 +183,10 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
   gap: 8px;
   flex: none;
 }
-/* 模型指示器：描边式，与只读的学段指示器（实底胶囊）在形态上分开 ——
- * 一个可点、一个只读，视觉上就不该长得一样。 */
+/* 模型指示器：描边式（透明底 + 发丝描边），与学段 chip（实底胶囊）在形态上分开 ——
+ * 两个都要点，但分量不同：模型那枚点开主要是**查看**（换模型连带 BaseURL / Key，
+ * 学生视角下弹层是只读的，见 `ModelPicker.vue`），学段那枚点开是**当场改**
+ * （D-037，改完立刻生效）。所以模型走描边、学段走实底 + 动作词（样式在 GradeIndicator）。 */
 .tb__model {
   display: inline-flex;
   align-items: center;

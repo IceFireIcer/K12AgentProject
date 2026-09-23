@@ -101,6 +101,17 @@ export interface ReportOverview {
   } | null
 }
 
+/**
+ * 拿不到昵称时学生被称作什么（页面 hero 与导出件**共用**这一份字）。
+ *
+ * ★★ 绝不回落成主键（报告 1.7 / C10）：这一行以前是 `report.nickname || report.studentId`，
+ *   导出件里还有一处**无条件**写 `mistakes.studentId` —— 于是学生 / 家长在报告最显眼
+ *   的位置读到的是 `student_001`。昵称缺失是服务端冷启动的正常状态（会先落一行空昵称），
+ *   显示口径就该是「同学」这种人话，而不是数据库主键。
+ * ⚠️ 主键仍然照常留在 wire 层与教师视角里：这里只改**显示**。
+ */
+export const STUDENT_FALLBACK_NAME = '同学'
+
 /** 0..1 之外的数不进导出物（脏数据不该在报告里变成 137%）——**只夹紧，不判断对错**。 */
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0
@@ -110,6 +121,46 @@ function clamp01(value: number): number {
 /** 0..1 → 百分比整数（导出物里不写 62.0000001%）。 */
 function percentOf(value: number): number {
   return Math.round(clamp01(value) * 100)
+}
+
+/**
+ * 那些**只能由一次真实作答**产生的关卡阶段（见 {@link hasLearningActivity} 的判据 ②）。
+ * `locked` / `learning` 都可能在学生一个题都没做时存在（冷启动把第一关播成 `learning`）。
+ */
+const ATTEMPTED_STAGES = ['quizzed', 'mastered'] as const
+
+/**
+ * ★ 有没有**任何学习活动** —— 页面空态与摘要行共用的判据（**唯一实现**）。
+ *
+ * 两个消费点必须问同一个问题，否则会拼出「页面说『还没有学习记录』、摘要行却在报
+ * 三个 0」这种自相矛盾的屏：
+ *   · `ReportTab.vue` 的空态（报告 1.6：没有任何学习活动时只给一句话 + 一个主行动）；
+ *   · 本文件的 {@link summaryLine}（报告 C9）。
+ *
+ * ★★ 判据只认**真的做过事**留下的痕迹，两条不能当活动的陷阱写在这里（都实测过）：
+ *
+ *   ① `chapters` **不算**：`_chapter_progress()` 是把**教材章节目录**（`kb.sqlite`）
+ *      铺成一行行进度 —— 一个从没学过的新学生也会有全部章节、每章 `已掌握 0 / N`。
+ *      拿它当判据，空态就永远不会出现（报告 1.6 点名的正是这排 0/N 条）。
+ *   ② `stageCounts` 里只有 `quizzed` / `mastered` 算：冷启动播种关卡路径时
+ *      **第一关就是 `learning`**（`routes/quiz.py` 的 `seed_progress(..., stage="learning")`），
+ *      那是系统铺的路，不是学生做过的事。而 `quizzed` / `mastered` 只可能由一次
+ *      真实作答（判分时 `upsert_progress`）产生。
+ *
+ * 其余各项都是真实痕迹：窗口内的活动量 / 题量 / 每日明细 / 连续天数，
+ * 以及跨整段历史的掌握度行、徽章（两者都由判分写入 `learning.db`）。
+ * ⚠️ `gradeHistory` **刻意不算**：冷启动会写一行基线学段，那不是学习活动。
+ */
+export function hasLearningActivity(report: ReportView): boolean {
+  return (
+    report.totalActivities > 0 ||
+    report.quizTotal > 0 ||
+    report.daily.length > 0 ||
+    report.streakDays > 0 ||
+    report.mastery.length > 0 ||
+    report.badges.length > 0 ||
+    ATTEMPTED_STAGES.some((stage) => (report.stageCounts[stage] ?? 0) > 0)
+  )
 }
 
 /** 毫秒时间戳 → `YYYY-MM-DD HH:mm`（本地时间；导出物上没有时区换算的需求）。 */
@@ -124,8 +175,19 @@ export function formatMs(ms: number): string {
   )
 }
 
-/** 一行「学习概况」的统计（报告第二节直接用）。 */
+/**
+ * 一行「学习概况」的统计（报告第二节直接用）。
+ *
+ * ★★ 没有任何活动时**只给一句话**（报告 C9）：原来的三段式在空数据下拼成
+ *    「近 7 天共 0 次学习活动，做了 0 道题，还没有作答记录。」——
+ *    读起来像系统在报障，而事实只是「还没开始」。
+ *    这一函数**同时供页面与导出 Markdown 用**，所以两边一起改口径。
+ * ★ 有数据时保留原来的三段（活动量 → 题量 → 正确率），一个字不改：
+ *   它的每一段都是真数字，且「还没有作答记录」这一句有单测钉着（quizTotal 为 0 但
+ *   确实有活动时仍然要出现 —— 那不是「没数据」，是「做了别的活动但没做题」）。
+ */
 export function summaryLine(report: ReportView, days: number): string {
+  if (!hasLearningActivity(report)) return '这段时间还没有学习记录。'
   const accuracy = report.quizTotal > 0 ? Math.round((report.quizCorrect / report.quizTotal) * 100) : null
   const parts = [
     `近 ${days} 天共 ${report.totalActivities} 次学习活动`,
@@ -175,7 +237,8 @@ export function composeReportMarkdown(
   const lines: string[] = []
   lines.push(`# 学习报告（近 ${days} 天）`)
   lines.push('')
-  lines.push(`- 学生：${report.nickname || report.studentId}`)
+  // ★ 昵称缺失时写「同学」（`STUDENT_FALLBACK_NAME`）——**绝不写主键**（报告 1.7）
+  lines.push(`- 学生：${report.nickname || STUDENT_FALLBACK_NAME}`)
   lines.push(`- 当前学段：${gradeLabel(report.gradeLevel)}`)
   lines.push(`- 生成时间：${formatMs(report.generatedAt)}`)
   lines.push('')
@@ -233,8 +296,9 @@ export function composeReportMarkdown(
     lines.push('还没有章节进度记录。')
   } else {
     for (const chapter of report.chapters) {
+      // 进度数字与页面同一格式：`已掌握 N / M`（报告 2.3 —— 一种进度语言）
       lines.push(
-        `- ${chapter.chapterTitle}：已掌握 ${chapter.masteredCount}/${chapter.kpCount}` +
+        `- ${chapter.chapterTitle}：已掌握 ${chapter.masteredCount} / ${chapter.kpCount}` +
           `（已测验 ${chapter.quizzedCount}）`
       )
     }
@@ -295,7 +359,7 @@ export function composeReportMarkdown(
       recommended.name && recommended.name !== recommended.kpId
         ? recommended.name
         : `${recommended.kpId}（知识点编号）`
-    lines.push(`- 建议接着练：**${name}** —— ${recommended.reason}`)
+    lines.push(`- 建议接着练：**${name}**。${recommended.reason}`)
     lines.push('')
   }
   lines.push('回到对话里问一句「我接下来该学什么」，助手会按依赖图与掌握度给出建议。')
@@ -315,7 +379,10 @@ export function composeMistakesMarkdown(mistakes: MistakesView): string {
   const lines: string[] = []
   lines.push('# 错题本')
   lines.push('')
-  lines.push(`- 学生：${mistakes.studentId}`)
+  // ★ 错题数据里**没有昵称字段**（契约 `MistakeListResponse` 只有 student_id），
+  //   所以这里写死中性称呼 —— 以前是**无条件**写 `- 学生：${mistakes.studentId}`，
+  //   等于把主键印在导出件第一行（报告 1.7 / C10 点名）。
+  lines.push(`- 学生：${STUDENT_FALLBACK_NAME}`)
   lines.push(`- 当前学段：${gradeLabel(mistakes.gradeLevel)}`)
   lines.push(`- 共 ${mistakes.items.length} 个知识点有错题，累计答错 ${mistakes.totalWrong} 次`)
   lines.push('')

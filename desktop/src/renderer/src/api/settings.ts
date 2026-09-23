@@ -32,6 +32,7 @@ import type { FetchModelsResult, ProviderCatalogEntry } from '@shared/provider-c
 //   渲染进程运行时不加载任何主进程模块（与 `stores/sidecar.ts` 引 `main/sidecar/protocol` 同法）。
 import type { SettingsCallResult } from '../../../main/ipc/channels'
 import type { K12Api } from '../../../preload/index'
+import { warnWiring } from './wiring-notice'
 
 // ---------------------------------------------------------------- 契约类型 --
 export type SettingsSnapshot = components['schemas']['SettingsResponse']
@@ -70,18 +71,35 @@ export type SettingsBridgeLookup =
   | { ready: false; message: string }
 
 /**
+ * 设置桥不可用时**给学生看的那句话**（设置页那条横幅上）。
+ *
+ * ★★ 2026-09-22 改口（设计评审报告 0.2 + 双视角 D-063）：原来有两句，都是接线说明：
+ *   「预加载脚本未生效（window.api 缺失），无法读写设置。**请重启应用**或检查 preload 是否加载成功。」
+ *   与「设置功能尚未接线：preload 白名单缺少 X，需要先在**主进程 IPC（channels/handlers）**注册
+ *   ……三条 invoke 通道，再由 preload 暴露对应方法。接线后刷新页面即可使用。」
+ *   学生读到的是 4 个他管不着的名词，而「请重启应用 / 刷新页面」对「线没接」是**假承诺**
+ *   （重开多少次都不会好）。现在屏幕上是学生话，那些话全部进控制台（见 `resolveSettingsBridge`）。
+ */
+export const SETTINGS_BRIDGE_MISSING_HINT = '设置暂时打不开。先回对话页就好，需要时请老师帮忙看看。'
+
+/**
  * 从 `window.api` 上取设置能力。
  *
  * 为什么用「按方法名探测」而不是直接调：票 07 与「主进程 IPC 接线」是两条并行的改动，
- * 通道还没落地时本页必须**显示一句能照着做的话**（缺哪个方法、去哪加），
- * 而不是抛一个 `window.api.readSettings is not a function`。
+ * 通道还没落地时本页必须**显示一句学生能读的话**，而不是抛一个
+ * `window.api.readSettings is not a function`。
+ *
+ * ★★ 缺哪条线时：**屏幕上是学生话**（{@link SETTINGS_BRIDGE_MISSING_HINT}）、
+ *   **缺哪个方法 / 要注册哪条通道进控制台**（`warnWiring`）——
+ *   两条通路的分工见 `api/wiring-notice.ts` 的文件头。
  */
 export function resolveSettingsBridge(): SettingsBridgeLookup {
   if (typeof window === 'undefined' || typeof window.api === 'undefined') {
-    return {
-      ready: false,
-      message: '预加载脚本未生效（window.api 缺失），无法读写设置。请重启应用或检查 preload 是否加载成功。'
-    }
+    warnWiring(
+      'settings',
+      'window.api 缺失：preload 没有加载（整块设置能力不可用）。检查 preload 入口与 contextIsolation / sandbox 配置。'
+    )
+    return { ready: false, message: SETTINGS_BRIDGE_MISSING_HINT }
   }
 
   // ★ 结构检查替代双重断言（H12）：先按**主进程白名单的真实类型**拿到 `window.api`，
@@ -91,13 +109,13 @@ export function resolveSettingsBridge(): SettingsBridgeLookup {
   const api: K12Api = window.api
   const missing = SETTINGS_BRIDGE_METHODS.filter((name) => typeof api[name] !== 'function')
   if (missing.length > 0) {
-    return {
-      ready: false,
-      message:
-        `设置功能尚未接线：preload 白名单缺少 ${missing.join(' / ')} —— 需要先在` +
-        '主进程 IPC（channels/handlers）注册设置读取、保存、探测三条 invoke 通道，' +
-        '再由 preload 暴露对应方法。接线后刷新页面即可使用。'
-    }
+    warnWiring(
+      'settings.methods',
+      `preload 白名单缺少这 ${missing.length} 个方法：${missing.join(' / ')}。` +
+        '需要先在主进程 IPC（channels/handlers）注册设置读取、保存、探测三条 invoke 通道' +
+        '（供应商目录 / 候选模型两条也在这里），再由 preload 暴露对应方法。接线后重启渲染进程即可生效。'
+    )
+    return { ready: false, message: SETTINGS_BRIDGE_MISSING_HINT }
   }
 
   return {

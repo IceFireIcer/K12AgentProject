@@ -32,8 +32,15 @@ export const GRADE_LABELS: Record<GradeLevel, string> = {
   senior: '高中'
 }
 
-/** 学段还没判出来时指示器上的字（★ 不许拿冷启动默认值冒充判定结果）。 */
-export const GRADE_UNKNOWN_LABEL = '待判定'
+/**
+ * 学段还没判出来时指示器上的字（★ 不许拿冷启动默认值冒充判定结果）。
+ *
+ * ★★ 2026-09-22 改词（报告 0.2 术语表）：「待判定」→「还没认出年级」。
+ *   原词是从后端规则引擎的视角写的（「判定」是 `rules.py` 的动作），学生读到的是
+ *   三个自己没做过、也不知道谁在做的事。新词只说**现在是什么状态**，不点破机制。
+ *   ⚠️ 这是**唯一**的字面量来源：视图 / store / 提示语一律引用它，别再写死一遍中文。
+ */
+export const GRADE_UNKNOWN_LABEL = '还没认出年级'
 
 /**
  * 「学段是怎么定下来的」这件事的说法（指示器上必须能看出来，否则手动选完看不出生效）。
@@ -49,7 +56,7 @@ export const GRADE_UNKNOWN_LABEL = '待判定'
  * | `explicit` | 学生手动选的 | 手动选中 |
  * | `llm` | 累计第 5 轮起，LLM（**决策者**） | AI 引擎判定 |
  * | `rules` | 前 4 轮 / LLM 不可用，规则引擎 | 本地规则判定 |
- * | `default` | **还没判过**（冷启动基线） | 待判定 |
+ * | `default` | **还没判过**（冷启动基线） | 还没认出年级 |
  *
  * ★ 学生看得见的词都是人话：「本地规则判定」「AI 引擎判定」说的是**判断方式**，
  *   不暴露 `rules.py` / `LAYER2` 这类实现名词（双视角纪律 D-063）。
@@ -71,9 +78,9 @@ export const GRADE_ORIGIN_LABELS: Record<GradeOrigin, string> = {
  * 表现是「同一个学段，指示器说『手动选中』、设置页说『本地规则判定』」——
  * 学生据此判断自己刚才那一下有没有生效，两处不一致等于告诉他没生效。
  *
- * `null`（还没收到任何推送）与 `default` 同口径（「待判定」）：
+ * `null`（还没收到任何推送）与 `default` 同口径（`GRADE_UNKNOWN_LABEL`）：
  * 那时 `currentGrade` 也是 `null`，界面本来就在说「等系统看几轮」——
- * 这一档**不是**「AI 判过了」，如实写「待判定」。
+ * 这一档**不是**「AI 判过了」，如实写「还没认出年级」。
  */
 export function gradeOriginLabel(origin: GradeOrigin | null): string {
   return origin === null ? GRADE_UNKNOWN_LABEL : GRADE_ORIGIN_LABELS[origin]

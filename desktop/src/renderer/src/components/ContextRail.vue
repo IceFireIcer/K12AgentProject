@@ -461,7 +461,13 @@ watch(tab, () => {
             </li>
           </ul>
 
-          <!-- 推荐下一步：依赖图推导，落在对话右栏而不是独立仪表盘 -->
+          <!-- 推荐下一步：依赖图推导，落在对话右栏而不是独立仪表盘。
+               ★ 保留（报告 1.2 的验收是「同一屏可见的『建议接着练』≤ 1」）：
+                 这一栏**默认收起**，与顶栏那份不在同一屏；顶栏那份按报告 1.1 / 1.2 删掉
+                 （那处在 `components/AppTopbar.vue`，不在本文件里）。
+               ★ 两行各说一件事，不是复读：标题给**是哪个知识点**，正文给**为什么是它**
+                 （服务端的 `reason`，如「这个知识点还没练熟，我们把刚才卡住的地方再过一遍。」）。
+                 所以这里不做合并 —— 合并会把「在哪儿」或「为什么」丢掉一个。 -->
           <div v-if="insight.recommended" class="reco" data-testid="rail-recommendation">
             <div class="reco__text">
               <p class="reco__title">建议下一步：{{ recommendedName }}</p>
@@ -644,7 +650,7 @@ watch(tab, () => {
               <el-descriptions-item label="答对次数">{{ kpRow.correct }}</el-descriptions-item>
             </el-descriptions>
             <p class="kpd__hint">
-              掌握度会跟着你每次答题的结果慢慢变化 —— 答得越准，它就越靠近 100%。
+              掌握度会跟着你每次答题的结果慢慢变化，答得越准，它就越靠近 100%。
             </p>
             <!-- 判分规则细节是教师视角的内容（学生只需要知道「它跟着答题结果走」） -->
             <TeacherGate label="掌握度规则">

@@ -321,9 +321,11 @@ function submit(question: QuizQuestionView): void {
     </header>
     <!-- ★ 主进程有时会带一句**本来就是写给学生看的**说明（例如主观题缺模型时的
          `SUBJECTIVE_UNAVAILABLE_TEXT`）—— 那种情况下以它为准，它比泛泛的兜底有用；
-         没有才用兜底那句（旧实现把兜底写成「内容格式不对」，那是开发者视角）。 -->
+         没有才用兜底那句（旧实现把兜底写成「内容格式不对」，那是开发者视角）。
+         ★ 兜底句里的「题库」也一并去掉了（与本文件 `sourceLabel` 那条口径一致：
+           学生不知道什么叫题库，他是从「再去要两道题」这个动作里恢复的）。 -->
     <p class="item__stem" data-testid="quiz-unknown-notice">
-      {{ view.text || '题库这次没把题目准备好。跟智团团说一句「再出两道题练一练」就能重新来一遍。' }}
+      {{ view.text || '这次的题目没能出出来。跟智团团说一句「再出两道题练一练」就能重新来一遍。' }}
     </p>
   </article>
 </template>

@@ -68,10 +68,14 @@ export const MESSAGE_ID_PREFIX = 'pi-message:'
 /** 供应商错误文案在 UI 里的统一前缀（面向学生可读，不暴露内部实现）。 */
 export const PROVIDER_ERROR_PREFIX = '云端模型暂时不可用'
 
-/** 无 Key 时的专用文案。**必须与「接线故障」区分开**（票 06 的 KEY_MISSING_MESSAGE）。 */
+/** 无 Key 时的专用文案。**必须与「接线故障」区分开**（票 06 的 KEY_MISSING_MESSAGE）。
+ *
+ * ★ 标点口径：整句用**句号**断句，不用破折号 —— 破折号是本应用里 LLM 文案的常见指纹，
+ *   学生面的接缝句一律不用它（报告 C16）。
+ */
 export const MISSING_KEY_MESSAGE =
   '云端模型暂时不可用：本机还没有配置 API Key（可在设置页填写，或设置环境变量 DEEPSEEK_API_KEY）。' +
-  '这是配置缺失，不是程序故障——配置好之后就能正常对话，现在也可以先用本地知识库的问题练习。'
+  '这是配置缺失，不是程序故障。配置好之后就能正常对话，现在也可以先用本地知识库的问题练习。'
 
 /* ------------------------------------------------------------------ *
  * Pi 事件的结构化类型（只声明我们用到的字段，避免把整个包静态 import 进来）
@@ -892,6 +896,12 @@ function looksLikeMissingKey(lower: string): boolean {
  * ★ 这条与「缺 Key」必须一眼可分（票 06 的验收要求）：
  *   装配失败意味着**运行时本身有问题**（打包缺 esbuild、原生依赖没解包、Node 版本不符……），
  *   改配置根本没用。所以文案里明说「不是密钥或网络问题」，并保留原始原因供排查。
+ *
+ * ★★ 末句只说要**怎么办**，不指派角色（D-063 双视角纪律）：本应用的学生端没有
+ *   「开发者」这个人，学生读到「交给开发者排查」只会无从下手。所以要交代的是
+ *   「把这段话交给老师」—— 谁去修、修什么，是老师/维护方那一侧的事。
+ *   ⚠️ 措辞改动时**不要**动前半句：「不是密钥或网络问题」是 G1i 的断言
+ *      （`tests/agent-events.test.ts`），它是这条文案能与「缺 Key」区分的全部依据。
  */
 export function describeRuntimeFailure(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error)
@@ -899,7 +909,7 @@ export function describeRuntimeFailure(error: unknown): string {
   return (
     '本轮没能开始：教学助手的对话运行时没有装配起来（' +
     (flat.length > 0 ? flat.slice(0, 120) : '未知原因') +
-    '）。这不是密钥或网络问题，而是运行时故障——请把这条信息交给开发者排查。'
+    '）。这不是密钥或网络问题，而是运行时故障。请把这条信息交给老师帮忙看看。'
   )
 }
 

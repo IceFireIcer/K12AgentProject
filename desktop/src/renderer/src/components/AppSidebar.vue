@@ -32,6 +32,13 @@
  *   3. 「开发工具」入口 —— 它指向的主题切换台（一个开发页）随
  *      「无人工学段入口」那套设计一起作废了；页面不存在，入口也不该在。
  *
+ * ★★ 2026-09-22（报告 C13 / 2.5）：底部原本是「● 已就绪」+ 一整块绿底的
+ *   「数据不出端 · 全本地」**双条**。现在只留**一个短词状态**（`sidecar.phaseText`），
+ *   绿块整块删掉：隐私说明在设置页的高级区已有一份（`views/Settings.vue` 的
+ *   「隐私与本地服务」），常驻侧栏等于把同一句话印两遍，而且那一块绿底在全站
+ *   语义色里是最抢眼的一档 —— 它却什么也不做。**删的是重复与抢眼，不是承诺本身**：
+ *   承诺仍在设置页那一处（且那里的措辞更完整）。
+ *
  * ★★ 服务状态**接真实 store**（`stores/sidecar.ts`）：原型里那行是写死的
  *   「本地服务就绪 + 绿点」，服务根本没起来时它也这么说 —— 那是界面在撒谎。
  *   现在圆点颜色与文案都随 `phase` 走（只有 `ready` 是绿的），出错时把 `errorText` 列出来。
@@ -49,7 +56,6 @@ import {
   MessageCircle,
   Radar,
   Settings,
-  ShieldCheck,
   Trophy
 } from 'lucide-vue-next'
 import { BRAND_NAME, BRAND_TAGLINE } from '@shared/brand'
@@ -60,7 +66,7 @@ import { useStudentStore } from '../stores/student'
 import { useThemeStore } from '../stores/theme'
 import { useChatStore } from '../stores/chat'
 import { PHASE_HINT, useSidecarStore } from '../stores/sidecar'
-import { gradeOriginLabel } from '../labels'
+import { GRADE_UNKNOWN_LABEL, gradeOriginLabel } from '../labels'
 import { logoUrlFor } from '../brand-logo'
 
 const ui = useUiStore()
@@ -131,16 +137,19 @@ const brandLogo = computed(() => logoUrlFor(theme.displayGrade))
  * 学生身份：昵称与学段。
  *
  * ★ 取数在**本组件**发起（原型里读的是那个已删除的 mocks 模块）：侧栏是昵称的消费点，
- *   `load()` 幂等、失败不抛，拿不到就回落成「同学」+「学段待判定」，不把整页打空。
+ *   `load()` 幂等、失败不抛，拿不到就回落成「同学」+ `GRADE_UNKNOWN_LABEL`，不把整页打空。
  * ★ 学段来源**如实标注**：D-037 之后学生可以手动指定，写死「系统自动判定」会在
  *   学生手选之后变成一句假话 —— 文案统一走 `gradeOriginLabel()`（唯一实现）。
+ * ★★ 这张卡是**全应用唯一**同时说「学段 + 来源」的地方（报告 2.1）：顶栏那枚学段 chip
+ *   只显示值（点开可改），设置页只负责编辑 —— 同一件事不再在四处各说一遍。
+ *   所以这一行**别**改成只有学段名：来源（「这档是谁定的」）只剩这里能看到了。
  */
 onMounted(() => void student.load())
 
 const gradeLine = computed(() =>
   theme.isRealGrade
     ? `${theme.displayGradeMeta.label} · ${gradeOriginLabel(chat.gradeOrigin)}`
-    : '学段待判定'
+    : GRADE_UNKNOWN_LABEL
 )
 
 const studentTitle = computed(() => {
@@ -215,22 +224,19 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
       </template>
     </nav>
 
-    <!-- 底部：一行总状态（真实的 sidecar 阶段）+ 隐私声明 -->
+    <!-- 底部：一个短词状态（真实的 sidecar 阶段）。
+         ★ 2026-09-22 起这里**只有这一行**：原先下面还挂着一整块绿底的「数据不出端 · 全本地」，
+           隐私说明在设置页高级区已有一份，常驻侧栏只是把同一句话印两遍（见文件头 ★★）。 -->
     <div class="sb__foot">
       <div class="sb__stat" :data-phase="sidecar.phase" :title="statusTitle" data-testid="sidecar-status">
         <span class="k12-dot sb__dot" />
         <span class="sb__stat-k">{{ sidecar.phaseText }}</span>
       </div>
+      <!-- 起不来时才有的第二行：那是**故障原因**（不是常驻说明），
+           学生/老师要能当场读出来；细节同时在 title 里，窄屏折掉这行也读得到。 -->
       <p v-if="sidecar.errorText" class="sb__stat-err" data-testid="sidecar-error">
         {{ sidecar.errorText }}
       </p>
-      <div
-        class="sb__privacy"
-        title="你的学习记录只存在这台电脑上：一人一份，不会传到任何服务器，也不会拿去做别的事。"
-      >
-        <ShieldCheck :size="14" />
-        <span class="sb__privacy-text">数据不出端 · 全本地</span>
-      </div>
     </div>
   </aside>
 </template>
@@ -244,9 +250,12 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   flex: none;
   display: flex;
   flex-direction: column;
-  /* 实色桌面：侧栏是"桌上的工具架"，不该透出正文工作面的格子 */
+  /* 实色桌面：侧栏是"桌上的工具架"，不该透出正文工作面的格子。
+   * ★★ 2026-09-22（报告 4.1）：这里原来还有一条 `border-right`。
+   *  窗口级分割线当时有四条（侧栏竖线 + 顶栏下线 + 章节条下线 + 「本轮对话」条下线），
+   *  而侧栏与内容区**本来就有材质差**（surface vs 带学段色的 page）—— 竖线是重复的一条。
+   *  ⚠️ 别加回来：这会与「边框 = 层级」的口径打架（见报告 0.1 / 4.2）。 */
   background: var(--k12-surface);
-  border-right: 1px solid var(--k12-border);
   position: relative;
   z-index: 2;
   color: var(--k12-fg);
@@ -490,23 +499,6 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   color: var(--k12-bad);
   word-break: break-word;
 }
-.sb__privacy {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px;
-  border-radius: var(--k12-r-control);
-  background: var(--k12-good-soft);
-  color: var(--k12-good);
-  font-size: var(--k12-fs-xs);
-  font-weight: 600;
-}
-.sb__privacy-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* ── 窄窗口：收成图标条（断点 1280，同时右栏在 ChatView 里改浮层）─────────
  * ★ 只有这一档隐藏文字；≥1280px 是完整的 248px 栏（目标窗口 1440×900）。 */
@@ -525,8 +517,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   .sb__label,
   .sb__section-label,
   .sb__stat-k,
-  .sb__stat-err,
-  .sb__privacy-text {
+  .sb__stat-err {
     display: none;
   }
   /* 服务状态只剩那个圆点：居中安置，别让 6px 的圆点孤零零飘在左边 */
@@ -558,13 +549,8 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
     padding: 10px;
     align-items: center;
   }
-  .sb__stat,
-  .sb__privacy {
+  .sb__stat {
     justify-content: center;
-  }
-  .sb__privacy {
-    padding: 8px;
-    width: 100%;
   }
 }
 </style>

@@ -130,11 +130,13 @@ export const useQuizStore = defineStore('quiz', () => {
    *
    * ★ 锁着的关卡**当场拒绝**（不发给后端）：后端的学段与阶段隔离是权威，
    *   但让一个明显点不动的按钮发出请求，会在界面上留下一次无意义的失败。
+   * ★ 这句话仍带着「还没解锁」（学生面的状态词，与 `views/Quiz.vue` 的 `stageMeta` 同一个词，
+   *   守卫 `tests/renderer-data-plane.test.ts` 钉着它）；破折号在报告 C16 里被点名，已换成逗号。
    */
   async function selectLevel(kpId: string): Promise<void> {
     const level = levels.value.find((item) => item.kpId === kpId)
     if (level?.stage === 'locked') {
-      bankError.value = '这一关还没解锁 —— 先把前面的关卡过掉。'
+      bankError.value = '这一关还没解锁，先把前面的关卡过掉。'
       return
     }
     activeKpId.value = kpId

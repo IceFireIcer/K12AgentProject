@@ -441,7 +441,7 @@ function relativeTime(ms: number): string {
       {{ study.sessionsError }}
     </p>
     <p v-else-if="items.length === 0" class="sl__state" data-testid="session-empty">
-      还没有历史对话 —— 问第一个问题就会出现在这里。
+      还没有历史对话，问第一个问题就会出现在这里。
     </p>
 
     <ul v-else class="sl__list" data-testid="session-tree">

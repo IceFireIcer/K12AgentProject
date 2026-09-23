@@ -64,8 +64,10 @@ const knowledge = useKnowledgeStore()
  * 四个阶段的中文名与图标（阶段字面量来自服务端进度，不在前端推导）。
  *
  * ★ `locked` 说「还没解锁」而不是「未解锁」：这两个字是**给学生的提示**，不是状态码。
- *   它出现在关卡条上会连成一整排（评审说的「一堵墙」），所以措辞与视觉一起降调
- *   （见 `.stg--locked` 的去色样式），而不是把状态码翻译一遍贴在按钮上。
+ *   它现在**最多出现在一张卡上**（当前关的下一关，见 `trackLevels`）—— 未解锁的关卡
+ *   不再一关一卡地铺开（报告 1.5 说的那面「锁墙」），其余压成尾部一句灰字。
+ * ★ 卡片上的状态只靠**图标 + 颜色 + 状态词**区分（`.stg__ico[data-stage]` 四档），
+ *   不再挂百分比（报告 2.3 / 0.2）：一排 `0%` 不携带信息，只制造焦虑。
  */
 const stageMeta: Record<string, { label: string; icon: unknown }> = {
   locked: { label: '还没解锁', icon: Lock },
@@ -127,6 +129,36 @@ const activeLevel = computed(
 )
 
 /**
+ * 横滚条里**真正展示**的关卡（报告 1.5：未解锁的不再摊成一片死卡）。
+ *
+ * ★ 只放这三类，其余未解锁的**不占卡片**：
+ *   ① 可做的与走过的（`learning` / `quizzed` / `mastered`）—— 当前关在这一类里，
+ *      已走过的留给学生**回看 / 重做**；
+ *   ② 当前关（兜一手：万一进度里没有它，关卡条也不该与上面的标题对不上）；
+ *   ③ 当前关的**下一关**（顺序就是服务端给的拓扑序）—— **哪怕它还锁着**。
+ *      它是全页唯一允许出现的锁卡：学生需要知道「下一关是什么、为什么还不能进」，
+ *      而一整排锁卡只会把真正能做的两三关淹掉。
+ * ★ 没摆上来的未解锁关数交给 `lockedRest`，在尾部压成一句灰字。
+ * ★ 服务端已按依赖图拓扑序排好，这里**不重排**（只做筛选）。
+ */
+const trackLevels = computed(() => {
+  const list = levels.value
+  const current = list.findIndex((level) => level.kpId === quiz.activeKpId)
+  return list.filter((level, index) => {
+    if (level.stage !== 'locked') return true
+    if (index === current) return true
+    return current >= 0 && index === current + 1
+  })
+})
+
+/** 收纳成一句灰字的未解锁关数（已摆在横滚条上的那张锁卡不算在内）。 */
+const lockedRest = computed(
+  () =>
+    levels.value.filter((level) => level.stage === 'locked').length -
+    trackLevels.value.filter((level) => level.stage === 'locked').length
+)
+
+/**
  * 冷启动落位：进度回来后默认选中**第一关**（优先 `learning`，否则第一个非 locked）。
  *
  * ★ 只在学生**还没选过关卡**时做（`activeKpId === ''`），选过之后再不插手 ——
@@ -154,6 +186,22 @@ const drafts = reactive<Record<string, string>>({})
 const localHint = ref('')
 
 const questions = computed(() => quiz.bank?.questions ?? [])
+
+/**
+ * 题区（`SurfacePanel.quiz__card`）要不要渲染。
+ *
+ * ★ 报告 1.6：空数据时不摆空仪表盘。一关都没有（教材还没准备好）时，
+ *   这张卡只能写「先选一关」—— 而上面根本没有关卡可选，等于把学生指向一个不存在的东西。
+ *   于是这种状态下**整块不渲染**：页面上只剩关卡区那一句灰字（唯一的一处空态说明）。
+ * ★ 读取中与读失败仍要渲染：那两种状态有话说（`.quiz__fail` / `EmptyState`）。
+ */
+const showQuestionPanel = computed(
+  () =>
+    levels.value.length > 0 ||
+    quiz.progressLoading ||
+    quiz.bridgeError !== null ||
+    quiz.progressError !== null
+)
 
 /** 题目 + 它当前的作答状态（一次算好，模板里不再反复查表）。 */
 const questionRows = computed(() =>
@@ -358,7 +406,10 @@ onMounted(() => {
   <div class="quiz">
     <PageActions>
       <template #info>
-        <span>闯关进度 {{ summary.mastered }} / {{ summary.total }} 已掌握</span>
+        <!-- ★ 进度数字**只有一种格式**（报告 2.3）：`已掌握 N / M`。
+             原来的「闯关进度 N / M 已掌握」是同一批数字的第二种说法 —— 全站统一成一种。
+             ★ 一关都没有时整格不渲染（报告 1.6：空态下不出现「已掌握 0 / 0」这种仪表盘读数）。 -->
+        <span v-if="summary.total > 0">已掌握 {{ summary.mastered }} / {{ summary.total }}</span>
       </template>
       <!-- 重做本关：清空本页的作答与小结（**不**清除已落库的判分结果）。
            有东西可清时才出现，避免摆一个按了没反应的按钮。 -->
@@ -377,7 +428,7 @@ onMounted(() => {
     <PageIdentity
       main="这几道题检验你刚才学的那一点"
       meta="客观题由规则判分，主观题由模型判分"
-      hint="先选关卡，再逐题作答 —— 每提交一题都会当场判分"
+      hint="先选关卡，再逐题作答，每提交一题都会当场判分"
     />
 
     <!-- 取数失败（桥缺失 / 端点报错）：一句可读中文 + 重试，绝不让页面静默空着。 -->
@@ -400,7 +451,7 @@ onMounted(() => {
 
       <div v-if="levels.length > 0" class="stages__track" data-testid="quiz-levels">
         <button
-          v-for="level in levels"
+          v-for="level in trackLevels"
           :key="level.kpId"
           type="button"
           class="stg"
@@ -414,14 +465,19 @@ onMounted(() => {
           <component :is="stageMeta[level.stage]!.icon" :size="14" class="stg__ico" :data-stage="level.stage" />
           <span class="stg__name">{{ nameOf(level.kpId) }}</span>
           <span class="stg__stage">{{ stageMeta[level.stage]!.label }}</span>
-          <span class="stg__pct k12-num">{{ Math.round(level.mastery * 100) }}%</span>
+          <!-- 卡片上**没有百分比**（报告 2.3）：状态由图标 + 状态词说，
+               掌握度去下面的明细面板看（那里才是点开后的细节）。 -->
           <!-- 徽章是服务端字段（`progress.badge`，文本形如「熟练-3」），没有就不渲染 -->
           <span v-if="level.badge" class="stg__badge" :title="level.badge">{{ badgeTier(level.badge) }}</span>
         </button>
       </div>
       <!-- 空态：**对学生只说他的处境**（现在没有可闯的关卡），机制另说（见下） -->
       <p v-else-if="!quiz.progressLoading" class="stages__empty" data-testid="quiz-levels-empty">
-        还没有可以闯的关卡 —— 教材内容准备好之后，这里会一关一关地排出来。
+        还没有可以闯的关卡，教材内容准备好之后这里会一关一关地排出来。
+      </p>
+      <!-- 未解锁的关卡**不占卡片**（报告 1.5）：一墙锁图标只会制造焦虑，一句灰字说清就够了。 -->
+      <p v-if="lockedRest > 0" class="stages__locked" data-testid="quiz-levels-locked">
+        还有 {{ lockedRest }} 关没解锁
       </p>
 
       <!-- 关卡是怎么来的（**教师 / 答辩视角**）：这是实现说明，不是给学生的解释。
@@ -449,8 +505,10 @@ onMounted(() => {
       </TeacherGate>
     </section>
 
-    <!-- ── 当前关卡标题（16px 块标题档：不得追平身份行的 22px）────────── -->
-    <header class="quiz__head">
+    <!-- ── 当前关卡标题（16px 块标题档：不得追平身份行的 22px）──────────
+         ★ 一关都没有时整块不渲染（报告 1.6）：空数据下摆一行「当前关卡 / 还没选关卡」
+           是仪表盘读数，不是给学生看的东西。 -->
+    <header v-if="levels.length > 0" class="quiz__head">
       <div class="quiz__head-text">
         <span class="quiz__kicker">当前关卡</span>
         <h2 class="quiz__title">{{ activeLevel ? nameOf(activeLevel.kpId) : '还没选关卡' }}</h2>
@@ -469,8 +527,10 @@ onMounted(() => {
       </div>
     </header>
 
-    <!-- ── 题目：全宽。作答草稿在页面里，判分状态在 store 里 ─────────────── -->
-    <SurfacePanel class="quiz__card">
+    <!-- ── 题目：全宽。作答草稿在页面里，判分状态在 store 里 ───────────────
+         ★ 一关都没有时**整块不渲染**（见 `showQuestionPanel`）：那时这张卡只能写
+           「先选一关」，而上面根本没有关卡可选 —— 空态留给关卡区那一句灰字。 -->
+    <SurfacePanel v-if="showQuestionPanel" class="quiz__card">
       <!-- ① 进度没读上来 / 读取中 / 还没选关卡：三种"题区为空"的原因分开说，
            不让取数失败看起来像"学生还没选关卡"。 -->
       <EmptyState
@@ -513,11 +573,11 @@ onMounted(() => {
         <el-button size="small" @click="quiz.loadBank(activeLevel.kpId)">重试</el-button>
       </div>
 
-      <!-- ④ 题库里这一关没有题 -->
+      <!-- ④ 这一关还没有题 -->
       <EmptyState
         v-else-if="questions.length === 0"
         title="这一关暂时没有题目"
-        desc="题库里还没有这一关的题；可以先在对话里让老师现场出几道，或换一关试试。"
+        desc="可以先在对话里让老师现场出几道，或者换一关试试。"
       />
 
       <!-- ⑤ 题目列表 -->
@@ -611,15 +671,18 @@ onMounted(() => {
       </template>
     </SurfacePanel>
 
-    <!-- ── 掌握度：移到题目**下方**横向铺开（不再与题目并排争焦点）────── -->
-    <SurfacePanel class="mastery">
+    <!-- ── 掌握度：移到题目**下方**横向铺开（不再与题目并排争焦点）──────
+         ★ 没有行可显示时**整块不渲染**（报告 1.6：空数据不摆空仪表盘）——
+           于是这里不再有「还没有关卡数据…」那句无数据的灰字：它已经不可能被渲染到。 -->
+    <SurfacePanel v-if="masteryRows.length > 0" class="mastery">
       <header class="mastery__head">
         <span class="mastery__title">本关与相邻关卡的掌握度</span>
         <!-- 括号里原来是「（服务端进度里的 mastery）」—— 字段名对学生的意义 = 没有。
              学生要回答的问题是「这个百分比是哪来的、算不算数」：答案是「每次答完题自动累加」。 -->
         <span class="mastery__meta">每次答题后自动更新</span>
       </header>
-      <div v-if="masteryRows.length > 0" class="mastery__rows" data-testid="quiz-mastery">
+      <!-- 百分比**只留在这里**（报告 2.3：点开后的明细可以有数字，关卡卡片上没有） -->
+      <div class="mastery__rows" data-testid="quiz-mastery">
         <div v-for="row in masteryRows" :key="row.kpId" class="mrow">
           <div class="mrow__top">
             <span class="mrow__role">{{ row.role }}</span>
@@ -635,7 +698,6 @@ onMounted(() => {
           />
         </div>
       </div>
-      <p v-else class="mastery__empty">还没有关卡数据 —— 选一关之后这里会显示它在路径上的位置与掌握度。</p>
     </SurfacePanel>
 
     <!-- ── 判分说明：收进折叠（默认折叠，它不该和题目抢注意力）──────────
@@ -649,7 +711,7 @@ onMounted(() => {
           <p class="howto__p">
             每题提交后马上判分，掌握度会跟着变一点：答对往上、答错往下，单次变化有上限
             （答得再好也不会一次从 0 涨满）。同一道题重复提交只更新这题的结论，
-            正确率与掌握度不会因此重复计分 —— <strong>第一次作答</strong>才是计分的那一次。
+            正确率与掌握度不会因此重复计分，<strong>第一次作答</strong>才是计分的那一次。
           </p>
           <p class="howto__p">答案与解析不会出现在界面上，判分之后才会以反馈的形式告诉你思路。</p>
 
@@ -690,7 +752,7 @@ onMounted(() => {
           <div class="hw__body">
             <!-- ⚠️ 只列**已判分**的题：没判过的题不占位（也不编造"未作答"的历史行）。 -->
             <p v-if="summaryRows.length === 0" class="hw__empty">
-              这一关还没有判分的题目 —— 提交一题之后，这里会按题号列出它的判分结论。
+              这一关还没有判分的题目，提交一题之后这里会按题号列出它的判分结论。
             </p>
 
             <template v-else>
@@ -814,7 +876,8 @@ onMounted(() => {
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted-2);
 }
-/* 横向排开：窄屏靠横向滚动兜住，不换行挤压（关卡名 + 状态 + 百分比三件套） */
+/* 横向排开：窄屏靠横向滚动兜住，不换行挤压（卡片是「图标 + 关卡名 + 状态词」三件套，
+ * 没有百分比 —— 见报告 2.3） */
 .stages__track {
   display: flex;
   gap: 8px;
@@ -829,6 +892,13 @@ onMounted(() => {
   font-size: var(--k12-fs-xs);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
+}
+/* 未解锁的关卡**收纳成一句灰字**（报告 1.5）：它不是卡片，是一句陈述 ——
+ * 所以无底色、无边框、无内边距（报告 4.2：纯说明一律 caption 灰字无框）。 */
+.stages__locked {
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted-2);
 }
 .stg {
   flex: none;
@@ -851,9 +921,11 @@ onMounted(() => {
   background: var(--k12-accent-soft);
   border-color: var(--k12-accent-ink);
 }
-/* ★★ 还没解锁的关卡要**整体退到背景里**（评审：一屏 50 多关时，「未解锁」连成
- * 一堵墙，把真正能做的两三关淹掉了）：虚线边框 + 透明底 + 全灰字。
+/* ★★ 还没解锁的关卡要**整体退到背景里**：虚线边框 + 透明底 + 全灰字。
  *
+ * ★ 报告 1.5 之后它**最多只有一张**（当前关的下一关，见 `trackLevels`）——
+ *   原来「一屏 50 多关全铺开」的那面锁墙没了，剩下的这一张只是「下一关是什么、
+ *   为什么还进不去」的预告，所以它保留卡片形状（不再需要靠视觉把它压到看不见）。
  * ⚠️ 刻意**不用 `opacity` 压暗**（旧写法是 `opacity: .6`）：那会把文字一起压到
  *   读不清（与 `.k12-cta:disabled` 那条纪律同一个道理 —— 状态不该以可读性为代价），
  *   而且 opacity 连对比度校验都测不出来。改成实打实的灰字（muted / muted-2 都是
@@ -867,10 +939,11 @@ onMounted(() => {
 .stg--locked .stg__name {
   color: var(--k12-muted);
 }
-.stg--locked .stg__stage,
-.stg--locked .stg__pct {
+.stg--locked .stg__stage {
   color: var(--k12-muted-2);
 }
+/* 四档状态：颜色 + 图标形状（`stageMeta` 的 icon）一起区分 —— 卡片上**没有数字**，
+ * 这一条（连同左边的状态词）就是学生判断「这一关到哪一步了」的全部依据。 */
 .stg__ico {
   flex: none;
 }
@@ -892,17 +965,11 @@ onMounted(() => {
   color: var(--k12-fg);
   white-space: nowrap;
 }
-/* 状态标签与百分比都是 meta —— 12px，不是 11px（11px 只许给角标） */
+/* 状态词是 meta —— 12px，不是 11px（11px 只许给角标） */
 .stg__stage {
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
   white-space: nowrap;
-}
-.stg__pct {
-  font-size: var(--k12-fs-xs);
-  font-weight: 650;
-  color: var(--k12-fg-2);
-  font-variant-numeric: tabular-nums;
 }
 /* 徽章：**≤4 字的角标** —— 11px 只在这一档允许（契约 §1），原始文本在 title 里 */
 .stg__badge {
@@ -916,8 +983,7 @@ onMounted(() => {
 }
 /* 选中项整体走 accent-ink：它在 accent-soft 上是达标的文字色（对比度机器校验） */
 .stg--on .stg__name,
-.stg--on .stg__stage,
-.stg--on .stg__pct {
+.stg--on .stg__stage {
   color: var(--k12-accent-ink);
 }
 /* ── 教师 / 答辩视角里那两段说明（学生视角整块不渲染，见 `.stages` 的模板）────
@@ -1002,7 +1068,12 @@ onMounted(() => {
   padding: 0;
   list-style: none;
 }
-/* 卡中卡一律用 inset 材质（E3）：白面叠白面看不出层次 */
+/* 每道题 = 白卡（`SurfacePanel.quiz__card`）里的一块**浅灰嵌入面**。
+ * ★ 报告 4.1/4.2：这里原来是「浅灰底 + 1px 边框」的完整卡片，套在已经是白底 + 边框 + 投影的
+ *   SurfacePanel 里 → 卡中卡（边框不携带层级）。改法是**去掉它的描边，留底色**：
+ *   边框属于外层那张卡，内层靠一块 soft 面就够分层（报告 4.3「闯关每题盒保留」）。
+ * ⚠️ 反过来（留边框、去底色）会把选项行变成白底白面 —— 选项就完全没有边界了。
+ * ⚠️ `.fb`（逐题反馈）留着它的描边：它是这一块里唯一的「结论」面，不是纯说明。 */
 .qitem {
   display: flex;
   flex-direction: column;
@@ -1010,7 +1081,6 @@ onMounted(() => {
   padding: 12px 14px;
   border-radius: var(--k12-r-inset);
   background: var(--k12-surface-2);
-  border: 1px solid var(--k12-border);
 }
 .qitem__head {
   display: flex;
@@ -1041,13 +1111,16 @@ onMounted(() => {
   flex-direction: column;
   gap: 8px;
 }
+/* 选项行：浅灰题块上的一片可点白面（报告 4.3「选项行可减描边（仅选中态有边）」）。
+ * ★ 未选中时**没有可见描边**（`transparent` 而不是删掉 border —— 这样 hover / 选中
+ *   加边时**不会挤动文字**，几何一个字不变）；hover 与选中态仍各有自己的边。 */
 .opt {
   display: flex;
   align-items: flex-start;
   gap: 10px;
   padding: 9px 12px;
   border-radius: var(--k12-r-inset);
-  border: 1px solid var(--k12-border);
+  border: 1px solid transparent;
   background: var(--k12-surface);
   cursor: pointer;
   font-size: var(--k12-fs-md);
@@ -1167,10 +1240,6 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-}
-.mastery__empty {
-  font-size: var(--k12-fs-xs);
-  color: var(--k12-muted);
 }
 .mrow {
   flex: 1 1 200px;

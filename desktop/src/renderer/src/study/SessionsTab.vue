@@ -116,7 +116,7 @@ function close(): void {
       {{ study.sessionsError }}
     </p>
     <p v-else-if="shown.length === 0" class="state" data-testid="sessions-empty">
-      {{ study.searchHits ? '没有匹配的会话。' : '还没有历史会话 —— 到对话页问第一个问题吧。' }}
+      {{ study.searchHits ? '没有匹配的会话。' : '还没有历史会话，到对话页问第一个问题吧。' }}
     </p>
 
     <ul v-else class="list" data-testid="sessions-list">

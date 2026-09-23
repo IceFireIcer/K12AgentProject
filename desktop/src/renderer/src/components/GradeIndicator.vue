@@ -8,7 +8,7 @@
  *
  * ★ 为什么还要有一个手动入口：自动推断有它的代价 —— 判错了（或还没判出来）
  *   学生只能干等。给一个显式指定，学生就能自己说了算；指定后 10 轮内系统不再自动改。
- * ★ 入口默认**收起来**：指示器平时只有一小行，点「自己指定」才展开四个选项。
+ * ★ 入口默认**收起来**：指示器平时只有一小行，点 chip 上的「我选年级」才展开四个选项。
  *   摊开着会让「系统自己在判」这件事看起来像「每次都让我填一遍」。
  * ★ 手动写路径**只有 store 里那一条** `chat.setGrade`（走 `grade:set` 独立通道）。
  *   这里不自己拼请求、也不改本地状态：界面显示的学段必须来自服务端回执 / 推送，
@@ -17,23 +17,33 @@
  * 判定链路（主进程）：对话 → 规则引擎 + 轻量 LLM 判定 → `grade:changed` 推送
  * → `stores/chat.ts` 的 `currentGrade` → 这里显示。
  *
+ * ★★ 2026-09-22（报告 1.1）：**状态与动作合成一枚 chip**。
+ *   此前这一格是两枚并列控件 —— 实底 badge（当前：初中 · 本地规则判定）+
+ *   描边触发器（自己指定）。顶栏那一行里再叠上模型 chip 与外壳级跳转，
+ *   右上角就是四个同级胶囊，学生分不清哪个是状态、哪个是动作。
+ *   现在只有一枚**可点 chip**：先说「现在是哪一档」，同一枚上写着「我选年级」，
+ *   点它展开选项（`data-testid="grade-set"` 与 `aria-expanded` 都挂在它身上）。
+ *
  * ── 两种用法（`compact` 属性）────────────────────────────────────────────
  *   - **顶栏用法（`compact`）**：顶栏是「当前环境」那一条（学段 + 模型并列），
  *     而它只有 64px 高、还要和标题 / 模型 chip / 视图切换按钮 / 窗口按钮共处一行 ——
- *     所以这里只留「chip + 短触发器」：
- *       · chip = 「当前档位 + 来源标签」挤成一枚小胶囊（来源文案仍由 labels.ts 唯一实现）；
- *       · 那句长说明**不进顶栏**（对话页空态已经写着「由系统根据对话自动判定，
- *         你也可以自己指定。」）；它的节点仍在 DOM 里，只是不显示 ——
+ *     所以这里只留**学段值 + 动作词**这一枚 chip：
+ *       · 顶栏只显示**学段值**：来源挪去侧栏身份卡（全应用唯一同时说「学段 + 来源」的地方，
+ *         报告 2.1）；节点的删除与否见下面 `.grade__origin` 那条样式；
+ *       · 那句长说明**不进顶栏**（对话页空态曾经写着「由系统根据对话自动判定，
+ *         你也可以自己选年级。」—— 那句已按报告 C2/2.1 删掉，学段状态现在只在
+ *         侧栏身份卡一处说全）；它的节点仍在 DOM 里，只是不显示 ——
  *         CDP 冒烟脚本按 testid 读它的 textContent，删掉节点会让那条探针落空，
  *         所以用 CSS 隐藏而不是 `v-if`；
  *       · 选项面板与一次性提示都**挂在这一格的绝对定位层**里，不占文档流行高 ——
  *         否则提示一出现，整条顶栏会往下长一截（行高抖动）。
- *   - **页面用法（默认，非紧凑）**：一整条带下边框的状态栏（说明 + 触发器 + 选项）。
+ *   - **页面用法（默认，非紧凑）**：一整条带下边框的状态栏（说明 + chip + 选项），
+ *     chip 上多显示来源那一截。
  *     对话页**不再**用它（学段是全局的、章节是对话级的，见 `views/Chat.vue` 的说明），
  *     但这条用法保留给「需要一条完整状态栏」的页面。
  *
  * 显示分档：
- *   - 还没定下来（`currentGrade === null`）：`当前：待判定`，**不显示来源那一句**
+ *   - 还没定下来（`currentGrade === null`）：`当前：还没认出年级`，**不显示来源那一句**
  *     （还没定下来的东西没有「怎么定下来的」可言），也**不拿冷启动默认值冒充判定结果**；
  *   - 已定下来：`当前：初中` + 来源标签（「谁定的」这件事只有 labels.ts 一处说法）；
  *   - 变化时多一行一次性提示：系统判出来的是「我按初中的说法来讲。」，
@@ -56,6 +66,12 @@ import type { GradeLevel } from '@shared/ipc-events'
  */
 const props = withDefaults(defineProps<{ compact?: boolean }>(), { compact: false })
 
+/**
+ * 紧凑形态（顶栏那一格）。模板读它而不是裸 `compact` —— 两种用法的差别不止
+ * 一个 CSS 类（顶栏不显示来源那一截，见模板里的说明），判据只留这一处。
+ */
+const isCompact = computed(() => props.compact === true)
+
 const chat = useChatStore()
 
 const label = computed(() => chat.currentGradeLabel ?? GRADE_UNKNOWN_LABEL)
@@ -63,8 +79,15 @@ const determined = computed(() => chat.currentGrade !== null)
 /** 「学段是怎么定下来的」：只在真定下来之后显示（`null` 时整句不渲染）。 */
 const originLabel = computed(() => gradeOriginLabel(chat.gradeOrigin))
 
-/** 触发器文案：顶栏那一格和模型 chip 一样宽（「自己指定学段」在顶栏里太长）。 */
-const triggerLabel = computed(() => (props.compact ? '自己指定' : '自己指定学段'))
+/**
+ * chip 上的**动作词**：紧凑与非紧凑**同一个词**（报告 0.2 术语表）。
+ *
+ * ★ 原先是两档文案（顶栏「自己指定」/ 页面「自己指定学段」）：同一个动作两句话，
+ *   学生得自己判断它们是不是一回事；而且「自己指定」名词化了，读起来像状态而不是动作。
+ *   现在统一成「我选年级」——主语是学生（这是他按下去的），宾语就是他改的那一格。
+ * ⚠️ 它只说**动作**：chip 上先说「现在是哪一档」（值 + 来源），再说「点这里能改」。
+ */
+const triggerLabel = '我选年级'
 
 const pickerOpen = ref(false)
 /** 面板与触发键：Esc / 点外部要用它们判断「点在不在里面」。 */
@@ -133,38 +156,41 @@ async function choose(level: GradeLevel): Promise<void> {
 <template>
   <div
     class="grade"
-    :class="{ 'grade--compact': compact, 'grade--picker-open': pickerOpen }"
+    :class="{ 'grade--compact': isCompact, 'grade--picker-open': pickerOpen }"
     data-testid="grade-indicator"
     :data-grade="chat.currentGrade ?? ''"
     :data-origin="chat.gradeOrigin ?? 'unknown'"
     :data-determined="String(determined)"
   >
     <div class="grade__row">
-      <!-- 一格里说清两件事：现在是哪一档（黑色粗体）+ 它是谁定的（来源标签）。
-           来源说法只有 labels.ts 那一处实现，这里不重写文案。 -->
-      <span class="grade__badge">
+      <!-- 一枚 chip 说清两件事：现在是哪一档（黑体值）+ 想改就从这儿改（动作词）。
+           来源说法只有 labels.ts 那一处实现，这里不重写文案。
+           ⚠️ 它就是**展开触发器**：`data-testid="grade-set"` 与 `aria-expanded` 都挂在
+             这枚 button 上 —— 合并前那是另一枚描边按钮，合并后不再有第二枚控件。
+           ⚠️ 来源标签（`grade-origin-label`）在紧凑形态下**只隐藏、不删**：
+             `scripts/verify-ui.mjs` 按 testid 读它，删节点会让那条探针落空
+             （与 `.grade__hint` 同一考虑，见文件头）。 -->
+      <button
+        type="button"
+        ref="triggerRef"
+        class="grade__chip"
+        data-testid="grade-set"
+        :aria-expanded="pickerOpen"
+        :disabled="chat.streaming"
+        @click="togglePicker"
+      >
         <span class="grade__prefix">当前：</span>
         <strong class="grade__level" data-testid="grade-current-label">{{ label }}</strong>
         <template v-if="determined">
           <span class="grade__sep" aria-hidden="true">·</span>
           <span class="grade__origin" data-testid="grade-origin-label">{{ originLabel }}</span>
         </template>
-      </span>
+        <span class="grade__action">{{ triggerLabel }}</span>
+      </button>
 
       <span class="grade__hint" data-testid="grade-indicator-hint">
-        系统会根据你问的问题自动判断，你也可以自己指定。
+        系统会根据你问的问题自动判断，你也可以自己选年级。
       </span>
-
-      <button
-        type="button"
-        ref="triggerRef"
-        class="grade__set"
-        data-testid="grade-set"
-        :disabled="chat.streaming"
-        @click="togglePicker"
-      >
-        {{ triggerLabel }}
-      </button>
     </div>
 
     <!-- 选项默认收起：点上面的按钮才展开（四个学段，当前生效的那个标出来）。
@@ -205,7 +231,7 @@ async function choose(level: GradeLevel): Promise<void> {
            ⚠️ 这个节点里**只有**那一句话（`已按你选的X来讲。` / `我按X的说法来讲。`）——
               验收脚本按整串匹配它，第二句不许塞进来（见脚本里 `switchDetail` 的说明）。 -->
       <p
-        v-if="chat.gradeNotice && (!compact || chat.gradeOrigin === 'explicit')"
+        v-if="chat.gradeNotice && (!isCompact || chat.gradeOrigin === 'explicit')"
         class="grade__notice"
         data-testid="grade-notice"
       >
@@ -240,18 +266,43 @@ async function choose(level: GradeLevel): Promise<void> {
   flex-wrap: wrap;
 }
 
-.grade__badge {
+/* 唯一的一枚 chip：既是状态（现在是哪一档）、也是动作（点开可以选年级）。
+ * 实底 + 强调色 = 「这是当前生效的东西」，与只读的模型 chip（描边）在形态上分开 ——
+ * 一个能改、一个只读，视觉上就不该长得一样（与 AppTopbar 里那条说明同一口径）。
+ * ⚠️ 它是 `<button>`：必须 `font: inherit`，否则会掉进浏览器给按钮的默认字体与字号。 */
+.grade__chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 10px;
+  padding: 4px 10px;
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-soft);
   border: 1px solid var(--k12-accent-border);
   color: var(--k12-accent-ink);
+  font: inherit;
   font-size: var(--k12-fs-xs);
   font-weight: 600;
+  line-height: var(--k12-lh-ui);
   white-space: nowrap;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .grade__chip:hover:not(:disabled) {
+    border-color: var(--k12-accent-ink);
+  }
+}
+
+/* 流式回答期间不能改学段（`chat.streaming`）—— 但**值照旧可读**：
+ * 只把动作词调暗。整枚 chip 一起禁用会连带把「现在按几年级讲」调灰，
+ * 而那正是学生在长回答期间最需要看的一格（状态与动作合并之后，
+ * 「谁被禁用」这件事必须分得开，否则状态跟着动作一起消失）。 */
+.grade__chip:disabled {
+  cursor: not-allowed;
+}
+
+.grade__chip:disabled .grade__action {
+  color: var(--k12-muted-2);
 }
 
 /* 「当前：」是标签，比档位名轻一档 —— 学生要读的是档位本身 */
@@ -273,30 +324,18 @@ async function choose(level: GradeLevel): Promise<void> {
   font-weight: 550;
 }
 
+/* 动作词（我选年级）：与值同格，但用一条发丝线隔开、字重轻一档 ——
+ * 这一格首先是**状态**，其次才是入口；不隔开会被读成值的一部分（「初中我选年级」）。 */
+.grade__action {
+  margin-left: 2px;
+  padding-left: 7px;
+  border-left: 1px solid var(--k12-accent-border);
+  font-weight: 500;
+}
+
 .grade__hint {
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
-}
-
-.grade__set {
-  padding: 2px 10px;
-  border-radius: var(--k12-r-pill);
-  border: 1px solid var(--k12-border-strong);
-  background: var(--k12-surface);
-  color: var(--k12-fg-2);
-  font: inherit;
-  font-size: var(--k12-fs-xs);
-  cursor: pointer;
-}
-
-.grade__set:hover:not(:disabled) {
-  border-color: var(--k12-accent-ink);
-  color: var(--k12-accent-ink);
-}
-
-.grade__set:disabled {
-  cursor: not-allowed;
-  color: var(--k12-muted-2);
 }
 
 .grade__picker {
@@ -333,7 +372,7 @@ async function choose(level: GradeLevel): Promise<void> {
   color: var(--k12-muted-2);
 }
 
-/* 当前生效的那一档：与 `.grade__badge` 同一视觉语言（选中 = 强调色） */
+/* 当前生效的那一档：与 `.grade__chip` 同一视觉语言（选中 = 强调色） */
 .grade__option--active {
   border-color: var(--k12-accent-border);
   background: var(--k12-accent-soft);
@@ -370,7 +409,7 @@ async function choose(level: GradeLevel): Promise<void> {
 }
 
 /* ── 紧凑用法（顶栏）────────────────────────────────────────────────────
- * 只保留「chip + 触发器」这一行；其余两块都挂在**绝对定位层**里：
+ * 只保留「学段值 + 动作词」这一枚 chip；其余两块都挂在**绝对定位层**里：
  *   · 选项面板 = 下拉；
  *   · 一次性提示 / 通道缺失说明 = chip 下方的一小片纸条（`--k12-shadow-float` 那一层）。
  * 两者都不进文档流 → 顶栏那一行不会因为它们出现而抖一下（顶栏是固定 64px 的单行，
@@ -403,8 +442,18 @@ async function choose(level: GradeLevel): Promise<void> {
   display: none;
 }
 
-.grade--compact .grade__badge,
-.grade--compact .grade__set,
+/* ★★ 顶栏那一格**只显示学段值**（报告 2.1：全应用同时说「学段 + 来源」的地方只留侧栏身份卡）。
+ *   `来源标签 + 分隔点` 一起隐藏 —— 只藏来源会剩一个孤零零的 `·`。
+ * ⚠️ 用 `display: none` 而不是 `v-if`：`scripts/verify-ui.mjs` 按 testid 读那个节点的
+ *   textContent（它验的是「来源说法在不在」），删掉节点会让那条探针落空、
+ *   把一次「界面改对了」报成「探针失败」（与 `.grade__hint` 同一考虑）。
+ *   学生看不见 = 这一格的承诺就兑现了；节点在不在不影响可见性。 */
+.grade--compact .grade__origin,
+.grade--compact .grade__sep {
+  display: none;
+}
+
+.grade--compact .grade__chip,
 .grade--compact .grade__option,
 .grade--compact .grade__picker {
   -webkit-app-region: no-drag;
