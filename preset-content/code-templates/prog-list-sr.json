@@ -1,0 +1,23 @@
+{
+  "kp_id": "prog-list-sr",
+  "grade_level": "senior",
+  "title": "列表：标准化一组特征（减均值再除以标准差）",
+  "expected_behavior": "打印标准化结果，约 [-1.34, -0.45, 0.45, 1.34]。",
+  "scaffold": "# 目标：把 xs 标准化后打印\nimport math\nxs = [2.0, 4.0, 6.0, 8.0]\n\n# TODO 1：求均值 mu 与标准差 sigma（总体）\nmu = ____\nsigma = ____\n\n# TODO 2：打印标准化后的列表，保留 2 位小数\nzs = ____\nprint([round(z, 2) for z in zs])\n",
+  "expected_output": "[-1.34, -0.45, 0.45, 1.34]\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "先算平均 mu，再算每个数与 mu 的偏差。"
+    },
+    {
+      "level": 2,
+      "hint": "sigma = sqrt(平方偏差的平均)；z = (x - mu) / sigma。"
+    },
+    {
+      "level": 3,
+      "hint": "用列表推导：zs = [(x - mu) / sigma for x in xs]。"
+    }
+  ],
+  "solution": "import math\nxs = [2.0, 4.0, 6.0, 8.0]\n\nmu = sum(xs) / len(xs)\nsigma = math.sqrt(sum((x - mu) ** 2 for x in xs) / len(xs))\n\nzs = [(x - mu) / sigma for x in xs]\nprint([round(z, 2) for z in zs])\n"
+}

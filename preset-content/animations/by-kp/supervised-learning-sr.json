@@ -1,0 +1,37 @@
+{
+  "kp_id": "supervised-learning-sr",
+  "grade_level": "senior",
+  "name": "监督学习",
+  "concept": "监督学习",
+  "template_id": "supervised-learning",
+  "archetype": "compare",
+  "title": "监督学习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "监督学习",
+      "caption": "先明确概念边界：用「带答案的题目」，输入和正确输出成对"
+    },
+    {
+      "left": "用「带答案…",
+      "right": "监督学习",
+      "caption": "再拆机制与前提：用「带答案的题目」，输入和正确输出成对"
+    },
+    {
+      "left": "记住这个",
+      "right": "用「带答案…",
+      "caption": "最后关联上下游与局限：用「带答案的题目」，输入和正确输出成对"
+    }
+  ],
+  "fallback_text": "（高中讲法）监督学习：用「带答案的题目」，输入和正确输出成对喂给它，让它学会自己判断新输入。 再记一句：监督学习（Supervised Learning）指在给定标注数据集 $\\{(x_i, y_i)\\}$ 的条件下，学习映射 $f: x \\to y$，使 $f$ 在未见样本上具有良好泛化能力。 其流程为：模型对输入 $x_i$ 给出预测 $。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

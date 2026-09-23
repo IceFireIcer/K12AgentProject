@@ -1,0 +1,42 @@
+{
+  "kp_id": "token-pl",
+  "grade_level": "primary_low",
+  "name": "Token",
+  "concept": "Token",
+  "template_id": "token",
+  "archetype": "steps",
+  "title": "Token：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "Token",
+      "hint": "是什么",
+      "caption": "先看这是什么：模型处理文字时的最小单位，"
+    },
+    {
+      "title": "关键点",
+      "hint": "机器读文章，不…",
+      "caption": "再想它像生活里的什么：机器读文章，不是像我们一样一个字一个字看的"
+    },
+    {
+      "title": "再看步",
+      "hint": "它会把句子切成…",
+      "caption": "它会把句子切成很多小碎块，一块一块地看"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "记住一点就好：这些小碎块就是它的「字」"
+    }
+  ],
+  "fallback_text": "（小学低年级讲法）Token：模型处理文字时的最小单位，把一段话切成一个个小片段再交给它读写。 再记一句：机器读文章，不是像我们一样一个字一个字看的。 它会把句子切成很多小碎块，一块一块地看。 这些小碎块就是它的「字」。 就像拼积木，先有很多小零件，才能搭出一整座房子。 想一想：如果把「今天天气很好」切成小块，你会怎么切？。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

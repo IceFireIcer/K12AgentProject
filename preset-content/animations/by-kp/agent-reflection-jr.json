@@ -1,0 +1,49 @@
+{
+  "kp_id": "agent-reflection-jr",
+  "grade_level": "junior",
+  "name": "反思模块",
+  "concept": "反思模块",
+  "template_id": "agent-reflection",
+  "archetype": "loop",
+  "title": "反思模块：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "反思模块",
+      "hint": "是什么",
+      "caption": "先抓住定义：智能体的，答案说出口前后自己"
+    },
+    {
+      "title": "关键点",
+      "hint": "发现问题就带着…",
+      "caption": "再分析怎么起作用：发现问题就带着反馈回到规划或执行步骤，"
+    },
+    {
+      "title": "再看步",
+      "hint": "易错点：不要以…",
+      "caption": "易错点：不要以为智能体自己检查过就一定正确"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：智能体的，答案说出口前后"
+    }
+  ],
+  "fallback_text": "（初中讲法）反思模块：智能体的，答案说出口前后自己再看一遍，发现错了就主动改正。 再记一句：反思模块（Reflection）让智能体具备自我校验与迭代校正的能力，是五模块闭环的收口环节。 它的典型做法是：把刚生成的答案与题目条件、检索到的材料重新比对，检查计算是否正确、推理是否连贯、引用是否可靠； 发现问题就带着反馈回到规划或执行。",
+  "duration_ms": 4800,
+  "params": {
+    "rounds": {
+      "type": "int",
+      "min": 1,
+      "max": 4,
+      "default": 2,
+      "description": "循环几轮"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "kp_id": "token-sr",
+  "grade_level": "senior",
+  "name": "Token",
+  "concept": "Token",
+  "template_id": "token",
+  "archetype": "steps",
+  "title": "Token：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "Token",
+      "hint": "是什么",
+      "caption": "先明确概念边界：模型处理文字时的最小单位，"
+    },
+    {
+      "title": "关键点",
+      "hint": "Token（词…",
+      "caption": "再拆机制与前提：Token（词元）是语言模型的基本离散单元"
+    },
+    {
+      "title": "再看步",
+      "hint": "生成时模型对词…",
+      "caption": "生成时模型对词表做概率分布预测，"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：模型处理文字时的最小单位，"
+    }
+  ],
+  "fallback_text": "（高中讲法）Token：模型处理文字时的最小单位，把一段话切成一个个小片段再交给它读写。 再记一句：Token（词元）是语言模型的基本离散单元。 文本先经分词器切分为词元序列，再通过词表映射为整数 id 输入网络； 生成时模型对词表做概率分布预测，逐词元采样并解码回文本。 因此模型的输入输出长度、推理成本与上下文窗口（context wi。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

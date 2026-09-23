@@ -1,0 +1,42 @@
+{
+  "kp_id": "speech-synthesis-sr",
+  "grade_level": "senior",
+  "name": "语音合成（TTS）",
+  "concept": "语音合成（TTS）",
+  "template_id": "speech-synthesis",
+  "archetype": "flow",
+  "title": "语音合成（TTS）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "语音合成…",
+      "hint": "是什么",
+      "caption": "先明确概念边界：把文字变成说出来的声音，让机器会「念」给你听。"
+    },
+    {
+      "title": "关键点",
+      "hint": "后端则建模从语…",
+      "caption": "再拆机制与前提：后端则建模从语言特征到声学特征的映射，"
+    },
+    {
+      "title": "再看步",
+      "hint": "早期系统依赖拼…",
+      "caption": "早期系统依赖拼接或参数化合成，音质生硬；"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：把文字变成说出来的声音，"
+    }
+  ],
+  "fallback_text": "（高中讲法）语音合成（TTS）：把文字变成说出来的声音，让机器会「念」给你听。 再记一句：文字转语音（Text to Speech，TTS）把文本映射为语音波形，通常由文本前端与声学后端两部分构成，是语音识别（3.5.1）的逆向任务。 文本前端负责文本归一化、分词、多音字消歧与韵律预测，输出带停顿和重音的中间表示。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

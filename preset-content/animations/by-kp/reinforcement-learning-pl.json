@@ -1,0 +1,49 @@
+{
+  "kp_id": "reinforcement-learning-pl",
+  "grade_level": "primary_low",
+  "name": "强化学习",
+  "concept": "强化学习",
+  "template_id": "reinforcement-learning",
+  "archetype": "loop",
+  "title": "强化学习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "强化学习",
+      "hint": "是什么",
+      "caption": "先看这是什么：没有标准答案，靠一次次尝试，做对了得到奖励、"
+    },
+    {
+      "title": "关键点",
+      "hint": "你在学骑自行车…",
+      "caption": "再想它像生活里的什么：你在学骑自行车，没有人能替你骑"
+    },
+    {
+      "title": "再看步",
+      "hint": "摔了一次，你就…",
+      "caption": "摔了一次，你就知道那样不稳；"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "记住一点就好：骑稳了一段，你心里就知道这样对"
+    }
+  ],
+  "fallback_text": "（小学低年级讲法）强化学习：没有标准答案，靠一次次尝试，做对了得到奖励、做错了受到提醒，慢慢学会最好的做法。 再记一句：你在学骑自行车，没有人能替你骑。 摔了一次，你就知道那样不稳； 骑稳了一段，你心里就知道这样对。 一次一次试，一次一次改，慢慢就学会了。 这种「在尝试中学会怎么做最好」的本领，就叫强化学习。 想一想：你学跳绳的时候，是试了多少次才学会的？。",
+  "duration_ms": 4800,
+  "params": {
+    "rounds": {
+      "type": "int",
+      "min": 1,
+      "max": 4,
+      "default": 2,
+      "description": "循环几轮"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

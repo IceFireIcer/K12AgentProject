@@ -1,0 +1,42 @@
+{
+  "kp_id": "neural-network-jr",
+  "grade_level": "junior",
+  "name": "神经网络",
+  "concept": "神经网络",
+  "template_id": "neural-network",
+  "archetype": "layers",
+  "title": "神经网络：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "基础",
+      "hint": "它的典型结构分…",
+      "caption": "它的典型结构分三层：输入层接收原始数据；"
+    },
+    {
+      "title": "中间",
+      "hint": "隐藏层（可以有…",
+      "caption": "隐藏层（可以有多层）逐层提取并组合特征；"
+    },
+    {
+      "title": "上层",
+      "hint": "输出层给出预测…",
+      "caption": "输出层给出预测结果"
+    },
+    {
+      "title": "神经网络",
+      "hint": "整体",
+      "caption": "最后辨析易混点：把大量人工神经元按「输入层—隐藏层—输出层」"
+    }
+  ],
+  "fallback_text": "（初中讲法）神经网络：把大量人工神经元按「输入层—隐藏层—输出层」分层连起来，前一层的结果喂给后一层，层层加工出最终答案。 再记一句：神经网络（Neural Network）是由大量人工神经元按层连接而成的计算结构，是深度学习的核心模型。 它的典型结构分三层：输入层接收原始数据； 隐藏层（可以有多层）逐层提取并组合特征； 输出层给出预测结果。 层与。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

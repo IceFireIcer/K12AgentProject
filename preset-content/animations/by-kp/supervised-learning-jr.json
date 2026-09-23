@@ -1,0 +1,37 @@
+{
+  "kp_id": "supervised-learning-jr",
+  "grade_level": "junior",
+  "name": "监督学习",
+  "concept": "监督学习",
+  "template_id": "supervised-learning",
+  "archetype": "compare",
+  "title": "监督学习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "监督学习",
+      "caption": "先抓住定义：用「带答案的题目」，输入和正确输出成对"
+    },
+    {
+      "left": "「标签」就…",
+      "right": "监督学习",
+      "caption": "再分析怎么起作用：「标签」就是标准答案"
+    },
+    {
+      "left": "记住这个",
+      "right": "这个过程叫…",
+      "caption": "最后辨析易混点：易错点：标签质量决定上限"
+    }
+  ],
+  "fallback_text": "（初中讲法）监督学习：用「带答案的题目」，输入和正确输出成对喂给它，让它学会自己判断新输入。 再记一句：监督学习的核心是用带标签的数据训练模型，使它能对没见过的输入给出正确输出。 「标签」就是标准答案。 每个训练样本都是「输入—标签」成对出现，模型先预测、再和标签比对、然后按误差调整内部参数，如此反复。 这个过程叫训练。 它的典型任务。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "kp_id": "reinforcement-learning-sr",
+  "grade_level": "senior",
+  "name": "强化学习",
+  "concept": "强化学习",
+  "template_id": "reinforcement-learning",
+  "archetype": "loop",
+  "title": "强化学习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "强化学习",
+      "hint": "是什么",
+      "caption": "先明确概念边界：没有标准答案，靠一次次尝试，做对了得到奖励、"
+    },
+    {
+      "title": "关键点",
+      "hint": "学习目标是最大…",
+      "caption": "再拆机制与前提：学习目标是最大化期望折扣回报"
+    },
+    {
+      "title": "再看步",
+      "hint": "若环境不可微或…",
+      "caption": "若环境不可微或奖励稀疏，还需要奖励塑形或模仿学习"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：这也是对齐问题的现实来源"
+    }
+  ],
+  "fallback_text": "（高中讲法）强化学习：没有标准答案，靠一次次尝试，做对了得到奖励、做错了受到提醒，慢慢学会最好的做法。 再记一句：强化学习（Reinforcement Learning，RL）研究智能体在马尔可夫决策过程框架下，通过与环境的交互最大化累计回报，从而学习最优策略。 形式化地，智能体在状态 $s$ 下按策略 $\\pi$ 选择动作 $a$，环境返回奖励 $r。",
+  "duration_ms": 4800,
+  "params": {
+    "rounds": {
+      "type": "int",
+      "min": 1,
+      "max": 4,
+      "default": 2,
+      "description": "循环几轮"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

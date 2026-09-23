@@ -1,0 +1,42 @@
+{
+  "kp_id": "transformer-pl",
+  "grade_level": "primary_low",
+  "name": "Transformer 架构",
+  "concept": "Transformer 架构",
+  "template_id": "transformer",
+  "archetype": "flow",
+  "title": "Transformer 架构：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "Tran…",
+      "hint": "是什么",
+      "caption": "先看这是什么：一种能一次读完整个句子、并判断哪些词最重要的深度"
+    },
+    {
+      "title": "关键点",
+      "hint": "机器要读句子，…",
+      "caption": "再想它像生活里的什么：机器要读句子，先要学会「看句子」"
+    },
+    {
+      "title": "再看步",
+      "hint": "就像你看一幅画…",
+      "caption": "就像你看一幅画，一眼就知道谁在做什么"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "记住一点就好：有了这种本领，机器读文章又快又准"
+    }
+  ],
+  "fallback_text": "（小学低年级讲法）Transformer 架构：一种能一次读完整个句子、并判断哪些词最重要的深度学习架构，是当前大语言模型的底层骨架。 再记一句：机器要读句子，先要学会「看句子」。 有一种很厉害的办法，能让机器一眼看完整句话，还能找出哪几个词最重要。 就像你看一幅画，一眼就知道谁在做什么。 有了这种本领，机器读文章又快又准。 想一想：读「弟弟把糖藏起来了」，你觉得哪个词最重要？。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

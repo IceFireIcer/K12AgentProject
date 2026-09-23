@@ -1,0 +1,42 @@
+{
+  "kp_id": "deep-learning-jr",
+  "grade_level": "junior",
+  "name": "深度学习（DL）",
+  "concept": "深度学习（DL）",
+  "template_id": "deep-learning",
+  "archetype": "layers",
+  "title": "深度学习（DL）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "基础",
+      "hint": "它最关键的特点…",
+      "caption": "它最关键的特点是自动提取特征"
+    },
+    {
+      "title": "中间",
+      "hint": "易错点：把深度…",
+      "caption": "易错点：把深度学习和机器学习当成两回事"
+    },
+    {
+      "title": "上层",
+      "hint": "深度学习是机器…",
+      "caption": "深度学习是机器学习的一部分，"
+    },
+    {
+      "title": "深度学习…",
+      "hint": "整体",
+      "caption": "最后辨析易混点：机器学习里的一个，用很多层的"
+    }
+  ],
+  "fallback_text": "（初中讲法）深度学习（DL）：机器学习里的一个，用很多层的人工神经元搭成网络，让它自己一层层提取特征，从简单线条一直到复杂事物。 再记一句：深度学习（Deep Learning，DL）是机器学习的一个子集，用多层的神经网络自动从数据中提取特征，完成复杂的学习任务。 它最关键的特点是自动提取特征。 传统机器学习往往要靠人设计特征（比如告诉模型看颜色、看边缘），而深度学习把。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "kp_id": "artificial-neuron-jr",
+  "grade_level": "junior",
+  "name": "人工神经元",
+  "concept": "人工神经元",
+  "template_id": "artificial-neuron",
+  "archetype": "flow",
+  "title": "人工神经元：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "人工神经元",
+      "hint": "是什么",
+      "caption": "先抓住定义：神经网络里，把收到的多个信号加权"
+    },
+    {
+      "title": "关键点",
+      "hint": "然后把这个结果…",
+      "caption": "再分析怎么起作用：然后把这个结果送进激活函数，得到输出"
+    },
+    {
+      "title": "再看步",
+      "hint": "神经网络里最小…",
+      "caption": "神经网络里，把收到的多个信号加权"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：神经网络里，把收到的多个信号"
+    }
+  ],
+  "fallback_text": "（初中讲法）人工神经元：神经网络里，把收到的多个信号加权求和，超过一定门槛就「兴奋」并把结果传下去。 再记一句：人工神经元（Artificial Neuron）是神经网络的最小计算单元，模拟生物神经元「接收信号—整合—输出」的工作方式。 它的计算可以拆成两步：先把来自前一层输入的每个数值乘以对应的权重并求和，再加上一个偏置； 然后把这个结果送。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

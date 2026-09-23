@@ -1,0 +1,42 @@
+{
+  "kp_id": "agent-perception-jr",
+  "grade_level": "junior",
+  "name": "感知模块",
+  "concept": "感知模块",
+  "template_id": "agent-perception",
+  "archetype": "flow",
+  "title": "感知模块：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "感知模块",
+      "hint": "是什么",
+      "caption": "先抓住定义：智能体的「眼睛和耳朵」，负责把学生的文字、语音、"
+    },
+    {
+      "title": "关键点",
+      "hint": "文字直接分词编…",
+      "caption": "再分析怎么起作用：文字直接分词编码；"
+    },
+    {
+      "title": "再看步",
+      "hint": "语音先由语音识…",
+      "caption": "语音先由语音识别（ASR）转成文字；"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：图像先由计算机视觉（CV）找出题目文字或图形"
+    }
+  ],
+  "fallback_text": "（初中讲法）感知模块：智能体的「眼睛和耳朵」，负责把学生的文字、语音、照片变成机器能看懂的信息，是整个流程的入口。 再记一句：感知模块（Perception）负责把外部输入转成智能体能处理的形式，是五模块流程的入口。 它的处理通常分三步：采集输入、识别内容、转成统一的中间表示。 文字直接分词编码； 语音先由语音识别（ASR）转成文字； 图像先由计算机视觉（CV）找。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

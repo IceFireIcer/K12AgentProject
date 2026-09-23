@@ -1,0 +1,42 @@
+{
+  "kp_id": "speech-recognition-ph",
+  "grade_level": "primary_high",
+  "name": "语音识别（ASR）",
+  "concept": "语音识别（ASR）",
+  "template_id": "speech-recognition",
+  "archetype": "flow",
+  "title": "语音识别（ASR）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "语音识别…",
+      "hint": "是什么",
+      "caption": "先弄懂它是什么：把说出来的话变成文字，让机器听懂人的声音。"
+    },
+    {
+      "title": "关键点",
+      "hint": "生活里它很常见…",
+      "caption": "再看它有什么用：生活里它很常见：对着手机说一段话，"
+    },
+    {
+      "title": "再看步",
+      "hint": "喊一声「你好，…",
+      "caption": "喊一声「你好，助手」，音箱就会回应；"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "还要知道边界：开会时的语音转字幕，也靠它"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）语音识别（ASR）：把说出来的话变成文字，让机器听懂人的声音。 再记一句：语音识别（英文缩写 ASR，全称自动语音识别）是让人说的话变成文字的技术。 它的做法是先看懂声音：把你说的话切成一小段一小段的声音片段，再从这些片段里找出对应的字，最后连成一句通顺的话。 生活里它很常见：对着手机说一段话，就自动变成文字消息。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

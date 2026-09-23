@@ -1,0 +1,42 @@
+{
+  "kp_id": "edu-preview-review-jr",
+  "grade_level": "junior",
+  "name": "预习复习",
+  "concept": "预习复习",
+  "template_id": "edu-preview-review",
+  "archetype": "flow",
+  "title": "预习复习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "预习复习",
+      "hint": "是什么",
+      "caption": "先抓住定义：课前生成预习提纲、课后生成复习总结，"
+    },
+    {
+      "title": "关键点",
+      "hint": "它的作用建立在…",
+      "caption": "再分析怎么起作用：它的作用建立在学习的两个规律上"
+    },
+    {
+      "title": "再看步",
+      "hint": "使用时有几条准…",
+      "caption": "使用时有几条准则需要遵守："
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：- 先自己读，再看提纲"
+    }
+  ],
+  "fallback_text": "（初中讲法）预习复习：课前生成预习提纲、课后生成复习总结，帮你先看清楚要学什么，再把学过的东西串起来。 再记一句：预习复习（Preview & Review）是面向课前与课后两个环节的学习功能：AI 依据教材知识点自动生成预习提纲与复习总结，把分散的内容整理成有条理的知识框架。 它的作用建立在学习的两个规律上。 预习的价值在于提前建立整体印象，。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

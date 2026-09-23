@@ -1,0 +1,42 @@
+{
+  "kp_id": "prompt-jr",
+  "grade_level": "junior",
+  "name": "Prompt 提示词",
+  "concept": "Prompt 提示词",
+  "template_id": "prompt",
+  "archetype": "steps",
+  "title": "Prompt 提示词：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "Prom…",
+      "hint": "是什么",
+      "caption": "先抓住定义：给机器下达的指令，用来说明「你是谁、要怎么做、"
+    },
+    {
+      "title": "关键点",
+      "hint": "一段结构清晰的…",
+      "caption": "再分析怎么起作用：一段结构清晰的提示词通常包含：角色（你是…"
+    },
+    {
+      "title": "再看步",
+      "hint": "）、任务（请帮…",
+      "caption": "）、任务（请帮我…"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：易错点：提示词写得含糊，模型只能猜你的意图；"
+    }
+  ],
+  "fallback_text": "（初中讲法）Prompt 提示词：给机器下达的指令，用来说明「你是谁、要怎么做、说成什么样」，直接决定它回答的质量与难度。 再记一句：提示词（Prompt）是用户发给大语言模型（4.1.1）的输入指令，用来约束模型的角色、任务、输出格式与语言风格。 它之所以有效，是因为模型会根据给定的前文条件来，提示词实际上给出了「回答的上下文与约束」。 因此，同样的模型配。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

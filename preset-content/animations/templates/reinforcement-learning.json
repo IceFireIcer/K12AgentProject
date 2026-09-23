@@ -1,0 +1,38 @@
+{
+  "id": "reinforcement-learning",
+  "label": "强化学习",
+  "title": "强化学习：看懂它是怎么起作用的",
+  "concept": "强化学习",
+  "kp_ids": [
+    "reinforcement-learning-pl",
+    "reinforcement-learning-ph",
+    "reinforcement-learning-jr",
+    "reinforcement-learning-sr"
+  ],
+  "grade_levels": [
+    "primary_low",
+    "primary_high",
+    "junior",
+    "senior"
+  ],
+  "duration_ms": 4800,
+  "params": {
+    "rounds": {
+      "type": "int",
+      "min": 1,
+      "max": 4,
+      "default": 2,
+      "description": "循环几轮"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">强化学习：看懂它是怎么起作用的</h1>\n<p class=\"anim-caption\" id=\"caption\">转一圈是一轮…</p>\n<div class=\"anim-canvas\">\n  <svg id=\"flow\" viewBox=\"0 0 460 240\" width=\"100%\" height=\"100%\" role=\"img\" aria-label=\"循环动画\">\n    <g id=\"ring\"></g>\n    <g id=\"mover\"></g>\n  </svg>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"round\">轮次</span></p>\n",
+  "script": "\nfunction makeTicker(durationMs, onFrame) {\n  var startTs = 0;\n  var raf = 0;\n  var running = false;\n  var lastT = 0;\n  function frame(ts) {\n    if (!running) return;\n    if (!startTs) startTs = ts;\n    var t = Math.min(1, (ts - startTs) / durationMs);\n    lastT = t;\n    onFrame(t);\n    if (t < 1) {\n      raf = requestAnimationFrame(frame);\n    } else {\n      running = false;\n      Sandbox.progress(1);\n    }\n  }\n  return {\n    restart: function () {\n      if (raf) cancelAnimationFrame(raf);\n      startTs = 0;\n      running = true;\n      raf = requestAnimationFrame(frame);\n    },\n    play: function () {\n      if (running) return;\n      running = true;\n      // 简化：从头续播（pause/play 场景够用）\n      startTs = 0;\n      raf = requestAnimationFrame(frame);\n    },\n    pause: function () {\n      running = false;\n      if (raf) cancelAnimationFrame(raf);\n      raf = 0;\n    }\n  };\n}\n\nvar SPEED = {{speed}};\nvar ROUNDS = {{rounds}};\nvar DURATION = Math.round(3600 * ROUNDS / SPEED);\nvar gR = document.getElementById('ring');\nvar gM = document.getElementById('mover');\nvar caption = document.getElementById('caption');\nvar chip = document.getElementById('round');\nvar STAGES = [{\"title\": \"强化学习\", \"hint\": \"是什么\", \"caption\": \"先抓住定义：没有标准答案，靠一次次尝试，做对了得到奖励、\"}, {\"title\": \"关键点\", \"hint\": \"核心目标是长期…\", \"caption\": \"再分析怎么起作用：核心目标是长期回报最大化，而不是眼前一步最优\"}, {\"title\": \"再看步\", \"hint\": \"辨析：强化学习…\", \"caption\": \"辨析：强化学习需要大量尝试，代价高、收敛慢；\"}, {\"title\": \"收束\", \"hint\": \"记住\", \"caption\": \"最后辨析易混点：没有标准答案，靠一次次尝试，做对了得到奖励、\"}];\nvar N = STAGES.length;\nvar cx = 230, cy = 115, R = 78;\nvar pts = [];\nfor (var s = 0; s < N; s += 1) {\n  var ang = -Math.PI / 2 + (s * 2 * Math.PI) / N;\n  var x = cx + R * Math.cos(ang);\n  var y = cy + R * Math.sin(ang);\n  pts.push({ x: x, y: y });\n  var c = Sandbox.svgEl('circle');\n  c.setAttribute('cx', String(x));\n  c.setAttribute('cy', String(y));\n  c.setAttribute('r', '26');\n  c.setAttribute('fill', '#ffffff');\n  c.setAttribute('stroke', '#d6ddec');\n  c.setAttribute('stroke-width', '1.6');\n  gR.appendChild(c);\n  var t = Sandbox.svgEl('text');\n  t.setAttribute('x', String(x));\n  t.setAttribute('y', String(y + 4));\n  t.setAttribute('text-anchor', 'middle');\n  t.setAttribute('style', 'font-size:11px;font-weight:650;fill:#12233b');\n  var label = STAGES[s].title;\n  if (label.length > 4) label = label.slice(0, 3) + '…';\n  t.textContent = label;\n  gR.appendChild(t);\n}\nvar ball = Sandbox.svgEl('circle');\nball.setAttribute('r', '7');\nball.setAttribute('fill', '#3b82f6');\nball.setAttribute('cx', String(pts[0].x));\nball.setAttribute('cy', String(pts[0].y));\ngM.appendChild(ball);\n\nfunction play() {\n  caption.textContent = STAGES[0].caption;\n  chip.textContent = '第 1 轮 · ' + STAGES[0].title;\n  var handle = makeTicker(DURATION, function (t) {\n    var total = ROUNDS * N;\n    var f = t * total;\n    var i = Math.floor(f) % N;\n    var local = f - Math.floor(f);\n    var a = pts[i];\n    var b = pts[(i + 1) % N];\n    ball.setAttribute('cx', String(a.x + (b.x - a.x) * local));\n    ball.setAttribute('cy', String(a.y + (b.y - a.y) * local));\n    var round = Math.min(ROUNDS, Math.floor(f / N) + 1);\n    caption.textContent = STAGES[i].caption;\n    chip.textContent = '第 ' + round + ' 轮 · ' + STAGES[i].title;\n    Sandbox.progress(t);\n  });\n  handle.restart();\n  return handle;\n}\nSandbox.play(play);\nSandbox.ready();\n",
+  "fallback_text": "（初中讲法）强化学习：没有标准答案，靠一次次尝试，做对了得到奖励、做错了受到提醒，慢慢学会最好的做法。 再记一句：强化学习（Reinforcement Learning，RL）研究智能体如何在与环境的交互中，通过试错和奖励信号学习最优决策策略。 它用一套完整的框架描述问题：智能体在某个状态下选择一个动作，环境随之转移到新状态并给出奖励，智能体依据累计奖。"
+}

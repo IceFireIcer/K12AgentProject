@@ -1,0 +1,42 @@
+{
+  "kp_id": "edu-agent-sr",
+  "grade_level": "senior",
+  "name": "AI 教育智能体",
+  "concept": "AI 教育智能体",
+  "template_id": "edu-agent",
+  "archetype": "flow",
+  "title": "AI 教育智能体：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "AI 教…",
+      "hint": "是什么",
+      "caption": "先明确概念边界：面向教育场景定制、能持续陪伴学生多轮对话的智能体"
+    },
+    {
+      "title": "关键点",
+      "hint": "其技术关键在于…",
+      "caption": "再拆机制与前提：其技术关键在于持续性与适配性"
+    },
+    {
+      "title": "再看步",
+      "hint": "它只是辅助工具…",
+      "caption": "它只是辅助工具，不能代替老师教学，"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：同时不向它提供任何敏感个人信息（参见 7.2"
+    }
+  ],
+  "fallback_text": "（高中讲法）AI 教育智能体：面向教育场景定制、能持续陪伴学生多轮对话的智能体，只做学习辅助，不替代老师教学，也不替代学生自己的思考。 再记一句：AI 教育智能体（AI Education Agent）是通用大模型（4.1.1）在教育场景的垂直化落地：以 LLM 为推理内核，外接教育知识库（参见 4.2.1 RAG）、长期记忆（4.3.2）与教学工具集，由智能体的五大核心模块协同工作。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

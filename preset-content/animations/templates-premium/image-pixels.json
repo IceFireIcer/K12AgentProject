@@ -1,0 +1,36 @@
+{
+  "id": "image-pixels",
+  "label": "图像分类",
+  "title": "图像分类：机器把照片看成数字",
+  "concept": "图像分类",
+  "kp_ids": [
+    "computer-vision-pl",
+    "computer-vision-ph",
+    "computer-vision-jr"
+  ],
+  "grade_levels": [
+    "primary_low",
+    "primary_high",
+    "junior"
+  ],
+  "duration_ms": 4400,
+  "params": {
+    "grid": {
+      "type": "int",
+      "min": 4,
+      "max": 8,
+      "default": 6,
+      "description": "把图切成几乘几的格子（格子越多，机器看到的数字越多）"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">图像分类：照片在机器眼里是一大堆数字</h1>\n<p class=\"anim-caption\" id=\"caption\">先看这张图：你一眼就认出来了。</p>\n<div class=\"anim-canvas\">\n  <svg id=\"scene\" viewBox=\"0 0 460 210\" width=\"100%\" height=\"100%\" role=\"img\" aria-label=\"图像分块成数字的动画\">\n    <g id=\"grid\"></g>\n    <g id=\"labels\"></g>\n  </svg>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"classified\">类别：—</span></p>",
+  "script": "var GRID = {{grid}};\nvar SPEED = {{speed}};\n\nvar gridGroup = document.getElementById('grid');\nvar labelGroup = document.getElementById('labels');\nvar caption = document.getElementById('caption');\nvar classified = document.getElementById('classified');\n\n// 一张「猫脸」的示意：用 1 / 0 描述哪里深、哪里浅（不依赖任何外部图片）\n// 1 = 深色（比如耳朵、眼睛的轮廓），0 = 浅色\nvar CAT_PATTERN = [\n  [1, 0, 0, 0, 0, 1, 0, 0],\n  [1, 1, 0, 0, 1, 1, 0, 0],\n  [1, 0, 1, 0, 1, 0, 1, 0],\n  [1, 0, 0, 1, 0, 0, 1, 0],\n  [1, 0, 1, 0, 1, 0, 1, 0],\n  [1, 0, 0, 0, 0, 0, 1, 0],\n  [1, 0, 1, 1, 1, 0, 1, 0],\n  [1, 1, 1, 1, 1, 1, 1, 0]\n];\n\nvar BASE_X = 30;\nvar BASE_Y = 22;\nvar SIZE = 150;\nvar CELL = SIZE / GRID;\n\nfunction cellValue(row, column) {\n  var sourceRow = Math.min(CAT_PATTERN.length - 1, Math.floor((row / GRID) * CAT_PATTERN.length));\n  var sourceCol = Math.min(CAT_PATTERN[0].length - 1, Math.floor((column / GRID) * CAT_PATTERN[0].length));\n  return CAT_PATTERN[sourceRow][sourceCol];\n}\n\nvar cells = [];\nfor (var row = 0; row < GRID; row += 1) {\n  for (var column = 0; column < GRID; column += 1) {\n    var value = cellValue(row, column);\n    var rect = Sandbox.svgEl('rect');\n    rect.setAttribute('x', String(BASE_X + column * CELL));\n    rect.setAttribute('y', String(BASE_Y + row * CELL));\n    rect.setAttribute('width', String(CELL));\n    rect.setAttribute('height', String(CELL));\n    rect.setAttribute('fill', value === 1 ? '#12233b' : '#eef2f8');\n    rect.setAttribute('stroke', '#ffffff');\n    rect.setAttribute('stroke-width', '0.5');\n    gridGroup.appendChild(rect);\n    cells.push({ rect: rect, value: value, row: row, column: column });\n  }\n}\n\n// 右侧：把每个格子写成 1 / 0（分列排，太长的列会省略）\nvar MAX_ROWS_SHOWN = 12;\nvar shown = cells.slice(0, MAX_ROWS_SHOWN);\nvar digitTexts = [];\nfor (var d = 0; d < shown.length; d += 1) {\n  var text = Sandbox.svgEl('text');\n  text.setAttribute('x', String(250 + (d % 4) * 22));\n  text.setAttribute('y', String(34 + Math.floor(d / 4) * 24));\n  text.setAttribute('style', 'font-family:Consolas,Menlo,monospace;font-size:13px;fill:#5b6b82');\n  text.setAttribute('opacity', '0');\n  text.textContent = String(shown[d].value);\n  labelGroup.appendChild(text);\n  digitTexts.push(text);\n}\n\nvar summary = Sandbox.svgEl('text');\nsummary.setAttribute('x', '250');\nsummary.setAttribute('y', '170');\nsummary.setAttribute('style', 'font-size:12.5px;fill:#12233b');\nsummary.setAttribute('opacity', '0');\nsummary.textContent = '一共 ' + GRID * GRID + ' 个数字';\nlabelGroup.appendChild(summary);\n\nSandbox.play(function () {\n  var steps = [];\n\n  steps.push({\n    targets: cells.map(function (cell) { return cell.rect; }),\n    duration: 400,\n    begin: function () {\n      caption.textContent = '你看到的是「一只猫」——因为你的眼睛直接给出了答案。';\n      classified.textContent = '类别：—';\n    }\n  });\n\n  steps.push({\n    targets: cells.map(function (cell) { return cell.rect; }),\n    stroke: '#2f6fd0',\n    strokeWidth: 1.2,\n    duration: 420 * SPEED,\n    begin: function () {\n      caption.textContent = '机器不会「看」。它先把图切成 ' + GRID + ' × ' + GRID + ' 个小格子，每个格子记一个数。';\n    }\n  });\n\n  for (var i = 0; i < digitTexts.length; i += 1) {\n    steps.push({\n      targets: digitTexts[i],\n      opacity: [0, 1],\n      duration: 90 * SPEED,\n      begin: (function (index) {\n        return function () {\n          caption.textContent = '第 ' + (index + 1) + ' 格是「' + (shown[index].value === 1 ? '深色' : '浅色') + '」，就写成 ' + shown[index].value + '。';\n        };\n      })(i)\n    });\n  }\n\n  steps.push({\n    targets: summary,\n    opacity: [0, 1],\n    duration: 300,\n    begin: function () {\n      caption.textContent =\n        '整张图在机器眼里就是这一串 1 和 0。它做的事是：把这一串数字和自己的『猫的样子』比一比，看谁更接近。';\n    }\n  });\n\n  steps.push({\n    targets: cells.filter(function (cell) { return cell.value === 1; }).map(function (cell) { return cell.rect; }),\n    fill: '#2f6fd0',\n    duration: 260 * SPEED,\n    begin: function () {\n      caption.textContent = '深色格子连起来的样子（耳朵、眼睛、胡须的方向）就是机器认猫的线索。';\n      classified.textContent = '类别：猫';\n    },\n    complete: function () {\n      Sandbox.progress(1);\n    }\n  });\n\n  var timeline = anime.timeline({ autoplay: true, easing: 'easeInOutQuad' });\n  for (var s = 0; s < steps.length; s += 1) timeline.add(steps[s]);\n  timeline.play();\n\n  var duration = timeline.duration || 4500;\n  return {\n    pause: function () { timeline.pause(); },\n    play: function () { timeline.play(); },\n    restart: function () { timeline.restart(); },\n    finished: {\n      then: function (resolve) {\n        var elapsed = 0;\n        var timer = setInterval(function () {\n          elapsed += 100;\n          if (timeline.completed || elapsed > duration + 800) {\n            clearInterval(timer);\n            resolve();\n          }\n          Sandbox.progress(Math.min(1, elapsed / duration));\n        }, 100);\n      }\n    }\n  };\n});\n\nSandbox.ready({ template: 'image-pixels', grid: GRID });",
+  "fallback_text": "图像分类的意思是：给一张图片，判断它属于事先定好的哪一类。机器不会「看」，它把图片切成很多小格子，每个格子记下颜色的深浅，于是**一张图变成了一串数字**。机器把这一串数字和自己学过的各类「样子」逐一比较，最接近的那一类就是它的答案——所以数据里有什么样子，它才认得出什么。"
+}

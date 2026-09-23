@@ -1,0 +1,49 @@
+{
+  "kp_id": "agent-reflection-sr",
+  "grade_level": "senior",
+  "name": "反思模块",
+  "concept": "反思模块",
+  "template_id": "agent-reflection",
+  "archetype": "loop",
+  "title": "反思模块：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "反思模块",
+      "hint": "是什么",
+      "caption": "先明确概念边界：智能体的，答案说出口前后自己"
+    },
+    {
+      "title": "关键点",
+      "hint": "三是带外部信号…",
+      "caption": "再拆机制与前提：三是带外部信号的校正，如调用计算器或单元测试验证"
+    },
+    {
+      "title": "再看步",
+      "hint": "审查者与生成者…",
+      "caption": "审查者与生成者同源时，盲区会高度相关"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：智能体的，答案说出口前后"
+    }
+  ],
+  "fallback_text": "（高中讲法）反思模块：智能体的，答案说出口前后自己再看一遍，发现错了就主动改正。 再记一句：反思模块（Reflection）是智能体的自我评估与迭代校正层，通过引入「批判者」视角，把单次生成转化为可收敛的闭环过程。 机制上常见三类实现：一是自检式，即对输出重新推理或反向验算，与题目条件、检索来源比对一致性； 二是双角色式，由生成者。",
+  "duration_ms": 4800,
+  "params": {
+    "rounds": {
+      "type": "int",
+      "min": 1,
+      "max": 4,
+      "default": 2,
+      "description": "循环几轮"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

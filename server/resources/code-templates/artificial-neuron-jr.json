@@ -1,0 +1,23 @@
+{
+  "kp_id": "artificial-neuron-jr",
+  "grade_level": "junior",
+  "title": "编程小练习：数一数概念「人工神经元」相关词出现了几次",
+  "expected_behavior": "打印关键词在句子里出现的次数。",
+  "scaffold": "# 目标：数出关键词在句子中出现了几次\nkeyword = \"人工神经\"\nsentence = \"神经网络里最小的计算单元——把收到的多个信号加权求和，超过一定门槛就「兴奋」并把\"\n\n# TODO 1：用 count 统计出现次数，存进 n\nn = ____\n\n# TODO 2：打印「关键词出现 N 次」\n____\n",
+  "expected_output": "关键词出现 0 次\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "字符串自带 count 方法。"
+    },
+    {
+      "level": 2,
+      "hint": "n = sentence.count(keyword)。"
+    },
+    {
+      "level": 3,
+      "hint": "print(f\"关键词出现 {n} 次\")。"
+    }
+  ],
+  "solution": "keyword = \"人工神经\"\nsentence = \"神经网络里最小的计算单元——把收到的多个信号加权求和，超过一定门槛就「兴奋」并把\"\n\nn = sentence.count(keyword)\nprint(f\"关键词出现 {n} 次\")\n"
+}

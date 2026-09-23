@@ -1,0 +1,71 @@
+{
+  "name": "preset-content",
+  "version": "1.0.0",
+  "generated_at": "2026-09-22",
+  "source": {
+    "kb": "server/_data/shared/kb.sqlite",
+    "knowledge": "server/knowledge/",
+    "quizbank_existing": "server/resources/quizbank/"
+  },
+  "grade_levels": ["primary_low", "primary_high", "junior", "senior"],
+  "kp_total": 228,
+  "concept_total": 57,
+  "artifacts": {
+    "quizbank": {
+      "path": "quizbank/",
+      "format": "QuizQuestion 章分片",
+      "files": 8,
+      "questions": 684,
+      "per_kp": 3,
+      "kp_covered": 228,
+      "import_to": "server/resources/quizbank/",
+      "env": "K12_QUIZ_BANK_DIR"
+    },
+    "code_templates": {
+      "path": "code-templates/",
+      "format": "CodeTemplateRecord（含 solution，不外发）",
+      "files": 228,
+      "kp_covered": 228,
+      "import_to": "server/resources/code-templates/",
+      "env": "K12_CODE_TEMPLATES_DIR",
+      "verified": "全部 solution 真跑通过，expected_output 逐字一致"
+    },
+    "animation_templates": {
+      "path": "animations/templates/",
+      "format": "AnimationTemplate",
+      "files": 57,
+      "kp_covered": 228,
+      "import_to": "server/resources/templates/",
+      "env": "K12_ANIMATION_TEMPLATES",
+      "note": "一概念一模板，kp_ids 覆盖四学段；严格 load_template 已通过"
+    },
+    "animation_by_kp": {
+      "path": "animations/by-kp/",
+      "format": "每 KP 文案/步骤/参数（非加载器格式，供接线或一 KP 一模板展开）",
+      "files": 228
+    },
+    "animation_premium": {
+      "path": "animations/templates-premium/",
+      "format": "仓库原有 8 份高保真动画",
+      "files": 8,
+      "kp_covered": 22,
+      "note": "与 templates/ 的 kp 可能重叠；导入时二选一，或保留 premium 优先"
+    }
+  },
+  "imported": {
+    "date": "2026-09-23",
+    "policy": "以包为准 + 全量覆盖；覆盖后按同一口径重做学生可见字段的卫生清理",
+    "quizbank": "8 份覆盖 server/resources/quizbank/，包内同步清理（两边逐字节一致）",
+    "code_templates": "228 份覆盖 server/resources/code-templates/（新增 225 + 覆盖 3）；两处 level 1 泄漏 range( 已改写",
+    "animations": "按 by-kp 展开成 206 份一 KP 一模板进 server/resources/templates/（228 − 22 个由既有 8 份手作模板服务）；templates-premium 覆盖既有 8 份",
+    "by_kp_direct": false,
+    "knowledge_base": "server/knowledge/ 未改（「除了知识点」）",
+    "guard": "server/tests/test_content_copy_hygiene.py 校验本包红线「文案禁 —— 与 **」"
+  },
+  "import_notes": [
+    "kp_id 必须存在于 server/knowledge/（本包 228 全部对齐）",
+    "code solution / quiz answer 绝不进 API 响应（投影层已保证）",
+    "动画 script 必须含 Sandbox.play(，无外链",
+    "可用环境变量指向本目录做离线验收，无需先拷贝"
+  ]
+}

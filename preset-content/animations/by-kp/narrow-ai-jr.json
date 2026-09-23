@@ -1,0 +1,37 @@
+{
+  "kp_id": "narrow-ai-jr",
+  "grade_level": "junior",
+  "name": "弱人工智能（专用 AI）",
+  "concept": "弱人工智能（专用 AI）",
+  "template_id": "narrow-ai",
+  "archetype": "compare",
+  "title": "弱人工智能（专用 AI）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "弱人工智能（专…",
+      "caption": "先抓住定义：只擅长一件事的人工智能，，换个领域"
+    },
+    {
+      "left": "其二，所有…",
+      "right": "弱人工智能…",
+      "caption": "再分析怎么起作用：其二，所有能力都是人类提前设定的；"
+    },
+    {
+      "left": "记住这个",
+      "right": "其三，任务…",
+      "caption": "最后辨析易混点：人脸识别能在百万人中瞬间锁定目标，却不会做算术；"
+    }
+  ],
+  "fallback_text": "（初中讲法）弱人工智能（专用 AI）：只擅长一件事的人工智能，，换个领域就完全不会了。我们身边用到的全都是这一类。 再记一句：弱人工智能（Artificial Narrow Intelligence），也叫专用人工智能，指只能在单一特定领域完成特定任务的人工智能。 三个判定特征：其一，没有真正的自主意识，不会自己产生目标； 其二，所有能力都是人类提前设定的； 其三。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

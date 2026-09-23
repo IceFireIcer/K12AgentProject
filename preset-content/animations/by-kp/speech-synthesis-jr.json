@@ -1,0 +1,42 @@
+{
+  "kp_id": "speech-synthesis-jr",
+  "grade_level": "junior",
+  "name": "语音合成（TTS）",
+  "concept": "语音合成（TTS）",
+  "template_id": "speech-synthesis",
+  "archetype": "flow",
+  "title": "语音合成（TTS）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "语音合成…",
+      "hint": "是什么",
+      "caption": "先抓住定义：把文字变成说出来的声音，让机器会「念」给你听。"
+    },
+    {
+      "title": "关键点",
+      "hint": "把文字变成说出…",
+      "caption": "再分析怎么起作用：把文字变成说出来的声音，让机器会「念」给你听。"
+    },
+    {
+      "title": "再看步",
+      "hint": "把文字变成说出…",
+      "caption": "把文字变成说出来的声音，让机器会「念」给你听。"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：把文字变成说出来的声音，"
+    }
+  ],
+  "fallback_text": "（初中讲法）语音合成（TTS）：把文字变成说出来的声音，让机器会「念」给你听。 再记一句：文字转语音（Text to Speech，TTS）是把文本转换成可听语音的技术，是语音识别（3.5.1）的逆过程。 它的处理分几步：先对文本做分析与归一化，比如把数字、符号和缩写读成正确的说法（「3.14」要读成圆周率，「AI」要读成字母或。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

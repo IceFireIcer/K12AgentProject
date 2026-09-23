@@ -1,0 +1,49 @@
+{
+  "kp_id": "agent-reflection-ph",
+  "grade_level": "primary_high",
+  "name": "反思模块",
+  "concept": "反思模块",
+  "template_id": "agent-reflection",
+  "archetype": "loop",
+  "title": "反思模块：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "反思模块",
+      "hint": "是什么",
+      "caption": "先弄懂它是什么：智能体的，答案说出口前后自己"
+    },
+    {
+      "title": "关键点",
+      "hint": "划重点：它不能…",
+      "caption": "再看它有什么用：划重点：它不能保证百分百正确，"
+    },
+    {
+      "title": "再看步",
+      "hint": "智能体的「回头…",
+      "caption": "智能体的，答案说出口前后自己"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "还要知道边界：智能体的，答案说出口前后"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）反思模块：智能体的，答案说出口前后自己再看一遍，发现错了就主动改正。 再记一句：反思模块是智能体的最后一环，负责对自己刚做出的回答进行自查和修正。 它会检查三件事：答案算得对不对、有没有讲清楚、有没有漏掉步骤。 如果发现问题，它会重新组织讲解或重新计算，而不是把错的一直留着。 比如它讲完一道应用题后，会回头验算一遍结果。",
+  "duration_ms": 4800,
+  "params": {
+    "rounds": {
+      "type": "int",
+      "min": 1,
+      "max": 4,
+      "default": 2,
+      "description": "循环几轮"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

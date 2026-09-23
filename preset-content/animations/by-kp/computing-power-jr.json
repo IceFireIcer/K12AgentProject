@@ -1,0 +1,42 @@
+{
+  "kp_id": "computing-power-jr",
+  "grade_level": "junior",
+  "name": "算力",
+  "concept": "算力",
+  "template_id": "computing-power",
+  "archetype": "layers",
+  "title": "算力：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "基础",
+      "hint": "AI 的运行分…",
+      "caption": "AI 的运行分两个阶段，对算力的需求完全不同"
+    },
+    {
+      "title": "中间",
+      "hint": "辨析：算力本身…",
+      "caption": "辨析：算力本身不产生智能，它只是必要条件"
+    },
+    {
+      "title": "上层",
+      "hint": "教育场景：搭建…",
+      "caption": "教育场景：搭建教育智能体，需要算力完成模型训练；"
+    },
+    {
+      "title": "算力",
+      "hint": "整体",
+      "caption": "最后辨析易混点：算力是人工智能运算所需要的计算能力，"
+    }
+  ],
+  "fallback_text": "（初中讲法）算力：算力是人工智能运算所需要的计算能力，是三大底层支柱中最基础的物质条件。 再记一句：算力，指支撑人工智能模型运算所需的计算能力，通常用每秒能完成多少次运算来衡量。 AI 的运行分两个阶段，对算力的需求完全不同。 训练阶段：模型要从海量数据中学习规律，反复调整内部参数，往往需要许多图形处理器（GPU）连续运转数周，是。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

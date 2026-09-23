@@ -1,0 +1,31 @@
+{
+  "id": "computing-power",
+  "label": "算力",
+  "title": "算力：看懂它是怎么起作用的",
+  "concept": "算力",
+  "kp_ids": [
+    "computing-power-pl",
+    "computing-power-ph",
+    "computing-power-jr",
+    "computing-power-sr"
+  ],
+  "grade_levels": [
+    "primary_low",
+    "primary_high",
+    "junior",
+    "senior"
+  ],
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">算力：看懂它是怎么起作用的</h1>\n<p class=\"anim-caption\" id=\"caption\">一层一层搭起来…</p>\n<div class=\"anim-canvas\">\n  <svg id=\"flow\" viewBox=\"0 0 460 240\" width=\"100%\" height=\"100%\" role=\"img\" aria-label=\"层级动画\">\n    <g id=\"stack\"></g>\n  </svg>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"layer-chip\">层</span></p>\n",
+  "script": "\nfunction makeTicker(durationMs, onFrame) {\n  var startTs = 0;\n  var raf = 0;\n  var running = false;\n  var lastT = 0;\n  function frame(ts) {\n    if (!running) return;\n    if (!startTs) startTs = ts;\n    var t = Math.min(1, (ts - startTs) / durationMs);\n    lastT = t;\n    onFrame(t);\n    if (t < 1) {\n      raf = requestAnimationFrame(frame);\n    } else {\n      running = false;\n      Sandbox.progress(1);\n    }\n  }\n  return {\n    restart: function () {\n      if (raf) cancelAnimationFrame(raf);\n      startTs = 0;\n      running = true;\n      raf = requestAnimationFrame(frame);\n    },\n    play: function () {\n      if (running) return;\n      running = true;\n      // 简化：从头续播（pause/play 场景够用）\n      startTs = 0;\n      raf = requestAnimationFrame(frame);\n    },\n    pause: function () {\n      running = false;\n      if (raf) cancelAnimationFrame(raf);\n      raf = 0;\n    }\n  };\n}\n\nvar SPEED = {{speed}};\nvar DURATION = Math.round(4200 / SPEED);\nvar g = document.getElementById('stack');\nvar caption = document.getElementById('caption');\nvar chip = document.getElementById('layer-chip');\nvar LAYERS = [{\"title\": \"基础\", \"hint\": \"AI 的运行分…\", \"caption\": \"AI 的运行分两个阶段，对算力的需求完全不同\"}, {\"title\": \"中间\", \"hint\": \"辨析：算力本身…\", \"caption\": \"辨析：算力本身不产生智能，它只是必要条件\"}, {\"title\": \"上层\", \"hint\": \"教育场景：搭建…\", \"caption\": \"教育场景：搭建教育智能体，需要算力完成模型训练；\"}, {\"title\": \"算力\", \"hint\": \"整体\", \"caption\": \"最后辨析易混点：算力是人工智能运算所需要的计算能力，\"}];\nvar N = LAYERS.length;\nvar nodes = [];\nfor (var i = 0; i < N; i += 1) {\n  var y = 200 - i * 48;\n  var x = 60 + i * 10;\n  var w = 340 - i * 20;\n  var r = Sandbox.svgEl('rect');\n  r.setAttribute('x', String(x));\n  r.setAttribute('y', String(y));\n  r.setAttribute('width', String(Math.max(160, w)));\n  r.setAttribute('height', '40');\n  r.setAttribute('rx', '10');\n  r.setAttribute('fill', '#ffffff');\n  r.setAttribute('stroke', '#d6ddec');\n  r.setAttribute('stroke-width', '1.6');\n  r.setAttribute('opacity', '0');\n  g.appendChild(r);\n  var t = Sandbox.svgEl('text');\n  t.setAttribute('x', String(x + Math.max(160, w) / 2));\n  t.setAttribute('y', String(y + 25));\n  t.setAttribute('text-anchor', 'middle');\n  t.setAttribute('style', 'font-size:12px;font-weight:600;fill:#12233b');\n  var label = LAYERS[i].title + (LAYERS[i].hint ? ' · ' + LAYERS[i].hint : '');\n  if (label.length > 16) label = label.slice(0, 15) + '…';\n  t.textContent = label;\n  t.setAttribute('opacity', '0');\n  g.appendChild(t);\n  nodes.push({ rect: r, text: t });\n}\nfunction play() {\n  for (var i = 0; i < N; i += 1) {\n    nodes[i].rect.setAttribute('opacity', '0');\n    nodes[i].text.setAttribute('opacity', '0');\n  }\n  caption.textContent = LAYERS[0].caption;\n  chip.textContent = '1 / ' + N;\n  var handle = makeTicker(DURATION, function (t) {\n    var i = Math.min(N - 1, Math.floor(t * N));\n    for (var k = 0; k <= i; k += 1) {\n      nodes[k].rect.setAttribute('opacity', '1');\n      nodes[k].text.setAttribute('opacity', '1');\n    }\n    caption.textContent = LAYERS[i].caption;\n    chip.textContent = (i + 1) + ' / ' + N;\n    Sandbox.progress(t);\n  });\n  handle.restart();\n  return handle;\n}\nSandbox.play(play);\nSandbox.ready();\n",
+  "fallback_text": "（初中讲法）算力：算力是人工智能运算所需要的计算能力，是三大底层支柱中最基础的物质条件。 再记一句：算力，指支撑人工智能模型运算所需的计算能力，通常用每秒能完成多少次运算来衡量。 AI 的运行分两个阶段，对算力的需求完全不同。 训练阶段：模型要从海量数据中学习规律，反复调整内部参数，往往需要许多图形处理器（GPU）连续运转数周，是。"
+}

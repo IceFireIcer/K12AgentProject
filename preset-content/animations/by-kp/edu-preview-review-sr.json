@@ -1,0 +1,42 @@
+{
+  "kp_id": "edu-preview-review-sr",
+  "grade_level": "senior",
+  "name": "预习复习",
+  "concept": "预习复习",
+  "template_id": "edu-preview-review",
+  "archetype": "flow",
+  "title": "预习复习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "预习复习",
+      "hint": "是什么",
+      "caption": "先明确概念边界：课前生成预习提纲、课后生成复习总结，"
+    },
+    {
+      "title": "关键点",
+      "hint": "课前生成预习提…",
+      "caption": "再拆机制与前提：课前生成预习提纲、课后生成复习总结，"
+    },
+    {
+      "title": "再看步",
+      "hint": "课前生成预习提…",
+      "caption": "课前生成预习提纲、课后生成复习总结，"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：课前生成预习提纲、课后生成复习总结，"
+    }
+  ],
+  "fallback_text": "（高中讲法）预习复习：课前生成预习提纲、课后生成复习总结，帮你先看清楚要学什么，再把学过的东西串起来。 再记一句：预习复习（Preview & Review）是 AI 依据教材结构自动生成预习提纲与复习总结的功能，其效果取决于检索范围与生成结构是否贴合课程目标。 技术上，它通常以教材知识库（参见 4.2.1 RAG）为检索源，结合长期记忆（4.3.2）。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "kp_id": "prog-variable-pl",
+  "grade_level": "primary_low",
+  "title": "变量：把两门课的星星放进盒子再数总数",
+  "expected_behavior": "填完 TODO 后打印出「一共 8 颗星」。",
+  "scaffold": "# 目标：用变量存下两门课得到的星星，算出总数\nchinese_star = 3\nmath_star = 5\n\n# TODO 1：把两门课的星星加起来，存进 total\ntotal = ____\n\n# TODO 2：打印「一共 N 颗星」\n____\n",
+  "expected_output": "一共 8 颗星\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "先想「一共」是不是把两个数合起来？合起来用哪个符号？"
+    },
+    {
+      "level": 2,
+      "hint": "把 chinese_star 和 math_star 用 + 连起来，赋给 total。"
+    },
+    {
+      "level": 3,
+      "hint": "total = chinese_star + math_star；再 print(f\"一共 {total} 颗星\")。"
+    }
+  ],
+  "solution": "chinese_star = 3\nmath_star = 5\n\ntotal = chinese_star + math_star\n\nprint(f\"一共 {total} 颗星\")\n"
+}

@@ -1,0 +1,42 @@
+{
+  "kp_id": "transformer-sr",
+  "grade_level": "senior",
+  "name": "Transformer 架构",
+  "concept": "Transformer 架构",
+  "template_id": "transformer",
+  "archetype": "flow",
+  "title": "Transformer 架构：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "Tran…",
+      "hint": "是什么",
+      "caption": "先明确概念边界：一种能一次读完整个句子、并判断哪些词最重要的深度"
+    },
+    {
+      "title": "关键点",
+      "hint": "前馈网络、残差…",
+      "caption": "再拆机制与前提：前馈网络、残差连接与层归一化共同构成每个编码器／"
+    },
+    {
+      "title": "再看步",
+      "hint": "它也是大语言模…",
+      "caption": "它也是大语言模型（4.1.1）的底座"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：一种能一次读完整个句子、"
+    }
+  ],
+  "fallback_text": "（高中讲法）Transformer 架构：一种能一次读完整个句子、并判断哪些词最重要的深度学习架构，是当前大语言模型的底层骨架。 再记一句：Transformer 是 2017 年论文《Attention Is All You Need》提出的序列建模架构，其核心是完全以注意力机制取代循环与卷积结构。 自注意力把输入映射为查询（Q）、键（K）、值（V）三组向量，以缩放点积计算相。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

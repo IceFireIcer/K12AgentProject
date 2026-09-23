@@ -1,0 +1,23 @@
+{
+  "kp_id": "prog-variable-ph",
+  "grade_level": "primary_high",
+  "title": "变量：算出两天一共走了多少步",
+  "expected_behavior": "填完 TODO 后打印出「两天一共走了 7700 步」。",
+  "scaffold": "# 目标：用变量存下两天的步数，算出总数\nday1 = 3200\nday2 = 4500\n\n# TODO 1：两天步数相加，存进 total_steps\ntotal_steps = ____\n\n# TODO 2：打印「两天一共走了 N 步」\n____\n",
+  "expected_output": "两天一共走了 7700 步\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "「一共」是加法。想清楚哪两个变量要加。"
+    },
+    {
+      "level": 2,
+      "hint": "total_steps = day1 + day2，然后用 f-string 打印。"
+    },
+    {
+      "level": 3,
+      "hint": "print(f\"两天一共走了 {total_steps} 步\")。"
+    }
+  ],
+  "solution": "day1 = 3200\nday2 = 4500\n\ntotal_steps = day1 + day2\n\nprint(f\"两天一共走了 {total_steps} 步\")\n"
+}

@@ -1,0 +1,42 @@
+{
+  "kp_id": "computing-power-sr",
+  "grade_level": "senior",
+  "name": "算力",
+  "concept": "算力",
+  "template_id": "computing-power",
+  "archetype": "layers",
+  "title": "算力：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "基础",
+      "hint": "机制层面：大模…",
+      "caption": "机制层面：大模型的训练本质是大规模数值优化"
+    },
+    {
+      "title": "中间",
+      "hint": "反向传播与参数…",
+      "caption": "反向传播与参数更新又使计算量再翻数倍"
+    },
+    {
+      "title": "上层",
+      "hint": "局限与思辨：算…",
+      "caption": "局限与思辨：算力是必要条件而非充分条件"
+    },
+    {
+      "title": "算力",
+      "hint": "整体",
+      "caption": "最后关联上下游与局限：算力是人工智能运算所需要的计算能力，"
+    }
+  ],
+  "fallback_text": "（高中讲法）算力：算力是人工智能运算所需要的计算能力，是三大底层支柱中最基础的物质条件。 再记一句：算力是衡量计算系统单位时间内完成运算能力的指标，常用 FLOPS（每秒浮点运算次数）度量，并以 PFLOPS、EFLOPS 分级。 机制层面：大模型的训练本质是大规模数值优化。 以 Transformer 为例，其参数量可达千亿级，一次前向。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

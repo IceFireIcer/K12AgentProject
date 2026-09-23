@@ -1,0 +1,42 @@
+{
+  "kp_id": "agent-tool-use-sr",
+  "grade_level": "senior",
+  "name": "工具调用模块",
+  "concept": "工具调用模块",
+  "template_id": "agent-tool-use",
+  "archetype": "flow",
+  "title": "工具调用模块：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "工具调用…",
+      "hint": "是什么",
+      "caption": "先明确概念边界：智能体的，自己不会的就去查知识"
+    },
+    {
+      "title": "关键点",
+      "hint": "多工具场景还需…",
+      "caption": "再拆机制与前提：多工具场景还需处理编排顺序、参数校验、"
+    },
+    {
+      "title": "再看步",
+      "hint": "智能体的「会借…",
+      "caption": "智能体的，自己不会的就去查知识"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：智能体的，自己不会的就去查"
+    }
+  ],
+  "fallback_text": "（高中讲法）工具调用模块：智能体的，自己不会的就去查知识库、调题库、查资料，而不是硬猜。 再记一句：工具调用模块（Tool Use，工程上常称 function calling / 工具编排）是智能体连接外部世界的接口层，使其能力从「参数化记忆」扩展为「可检索、可计算、可执行」。 机制上，每个工具以结构化接口声明（名称、参数模式、返回格式。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

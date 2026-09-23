@@ -1,0 +1,31 @@
+{
+  "id": "ethics-privacy",
+  "label": "用户隐私保护（学生学习数据）",
+  "title": "用户隐私保护（学生学习数据）：看懂它是怎么起作用的",
+  "concept": "用户隐私保护（学生学习数据）",
+  "kp_ids": [
+    "ethics-privacy-pl",
+    "ethics-privacy-ph",
+    "ethics-privacy-jr",
+    "ethics-privacy-sr"
+  ],
+  "grade_levels": [
+    "primary_low",
+    "primary_high",
+    "junior",
+    "senior"
+  ],
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">用户隐私保护（学生学习数据）：看懂它是怎么起作用的</h1>\n<p class=\"anim-caption\" id=\"caption\">一条条对一遍…</p>\n<div class=\"anim-canvas\">\n  <div id=\"list\" style=\"padding:8px 12px\"></div>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"ok-count\">0 / 0</span></p>\n",
+  "script": "\nfunction makeTicker(durationMs, onFrame) {\n  var startTs = 0;\n  var raf = 0;\n  var running = false;\n  var lastT = 0;\n  function frame(ts) {\n    if (!running) return;\n    if (!startTs) startTs = ts;\n    var t = Math.min(1, (ts - startTs) / durationMs);\n    lastT = t;\n    onFrame(t);\n    if (t < 1) {\n      raf = requestAnimationFrame(frame);\n    } else {\n      running = false;\n      Sandbox.progress(1);\n    }\n  }\n  return {\n    restart: function () {\n      if (raf) cancelAnimationFrame(raf);\n      startTs = 0;\n      running = true;\n      raf = requestAnimationFrame(frame);\n    },\n    play: function () {\n      if (running) return;\n      running = true;\n      // 简化：从头续播（pause/play 场景够用）\n      startTs = 0;\n      raf = requestAnimationFrame(frame);\n    },\n    pause: function () {\n      running = false;\n      if (raf) cancelAnimationFrame(raf);\n      raf = 0;\n    }\n  };\n}\n\nvar SPEED = {{speed}};\nvar DURATION = Math.round(3600 / SPEED);\nvar list = document.getElementById('list');\nvar caption = document.getElementById('caption');\nvar chip = document.getElementById('ok-count');\nvar STAGES = [{\"title\": \"先看风险来源\", \"hint\": \"机器会记住你输入的内容…\", \"caption\": \"先看风险来源\"}, {\"title\": \"再看保护原则，分两方\", \"hint\": \"再分析怎么起作用\", \"caption\": \"再看保护原则，分两方\"}, {\"title\": \"机器会记住你输入的…\", \"hint\": \"最后辨析易混点\", \"caption\": \"机器会记住你输入的内容，所以身份证号、\"}];\nvar N = STAGES.length;\nvar rows = [];\nfor (var i = 0; i < N; i += 1) {\n  var row = document.createElement('div');\n  row.style.cssText = 'display:flex;gap:10px;align-items:flex-start;padding:10px 8px;border-bottom:1px solid #eef2f7;opacity:0.35';\n  var mark = document.createElement('span');\n  mark.textContent = '○';\n  mark.style.cssText = 'width:18px;flex:0 0 18px;color:#3b82f6';\n  var body = document.createElement('div');\n  var t = document.createElement('div');\n  t.textContent = STAGES[i].title;\n  t.style.cssText = 'font-size:14px;font-weight:600;color:#12233b';\n  var h = document.createElement('div');\n  h.textContent = STAGES[i].hint;\n  h.style.cssText = 'font-size:12px;color:#5b6b82;margin-top:2px';\n  body.appendChild(t);\n  body.appendChild(h);\n  row.appendChild(mark);\n  row.appendChild(body);\n  list.appendChild(row);\n  rows.push({ row: row, mark: mark });\n}\nfunction play() {\n  for (var i = 0; i < N; i += 1) {\n    rows[i].row.style.opacity = '0.35';\n    rows[i].mark.textContent = '○';\n  }\n  caption.textContent = STAGES[0].caption;\n  chip.textContent = '1 / ' + N;\n  var handle = makeTicker(DURATION, function (t) {\n    var i = Math.min(N - 1, Math.floor(t * N));\n    for (var k = 0; k <= i; k += 1) {\n      rows[k].row.style.opacity = '1';\n      rows[k].mark.textContent = '●';\n    }\n    caption.textContent = STAGES[i].caption;\n    chip.textContent = (i + 1) + ' / ' + N;\n    Sandbox.progress(t);\n  });\n  handle.restart();\n  return handle;\n}\nSandbox.play(play);\nSandbox.ready();\n",
+  "fallback_text": "（初中讲法）用户隐私保护（学生学习数据）：机器会记住你输入的内容，所以身份证号、家庭住址这类敏感信息绝不能告诉它。 再记一句：用户隐私保护，是指在使用 AI（人工智能）产品时，防止个人信息被过度收集、滥用或泄露。 对学生而言，需要保护的主要是学习数据：输入的文字、答题记录、学习行为等。 先看风险来源。 AI 工具要回答问题，必须把你的输入发送到服务器，这些内容通常。"
+}

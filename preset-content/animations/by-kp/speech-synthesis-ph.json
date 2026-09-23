@@ -1,0 +1,42 @@
+{
+  "kp_id": "speech-synthesis-ph",
+  "grade_level": "primary_high",
+  "name": "语音合成（TTS）",
+  "concept": "语音合成（TTS）",
+  "template_id": "speech-synthesis",
+  "archetype": "flow",
+  "title": "语音合成（TTS）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "语音合成…",
+      "hint": "是什么",
+      "caption": "先弄懂它是什么：把文字变成说出来的声音，让机器会「念」给你听。"
+    },
+    {
+      "title": "关键点",
+      "hint": "视力不便或阅读…",
+      "caption": "再看它有什么用：视力不便或阅读有障碍的同学，也能靠听来学习"
+    },
+    {
+      "title": "再看步",
+      "hint": "划重点：让机器…",
+      "caption": "划重点：让机器把文字念得像人说话，"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "还要知道边界：把文字变成说出来的声音，"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）语音合成（TTS）：把文字变成说出来的声音，让机器会「念」给你听。 再记一句：语音合成（英文缩写 TTS，全称文字转语音）是让机器把文字读成声音的技术。 它的做法是先把句子读明白：判断哪里该停顿、哪个字该重读、这句话是问句还是陈述句； 再把这些信息变成声音的起伏和长短，最后拼成一段听起来自然的朗读。 生活里它很常见：。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

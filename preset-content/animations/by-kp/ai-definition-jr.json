@@ -1,0 +1,37 @@
+{
+  "kp_id": "ai-definition-jr",
+  "grade_level": "junior",
+  "name": "人工智能的定义",
+  "concept": "人工智能的定义",
+  "template_id": "ai-definition",
+  "archetype": "compare",
+  "title": "人工智能的定义：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "人工智能的定义",
+      "caption": "先抓住定义：人工智能是让机器模拟、延伸和扩展人类智能的技术科"
+    },
+    {
+      "left": "三者不是并…",
+      "right": "人工智能的…",
+      "caption": "再分析怎么起作用：三者不是并列关系，而是由低到高的递进"
+    },
+    {
+      "left": "记住这个",
+      "right": "第二，AI…",
+      "caption": "最后辨析易混点：易错点：把「看起来很聪明」当成「真的会思考」"
+    }
+  ],
+  "fallback_text": "（初中讲法）人工智能的定义：人工智能是让机器模拟、延伸和扩展人类智能的技术科学；它的本领是人教出来的，不是天生就有。 再记一句：人工智能（Artificial Intelligence，简称 AI）是一门研究如何让机器模拟、延伸和扩展人类智能的技术科学。 理解它的关键在这三个词：模拟是模仿人的某项能力，延伸是突破人的生理极限，扩展是创造人类原。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

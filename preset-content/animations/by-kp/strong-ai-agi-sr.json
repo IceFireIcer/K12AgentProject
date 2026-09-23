@@ -1,0 +1,37 @@
+{
+  "kp_id": "strong-ai-agi-sr",
+  "grade_level": "senior",
+  "name": "强人工智能（AGI）",
+  "concept": "强人工智能（AGI）",
+  "template_id": "strong-ai-agi",
+  "archetype": "compare",
+  "title": "强人工智能（AGI）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "强人工智能（A…",
+      "caption": "先明确概念边界：具备人类同等水平、能在任何领域展现智能的人工智能"
+    },
+    {
+      "left": "一个在围棋…",
+      "right": "强人工智能…",
+      "caption": "再拆机制与前提：一个在围棋上碾压人类的系统仍是 ANI，"
+    },
+    {
+      "left": "记住这个",
+      "right": "具身假说认…",
+      "caption": "最后关联上下游与局限：当前尚无共识，AGI 也未实现"
+    }
+  ],
+  "fallback_text": "（高中讲法）强人工智能（AGI）：具备人类同等水平、能在任何领域展现智能的人工智能。它目前还没有实现，只存在于科幻作品里。 再记一句：强人工智能（Artificial General Intelligence, AGI），指在广泛认知任务上达到或超越人类水平、并具备自主目标设定与跨域迁移能力的智能系统。 其判定维度通常包括：，不受限于预设任务域，可在陌生环。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

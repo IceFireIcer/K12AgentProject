@@ -1,0 +1,23 @@
+{
+  "kp_id": "prog-list-pl",
+  "grade_level": "primary_low",
+  "title": "列表：数一数袋子里有几颗糖",
+  "expected_behavior": "打印「袋子里有 3 颗糖」。",
+  "scaffold": "# 目标：数出列表里有几样东西\ncandies = [\"苹果糖\", \"牛奶糖\", \"巧克力\"]\n\n# TODO 1：用 len 数出数量，存进 count\ncount = ____\n\n# TODO 2：打印「袋子里有 N 颗糖」\n____\n",
+  "expected_output": "袋子里有 3 颗糖\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "「有几样」用哪个函数？len 是 length（长度）。"
+    },
+    {
+      "level": 2,
+      "hint": "count = len(candies)。"
+    },
+    {
+      "level": 3,
+      "hint": "print(f\"袋子里有 {count} 颗糖\")。"
+    }
+  ],
+  "solution": "candies = [\"苹果糖\", \"牛奶糖\", \"巧克力\"]\n\ncount = len(candies)\n\nprint(f\"袋子里有 {count} 颗糖\")\n"
+}

@@ -1,0 +1,37 @@
+{
+  "kp_id": "unsupervised-learning-jr",
+  "grade_level": "junior",
+  "name": "无监督学习",
+  "concept": "无监督学习",
+  "template_id": "unsupervised-learning",
+  "archetype": "compare",
+  "title": "无监督学习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "无监督学习",
+      "caption": "先抓住定义：只给数据、不给答案，让机器自己去找里面藏着的规律"
+    },
+    {
+      "left": "机器分出的…",
+      "right": "无监督学习",
+      "caption": "再分析怎么起作用：机器分出的类别，不一定对应真实的教学意义"
+    },
+    {
+      "left": "记住这个",
+      "right": "只给数据、…",
+      "caption": "最后辨析易混点：只给数据、不给答案，让机器自己去找里面藏着的规律"
+    }
+  ],
+  "fallback_text": "（初中讲法）无监督学习：只给数据、不给答案，让机器自己去找里面藏着的规律和分组。 再记一句：无监督学习（Unsupervised Learning）指在没有标签的数据上训练模型，让机器自行发现数据内部的结构与规律。 它与监督学习的根本区别在于有没有标准答案：监督学习是「输入—标签」成对出现，而无监督学习只有输入，没有对应答。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

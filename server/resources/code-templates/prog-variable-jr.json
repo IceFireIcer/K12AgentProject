@@ -8,7 +8,7 @@
   "hints": [
     {
       "level": 1,
-      "hint": "平均分是怎么算出来的？先用你自己的话说出这一步，再想「加」和「除」分别该写成哪个符号 —— 注意别写成一个等号。"
+      "hint": "平均分是怎么算出来的？先用你自己的话说出这一步，再想「加」和「除」分别该写成哪个符号。注意别写成一个等号。"
     },
     {
       "level": 2,
@@ -16,7 +16,7 @@
     },
     {
       "level": 3,
-      "hint": "赋值那句的左半边就是 `average`，右半边三个变量用 `+` 连起来再 `/ 3`；打印用 f-string：`print(f\"平均分：{average:.1f}\")`，其中 `.1f` 表示「保留 1 位小数」。"
+      "hint": "赋值那句的左半边就是 average，右半边三个变量用 + 连起来再 / 3；打印用 f-string：print(f\"平均分：{average:.1f}\")，其中 .1f 表示「保留 1 位小数」。"
     }
   ],
   "solution": "chinese = 88\nmath = 92\nenglish = 75\n\naverage = (chinese + math + english) / 3\n\nprint(f\"平均分：{average:.1f}\")\n"

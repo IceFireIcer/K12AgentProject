@@ -1,0 +1,42 @@
+{
+  "kp_id": "token-jr",
+  "grade_level": "junior",
+  "name": "Token",
+  "concept": "Token",
+  "template_id": "token",
+  "archetype": "steps",
+  "title": "Token：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "Token",
+      "hint": "是什么",
+      "caption": "先抓住定义：模型处理文字时的最小单位，"
+    },
+    {
+      "title": "关键点",
+      "hint": "这个过程叫分词",
+      "caption": "再分析怎么起作用：这个过程叫分词"
+    },
+    {
+      "title": "再看步",
+      "hint": "这样既能控制词…",
+      "caption": "这样既能控制词表规模，又能表示没见过的词"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：输出时再反过来，把预测出的编号还原成文字"
+    }
+  ],
+  "fallback_text": "（初中讲法）Token：模型处理文字时的最小单位，把一段话切成一个个小片段再交给它读写。 再记一句：词元（Token）是大语言模型处理文本的最小单位，模型不能直接处理文字，只能处理编号，因此文本必须先被切分成词元再映射成数字。 这个过程叫分词。 常见的做法是子词切分：不按字也不按词硬切，而是把常见的字词整块保留，把生僻的词拆成更小。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

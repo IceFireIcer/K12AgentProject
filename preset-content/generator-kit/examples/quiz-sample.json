@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "chapter": "第1章 人工智能的基础概念",
+  "notes": "example · ai-definition-pl · 三题节奏",
+  "questions": [
+    {
+      "qid": "ai-definition-pl-q1",
+      "kp_id": "ai-definition-pl",
+      "type": "choice",
+      "stem": "「人工智能」是说让机器变聪明。下面哪件事最能看出机器变聪明了？",
+      "options": ["你对它说话，它能听懂", "它插上电以后就不烫手了", "它摔在地上也不会疼"],
+      "answer": "你对它说话，它能听懂",
+      "explanation": "听得懂你说话、认得出照片里是什么，都是机器变聪明的样子。"
+    },
+    {
+      "qid": "ai-definition-pl-q2",
+      "kp_id": "ai-definition-pl",
+      "type": "blank",
+      "stem": "机器会认脸、会听话，这些本领不是它天生就会的，是人一点一点 ______ 它的。",
+      "answer": ["教", "教给", "教会", "教出来"],
+      "explanation": "机器本来什么都不会。你看到的这些聪明本领，都是人慢慢教出来的。"
+    },
+    {
+      "qid": "ai-definition-pl-q3",
+      "kp_id": "ai-definition-pl",
+      "type": "choice",
+      "stem": "小猫生下来就会找奶喝。手机里的助手也会这样吗？",
+      "options": ["不会，它要靠人教才会", "会，它生下来就会说话", "会，它和小猫一样天生就会"],
+      "answer": "不会，它要靠人教才会",
+      "explanation": "小猫的本领是天生的，机器的本领是人一点一点教会的。"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "kp_id": "supervised-learning-ph",
+  "grade_level": "primary_high",
+  "title": "编程小练习：给「监督学习」列一张要点清单",
+  "expected_behavior": "打印三行要点。",
+  "scaffold": "# 目标：把「监督学习」的 3 个要点列出来\npoints = [\"用「带答案的题目」训练机\", \"TODO2\", \"TODO3\"]\n\n# TODO 1：把后两个要点改成真正的句子（从课本里找）\n# TODO 2：for 循环依次打印「要点 N：……」\n____\n    ____\n",
+  "expected_output": "要点 1：用「带答案的题目」训练机\n要点 2：监督学习\n要点 3：监督学习\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "enumerate 可以一边循环一边数第几个。"
+    },
+    {
+      "level": 2,
+      "hint": "for i, p in enumerate(points, 1):"
+    },
+    {
+      "level": 3,
+      "hint": "print(f\"要点 {i}：{p}\")。"
+    }
+  ],
+  "solution": "points = [\"用「带答案的题目」训练机\", \"监督学习\", \"监督学习\"]\n\nfor i, p in enumerate(points, 1):\n    print(f\"要点 {i}：{p}\")\n"
+}

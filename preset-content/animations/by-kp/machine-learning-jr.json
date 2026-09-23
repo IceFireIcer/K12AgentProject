@@ -1,0 +1,42 @@
+{
+  "kp_id": "machine-learning-jr",
+  "grade_level": "junior",
+  "name": "机器学习（ML）",
+  "concept": "机器学习（ML）",
+  "template_id": "machine-learning",
+  "archetype": "steps",
+  "title": "机器学习（ML）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "机器学习…",
+      "hint": "是什么",
+      "caption": "先抓住定义：不再由人写死每一条规则，而是让机器从大量数据里自"
+    },
+    {
+      "title": "关键点",
+      "hint": "传统编程是「人…",
+      "caption": "再分析怎么起作用：传统编程是「人写规则、机器执行」；"
+    },
+    {
+      "title": "再看步",
+      "hint": "机器学习反过来…",
+      "caption": "机器学习反过来，是「人给数据和目标，"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：无监督学习只用无标签数据，"
+    }
+  ],
+  "fallback_text": "（初中讲法）机器学习（ML）：不再由人写死每一条规则，而是让机器从大量数据里自己总结规律，再用规律去判断没见过的新情况。 再记一句：机器学习（Machine Learning，ML）是让计算机从数据中自动归纳规律，并用这些规律预测新数据的技术，属于人工智能的核心方法。 传统编程是「人写规则、机器执行」； 机器学习反过来，是「人给数据和目标，机器自己找规则」。 当规则难以。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

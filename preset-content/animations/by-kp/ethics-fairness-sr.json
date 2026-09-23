@@ -1,0 +1,37 @@
+{
+  "kp_id": "ethics-fairness-sr",
+  "grade_level": "senior",
+  "name": "公平性：面向不同人群适配",
+  "concept": "公平性：面向不同人群适配",
+  "template_id": "ethics-fairness",
+  "archetype": "checklist",
+  "title": "公平性：面向不同人群适配：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "部署层，单一模型面…",
+      "hint": "机器对每个人都要一样公…",
+      "caption": "部署层，单一模型面向所有人群，缺乏个性化调整"
+    },
+    {
+      "title": "偏见往往不以明显错…",
+      "hint": "再拆机制与前提",
+      "caption": "偏见往往不以明显错误出现，"
+    },
+    {
+      "title": "适配路径分两类",
+      "hint": "最后关联上下游与局限",
+      "caption": "适配路径分两类"
+    }
+  ],
+  "fallback_text": "（高中讲法）公平性：面向不同人群适配：机器对每个人都要一样公平，还要能按不同人的需要调整说话的方式。 再记一句：公平性（Fairness & Inclusion）指 AI 系统在输出中不因群体属性产生系统性不利影响，并能按使用者的认知水平与身体条件提供适配内容，是技术指标与价值判断的交汇点。 偏见有三类来源：数据层，训练语料的历史偏见与分布不。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

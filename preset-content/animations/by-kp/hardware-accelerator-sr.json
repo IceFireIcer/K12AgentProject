@@ -1,0 +1,42 @@
+{
+  "kp_id": "hardware-accelerator-sr",
+  "grade_level": "senior",
+  "name": "硬件载体：GPU / CPU / TPU",
+  "concept": "硬件载体：GPU / CPU / TPU",
+  "template_id": "hardware-accelerator",
+  "archetype": "layers",
+  "title": "硬件载体：GPU / CPU / TPU：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "基础",
+      "hint": "关键辨析：评价…",
+      "caption": "关键辨析：评价硬件不能只看峰值算力"
+    },
+    {
+      "title": "中间",
+      "hint": "训练常受限于显…",
+      "caption": "训练常受限于显存与通信，推理则更受带宽与延迟约束"
+    },
+    {
+      "title": "上层",
+      "hint": "局限与思辨：专…",
+      "caption": "局限与思辨：专用芯片带来高性能的同时也带来锁定风"
+    },
+    {
+      "title": "硬件载体…",
+      "hint": "整体",
+      "caption": "最后关联上下游与局限：算力：图形处理器擅长同时做大"
+    }
+  ],
+  "fallback_text": "（高中讲法）硬件载体：GPU / CPU / TPU：算力：图形处理器擅长同时做大量重复计算，通用处理器擅长处理各种杂事，专用芯片则为机器学习量身定制。 再记一句：GPU、CPU、TPU 代表三种计算架构取向，差异源于对「并行度」与「通用性」的不同取舍。 CPU 面向通用串行计算：核心数少（数十核）、单核性能强，配有复杂的控制逻辑与多级缓存，擅长分支密集、依赖链长的任务，在系统中承担调度与操作。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

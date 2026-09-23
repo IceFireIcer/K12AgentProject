@@ -1,0 +1,37 @@
+{
+  "kp_id": "strong-ai-agi-jr",
+  "grade_level": "junior",
+  "name": "强人工智能（AGI）",
+  "concept": "强人工智能（AGI）",
+  "template_id": "strong-ai-agi",
+  "archetype": "compare",
+  "title": "强人工智能（AGI）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "强人工智能（A…",
+      "caption": "先抓住定义：具备人类同等水平、能在任何领域展现智能的人工智能"
+    },
+    {
+      "left": "判定它需要…",
+      "right": "强人工智能…",
+      "caption": "再分析怎么起作用：判定它需要四个条件：有真正的自主意识，"
+    },
+    {
+      "left": "记住这个",
+      "right": "能像人一样…",
+      "caption": "最后辨析易混点：有情感、判断力和换位思考能力；"
+    }
+  ],
+  "fallback_text": "（初中讲法）强人工智能（AGI）：具备人类同等水平、能在任何领域展现智能的人工智能。它目前还没有实现，只存在于科幻作品里。 再记一句：强人工智能（Artificial General Intelligence，简称 AGI），也叫通用人工智能，指具备与人类同等水平、能在任何领域展现智能的人工智能。 判定它需要四个条件：有真正的自主意识，能自己产生目标； 能像人一样学习任何。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

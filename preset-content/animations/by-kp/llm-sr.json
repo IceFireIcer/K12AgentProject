@@ -1,0 +1,42 @@
+{
+  "kp_id": "llm-sr",
+  "grade_level": "senior",
+  "name": "大语言模型（LLM）",
+  "concept": "大语言模型（LLM）",
+  "template_id": "llm",
+  "archetype": "steps",
+  "title": "大语言模型（LLM）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "大语言模…",
+      "hint": "是什么",
+      "caption": "先明确概念边界：用海量文字训练出来的「会读会写的大脑」，"
+    },
+    {
+      "title": "关键点",
+      "hint": "推理时自回归地…",
+      "caption": "再拆机制与前提：推理时自回归地逐词采样，温度等解码参数控制输出的"
+    },
+    {
+      "title": "再看步",
+      "hint": "局限：上下文窗…",
+      "caption": "局限：上下文窗口有限，超出部分会被截断；"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：知识截止于训练数据的采集时间；"
+    }
+  ],
+  "fallback_text": "（高中讲法）大语言模型（LLM）：用海量文字训练出来的「会读会写的大脑」，能理解提问、推理并生成回答，但它的知识来自训练语料，会出错。 再记一句：大语言模型（Large Language Model，LLM）是以 Transformer 为骨干、在海量文本上以自监督方式预训练得到的大规模参数化语言模型，通常指参数规模达数十亿以上的模型。 机制层面：文本先经分词进入模型，通过自注意力机。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

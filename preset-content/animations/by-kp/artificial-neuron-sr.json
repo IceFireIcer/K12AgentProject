@@ -1,0 +1,42 @@
+{
+  "kp_id": "artificial-neuron-sr",
+  "grade_level": "senior",
+  "name": "人工神经元",
+  "concept": "人工神经元",
+  "template_id": "artificial-neuron",
+  "archetype": "flow",
+  "title": "人工神经元：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "人工神经元",
+      "hint": "是什么",
+      "caption": "先明确概念边界：神经网络里，把收到的多个信号加权"
+    },
+    {
+      "title": "关键点",
+      "hint": "深度模型的表达…",
+      "caption": "再拆机制与前提：深度模型的表达能力来自层级组合，而非单个单元"
+    },
+    {
+      "title": "再看步",
+      "hint": "延伸见 3.2…",
+      "caption": "延伸见 3.2.1 深度学习"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：神经网络里，把收到的多个信号"
+    }
+  ],
+  "fallback_text": "（高中讲法）人工神经元：神经网络里，把收到的多个信号加权求和，超过一定门槛就「兴奋」并把结果传下去。 再记一句：人工神经元（Artificial Neuron）是神经网络的基本计算单元，其数学模型为 $y = \\sigma\\! \\left(\\sum_{i=1}^{n} w_i x_i + b\\right)$，其中 $x_i$ 为输入，$w_i$ 为权。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

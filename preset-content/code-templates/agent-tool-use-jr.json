@@ -1,0 +1,23 @@
+{
+  "kp_id": "agent-tool-use-jr",
+  "grade_level": "junior",
+  "title": "编程小练习：数一数概念「工具调用模块」相关词出现了几次",
+  "expected_behavior": "打印关键词在句子里出现的次数。",
+  "scaffold": "# 目标：数出关键词在句子中出现了几次\nkeyword = \"工具调用\"\nsentence = \"智能体的「会借工具的手」——自己不会的就去查知识库、调题库、查资料，而不是硬猜。\"\n\n# TODO 1：用 count 统计出现次数，存进 n\nn = ____\n\n# TODO 2：打印「关键词出现 N 次」\n____\n",
+  "expected_output": "关键词出现 0 次\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "字符串自带 count 方法。"
+    },
+    {
+      "level": 2,
+      "hint": "n = sentence.count(keyword)。"
+    },
+    {
+      "level": 3,
+      "hint": "print(f\"关键词出现 {n} 次\")。"
+    }
+  ],
+  "solution": "keyword = \"工具调用\"\nsentence = \"智能体的「会借工具的手」——自己不会的就去查知识库、调题库、查资料，而不是硬猜。\"\n\nn = sentence.count(keyword)\nprint(f\"关键词出现 {n} 次\")\n"
+}

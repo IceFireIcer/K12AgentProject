@@ -1,0 +1,42 @@
+{
+  "kp_id": "short-term-memory-sr",
+  "grade_level": "senior",
+  "name": "短期记忆",
+  "concept": "短期记忆",
+  "template_id": "short-term-memory",
+  "archetype": "layers",
+  "title": "短期记忆：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "基础",
+      "hint": "常见缓解手段包…",
+      "caption": "常见缓解手段包括滑动窗口、历史摘要与关键信息抽取"
+    },
+    {
+      "title": "中间",
+      "hint": "保存本次对话的…",
+      "caption": "保存本次对话的上下文，让机器记得你刚才说了什么，"
+    },
+    {
+      "title": "上层",
+      "hint": "保存本次对话的…",
+      "caption": "保存本次对话的上下文，让机器记得你刚才说了什么，"
+    },
+    {
+      "title": "短期记忆",
+      "hint": "整体",
+      "caption": "最后关联上下游与局限：保存本次对话的上下文，"
+    }
+  ],
+  "fallback_text": "（高中讲法）短期记忆：保存本次对话的上下文，让机器记得你刚才说了什么，从而支持多轮连续交流。 再记一句：短期记忆（Short-term Memory）指智能体在单次会话或单次任务周期内，对对话历史与中间状态的临时保留，通常以完整上下文的形式维护。 技术实现上，历史消息被序列化为词元序列后拼入提示词，连同当前问题一起送入大语言模型（4.1.1）。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

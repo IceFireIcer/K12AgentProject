@@ -1,0 +1,37 @@
+{
+  "kp_id": "unsupervised-learning-sr",
+  "grade_level": "senior",
+  "name": "无监督学习",
+  "concept": "无监督学习",
+  "template_id": "unsupervised-learning",
+  "archetype": "compare",
+  "title": "无监督学习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "无监督学习",
+      "caption": "先明确概念边界：只给数据、不给答案，让机器自己去找里面藏着的规律"
+    },
+    {
+      "left": "降维在尽量…",
+      "right": "无监督学习",
+      "caption": "再拆机制与前提：降维在尽量保留信息的前提下压缩表示；"
+    },
+    {
+      "left": "记住这个",
+      "right": "密度估计则…",
+      "caption": "最后关联上下游与局限：三者并非互斥，可以组合，例如自监督学习用数据自身"
+    }
+  ],
+  "fallback_text": "（高中讲法）无监督学习：只给数据、不给答案，让机器自己去找里面藏着的规律和分组。 再记一句：无监督学习（Unsupervised Learning）指仅给定无标注数据集，学习其内在结构或概率分布的范式。 与监督学习不同，它没有标签提供的监督信号，学习目标由数据自身的性质定义：聚类追求类内紧凑、类间分离； 降维在尽量保留信息的前提下。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

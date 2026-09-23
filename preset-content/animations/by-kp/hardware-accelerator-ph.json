@@ -1,0 +1,42 @@
+{
+  "kp_id": "hardware-accelerator-ph",
+  "grade_level": "primary_high",
+  "name": "硬件载体：GPU / CPU / TPU",
+  "concept": "硬件载体：GPU / CPU / TPU",
+  "template_id": "hardware-accelerator",
+  "archetype": "layers",
+  "title": "硬件载体：GPU / CPU / TPU：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "基础",
+      "hint": "人工智能的算力…",
+      "caption": "人工智能的算力，要靠具体的硬件零件来实现，"
+    },
+    {
+      "title": "中间",
+      "hint": "算力要有实体来…",
+      "caption": "算力：图形处理器擅长同时做大量重"
+    },
+    {
+      "title": "上层",
+      "hint": "算力要有实体来…",
+      "caption": "算力：图形处理器擅长同时做大量重"
+    },
+    {
+      "title": "硬件载体…",
+      "hint": "整体",
+      "caption": "还要知道边界：算力：图形处理器擅长同时做大"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）硬件载体：GPU / CPU / TPU：算力：图形处理器擅长同时做大量重复计算，通用处理器擅长处理各种杂事，专用芯片则为机器学习量身定制。 再记一句：人工智能的算力，要靠具体的硬件零件来实现，常见的有三种。 图形处理器：里面有很多小计算单元，原本是给游戏画面用的，后来大家发现它特别适合让人工智能同时做大量简单计算，于是成了训练大模型最主要的硬件。 通用处理器：本领全面，什。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

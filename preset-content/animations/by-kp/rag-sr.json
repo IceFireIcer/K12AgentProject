@@ -1,0 +1,42 @@
+{
+  "kp_id": "rag-sr",
+  "grade_level": "senior",
+  "name": "RAG 检索增强生成（外挂知识库）",
+  "concept": "RAG 检索增强生成（外挂知识库）",
+  "template_id": "rag",
+  "archetype": "steps",
+  "title": "RAG 检索增强生成（外挂知识库）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "RAG …",
+      "hint": "是什么",
+      "caption": "先明确概念边界：回答之前先去自己带的资料库里查一查，"
+    },
+    {
+      "title": "关键点",
+      "hint": "回答之前先去自…",
+      "caption": "再拆机制与前提：回答之前先去自己带的资料库里查一查，"
+    },
+    {
+      "title": "再看步",
+      "hint": "回答之前先去自…",
+      "caption": "回答之前先去自己带的资料库里查一查，"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：回答之前先去自己带的资料库里查一查，"
+    }
+  ],
+  "fallback_text": "（高中讲法）RAG 检索增强生成（外挂知识库）：回答之前先去自己带的资料库里查一查，再照着查到的，相当于给机器外挂一本自己的课本。 再记一句：检索增强生成（Retrieval-Augmented Generation，RAG）是一种将参数化知识与非参数化外部知识结合的生成范式：模型在生成前先检索外部语料，并将检索结果作为上下文条件参与解码。 核心技术环节：，文。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "kp_id": "prog-loop-ph",
+  "grade_level": "primary_high",
+  "title": "循环：从 1 数到 5",
+  "expected_behavior": "依次打印 1 到 5，每个一行。",
+  "scaffold": "# 目标：依次打印 1 2 3 4 5\n# TODO 1：写 for 循环，让 n 取 1 到 5\n____\n# TODO 2：打印 n\n    ____\n",
+  "expected_output": "1\n2\n3\n4\n5\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "循环的终点要注意「含头不含尾」，所以那里要写 6。"
+    },
+    {
+      "level": 2,
+      "hint": "for n in range(1, 6): 然后 print(n)。"
+    },
+    {
+      "level": 3,
+      "hint": "for n in range(1, 6):\n    print(n)"
+    }
+  ],
+  "solution": "for n in range(1, 6):\n    print(n)\n"
+}

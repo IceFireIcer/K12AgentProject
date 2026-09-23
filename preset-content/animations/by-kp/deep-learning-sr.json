@@ -1,0 +1,42 @@
+{
+  "kp_id": "deep-learning-sr",
+  "grade_level": "senior",
+  "name": "深度学习（DL）",
+  "concept": "深度学习（DL）",
+  "template_id": "deep-learning",
+  "archetype": "layers",
+  "title": "深度学习（DL）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "基础",
+      "hint": "正是非线性使得…",
+      "caption": "正是非线性使得多层堆叠获得远超单层的表达能力"
+    },
+    {
+      "title": "中间",
+      "hint": "教育场景中大语…",
+      "caption": "教育场景中大语言模型、教育智能体均构建于该架构之"
+    },
+    {
+      "title": "上层",
+      "hint": "数据有偏则会继…",
+      "caption": "数据有偏则会继承偏差（参见 7.4）"
+    },
+    {
+      "title": "深度学习…",
+      "hint": "整体",
+      "caption": "最后关联上下游与局限：机器学习里的一个，用很多层的"
+    }
+  ],
+  "fallback_text": "（高中讲法）深度学习（DL）：机器学习里的一个，用很多层的人工神经元搭成网络，让它自己一层层提取特征，从简单线条一直到复杂事物。 再记一句：深度学习（Deep Learning，DL）是机器学习中以多层非线性变换为核心表征方式的子领域，其基本单元是人工神经元（3.2.2），由神经元按层连接构成神经网络（3.2.3）。 机制层面：一个 $L$ 层的网络把输入逐层映射，第 $l$ 。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

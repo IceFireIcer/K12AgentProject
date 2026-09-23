@@ -1,0 +1,37 @@
+{
+  "kp_id": "limit-interaction-ph",
+  "grade_level": "primary_high",
+  "name": "交互短板",
+  "concept": "交互短板",
+  "template_id": "limit-interaction",
+  "archetype": "checklist",
+  "title": "交互短板：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "二是对话一长，它容…",
+      "hint": "同一个问题，换一次提问…",
+      "caption": "二是对话一长，它容易忘记前面的内容；"
+    },
+    {
+      "title": "三是复杂问题容易中…",
+      "hint": "再看它有什么用",
+      "caption": "三是复杂问题容易中途跑偏，逻辑断裂"
+    },
+    {
+      "title": "长对话中它会忘记之…",
+      "hint": "还要知道边界",
+      "caption": "长对话中它会忘记之前和你约定好的条件"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）交互短板：同一个问题，换一次提问、多聊几句，AI 的答案就可能变样甚至前后不一致。 再记一句：交互短板，是指在实时对话中，AI 答疑的表现不稳定：同一个问题，在不同上下文、不同提问时机下，回答的质量和内容会发生变化。 它的特点有三个：一是同一个问题多问几次，答案并不完全一致； 二是对话一长，它容易忘记前面的内容； 三是复杂问题容易中。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

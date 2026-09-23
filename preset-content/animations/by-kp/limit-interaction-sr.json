@@ -1,0 +1,37 @@
+{
+  "kp_id": "limit-interaction-sr",
+  "grade_level": "senior",
+  "name": "交互短板",
+  "concept": "交互短板",
+  "template_id": "limit-interaction",
+  "archetype": "checklist",
+  "title": "交互短板：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "机制主要有两个来源",
+      "hint": "同一个问题，换一次提问…",
+      "caption": "机制主要有两个来源"
+    },
+    {
+      "title": "短期记忆（4.3.…",
+      "hint": "再拆机制与前提",
+      "caption": "短期记忆（4.3.1）等机制正是在工程上对此做补"
+    },
+    {
+      "title": "由此可解释三类现象…",
+      "hint": "最后关联上下游与局限",
+      "caption": "由此可解释三类现象：重复提问答案不一致；"
+    }
+  ],
+  "fallback_text": "（高中讲法）交互短板：同一个问题，换一次提问、多聊几句，AI 的答案就可能变样甚至前后不一致。 再记一句：交互短板（Interaction Instability）指大语言模型的对话输出缺少跨轮次的一致性保证：同一问题在不同上下文、不同时机下可能给出质量与内容都不稳定的回答。 机制主要有两个来源。 其一是上下文窗口限制：模型没有跨会话的。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

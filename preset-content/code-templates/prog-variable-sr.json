@@ -1,0 +1,23 @@
+{
+  "kp_id": "prog-variable-sr",
+  "grade_level": "senior",
+  "title": "变量：由摄氏温度算出华氏温度",
+  "expected_behavior": "填完 TODO 后打印出「25 C = 77.0 F」。",
+  "scaffold": "# 目标：C = 25，用公式 F = C * 9 / 5 + 32 求华氏度\nc = 25\n\n# TODO 1：按公式算出 f\nf = ____\n\n# TODO 2：打印「25 C = 77.0 F」（保留 1 位小数）\n____\n",
+  "expected_output": "25 C = 77.0 F\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "先写出公式，再决定先乘除还是先加减。"
+    },
+    {
+      "level": 2,
+      "hint": "f = c * 9 / 5 + 32。"
+    },
+    {
+      "level": 3,
+      "hint": "print(f\"{c} C = {f:.1f} F\")。"
+    }
+  ],
+  "solution": "c = 25\n\nf = c * 9 / 5 + 32\n\nprint(f\"{c} C = {f:.1f} F\")\n"
+}

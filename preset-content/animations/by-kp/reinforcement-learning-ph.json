@@ -1,0 +1,49 @@
+{
+  "kp_id": "reinforcement-learning-ph",
+  "grade_level": "primary_high",
+  "name": "强化学习",
+  "concept": "强化学习",
+  "template_id": "reinforcement-learning",
+  "archetype": "loop",
+  "title": "强化学习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "强化学习",
+      "hint": "是什么",
+      "caption": "先弄懂它是什么：没有标准答案，靠一次次尝试，做对了得到奖励、"
+    },
+    {
+      "title": "关键点",
+      "hint": "它和监督学习不…",
+      "caption": "再看它有什么用：它和监督学习不一样"
+    },
+    {
+      "title": "再看步",
+      "hint": "监督学习每一步…",
+      "caption": "监督学习每一步都有标准答案；"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "还要知道边界：强化学习刚开始并不知道正确答案，"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）强化学习：没有标准答案，靠一次次尝试，做对了得到奖励、做错了受到提醒，慢慢学会最好的做法。 再记一句：强化学习是机器学习的一类，特点是在尝试中学：机器先做动作，然后根据结果得到奖励或惩罚，再调整下一次的做法。 它和监督学习不一样。 监督学习每一步都有标准答案； 强化学习刚开始并不知道正确答案，只有做完才知道好不好。 就像学下棋，没人。",
+  "duration_ms": 4800,
+  "params": {
+    "rounds": {
+      "type": "int",
+      "min": 1,
+      "max": 4,
+      "default": 2,
+      "description": "循环几轮"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

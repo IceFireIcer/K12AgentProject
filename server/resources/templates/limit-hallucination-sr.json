@@ -1,0 +1,25 @@
+{
+  "id": "limit-hallucination-sr",
+  "label": "模型幻觉",
+  "title": "模型幻觉：看懂它是怎么起作用的",
+  "concept": "模型幻觉",
+  "kp_ids": [
+    "limit-hallucination-sr"
+  ],
+  "grade_levels": [
+    "senior"
+  ],
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">模型幻觉：看懂它是怎么起作用的</h1>\n<p class=\"anim-caption\" id=\"caption\">一条条对一遍…</p>\n<div class=\"anim-canvas\">\n  <div id=\"list\" style=\"padding:8px 12px\"></div>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"ok-count\">0 / 0</span></p>\n",
+  "script": "\nfunction makeTicker(durationMs, onFrame) {\n  var startTs = 0;\n  var raf = 0;\n  var running = false;\n  var lastT = 0;\n  function frame(ts) {\n    if (!running) return;\n    if (!startTs) startTs = ts;\n    var t = Math.min(1, (ts - startTs) / durationMs);\n    lastT = t;\n    onFrame(t);\n    if (t < 1) {\n      raf = requestAnimationFrame(frame);\n    } else {\n      running = false;\n      Sandbox.progress(1);\n    }\n  }\n  return {\n    restart: function () {\n      if (raf) cancelAnimationFrame(raf);\n      startTs = 0;\n      running = true;\n      raf = requestAnimationFrame(frame);\n    },\n    play: function () {\n      if (running) return;\n      running = true;\n      // 简化：从头续播（pause/play 场景够用）\n      startTs = 0;\n      raf = requestAnimationFrame(frame);\n    },\n    pause: function () {\n      running = false;\n      if (raf) cancelAnimationFrame(raf);\n      raf = 0;\n    }\n  };\n}\n\nvar SPEED = {{speed}};\nvar DURATION = Math.round(3600 / SPEED);\nvar list = document.getElementById('list');\nvar caption = document.getElementById('caption');\nvar chip = document.getElementById('ok-count');\nvar STAGES = [{\"title\": \"工具调用（4.4.…\", \"hint\": \"AI 会生成读起来通顺…\", \"caption\": \"工具调用（4.4.3）引入计算器、\"}, {\"title\": \"反思模块（4.4.…\", \"hint\": \"再拆机制与前提\", \"caption\": \"反思模块（4.4.5）对输出自查；\"}, {\"title\": \"解码端可降低温度并…\", \"hint\": \"最后关联上下游与局限\", \"caption\": \"解码端可降低温度并诱导模型给出置信度\"}];\nvar N = STAGES.length;\nvar rows = [];\nfor (var i = 0; i < N; i += 1) {\n  var row = document.createElement('div');\n  row.style.cssText = 'display:flex;gap:10px;align-items:flex-start;padding:10px 8px;border-bottom:1px solid #eef2f7;opacity:0.35';\n  var mark = document.createElement('span');\n  mark.textContent = '○';\n  mark.style.cssText = 'width:18px;flex:0 0 18px;color:#3b82f6';\n  var body = document.createElement('div');\n  var t = document.createElement('div');\n  t.textContent = STAGES[i].title;\n  t.style.cssText = 'font-size:14px;font-weight:600;color:#12233b';\n  var h = document.createElement('div');\n  h.textContent = STAGES[i].hint;\n  h.style.cssText = 'font-size:12px;color:#5b6b82;margin-top:2px';\n  body.appendChild(t);\n  body.appendChild(h);\n  row.appendChild(mark);\n  row.appendChild(body);\n  list.appendChild(row);\n  rows.push({ row: row, mark: mark });\n}\nfunction play() {\n  for (var i = 0; i < N; i += 1) {\n    rows[i].row.style.opacity = '0.35';\n    rows[i].mark.textContent = '○';\n  }\n  caption.textContent = STAGES[0].caption;\n  chip.textContent = '1 / ' + N;\n  var handle = makeTicker(DURATION, function (t) {\n    var i = Math.min(N - 1, Math.floor(t * N));\n    for (var k = 0; k <= i; k += 1) {\n      rows[k].row.style.opacity = '1';\n      rows[k].mark.textContent = '●';\n    }\n    caption.textContent = STAGES[i].caption;\n    chip.textContent = (i + 1) + ' / ' + N;\n    Sandbox.progress(t);\n  });\n  handle.restart();\n  return handle;\n}\nSandbox.play(play);\nSandbox.ready();\n",
+  "fallback_text": "（高中讲法）模型幻觉：AI 会生成读起来通顺、看起来真实，实际上。这不是它故意骗人，而是算法本身的固有现象。 再记一句：模型幻觉（Hallucination）指大语言模型生成内容与事实不符、或无法由给定上下文支持的现象，其输出表面连贯可信，实则虚构。 机制层面：自回归语言模型在每一步对词表做条件概率采样 $P(w_t \\mid w_{<t})$，优化的目标是。"
+}

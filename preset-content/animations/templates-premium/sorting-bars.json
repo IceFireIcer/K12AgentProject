@@ -1,0 +1,36 @@
+{
+  "id": "sorting-bars",
+  "label": "排序",
+  "title": "排序：把一排数字从小到大摆好",
+  "concept": "排序",
+  "kp_ids": [
+    "prog-list-ph",
+    "prog-list-jr",
+    "prog-list-sr"
+  ],
+  "grade_levels": [
+    "primary_high",
+    "junior",
+    "senior"
+  ],
+  "duration_ms": 5200,
+  "params": {
+    "count": {
+      "type": "int",
+      "min": 4,
+      "max": 9,
+      "default": 6,
+      "description": "有几根柱子（要排序的数字个数）"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.4,
+      "description": "播放速度倍数（越大越快）"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">排序：每次把相邻的两个比一比</h1>\n<p class=\"anim-caption\" id=\"caption\">正在比较…</p>\n<div class=\"anim-canvas\">\n  <svg id=\"bars\" viewBox=\"0 0 420 200\" width=\"100%\" height=\"100%\" role=\"img\" aria-label=\"柱状图排序动画\">\n    <g id=\"axis\" class=\"axis\"></g>\n    <g id=\"columns\"></g>\n  </svg>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"swaps\">交换 0 次</span>&nbsp;<span class=\"chip\" id=\"compare\">比较 0 次</span></p>",
+  "script": "var COUNT = {{count}};\nvar SPEED = {{speed}};\n\nvar COLORS = ['#2f6fd0', '#1f9d63', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#4d7c0f', '#b45309', '#0f766e'];\n\n// 固定的一串数字（不用随机：演示要可复现，同一个知识点每次看起来一样）\nvar BASE = [7, 2, 9, 4, 6, 1, 8, 3, 5];\nvar values = BASE.slice(0, COUNT);\n\nvar COL_W = 420 / COUNT;\nvar BAR_MAX = 150;\nvar BASE_Y = 180;\n\nvar columns = document.getElementById('columns');\nvar axis = document.getElementById('axis');\nvar caption = document.getElementById('caption');\nvar swapLabel = document.getElementById('swaps');\nvar compareLabel = document.getElementById('compare');\n\nvar bars = [];\nvar swaps = 0;\nvar compares = 0;\n\nfor (var i = 0; i < COUNT; i += 1) {\n  var x = i * COL_W + COL_W * 0.14;\n  var w = COL_W * 0.72;\n  var h = (values[i] / 9) * BAR_MAX;\n  var rect = Sandbox.svgEl('rect');\n  rect.setAttribute('x', String(x));\n  rect.setAttribute('y', String(BASE_Y - h));\n  rect.setAttribute('width', String(w));\n  rect.setAttribute('height', String(h));\n  rect.setAttribute('rx', '4');\n  var color = COLORS[i % COLORS.length];\n  rect.setAttribute('fill', color);\n  columns.appendChild(rect);\n\n  var label = Sandbox.svgEl('text');\n  label.setAttribute('x', String(x + w / 2));\n  label.setAttribute('y', String(BASE_Y + 14));\n  label.setAttribute('text-anchor', 'middle');\n  label.setAttribute('class', 'axis-label');\n  label.textContent = String(values[i]);\n  axis.appendChild(label);\n\n  // ★ 一根柱子 = 一个固定位置上的槽位：它自己的 rect / 颜色 / 数字标签都不换，\n  //   交换时只换「值」（见下面的 complete）。这样步里抓到的元素引用永远有效。\n  bars.push({ rect: rect, label: label, value: values[i], color: color, x: x, width: w });\n}\n\n// 冒泡排序的每一轮「比较」都变成一个动画步骤：模型不需要懂排序，模板自己跑完\nvar rounds = [];\nvar work = values.slice();\nfor (var pass = 0; pass < work.length - 1; pass += 1) {\n  for (var j = 0; j < work.length - 1 - pass; j += 1) {\n    var pair = [j, j + 1];\n    if (work[j] > work[j + 1]) {\n      var tmp = work[j];\n      work[j] = work[j + 1];\n      work[j + 1] = tmp;\n      rounds.push({ pair: pair, swap: true });\n    } else {\n      rounds.push({ pair: pair, swap: false });\n    }\n  }\n}\n\nfunction placeBars() {\n  for (var i = 0; i < bars.length; i += 1) {\n    var h = (bars[i].value / 9) * BAR_MAX;\n    bars[i].rect.setAttribute('y', String(BASE_Y - h));\n    bars[i].rect.setAttribute('height', String(h));\n    bars[i].rect.setAttribute('x', String(i * COL_W + COL_W * 0.14));\n    // 颜色与数字都跟着「值」走 —— 换值之后这一格显示的就是换过来的那根柱子。\n    bars[i].rect.setAttribute('fill', bars[i].color);\n    bars[i].label.textContent = String(bars[i].value);\n  }\n}\n\nfunction highlight(bar, color) {\n  anime({\n    targets: bar.rect,\n    stroke: color,\n    strokeWidth: 3,\n    duration: 120 * SPEED\n  });\n}\n\nSandbox.play(function () {\n  swaps = 0;\n  compares = 0;\n  swapLabel.textContent = '交换 0 次';\n  compareLabel.textContent = '比较 0 次';\n  placeBars();\n\n  var steps = [];\n  for (var index = 0; index < rounds.length; index += 1) {\n    var round = rounds[index];\n    steps.push({\n      targets: [bars[round.pair[0]].rect, bars[round.pair[1]].rect],\n      stroke: round.swap ? '#d97706' : '#2f6fd0',\n      strokeWidth: 3,\n      duration: 180 * SPEED,\n      begin: (function (r) {\n        return function () {\n          compares += 1;\n          compareLabel.textContent = '比较 ' + compares + ' 次';\n          caption.textContent = '比一比第 ' + (r.pair[0] + 1) + ' 根和第 ' + (r.pair[1] + 1) + ' 根：' + (r.swap ? '左边更大，交换' : '顺序正确，不动');\n        };\n      })(round)\n    });\n    if (round.swap) {\n      steps.push({\n        targets: [bars[round.pair[0]].rect, bars[round.pair[1]].rect],\n        // ★ 每根柱子走自己的方向（函数值 = 逐目标取值）：原来两根共用 [0, COL_W]，\n        //   右边那根会跟着右移一整格 —— 最右一对交换时它整根跑出 viewBox（实测被裁 60 单位）。\n        translateX: function (el, i) { return [0, i === 0 ? COL_W : -COL_W]; },\n        duration: 260 * SPEED,\n        complete: (function (r) {\n          return function () {\n            // ★ 交换「值」而不是两个 rect 元素：元素与位置是绑死的（见上面的说明），\n            //   颜色跟着值走，所以观感与「柱子换了位置」完全一致。\n            var a = bars[r.pair[0]];\n            var b = bars[r.pair[1]];\n            var value = a.value;\n            a.value = b.value;\n            b.value = value;\n            var color = a.color;\n            a.color = b.color;\n            b.color = color;\n            swaps += 1;\n            swapLabel.textContent = '交换 ' + swaps + ' 次';\n            for (var k = 0; k < bars.length; k += 1) {\n              // ★ 必须清 **style.transform**：动画写的是它，而 CSS 优先级高于表现属性，\n              //   原来那句 setAttribute('transform', …) 根本盖不住它 —— 残留的位移会一直\n              //   叠在 placeBars() 的 x 上，柱子越换越往右跑、最后整根出画。\n              bars[k].rect.style.transform = '';\n            }\n            placeBars();\n          };\n        })(round)\n      });\n    }\n  }\n\n  steps.push({\n    targets: '#columns rect',\n    stroke: '#1f9d63',\n    strokeWidth: 3,\n    duration: 320,\n    begin: function () {\n      caption.textContent = '排好了：' + work.join('、') + '（一共比较 ' + compares + ' 次、交换 ' + swaps + ' 次）';\n    },\n    complete: function () {\n      Sandbox.progress(1);\n    }\n  });\n\n  var timeline = anime.timeline({ autoplay: true, easing: 'easeInOutQuad' });\n  for (var s = 0; s < steps.length; s += 1) timeline.add(steps[s]);\n  timeline.play();\n\n  var total = 0;\n  if (timeline.duration) total = timeline.duration;\n  return {\n    pause: function () {\n      timeline.pause();\n    },\n    play: function () {\n      timeline.play();\n    },\n    restart: function () {\n      timeline.restart();\n    },\n    finished: {\n      then: function (resolve) {\n        var elapsed = 0;\n        var timer = setInterval(function () {\n          elapsed += 100;\n          if (timeline.completed || elapsed > (total || 8000) + 800) {\n            clearInterval(timer);\n            resolve();\n          }\n          Sandbox.progress(Math.min(1, elapsed / (total || 8000)));\n        }, 100);\n      }\n    }\n  };\n});\n\nSandbox.ready({ template: 'sorting-bars', bars: COUNT });",
+  "fallback_text": "排序做的事，是**反复比较相邻的两个数**：如果左边的比右边的大，就把它们交换过来。一遍走完，最大的数就被推到了最后；再来一遍，第二大的也到了位置。重复「比较 + 交换」直到没有需要交换的，一整排数就排好了。"
+}

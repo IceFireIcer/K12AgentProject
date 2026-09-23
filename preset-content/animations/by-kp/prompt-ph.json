@@ -1,0 +1,42 @@
+{
+  "kp_id": "prompt-ph",
+  "grade_level": "primary_high",
+  "name": "Prompt 提示词",
+  "concept": "Prompt 提示词",
+  "template_id": "prompt",
+  "archetype": "steps",
+  "title": "Prompt 提示词：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "Prom…",
+      "hint": "是什么",
+      "caption": "先弄懂它是什么：给机器下达的指令，用来说明「你是谁、要怎么做、"
+    },
+    {
+      "title": "关键点",
+      "hint": "提示词，就是你…",
+      "caption": "再看它有什么用：提示词，就是你向机器提出的那段指令或问题"
+    },
+    {
+      "title": "再看步",
+      "hint": "它的作用有三个…",
+      "caption": "它的作用有三个：，让它扮演某位老师；"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "还要知道边界：，要求它分点写、列表格；"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）Prompt 提示词：给机器下达的指令，用来说明「你是谁、要怎么做、说成什么样」，直接决定它回答的质量与难度。 再记一句：提示词，就是你向机器提出的那段指令或问题。 它的作用有三个：，让它扮演某位老师； ，要求它分点写、列表格； ，要求通俗易懂或者详细严谨。 举个例子：提示词写「你是初中数学老师，语言通。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

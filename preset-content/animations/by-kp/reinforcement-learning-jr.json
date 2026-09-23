@@ -1,0 +1,49 @@
+{
+  "kp_id": "reinforcement-learning-jr",
+  "grade_level": "junior",
+  "name": "强化学习",
+  "concept": "强化学习",
+  "template_id": "reinforcement-learning",
+  "archetype": "loop",
+  "title": "强化学习：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "强化学习",
+      "hint": "是什么",
+      "caption": "先抓住定义：没有标准答案，靠一次次尝试，做对了得到奖励、"
+    },
+    {
+      "title": "关键点",
+      "hint": "核心目标是长期…",
+      "caption": "再分析怎么起作用：核心目标是长期回报最大化，而不是眼前一步最优"
+    },
+    {
+      "title": "再看步",
+      "hint": "辨析：强化学习…",
+      "caption": "辨析：强化学习需要大量尝试，代价高、收敛慢；"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：没有标准答案，靠一次次尝试，做对了得到奖励、"
+    }
+  ],
+  "fallback_text": "（初中讲法）强化学习：没有标准答案，靠一次次尝试，做对了得到奖励、做错了受到提醒，慢慢学会最好的做法。 再记一句：强化学习（Reinforcement Learning，RL）研究智能体如何在与环境的交互中，通过试错和奖励信号学习最优决策策略。 它用一套完整的框架描述问题：智能体在某个状态下选择一个动作，环境随之转移到新状态并给出奖励，智能体依据累计奖。",
+  "duration_ms": 4800,
+  "params": {
+    "rounds": {
+      "type": "int",
+      "min": 1,
+      "max": 4,
+      "default": 2,
+      "description": "循环几轮"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

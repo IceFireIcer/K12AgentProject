@@ -1,0 +1,34 @@
+{
+  "id": "python-loop",
+  "label": "循环",
+  "title": "循环：同一段代码重复执行",
+  "concept": "循环",
+  "kp_ids": [
+    "prog-loop-jr",
+    "prog-loop-sr"
+  ],
+  "grade_levels": [
+    "junior",
+    "senior"
+  ],
+  "duration_ms": 4400,
+  "params": {
+    "times": {
+      "type": "int",
+      "min": 3,
+      "max": 8,
+      "default": 5,
+      "description": "循环体执行几次（与 for i in range(n) 的 n 一致）"
+    },
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">循环：让同一段代码重复跑</h1>\n<p class=\"anim-caption\" id=\"caption\">for 循环的准备阶段：先定好要跑几遍…</p>\n<div class=\"anim-canvas\">\n  <svg id=\"loop-stage\" viewBox=\"0 0 460 200\" width=\"100%\" height=\"100%\" role=\"img\" aria-label=\"for 循环执行动画\">\n    <g id=\"code\"></g>\n    <g id=\"vars\"></g>\n    <g id=\"output\"></g>\n  </svg>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"counter\">第 0 次</span></p>",
+  "script": "var TIMES = {{times}};\nvar SPEED = {{speed}};\n\nvar codeGroup = document.getElementById('code');\nvar varGroup = document.getElementById('vars');\nvar outGroup = document.getElementById('output');\nvar caption = document.getElementById('caption');\nvar counter = document.getElementById('counter');\n\n// 左侧：代码块（逐行高亮）\nvar CODE_LINES = [\n  'total = 0',\n  'for i in range(' + TIMES + '):',\n  '    total = total + i',\n  'print(total)'\n];\n\nvar codeRows = [];\nfor (var lineIndex = 0; lineIndex < CODE_LINES.length; lineIndex += 1) {\n  var y = 34 + lineIndex * 30;\n  var bg = Sandbox.svgEl('rect');\n  bg.setAttribute('x', '12');\n  bg.setAttribute('y', String(y - 16));\n  bg.setAttribute('width', '250');\n  bg.setAttribute('height', '24');\n  bg.setAttribute('rx', '5');\n  bg.setAttribute('fill', 'transparent');\n  codeGroup.appendChild(bg);\n\n  var text = Sandbox.svgEl('text');\n  text.setAttribute('x', '20');\n  text.setAttribute('y', String(y));\n  text.setAttribute('style', 'font-family:Consolas,Menlo,monospace;font-size:13px;fill:#12233b');\n  text.textContent = CODE_LINES[lineIndex];\n  codeGroup.appendChild(text);\n  codeRows.push(bg);\n}\n\n// 右侧：变量表（i / total）\nfunction varRow(label, y, color) {\n  var text = Sandbox.svgEl('text');\n  text.setAttribute('x', '300');\n  text.setAttribute('y', String(y));\n  text.setAttribute('style', 'font-family:Consolas,Menlo,monospace;font-size:13px;fill:' + color);\n  text.textContent = label;\n  varGroup.appendChild(text);\n  return text;\n}\n\nvar iText = varRow('i = —', 50, '#2f6fd0');\nvar totalText = varRow('total = 0', 80, '#1f9d63');\n\n// 底部：输出区（每次 print 多一行）\nvar outputLines = [];\n\nfunction highlightRow(index) {\n  for (var i = 0; i < codeRows.length; i += 1) {\n    codeRows[i].setAttribute('fill', i === index ? '#e8f0fd' : 'transparent');\n  }\n}\n\nfunction addOutput(text) {\n  var node = Sandbox.svgEl('text');\n  node.setAttribute('x', '300');\n  node.setAttribute('y', String(120 + outputLines.length * 22));\n  node.setAttribute('style', 'font-family:Consolas,Menlo,monospace;font-size:13px;fill:#12233b');\n  node.setAttribute('opacity', '0');\n  node.textContent = '> ' + text;\n  outGroup.appendChild(node);\n  outputLines.push(node);\n  return node;\n}\n\nSandbox.play(function () {\n  var steps = [];\n  var total = 0;\n\n  steps.push({\n    targets: codeRows[0],\n    duration: 200,\n    begin: function () {\n      highlightRow(0);\n      caption.textContent = '先把累加器 total 清成 0——它负责把每次的结果攒起来。';\n      totalText.textContent = 'total = 0';\n    }\n  });\n\n  for (var n = 0; n < TIMES; n += 1) {\n    steps.push({\n      targets: codeRows[1],\n      duration: 220 * SPEED,\n      begin: (function (index) {\n        return function () {\n          highlightRow(1);\n          caption.textContent = '第 ' + (index + 1) + ' 圈：循环变量 i 变成 ' + index + '。';\n          iText.textContent = 'i = ' + index;\n          counter.textContent = '第 ' + (index + 1) + ' 次';\n        };\n      })(n)\n    });\n\n    steps.push({\n      targets: codeRows[2],\n      duration: 300 * SPEED,\n      begin: (function (index) {\n        return function () {\n          highlightRow(2);\n          total += index;\n          caption.textContent = '执行循环体：total = total + i，也就是累加上了 ' + index + '。';\n          totalText.textContent = 'total = ' + total;\n        };\n      })(n),\n      complete: function () {\n        // 每圈结束闪一下，让「重复」这件事看得出来\n        anime({ targets: totalText, scale: [1, 1.1], duration: 140, direction: 'alternate' });\n      }\n    });\n  }\n\n  steps.push({\n    targets: codeRows[1],\n    duration: 260,\n    begin: function () {\n      highlightRow(1);\n      caption.textContent = 'i 已经走到 ' + TIMES + '，超出了 range(' + TIMES + ')，循环结束。';\n      iText.textContent = 'i = ' + TIMES + '（越界，退出）';\n    }\n  });\n\n  var out = addOutput(String(total));\n  steps.push({\n    targets: codeRows[3],\n    duration: 320,\n    begin: function () {\n      highlightRow(3);\n      caption.textContent = '循环结束后才执行 print：屏幕上是 ' + total + '。注意它只打印了一次。';\n    },\n    complete: function () {\n      anime({ targets: out, opacity: [0, 1], translateX: [-8, 0], duration: 320 });\n      Sandbox.progress(1);\n    }\n  });\n\n  var timeline = anime.timeline({ autoplay: true, easing: 'easeInOutSine' });\n  for (var s = 0; s < steps.length; s += 1) timeline.add(steps[s]);\n  timeline.play();\n\n  var duration = timeline.duration || 5000;\n  return {\n    pause: function () { timeline.pause(); },\n    play: function () { timeline.play(); },\n    restart: function () { timeline.restart(); },\n    finished: {\n      then: function (resolve) {\n        var elapsed = 0;\n        var timer = setInterval(function () {\n          elapsed += 100;\n          if (timeline.completed || elapsed > duration + 800) {\n            clearInterval(timer);\n            resolve();\n          }\n          Sandbox.progress(Math.min(1, elapsed / duration));\n        }, 100);\n      }\n    }\n  };\n});\n\nSandbox.ready({ template: 'python-loop', times: TIMES });",
+  "fallback_text": "循环的作用是**让同一段代码重复执行**，而不用把它抄一遍。`for i in range(n)` 会依次把 `i` 取成 0、1、2……n-1，每取一个值就执行一次「循环体」。循环体里可以读到 `i`，也可以改动外面的变量（比如累加器 `total`）。缩进决定哪些行属于循环体——只有缩进的那几行会被重复执行。"
+}

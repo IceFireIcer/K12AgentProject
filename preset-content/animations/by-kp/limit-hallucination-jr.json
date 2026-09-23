@@ -1,0 +1,37 @@
+{
+  "kp_id": "limit-hallucination-jr",
+  "grade_level": "junior",
+  "name": "模型幻觉",
+  "concept": "模型幻觉",
+  "template_id": "limit-hallucination",
+  "archetype": "checklist",
+  "title": "模型幻觉：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "三个辨析要点：其一…",
+      "hint": "AI 会生成读起来通顺…",
+      "caption": "三个辨析要点：其一，幻觉不是故意欺骗，"
+    },
+    {
+      "title": "其三，冷门知识与专…",
+      "hint": "再分析怎么起作用",
+      "caption": "其三，冷门知识与专业细节是重灾区"
+    },
+    {
+      "title": "应对方法（参见 7…",
+      "hint": "最后辨析易混点",
+      "caption": "应对方法（参见 7.1）：交叉核对权威资料；"
+    }
+  ],
+  "fallback_text": "（初中讲法）模型幻觉：AI 会生成读起来通顺、看起来真实，实际上。这不是它故意骗人，而是算法本身的固有现象。 再记一句：模型幻觉是大模型的典型缺陷：生成逻辑通顺、看起来真实，但实际完全虚构的事实、数据、文献或知识点。 成因在于：它是在按概率预测下一个词，而不是在数据库里查证事实（参见 6.3 理解局限）。 因此当某个知识在训练数据中。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "kp_id": "narrow-ai-sr",
+  "grade_level": "senior",
+  "name": "弱人工智能（专用 AI）",
+  "concept": "弱人工智能（专用 AI）",
+  "template_id": "narrow-ai",
+  "archetype": "compare",
+  "title": "弱人工智能（专用 AI）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "弱人工智能（专…",
+      "caption": "先明确概念边界：只擅长一件事的人工智能，，换个领域"
+    },
+    {
+      "left": "无意识性—…",
+      "right": "弱人工智能…",
+      "caption": "再拆机制与前提：：不涉及主观体验与自我模型"
+    },
+    {
+      "left": "记住这个",
+      "right": "大语言模型…",
+      "caption": "最后关联上下游与局限：它既无持久目标，也无行动能力，仍属 ANI 范畴"
+    }
+  ],
+  "fallback_text": "（高中讲法）弱人工智能（专用 AI）：只擅长一件事的人工智能，，换个领域就完全不会了。我们身边用到的全都是这一类。 再记一句：弱人工智能（Artificial Narrow Intelligence, ANI），又称专用人工智能，指在限定任务域内具备甚至超越人类表现、但不具备通用认知能力与自主目标的系统。 其核心特征可归纳为三点：，能力边界由训。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

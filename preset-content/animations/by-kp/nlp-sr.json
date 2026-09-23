@@ -1,0 +1,42 @@
+{
+  "kp_id": "nlp-sr",
+  "grade_level": "senior",
+  "name": "自然语言处理（NLP）",
+  "concept": "自然语言处理（NLP）",
+  "template_id": "nlp",
+  "archetype": "flow",
+  "title": "自然语言处理（NLP）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "自然语言…",
+      "hint": "是什么",
+      "caption": "先明确概念边界：让机器听懂、读懂人类语言文字的技术，能对话、"
+    },
+    {
+      "title": "关键点",
+      "hint": "自然语言生成，…",
+      "caption": "再拆机制与前提：自然语言生成，如机器翻译、摘要、对话与文本创作"
+    },
+    {
+      "title": "再看步",
+      "hint": "输出还可能继承…",
+      "caption": "输出还可能继承训练语料中的偏见（参见 7.4）"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：应用中须核验重要信息，"
+    }
+  ],
+  "fallback_text": "（高中讲法）自然语言处理（NLP）：让机器听懂、读懂人类语言文字的技术，能对话、翻译、总结和写作。 再记一句：自然语言处理（Natural Language Processing，NLP）是研究计算机理解与生成自然语言的学科，位于语言学、计算机科学与统计学习的交叉处，也是人工智能面向文本的核心分支。 其任务可分两类：自然语言理解，如分词、词。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

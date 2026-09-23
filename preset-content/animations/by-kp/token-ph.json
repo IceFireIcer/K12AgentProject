@@ -1,0 +1,42 @@
+{
+  "kp_id": "token-ph",
+  "grade_level": "primary_high",
+  "name": "Token",
+  "concept": "Token",
+  "template_id": "token",
+  "archetype": "steps",
+  "title": "Token：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "Token",
+      "hint": "是什么",
+      "caption": "先弄懂它是什么：模型处理文字时的最小单位，"
+    },
+    {
+      "title": "关键点",
+      "hint": "Token（词…",
+      "caption": "再看它有什么用：Token（词元）是大语言模型处理文字时的最小单"
+    },
+    {
+      "title": "再看步",
+      "hint": "这个词元可能是…",
+      "caption": "这个词元可能是一个字、一个词，"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "还要知道边界：它也是这样「写」字的：一个一个词元地往外蹦"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）Token：模型处理文字时的最小单位，把一段话切成一个个小片段再交给它读写。 再记一句：Token（词元）是大语言模型处理文字时的最小单位。 模型没法直接看懂一句话，它要先做切分：把文字切成一个个小片段，每个片段就是一个词元。 这个词元可能是一个字、一个词，也可能是几个字拼起来的一段。 切好之后，每个词元都会被换成一个。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

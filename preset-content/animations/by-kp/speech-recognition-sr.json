@@ -1,0 +1,42 @@
+{
+  "kp_id": "speech-recognition-sr",
+  "grade_level": "senior",
+  "name": "语音识别（ASR）",
+  "concept": "语音识别（ASR）",
+  "template_id": "speech-recognition",
+  "archetype": "flow",
+  "title": "语音识别（ASR）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "语音识别…",
+      "hint": "是什么",
+      "caption": "先明确概念边界：把说出来的话变成文字，让机器听懂人的声音。"
+    },
+    {
+      "title": "关键点",
+      "hint": "评价指标是词错…",
+      "caption": "再拆机制与前提：评价指标是词错误率"
+    },
+    {
+      "title": "再看步",
+      "hint": "识别文本一旦出…",
+      "caption": "识别文本一旦出错，后续理解与回答也会跟着错"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后关联上下游与局限：把说出来的话变成文字，让机器听懂人的声音。"
+    }
+  ],
+  "fallback_text": "（高中讲法）语音识别（ASR）：把说出来的话变成文字，让机器听懂人的声音。 再记一句：自动语音识别（Automatic Speech Recognition，ASR）是把语音波形映射为文字序列的序列到序列任务。 典型流程为：分帧与加窗（通常 20–30 毫秒一帧）后提取声学特征（如梅尔频率倒谱系数），由声学模型在声学特征与建。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

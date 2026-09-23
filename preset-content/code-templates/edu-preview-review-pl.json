@@ -1,0 +1,23 @@
+{
+  "kp_id": "edu-preview-review-pl",
+  "grade_level": "primary_low",
+  "title": "编程小练习：把「预习复习」的关键句打出来",
+  "expected_behavior": "打印一行：今天学了：预习复习，记住：课前生成预习提纲、课后生成复习总",
+  "scaffold": "# 目标：把和「预习复习」有关的一句话打印出来\ntopic = \"预习复习\"\n\n# TODO 1：准备一条要点 note（用你自己的话，一句就好）\nnote = ____\n\n# TODO 2：打印「今天学了：<topic>，记住：<note>」\n____\n",
+  "expected_output": "今天学了：预习复习，记住：课前生成预习提纲、课后生成复习总\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "先想好要记住的那一句，再放进变量 note。"
+    },
+    {
+      "level": 2,
+      "hint": "note = \"……\"，然后用 f-string 把 topic 和 note 放进同一行。"
+    },
+    {
+      "level": 3,
+      "hint": "print(f\"今天学了：{topic}，记住：{note}\")。"
+    }
+  ],
+  "solution": "topic = \"预习复习\"\nnote = \"课前生成预习提纲、课后生成复习总\"\nprint(f\"今天学了：{topic}，记住：{note}\")\n"
+}

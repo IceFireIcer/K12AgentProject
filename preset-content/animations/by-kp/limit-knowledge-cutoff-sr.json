@@ -1,0 +1,37 @@
+{
+  "kp_id": "limit-knowledge-cutoff-sr",
+  "grade_level": "senior",
+  "name": "知识截止",
+  "concept": "知识截止",
+  "template_id": "limit-knowledge-cutoff",
+  "archetype": "checklist",
+  "title": "知识截止：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "模型的知识来自训练…",
+      "hint": "模型的知识来自训练时用…",
+      "caption": "模型的知识来自训练时用过的资料，"
+    },
+    {
+      "title": "模型的知识来自训练…",
+      "hint": "再拆机制与前提",
+      "caption": "模型的知识来自训练时用过的资料，"
+    },
+    {
+      "title": "模型的知识来自训练…",
+      "hint": "最后关联上下游与局限",
+      "caption": "模型的知识来自训练时用过的资料，"
+    }
+  ],
+  "fallback_text": "（高中讲法）知识截止：模型的知识来自训练时用过的资料，资料有固定的时间边界，边界之后的新事情它本来并不知道。 再记一句：知识截止（Knowledge Cutoff）指大语言模型的参数化知识存在一个时间上界：模型只能覆盖训练语料采集截止之前的信息，截止之后的事件默认不在其知识范围内。 机制层面：预训练把语料中的统计规律压缩进参数，参数在一次训练后即被冻结，因此。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

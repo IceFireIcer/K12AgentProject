@@ -1,0 +1,25 @@
+{
+  "id": "ai-definition-jr",
+  "label": "人工智能的定义",
+  "title": "人工智能的定义：看懂它是怎么起作用的",
+  "concept": "人工智能的定义",
+  "kp_ids": [
+    "ai-definition-jr"
+  ],
+  "grade_levels": [
+    "junior"
+  ],
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">人工智能的定义：看懂它是怎么起作用的</h1>\n<p class=\"anim-caption\" id=\"caption\">左右比一比…</p>\n<div class=\"anim-canvas\">\n  <svg id=\"flow\" viewBox=\"0 0 460 230\" width=\"100%\" height=\"100%\" role=\"img\" aria-label=\"对比动画\">\n    <g id=\"cols\"></g>\n  </svg>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"side\">对照</span></p>\n",
+  "script": "\nfunction makeTicker(durationMs, onFrame) {\n  var startTs = 0;\n  var raf = 0;\n  var running = false;\n  var lastT = 0;\n  function frame(ts) {\n    if (!running) return;\n    if (!startTs) startTs = ts;\n    var t = Math.min(1, (ts - startTs) / durationMs);\n    lastT = t;\n    onFrame(t);\n    if (t < 1) {\n      raf = requestAnimationFrame(frame);\n    } else {\n      running = false;\n      Sandbox.progress(1);\n    }\n  }\n  return {\n    restart: function () {\n      if (raf) cancelAnimationFrame(raf);\n      startTs = 0;\n      running = true;\n      raf = requestAnimationFrame(frame);\n    },\n    play: function () {\n      if (running) return;\n      running = true;\n      // 简化：从头续播（pause/play 场景够用）\n      startTs = 0;\n      raf = requestAnimationFrame(frame);\n    },\n    pause: function () {\n      running = false;\n      if (raf) cancelAnimationFrame(raf);\n      raf = 0;\n    }\n  };\n}\n\nvar SPEED = {{speed}};\nvar DURATION = Math.round(4200 / SPEED);\nvar g = document.getElementById('cols');\nvar caption = document.getElementById('caption');\nvar side = document.getElementById('side');\nvar PAIRS = [{\"left\": \"不是这个\", \"right\": \"人工智能的定义\", \"caption\": \"先抓住定义：人工智能是让机器模拟、延伸和扩展人类智能的技术科\"}, {\"left\": \"三者不是并…\", \"right\": \"人工智能的…\", \"caption\": \"再分析怎么起作用：三者不是并列关系，而是由低到高的递进\"}, {\"left\": \"记住这个\", \"right\": \"第二，AI…\", \"caption\": \"最后辨析易混点：易错点：把「看起来很聪明」当成「真的会思考」\"}];\nvar N = PAIRS.length;\nfunction panel(x, fill) {\n  var r = Sandbox.svgEl('rect');\n  r.setAttribute('x', String(x));\n  r.setAttribute('y', '30');\n  r.setAttribute('width', '200');\n  r.setAttribute('height', '150');\n  r.setAttribute('rx', '14');\n  r.setAttribute('fill', fill);\n  r.setAttribute('stroke', '#d6ddec');\n  r.setAttribute('stroke-width', '1.6');\n  g.appendChild(r);\n}\npanel(20, '#f8fafc');\npanel(240, '#eef4ff');\nvar left = Sandbox.svgEl('text');\nvar right = Sandbox.svgEl('text');\nleft.setAttribute('x', '120');\nleft.setAttribute('y', '120');\nleft.setAttribute('text-anchor', 'middle');\nleft.setAttribute('style', 'font-size:15px;font-weight:600;fill:#12233b');\nright.setAttribute('x', '340');\nright.setAttribute('y', '120');\nright.setAttribute('text-anchor', 'middle');\nright.setAttribute('style', 'font-size:15px;font-weight:600;fill:#12233b');\ng.appendChild(left);\ng.appendChild(right);\nvar sideTitle = Sandbox.svgEl('text');\nsideTitle.setAttribute('x', '120');\nsideTitle.setAttribute('y', '58');\nsideTitle.setAttribute('text-anchor', 'middle');\nsideTitle.setAttribute('style', 'font-size:11px;fill:#8aa0bd');\nsideTitle.textContent = '常见误解';\ng.appendChild(sideTitle);\nvar sideTitleB = Sandbox.svgEl('text');\nsideTitleB.setAttribute('x', '340');\nsideTitleB.setAttribute('y', '58');\nsideTitleB.setAttribute('text-anchor', 'middle');\nsideTitleB.setAttribute('style', 'font-size:11px;fill:#8aa0bd');\nsideTitleB.textContent = '正确理解';\ng.appendChild(sideTitleB);\n\nfunction play() {\n  left.textContent = PAIRS[0].left;\n  right.textContent = PAIRS[0].right;\n  caption.textContent = PAIRS[0].caption;\n  side.textContent = '1 / ' + N;\n  var handle = makeTicker(DURATION, function (t) {\n    var i = Math.min(N - 1, Math.floor(t * N));\n    var pair = PAIRS[i];\n    left.textContent = pair.left;\n    right.textContent = pair.right;\n    caption.textContent = pair.caption;\n    side.textContent = (i + 1) + ' / ' + N;\n    Sandbox.progress(t);\n  });\n  handle.restart();\n  return handle;\n}\nSandbox.play(play);\nSandbox.ready();\n",
+  "fallback_text": "（初中讲法）人工智能的定义：人工智能是让机器模拟、延伸和扩展人类智能的技术科学；它的本领是人教出来的，不是天生就有。 再记一句：人工智能（Artificial Intelligence，简称 AI）是一门研究如何让机器模拟、延伸和扩展人类智能的技术科学。 理解它的关键在这三个词：模拟是模仿人的某项能力，延伸是突破人的生理极限，扩展是创造人类原。"
+}

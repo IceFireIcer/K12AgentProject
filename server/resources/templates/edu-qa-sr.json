@@ -1,0 +1,25 @@
+{
+  "id": "edu-qa-sr",
+  "label": "智能答疑",
+  "title": "智能答疑：看懂它是怎么起作用的",
+  "concept": "智能答疑",
+  "kp_ids": [
+    "edu-qa-sr"
+  ],
+  "grade_levels": [
+    "senior"
+  ],
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">智能答疑：看懂它是怎么起作用的</h1>\n<p class=\"anim-caption\" id=\"caption\">看东西怎么流过去…</p>\n<div class=\"anim-canvas\">\n  <svg id=\"flow\" viewBox=\"0 0 460 200\" width=\"100%\" height=\"100%\" role=\"img\" aria-label=\"流程动画\">\n    <g id=\"nodes\"></g>\n    <g id=\"packet\"></g>\n  </svg>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"phase\">阶段</span></p>\n",
+  "script": "\nfunction makeTicker(durationMs, onFrame) {\n  var startTs = 0;\n  var raf = 0;\n  var running = false;\n  var lastT = 0;\n  function frame(ts) {\n    if (!running) return;\n    if (!startTs) startTs = ts;\n    var t = Math.min(1, (ts - startTs) / durationMs);\n    lastT = t;\n    onFrame(t);\n    if (t < 1) {\n      raf = requestAnimationFrame(frame);\n    } else {\n      running = false;\n      Sandbox.progress(1);\n    }\n  }\n  return {\n    restart: function () {\n      if (raf) cancelAnimationFrame(raf);\n      startTs = 0;\n      running = true;\n      raf = requestAnimationFrame(frame);\n    },\n    play: function () {\n      if (running) return;\n      running = true;\n      // 简化：从头续播（pause/play 场景够用）\n      startTs = 0;\n      raf = requestAnimationFrame(frame);\n    },\n    pause: function () {\n      running = false;\n      if (raf) cancelAnimationFrame(raf);\n      raf = 0;\n    }\n  };\n}\n\nvar SPEED = {{speed}};\nvar DURATION = Math.round(4200 / SPEED);\nvar gN = document.getElementById('nodes');\nvar gP = document.getElementById('packet');\nvar caption = document.getElementById('caption');\nvar phase = document.getElementById('phase');\nvar STAGES = [{\"title\": \"智能答疑\", \"hint\": \"是什么\", \"caption\": \"先明确概念边界：拍照或输入题目，由学习助手讲解思路、分步引导，\"}, {\"title\": \"关键点\", \"hint\": \"对证明题与开放…\", \"caption\": \"再拆机制与前提：对证明题与开放题，优先给出方法与方向，\"}, {\"title\": \"再看步\", \"hint\": \"拍照或输入题目…\", \"caption\": \"拍照或输入题目，由学习助手讲解思路、分步引导，\"}, {\"title\": \"收束\", \"hint\": \"记住\", \"caption\": \"最后关联上下游与局限：拍照或输入题目，由学习助手讲解思路、\"}];\nvar N = STAGES.length;\nvar pts = [];\nfor (var s = 0; s < N; s += 1) {\n  var x = N === 1 ? 230 : 40 + s * (380 / (N - 1));\n  var y = 100;\n  pts.push({ x: x, y: y });\n  var c = Sandbox.svgEl('circle');\n  c.setAttribute('cx', String(x));\n  c.setAttribute('cy', String(y));\n  c.setAttribute('r', '30');\n  c.setAttribute('fill', '#ffffff');\n  c.setAttribute('stroke', '#d6ddec');\n  c.setAttribute('stroke-width', '1.6');\n  gN.appendChild(c);\n  var t1 = Sandbox.svgEl('text');\n  t1.setAttribute('x', String(x));\n  t1.setAttribute('y', String(y - 2));\n  t1.setAttribute('text-anchor', 'middle');\n  t1.setAttribute('style', 'font-size:12px;font-weight:650;fill:#12233b');\n  t1.textContent = STAGES[s].title;\n  if (t1.textContent.length > 5) t1.textContent = t1.textContent.slice(0, 4) + '…';\n  gN.appendChild(t1);\n  var t2 = Sandbox.svgEl('text');\n  t2.setAttribute('x', String(x));\n  t2.setAttribute('y', String(y + 16));\n  t2.setAttribute('text-anchor', 'middle');\n  t2.setAttribute('style', 'font-size:10px;fill:#5b6b82');\n  t2.textContent = STAGES[s].hint;\n  gN.appendChild(t2);\n  if (s < N - 1) {\n    var x2 = 40 + (s + 1) * (380 / (N - 1));\n    var line = Sandbox.svgEl('line');\n    line.setAttribute('x1', String(x + 32));\n    line.setAttribute('y1', String(y));\n    line.setAttribute('x2', String(x2 - 32));\n    line.setAttribute('y2', String(y));\n    line.setAttribute('stroke', '#e4eaf3');\n    line.setAttribute('stroke-width', '2');\n    gN.appendChild(line);\n  }\n}\nvar ball = Sandbox.svgEl('circle');\nball.setAttribute('r', '8');\nball.setAttribute('fill', '#3b82f6');\nball.setAttribute('cx', String(pts[0].x));\nball.setAttribute('cy', String(pts[0].y));\ngP.appendChild(ball);\n\nfunction play() {\n  caption.textContent = STAGES[0].caption;\n  phase.textContent = '1 / ' + N;\n  var handle = makeTicker(DURATION, function (t) {\n    var f = t * (N - 1);\n    var i = Math.min(N - 2, Math.floor(f));\n    if (N === 1) { i = 0; }\n    var local = N === 1 ? 0 : f - i;\n    var a = pts[i];\n    var b = pts[Math.min(N - 1, i + 1)];\n    var x = a.x + (b.x - a.x) * local;\n    var y = a.y + (b.y - a.y) * local - Math.sin(local * Math.PI) * 18;\n    ball.setAttribute('cx', String(x));\n    ball.setAttribute('cy', String(y));\n    var idx = Math.min(N - 1, Math.round(t * (N - 1)));\n    caption.textContent = STAGES[idx].caption;\n    phase.textContent = (idx + 1) + ' / ' + N;\n    Sandbox.progress(t);\n  });\n  handle.restart();\n  return handle;\n}\nSandbox.play(play);\nSandbox.ready();\n",
+  "fallback_text": "（高中讲法）智能答疑：拍照或输入题目，由学习助手讲解思路、分步引导，而不是直接把完整答案递给你。 再记一句：智能答疑（Intelligent Q&A）是面向作业与习题场景的智能讲解系统，技术上由多模态识别、知识点检索与分步生成三部分衔接而成：拍照上传的题目先经图像识别与公式识别（OCR）转为文本，再由检索增强生成（4.2.1）在题库与课标知识库中。"
+}

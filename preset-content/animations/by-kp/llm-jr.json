@@ -1,0 +1,42 @@
+{
+  "kp_id": "llm-jr",
+  "grade_level": "junior",
+  "name": "大语言模型（LLM）",
+  "concept": "大语言模型（LLM）",
+  "template_id": "llm",
+  "archetype": "steps",
+  "title": "大语言模型（LLM）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "大语言模…",
+      "hint": "是什么",
+      "caption": "先抓住定义：用海量文字训练出来的「会读会写的大脑」，"
+    },
+    {
+      "title": "关键点",
+      "hint": "用海量文字训练…",
+      "caption": "再分析怎么起作用：用海量文字训练出来的「会读会写的大脑」，"
+    },
+    {
+      "title": "再看步",
+      "hint": "用海量文字训练…",
+      "caption": "用海量文字训练出来的「会读会写的大脑」，"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "最后辨析易混点：用海量文字训练出来的「会读会写的大脑」，"
+    }
+  ],
+  "fallback_text": "（初中讲法）大语言模型（LLM）：用海量文字训练出来的「会读会写的大脑」，能理解提问、推理并生成回答，但它的知识来自训练语料，会出错。 再记一句：大语言模型（Large Language Model，LLM）是基于海量文本训练、具备通用语言理解与生成能力的大规模神经网络模型。 它的基本原理是：把文字切成一个个词元，用 Transformer 架构（3.2.4）学习上下文里的统计规律，。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

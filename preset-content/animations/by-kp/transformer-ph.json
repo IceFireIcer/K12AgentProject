@@ -1,0 +1,42 @@
+{
+  "kp_id": "transformer-ph",
+  "grade_level": "primary_high",
+  "name": "Transformer 架构",
+  "concept": "Transformer 架构",
+  "template_id": "transformer",
+  "archetype": "flow",
+  "title": "Transformer 架构：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "Tran…",
+      "hint": "是什么",
+      "caption": "先弄懂它是什么：一种能一次读完整个句子、并判断哪些词最重要的深度"
+    },
+    {
+      "title": "关键点",
+      "hint": "划重点：Tra…",
+      "caption": "再看它有什么用：划重点：Transformer 是大语言模型的底"
+    },
+    {
+      "title": "再看步",
+      "hint": "一种能一次读完…",
+      "caption": "一种能一次读完整个句子、并判断哪些词最重要的深度"
+    },
+    {
+      "title": "收束",
+      "hint": "记住",
+      "caption": "还要知道边界：一种能一次读完整个句子、"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）Transformer 架构：一种能一次读完整个句子、并判断哪些词最重要的深度学习架构，是当前大语言模型的底层骨架。 再记一句：Transformer（变换器）是一种让机器处理文字的深度学习架构，现在的大语言模型都建立在它之上。 它的最大特点是能同时看完一整句话：不像老办法那样从左到右一个字一个字地读，而是把整句一次读进来，再判断每个词和其他词有什么关系。 。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

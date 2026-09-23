@@ -1,0 +1,23 @@
+{
+  "kp_id": "prog-loop-sr",
+  "grade_level": "senior",
+  "title": "循环：求 1 到 n 的平方和（n=5）",
+  "expected_behavior": "打印出 55。",
+  "scaffold": "# 目标：求 1^2 + 2^2 + ... + 5^2\nn = 5\ntotal = 0\n\n# TODO 1：for 循环 1..n\n____\n# TODO 2：把 i*i 加进 total\n    ____\n\nprint(total)\n",
+  "expected_output": "55\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "每一项是 i 的平方，累加进 total。"
+    },
+    {
+      "level": 2,
+      "hint": "for i in range(1, n + 1): total += i * i。"
+    },
+    {
+      "level": 3,
+      "hint": "for i in range(1, n + 1):\n    total += i * i\nprint(total)"
+    }
+  ],
+  "solution": "n = 5\ntotal = 0\n\nfor i in range(1, n + 1):\n    total += i * i\n\nprint(total)\n"
+}

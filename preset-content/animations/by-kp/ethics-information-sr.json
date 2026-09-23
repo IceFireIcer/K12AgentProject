@@ -1,0 +1,37 @@
+{
+  "kp_id": "ethics-information-sr",
+  "grade_level": "senior",
+  "name": "信息真实性校验",
+  "concept": "信息真实性校验",
+  "template_id": "ethics-information",
+  "archetype": "checklist",
+  "title": "信息真实性校验：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "交叉验证，对同一事…",
+      "hint": "机器会一本正经地编造不…",
+      "caption": "交叉验证，对同一事实做多源比对；"
+    },
+    {
+      "title": "细节抽查，人名、时…",
+      "hint": "再拆机制与前提",
+      "caption": "细节抽查，人名、时间、数据等易错点逐一核对；"
+    },
+    {
+      "title": "人工复核，关键结论…",
+      "hint": "最后关联上下游与局限",
+      "caption": "人工复核，关键结论由具备专业判断力的人确认；"
+    }
+  ],
+  "fallback_text": "（高中讲法）信息真实性校验：机器会一本正经地编造不存在的事实，所以它说的重要内容必须先核验、再使用。 再记一句：信息真实性校验（Information Verification），指对 AI 输出的事实性做独立核实，使其达到可作为决策依据的可靠程度。 它是模型幻觉（6.1）在使用侧的对应责任：模型优化的是语言合理性而非事实正确性，事实性只是统计相关性。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

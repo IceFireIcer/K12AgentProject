@@ -12,11 +12,11 @@
     },
     {
       "level": 2,
-      "hint": "排 n 个数最多需要比 n-1 轮；每一轮里，从最前面开始让相邻两个数比一遍，大的往后挪，一轮走完最大的那个就沉到末尾了。所以外层循环决定「比几轮」，内层循环决定「这一轮比到哪儿为止」——第二轮开始，末尾那些已经排好的就不用再看了。"
+      "hint": "排 n 个数最多需要比 n-1 轮；每一轮里，从最前面开始让相邻两个数比一遍，大的往后挪，一轮走完最大的那个就沉到末尾了。所以外层循环决定「比几轮」，内层循环决定「这一轮比到哪儿为止」。第二轮开始，末尾那些已经排好的就不用再看了。"
     },
     {
       "level": 3,
-      "hint": "两个 range 的形状是 `range(n - 1)` 和 `range(n - 1 - i)`；交换两个变量 Python 可以一次写完：`result[j], result[j+1] = ...`。剩下那个比较条件（哪个比哪个大才交换）你自己定——先想清「从小到大」意味着大的往哪边跑。"
+      "hint": "两个 range 的形状是 range(n - 1) 和 range(n - 1 - i)；交换两个变量 Python 可以一次写完：result[j], result[j+1] = ...。剩下那个比较条件（哪个比哪个大才交换）你自己定，先想清「从小到大」意味着大的往哪边跑。"
     }
   ],
   "solution": "scores = [88, 92, 75, 60, 99]\nresult = list(scores)\nn = len(result)\n\nfor i in range(n - 1):\n    for j in range(n - 1 - i):\n        if result[j] > result[j + 1]:\n            result[j], result[j + 1] = result[j + 1], result[j]\n\nprint(\" \".join(str(s) for s in result))\n"

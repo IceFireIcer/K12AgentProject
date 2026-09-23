@@ -1,0 +1,37 @@
+{
+  "kp_id": "limit-understanding-sr",
+  "grade_level": "senior",
+  "name": "理解局限",
+  "concept": "理解局限",
+  "template_id": "limit-understanding",
+  "archetype": "checklist",
+  "title": "理解局限：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "二是前后自相矛盾，…",
+      "hint": "AI 不是在真正读懂文…",
+      "caption": "二是前后自相矛盾，上下文越长越容易出现不一致；"
+    },
+    {
+      "title": "三是它能生成情感充…",
+      "hint": "再拆机制与前提",
+      "caption": "三是它能生成情感充沛的文本，却并不真正体验情感"
+    },
+    {
+      "title": "判断时应看它能否在…",
+      "hint": "最后关联上下游与局限",
+      "caption": "判断时应看它能否在新情境下稳定推理，"
+    }
+  ],
+  "fallback_text": "（高中讲法）理解局限：AI 不是在真正读懂文字，而是在按统计规律预测「下一个字」；语言流畅并不等于理解到位。 再记一句：理解局限（Next-token Prediction）指大语言模型并不具备人类意义上的语义理解，其全部输出都是基于上下文的下一词预测，语言能力与概念理解并不是同一回事。 机制层面：模型以自回归方式生成，每一步对词表给出条件概率 $P(w_t。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

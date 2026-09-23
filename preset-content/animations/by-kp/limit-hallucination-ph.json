@@ -1,0 +1,37 @@
+{
+  "kp_id": "limit-hallucination-ph",
+  "grade_level": "primary_high",
+  "name": "模型幻觉",
+  "concept": "模型幻觉",
+  "template_id": "limit-hallucination",
+  "archetype": "checklist",
+  "title": "模型幻觉：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "title": "越是冷门的知识、越…",
+      "hint": "AI 会生成读起来通顺…",
+      "caption": "越是冷门的知识、越专业的细节，越容易出错；"
+    },
+    {
+      "title": "而且这不是 AI …",
+      "hint": "再看它有什么用",
+      "caption": "而且这不是 AI 故意骗人，是它本身的缺陷"
+    },
+    {
+      "title": "常见的例子有三个：…",
+      "hint": "还要知道边界",
+      "caption": "常见的例子有三个：编造根本没有的书名或论文名；"
+    }
+  ],
+  "fallback_text": "（小学高年级讲法）模型幻觉：AI 会生成读起来通顺、看起来真实，实际上。这不是它故意骗人，而是算法本身的固有现象。 再记一句：模型幻觉，是指 AI 会编造不存在的事实、数据、书籍或事件。 它的特点是：编出来的内容语句通顺、很像真的，一眼很难分辨； 越是冷门的知识、越专业的细节，越容易出错； 而且这不是 AI 故意骗人，是它本身的缺陷。 常见的例子有三个：编造根本没。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}

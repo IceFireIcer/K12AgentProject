@@ -1,0 +1,25 @@
+{
+  "id": "limit-teaching-ph",
+  "label": "教学短板（难自动分层适配）",
+  "title": "教学短板（难自动分层适配）：看懂它是怎么起作用的",
+  "concept": "教学短板（难自动分层适配）",
+  "kp_ids": [
+    "limit-teaching-ph"
+  ],
+  "grade_levels": [
+    "primary_high"
+  ],
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  },
+  "body": "<h1 class=\"anim-title\">教学短板（难自动分层适配）：看懂它是怎么起作用的</h1>\n<p class=\"anim-caption\" id=\"caption\">一条条对一遍…</p>\n<div class=\"anim-canvas\">\n  <div id=\"list\" style=\"padding:8px 12px\"></div>\n</div>\n<p class=\"anim-caption\"><span class=\"chip\" id=\"ok-count\">0 / 0</span></p>\n",
+  "script": "\nfunction makeTicker(durationMs, onFrame) {\n  var startTs = 0;\n  var raf = 0;\n  var running = false;\n  var lastT = 0;\n  function frame(ts) {\n    if (!running) return;\n    if (!startTs) startTs = ts;\n    var t = Math.min(1, (ts - startTs) / durationMs);\n    lastT = t;\n    onFrame(t);\n    if (t < 1) {\n      raf = requestAnimationFrame(frame);\n    } else {\n      running = false;\n      Sandbox.progress(1);\n    }\n  }\n  return {\n    restart: function () {\n      if (raf) cancelAnimationFrame(raf);\n      startTs = 0;\n      running = true;\n      raf = requestAnimationFrame(frame);\n    },\n    play: function () {\n      if (running) return;\n      running = true;\n      // 简化：从头续播（pause/play 场景够用）\n      startTs = 0;\n      raf = requestAnimationFrame(frame);\n    },\n    pause: function () {\n      running = false;\n      if (raf) cancelAnimationFrame(raf);\n      raf = 0;\n    }\n  };\n}\n\nvar SPEED = {{speed}};\nvar DURATION = Math.round(3600 / SPEED);\nvar list = document.getElementById('list');\nvar caption = document.getElementById('caption');\nvar chip = document.getElementById('ok-count');\nvar STAGES = [{\"title\": \"这也是教育场景实际…\", \"hint\": \"AI 不能自动判断你的…\", \"caption\": \"这也是教育场景实际调研发现的现实痛点\"}, {\"title\": \"二是要使用者手动说…\", \"hint\": \"再看它有什么用\", \"caption\": \"二是要使用者手动说明自己的年级，它才会调整难度；\"}, {\"title\": \"三是它无法自动诊断…\", \"hint\": \"还要知道边界\", \"caption\": \"三是它无法自动诊断你的薄弱知识点，\"}];\nvar N = STAGES.length;\nvar rows = [];\nfor (var i = 0; i < N; i += 1) {\n  var row = document.createElement('div');\n  row.style.cssText = 'display:flex;gap:10px;align-items:flex-start;padding:10px 8px;border-bottom:1px solid #eef2f7;opacity:0.35';\n  var mark = document.createElement('span');\n  mark.textContent = '○';\n  mark.style.cssText = 'width:18px;flex:0 0 18px;color:#3b82f6';\n  var body = document.createElement('div');\n  var t = document.createElement('div');\n  t.textContent = STAGES[i].title;\n  t.style.cssText = 'font-size:14px;font-weight:600;color:#12233b';\n  var h = document.createElement('div');\n  h.textContent = STAGES[i].hint;\n  h.style.cssText = 'font-size:12px;color:#5b6b82;margin-top:2px';\n  body.appendChild(t);\n  body.appendChild(h);\n  row.appendChild(mark);\n  row.appendChild(body);\n  list.appendChild(row);\n  rows.push({ row: row, mark: mark });\n}\nfunction play() {\n  for (var i = 0; i < N; i += 1) {\n    rows[i].row.style.opacity = '0.35';\n    rows[i].mark.textContent = '○';\n  }\n  caption.textContent = STAGES[0].caption;\n  chip.textContent = '1 / ' + N;\n  var handle = makeTicker(DURATION, function (t) {\n    var i = Math.min(N - 1, Math.floor(t * N));\n    for (var k = 0; k <= i; k += 1) {\n      rows[k].row.style.opacity = '1';\n      rows[k].mark.textContent = '●';\n    }\n    caption.textContent = STAGES[i].caption;\n    chip.textContent = (i + 1) + ' / ' + N;\n    Sandbox.progress(t);\n  });\n  handle.restart();\n  return handle;\n}\nSandbox.play(play);\nSandbox.ready();\n",
+  "fallback_text": "（小学高年级讲法）教学短板（难自动分层适配）：AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真实发现的痛点。 再记一句：教学短板，是指 AI 很难自动分层适配不同的学习者：它不能自动判断使用者的年龄和知识基础，也就不能自动调整内容的难度。 这也是教育场景实际调研发现的现实痛点。 它的特点有三个：一是默认输出中等难度的内容，不会自动区分小学生、初中生和高中生；。"
+}

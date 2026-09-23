@@ -1,0 +1,37 @@
+{
+  "kp_id": "genai-sr",
+  "grade_level": "senior",
+  "name": "生成式大模型（GenAI）",
+  "concept": "生成式大模型（GenAI）",
+  "template_id": "genai",
+  "archetype": "compare",
+  "title": "生成式大模型（GenAI）：看懂它是怎么起作用的",
+  "steps": [
+    {
+      "left": "不是这个",
+      "right": "生成式大模型（…",
+      "caption": "先明确概念边界：会「创造」，能自己写文章、"
+    },
+    {
+      "left": "2022 …",
+      "right": "生成式大模…",
+      "caption": "再拆机制与前提：2022 年底 ChatGPT 的发布是这一范式"
+    },
+    {
+      "left": "记住这个",
+      "right": "会「创造」…",
+      "caption": "最后关联上下游与局限：会「创造」，能自己写文章、"
+    }
+  ],
+  "fallback_text": "（高中讲法）生成式大模型（GenAI）：会「创造」，能自己写文章、画画、做视频，而不只是做判断。 再记一句：生成式大模型（Generative AI）指以大规模神经网络为基础、能够生成全新内容样本的模型，是深度学习（3.2.1）中最晚近也最受关注的分支。 与判别式模型的对照是其定义核心：判别式模型估计条件概率 $P(y \\mid x)$，输出对输。",
+  "duration_ms": 4800,
+  "params": {
+    "speed": {
+      "type": "float",
+      "min": 0.5,
+      "max": 3,
+      "default": 1.2,
+      "description": "播放速度倍数"
+    }
+  }
+}
