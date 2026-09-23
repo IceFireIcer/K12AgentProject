@@ -66,6 +66,7 @@ from app.contracts import (
 )
 from app.routes.students import (
     DEFAULT_COLD_START_GRADE,
+    DEFAULT_STUDENT_NICKNAME,
     as_grade_level,
     open_learning_store,
     require_data_dir,
@@ -380,7 +381,10 @@ def build_recommendation(
                         grade_level=_as_grade_or_none(_kp_grade(conn, kp_id)),
                         depth=0,
                         mastery=max(0.0, min(1.0, mastery_map.get(kp_id, 0.0))),
-                        reason="这个还没学过 —— 想的话可以从它开始看看。",
+                        # ★ 标点口径（报告 C16）：这条 reason 会进右栏与学习记录页，
+                        #   还会被 `report-markdown.ts` 带进导出件 —— 学生面文案不用
+                        #   `——` 断句（它是本应用里 LLM 文案的常见指纹），用逗号。
+                        reason="这个还没学过，想的话可以从它开始看看。",
                     )
                 )
             if items and source == "empty":
@@ -412,7 +416,7 @@ def build_recommendation(
 #:    文案里出现两个学生就不知道点下去会去哪里（这条纪律有过实测教训）。
 _OPENING_VARIANTS: tuple[str, ...] = (
     "今天想聊点什么？我这边可以先从{name}说起，想听听吗？",
-    "想学点什么都可以 —— 要不我们从{name}聊起？",
+    "想学点什么都可以，要不我们从{name}聊起？",
     "先从{name}开始怎么样？不想聊它，也可以问我别的。",
     "你有什么想学的？或者我随手挑一个：{name}，要听听看吗？",
 )
@@ -467,7 +471,7 @@ def _recommendation_summary(source: RecommendationSource, items: list[Recommenda
         return f"先回头把{names}再练熟一点，我们再往前走。"
     # ★ D-074：不再有「顺着依赖图往下学」与「学习路线的起点」两种说法 ——
     #   推荐只是「你还没学过的、可以看看的」，不含任何顺序主张。
-    return f"想学点什么都可以 —— 比如{names}。"
+    return f"想学点什么都可以，比如{names}。"
 
 
 def _as_grade_or_none(value: str | None) -> GradeLevel | None:
@@ -605,7 +609,7 @@ def student_recommendation(
         student = store.get_student(student_id)
         if student is None:
             student = store.upsert_student(
-                student_id, nickname="", grade_level=DEFAULT_COLD_START_GRADE
+                student_id, nickname=DEFAULT_STUDENT_NICKNAME, grade_level=DEFAULT_COLD_START_GRADE
             )
             logger.info(
                 "冷启动：为 %s 建立学生行（学段 %s），直接给推荐路径",
@@ -667,7 +671,7 @@ def student_opening(
         student = store.get_student(student_id)
         if student is None:
             student = store.upsert_student(
-                student_id, nickname="", grade_level=DEFAULT_COLD_START_GRADE
+                student_id, nickname=DEFAULT_STUDENT_NICKNAME, grade_level=DEFAULT_COLD_START_GRADE
             )
             logger.info("冷启动：为 %s 建立学生行（学段 %s），生成开场引导", student_id, student.grade_level)
         level = override or student.grade_level
@@ -737,7 +741,7 @@ def record_learning_event(
         if student is None:
             student = store.upsert_student(
                 student_id,
-                nickname="",
+                nickname=DEFAULT_STUDENT_NICKNAME,
                 grade_level=payload.grade_level or DEFAULT_COLD_START_GRADE,
             )
             logger.info("冷启动：为 %s 自动建立学生行（学段 %s）", student_id, student.grade_level)
@@ -809,7 +813,7 @@ def update_preference(
         student = store.get_student(student_id)
         if student is None:
             student = store.upsert_student(
-                student_id, nickname="", grade_level=DEFAULT_COLD_START_GRADE
+                student_id, nickname=DEFAULT_STUDENT_NICKNAME, grade_level=DEFAULT_COLD_START_GRADE
             )
             logger.info("冷启动：为 %s 自动建立学生行（学段 %s）", student_id, student.grade_level)
 

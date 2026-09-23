@@ -64,6 +64,7 @@ from app.knowledge.library import (
 )
 from app.routes.students import (
     DEFAULT_COLD_START_GRADE,
+    DEFAULT_STUDENT_NICKNAME,
     as_grade_level,
     open_learning_store,
     require_data_dir,
@@ -577,7 +578,7 @@ def feedback_for(question: QuizQuestion, correct: bool) -> str:
 #:   这不是措辞软化，是同一件事实换了个学生听得进去的说法），
 #:   但落点是「接着往下走」，而不是「你这次白答了」。
 REPEAT_ATTEMPT_SUFFIX = (
-    "（这道题你之前已经答过啦，这次就算再练一遍，不计分 —— "
+    "（这道题你之前已经答过啦，这次就算再练一遍，不计分，"
     "掌握度和闯关进度都不会因此改变。我们接着往下练吧～）"
 )
 
@@ -1515,7 +1516,9 @@ def register_variants(
         # 「学生还没登录就先开始做题」不该丢数据，也不该让之后的 `GET /api/profile` 回 404
         # —— 那样学生会看到「我没有学习记录」，而他明明刚做了题。
         if store.get_student(student) is None:
-            store.upsert_student(student, nickname="", grade_level=body.grade_level)
+            store.upsert_student(
+                student, nickname=DEFAULT_STUDENT_NICKNAME, grade_level=body.grade_level
+            )
             logger.info("冷启动：为 %s 建立学生行（学段 %s）", student, body.grade_level)
         store.save_generated_questions(accepted)
         # 冷启动/首次练习：把进度行补出来（**只插不覆盖**），否则前端拿到的进度里没这几关
@@ -1699,7 +1702,7 @@ def read_progress(
         student = store.get_student(student_id)
         if student is None:
             student = store.upsert_student(
-                student_id, nickname="", grade_level=COLD_START_GRADE
+                student_id, nickname=DEFAULT_STUDENT_NICKNAME, grade_level=COLD_START_GRADE
             )
             logger.info("冷启动：为 %s 建立学生行（学段 %s）", student_id, student.grade_level)
 

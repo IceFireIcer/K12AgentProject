@@ -66,7 +66,11 @@ from app.grade.signals import (
     mean_strength,
     rank_of,
 )
-from app.routes.students import DEFAULT_COLD_START_GRADE, as_grade_level
+from app.routes.students import (
+    DEFAULT_COLD_START_GRADE,
+    DEFAULT_STUDENT_NICKNAME,
+    as_grade_level,
+)
 from app.store.learning import LearningStore
 
 logger = logging.getLogger(__name__)
@@ -583,16 +587,26 @@ class GradeEngine:
 
     # ------------------------------------------------------------ 冷启动 --
     def ensure_student(self, student_id: str) -> str:
-        """确保学生行存在；不存在则建（默认小学高年级）并留一条**基线**轨迹。
+        """确保学生行存在；不存在则建（默认初中）并留一条**基线**轨迹。
 
         基线那行的 ``from_level`` 是 ``NULL``：它**不是一次变更**，
         因此不参与冷却期计算（否则学生会在第 5 轮前一直被误冷却）。
+
+        ★ 建行时昵称用 :data:`routes.students.DEFAULT_STUDENT_NICKNAME`（**不许留空**）：
+          本方法是「学段引擎先看到一个陌生人 id」时的落库点，而空昵称会一路传到
+          学习记录页 / 侧栏（渲染侧只能回落成主键或留白，见 D-063 与报告 1.7）。
+          口径与桌面端建号（``handlers-data.ts`` 的 ``nickname: '同学'``）一致。
+          ⚠️ **不覆盖已有行**：``upsert_student`` 走 ``ON CONFLICT`` 分支会整行回写
+             ``nickname`` —— 只在 ``existing is None`` 时调用它，所以学生自己改过的
+             昵称不会被这里抹掉。
         """
         existing = self.store.get_student(student_id)
         if existing is not None:
             return as_grade_level(existing.grade_level)
 
-        self.store.upsert_student(student_id, nickname="", grade_level=self.default_level)
+        self.store.upsert_student(
+            student_id, nickname=DEFAULT_STUDENT_NICKNAME, grade_level=self.default_level
+        )
         with self.store.conn:
             self.store.conn.execute(
                 "INSERT INTO grade_history(ts, turn, from_level, to_level, source, confidence) "

@@ -72,6 +72,28 @@ STUDENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 #:   界面照旧显示「待判定」，不冒充任何一层引擎的结论（D-066）。
 DEFAULT_COLD_START_GRADE: GradeLevel = "junior"
 
+#: 冷启动建行时的**默认昵称**（与桌面端同一口径：``desktop/src/main/ipc/handlers-data.ts``
+#: 的建号请求带的就是 ``nickname: '同学'``）。
+#:
+#: ★★ 为什么必须非空：``student.nickname`` 是**显示字段**，它会经 ``/api/students``（侧栏
+#:    与问候语）、``GET /api/profile/{id}``、``GET /api/profile/{id}/report``（学习记录页，
+#:    还会被导出件带上）一路走到界面上。落一个空串下去，界面要么留白、要么回落到
+#:    ``student_001`` 这种**内部主键** —— 而内部 id 出现在学生面前是双视角纪律的违规
+#:    （D-063：学生面禁内部 id）。「同学」是与「不采集真实姓名」（§12 数据最小化）
+#:    配套的中性称呼，也是渲染侧（``stores/student.ts`` 的 ``nickname`` computed）
+#:    的同名回落值 —— 两边取的是**同一个词**，所以哪一侧先兜住，学生看到的都一样。
+#:
+#: ⚠️ 它只约束**写入**。契约的出参默认值（``contracts.LearningReport.nickname: str = ""``）
+#:    不动：那是一个**为旧数据留的兜底**，改它会牵 ``export_openapi`` → ``gen:api``
+#:    → TS 类型与 ``check:api``（本次刻意不碰契约）。
+#:
+#: ★ 谁在用它：``app/grade/rules.py`` 的 ``ensure_student``（学段引擎的冷启动）与
+#:   ``app/routes/profile.py`` 的四处冷启动建行（推荐 / 开场 / 学习记录 / 偏好）。
+#:   ``POST /api/students`` **不需要**它 —— 那条路的昵称由契约校验器把着
+#:   （``StudentCreateRequest._strip_nickname`` 对空白抛 ``ValueError`` → 422），
+#:   所以这里也不给它加「空就当默认」的兜底（那是一段永远走不到的代码）。
+DEFAULT_STUDENT_NICKNAME = "同学"
+
 
 def _now_ms() -> int:
     """Unix 毫秒（与 JS ``Date.now()`` 同尺度）。"""
@@ -379,6 +401,7 @@ def create_student(payload: StudentCreateRequest, request: Request) -> Student:
 
 __all__ = [
     "DEFAULT_COLD_START_GRADE",
+    "DEFAULT_STUDENT_NICKNAME",
     "InMemoryStudentStore",
     "LEARNING_DB_NAME",
     "LearningDbStudentStore",
