@@ -69,6 +69,12 @@ export interface DataBridge {
     gradeLevel?: GradeLevel
     params?: Record<string, unknown>
     fallbackText?: string
+    /**
+     * 烙进产物的 `payload_id` —— **必须与随后那次 `hostAnimation` 的同一个值**：
+     * 产物里带着谁，沙箱就回谁；宿主只认它自己那把 id。对不上 = 每条消息被过滤 =
+     * 5 秒超时 + 整段降级（见 `ipc/channels.ts` 的注释）。
+     */
+    payloadId?: string
   }): Promise<DataCallResult>
   hostAnimation(payload: { kpId: string; html: string; payloadId: string }): Promise<DataCallResult>
 

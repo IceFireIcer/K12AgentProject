@@ -82,6 +82,13 @@ const { resetWiringNotices } = await import('../src/renderer/src/api/wiring-noti
 
 interface FakeBridge {
   calls: Record<string, number>
+  /**
+   * 每个方法**最近一次**收到的入参。
+   *
+   * ★ 为什么要有：有些端点的**两个调用之间必须一致**（渲染烙进 HTML 的 `payload_id`
+   *   与托管那把必须是同一个），只数调用次数抓不到这类缺陷。
+   */
+  payloads: Record<string, Record<string, unknown> | undefined>
   /** 让某个方法回失败（下一个请求生效）。 */
   failWith(method: string, message: string | null): void
   /** 让某个方法**抛异常**（覆盖渲染进程侧「传输层直接抛」那条路径）。 */
@@ -116,6 +123,7 @@ const DATA_METHODS = [
 /** 装一个假桥；`omit` 里的方法不提供（用来验能力探测）。 */
 function installFakeBridge(omit: readonly string[] = []): FakeBridge {
   const calls: Record<string, number> = {}
+  const payloads: Record<string, Record<string, unknown> | undefined> = {}
   const failures = new Map<string, string>()
   const throws = new Map<string, unknown>()
   const responses = new Map<string, unknown>()
@@ -128,6 +136,7 @@ function installFakeBridge(omit: readonly string[] = []): FakeBridge {
     //   否则假响应会与真实后端不一致，测出来的「bug」其实是夹具的锅。
     api[method] = async (payload?: Record<string, unknown>) => {
       calls[method] = (calls[method] ?? 0) + 1
+      payloads[method] = payload
       // 抛异常优先于回失败：渲染进程侧**两条路径**都要能变成可读中文
       if (throws.has(method)) throw throws.get(method)
       const failure = failures.get(method)
@@ -160,6 +169,7 @@ function installFakeBridge(omit: readonly string[] = []): FakeBridge {
 
   return {
     calls,
+    payloads,
     failWith: (method, message) => {
       if (message === null) failures.delete(method)
       else failures.set(method, message)
@@ -743,6 +753,38 @@ test('★ 动画走「模板 → 渲染 → 一次性托管」三步，托管地
   assert.equal(hosted.payloadId, 'payload-abc', 'payloadId 必须原样带回（沙箱靠它防多卡串台）')
   assert.equal(anim.canPlay, true)
   assert.ok((hosted.url ?? '').length > 0)
+})
+
+test('★★ 渲染与托管必须用同一个 payload_id（两个 id 不一致 = 动画全部降级）', async () => {
+  // ── 这条挡的是用户实测报的缺陷（2026-09-23）────────────────────────────
+  // 症状：**动画讲解页的动画全部**播不出来，每段都在 5 秒后降级成文字。
+  // 现场（CDP 抓到）：沙箱发的是 `ready(payload_id="preview")`，而宿主等的是
+  //   自己新造的 UUID → 来源对了、id 不对 → `handleMessage` 每小时都判它「别人的消息」丢掉
+  //   → 永远等不到 ready → 超时降级。
+  // 两个 id 的来源：**产物里那个由渲染决定**（不传时服务端落 `"preview"`，
+  //   `server/app/routes/resources.py`：`payloadId or "preview"`），**宿主那个由托管决定**。
+  //   ⇒ 只要「渲染不传 id」而「托管自己造一个」，两边**必然**对不上，且错误表现
+  //   离根因很远（看起来像模板坏了 / 沙箱没起来）。
+  // ⚠️ 主进程的工具路径一直是对的（一次生成、两处回传）——所以聊天里的卡片能播，
+  //    只有走「页面 → renderAndHost」那条路全挂。两边行为不一致本身就是线索。
+  const bridge = installFakeBridge()
+  const { useAnimationStore } = await import('../src/renderer/src/stores/animation.ts')
+  setActivePinia(createPinia())
+  const anim = useAnimationStore()
+
+  await anim.loadTemplates()
+  await anim.renderAndHost({ templateId: 'neural-forward' })
+
+  const rendered = bridge.payloads.renderAnimation?.payloadId
+  const hosted = bridge.payloads.hostAnimation?.payloadId
+  assert.equal(typeof rendered, 'string', '渲染必须带上 payload_id（不传的话服务端会落 "preview"）')
+  assert.ok((rendered as string).length > 0, 'payload_id 不许是空串')
+  assert.notEqual(rendered, 'preview', '不许落到服务端的默认值 —— 那与托管那把必然对不上')
+  assert.equal(
+    hosted,
+    rendered,
+    '托管必须用**渲染时那一个** id：沙箱回的是产物里的 id，宿主只认自己的，对不上就永远收不到 ready'
+  )
 })
 
 test('★ 拿不到知识点时拒绝托管（托管要按「学生 + 知识点」分目录）', async () => {

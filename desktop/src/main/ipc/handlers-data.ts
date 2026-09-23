@@ -284,6 +284,9 @@ export function registerDataHandlers(options: {
     if (typeof request.kpId === 'string' && request.kpId) render.kpId = request.kpId
     if (typeof request.fallbackText === 'string') render.fallbackText = request.fallbackText
     if (request.params && typeof request.params === 'object') render.params = request.params
+    // ★ 转发 payload_id：不转发的话服务端会落默认的 `"preview"`，而托管侧另造一个 UUID，
+    //   两边对不上 → 沙箱的每条消息被宿主过滤 → 动画必降级（见 `AnimationRenderRequest` 注释）。
+    if (typeof request.payloadId === 'string' && request.payloadId) render.payloadId = request.payloadId
     if (request.gradeLevel !== undefined) {
       const level = readGradeLevel(request.gradeLevel)
       if (level === null) return { ok: false, message: '渲染失败：学段不合法。' }

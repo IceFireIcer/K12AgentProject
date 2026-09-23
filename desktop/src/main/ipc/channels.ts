@@ -761,6 +761,20 @@ export interface AnimationRenderRequest {
   gradeLevel?: GradeLevel
   params?: Record<string, unknown>
   fallbackText?: string
+  /**
+   * 烙进产物 HTML 的 `payload_id`。
+   *
+   * ★★ **渲染与托管必须是同一个值**：产物里带着谁，沙箱就回谁，而宿主只认它自己那把 id。
+   *   两边各生成一个 → 沙箱发来的每条消息（含 `ready`）都被当成别人的 → 永远等不到 ready →
+   *   5 秒超时 → 整段动画降级成文字。
+   *   ⚠️ 服务端缺省会烙 `"preview"`（`server/app/routes/resources.py`：`payloadId or "preview"`）——
+   *   所以**不传**等于与托管侧新造的 UUID 必然对不上。
+   *   实测症状（2026-09-23）：动画讲解页的动画**全部**降级，`data-degrade-reason` =
+   *   「沙箱在 5 秒内没有就绪」，而沙箱其实发过 `ready(payload_id="preview")`。
+   *   主进程的工具路径早就是对的（一次生成、渲染与托管两处回传），
+   *   见 `agent/extensions/animation.ts` 里「卡片手里的那个 payload_id」那条注释。
+   */
+  payloadId?: string
 }
 
 /**

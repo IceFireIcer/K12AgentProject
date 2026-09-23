@@ -780,58 +780,93 @@ test('降级判定：html 为空不建 iframe（少一次必然失败的加载�
   assert.equal(shouldMountIframe(null), false)
 })
 
-test('★★ 托管路径失败必须**先回退内联 HTML**，不能直接降级（实测缺陷的回归）', () => {
-  // ── 缺陷是什么 ────────────────────────────────────────────────────
-  // 托管地址带的是**一次性 nonce，TTL 120 秒**（`app/routes/resources.py`）。一旦 iframe
-  // 重新加载它（应用重启后回看历史 / 组件被重建），后端就拒收 —— 实测日志：
-  //     WARNING app.routes.resources: 动画资源被拒 … 原因=used
-  //     WARNING app.routes.resources: 动画资源被拒 … 原因=expired
-  // 而**载荷里明明躺着完整的内联 HTML**（`html` 字段）。旧实现却直接进降级视图，
-  // 学生看到「动画没能加载，已用文字讲解」—— 一个本该放出来的动画白白没了。
+test('★★ 对话卡片只从内联 HTML 挂 iframe —— 一次性 nonce 的 used/expired 不可能落到学生眼前', () => {
+  // ── 这条断言挡的是用户实测报的缺陷（2026-09-23） ────────────────────
+  // 托管地址 = 一次性 nonce + TTL 120s + `Cache-Control: no-store`
+  // （`server/app/routes/resources.py`：`单次消费`）。而卡片拿到的 `resourceUrl` 是
+  // **跟着会话落盘的**：切页回来重建组件、回看历史、隔 2 分钟再看、
+  // 甚至 Chromium 丢弃隐藏 iframe 文档后再加载 —— 任一种都会把同一个地址再取一次
+  // → 403 `used` / `expired` → iframe 把
+  //   `{"detail":"动画资源未通过 nonce 校验（used）"}` 当作文档渲染出来，
+  // **直接摆进学生的对话**，还得再干等 5 秒超时才回退。
   //
-  // ── 为什么这条断言写在源码级 ───────────────────────────────────────
-  // 卡片是 `.vue` 组件，`node --test` 里没有 Vue 运行时；而这条纪律的关键
-  // 恰恰是「失败处理里有没有那个回退分支」，源码级断言能直接钉住它 ——
-  // 且改动这个分支必须显式改测试（这正是我们想要的摩擦）。
-  // ★ 先归一化换行：本仓库的 .vue 在 Windows 工作区里是 CRLF，
-  //   而下面按 `\n` 写的切片锚点在 CRLF 文本里匹配不到（实测踩到：errorBody 一路切到文件尾，
-  //   于是「不得出现 goDegraded」的断言去扫了整份源码，测试**假红**）。
+  // 旧实现是「托管优先、失败回退内联」（当年源码里留着实测记录：原因=used / expired），
+  // 那是**止血不是修复**：它承认网络往返会失败，却仍让失败在学生眼前停留 5 秒。
+  // 现在的口径是**那次请求根本不该发生**：内联 HTML 永远在（挂载条件就是它非空），
+  // 而托管的正是同一份 HTML（`hostAnimation({kpId, html})` 原样落盘）——
+  // 走内联 = nonce 没被消费，也就没有「第二次」可言（used 与 expired 同时失效）。
+  // 附带收益：卡片不再依赖 sidecar 存活（它挂了动画照样能播）。
+  //
+  // ⚠️ 规格 D10 的托管服务**没有被架空**：动画讲解页的舞台是它的正常消费者
+  //   （每次 `renderAndHost` 现签新地址、不会复用旧地址；实测切页回来不发第二次请求）。
+  //
+  // ★ 为什么写成源码级断言：卡片是 `.vue`，`node --test` 里没有 Vue 运行时；
+  //   而这条纪律的要害恰恰是「源码里还有没有把 URL 绑到 iframe 上的分支」——
+  //   源码断言能直接钉住它，且**删掉/加回那条分支都必须显式改本测试**（这正是想要的摩擦）。
+  // ★ 先归一化换行：本仓库 `.vue` 在 Windows 工作区里可能是 CRLF，
+  //   按 `\n` 写的切片锚点在 CRLF 文本里匹配不到（实测踩过：切片一路跑到文件尾，
+  //   断言去扫了整份源码，测试**假红**）。
   const source = readFileSync(
     join(DESKTOP_ROOT, 'src', 'renderer', 'src', 'cards', 'AnimationCard.vue'),
     'utf8'
   ).replace(/\r\n/g, '\n')
 
-  assert.match(source, /function handleFailure\(/, '超时与沙箱自报错误必须走统一的失败处理')
+  /**
+   * 剥注释后只看**代码**。
+   *
+   * ⚠️ 必须有这一步：本文件用**自然语言**解释了「为什么删掉托管开关」，
+   *   注释里难免出现那个标识符。扫整份源码会把**说明**当成**实现**（实测：
+   *   第一版直接 `doesNotMatch(/useHosted/)` 就是被自己写的注释判红）——
+   *   那等于禁止后人在代码里记录历史，判据与意图背道而驰。
+   * `//` 前加 `[^:]` 看着：别吃掉 `http://` 这种 URL 里的双斜线。
+   */
+  const code = source
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+
+  // ① iframe 只吃内联 HTML：**不许**出现把 URL 绑上去的写法
+  assert.match(source, /:srcdoc="view\.html"/, 'iframe 必须直接吃内联 HTML')
+  assert.doesNotMatch(
+    code,
+    /:src="/,
+    '不许给这个 iframe 绑 src —— 绑了就等于把持久化的 nonce 交给浏览器去取第二次'
+  )
+  assert.doesNotMatch(
+    code,
+    /useHosted/,
+    '托管开关（useHosted）必须连同它的回退分支一起删干净：留着就有人会把那条路径加回来'
+  )
+
+  // ② 挂载条件仍然只认 html（html 为空 → 不建 iframe → 直接文字讲解，少一次必然失败的加载）
+  assert.match(
+    source,
+    /const mountIframe = ref<boolean>\(shouldMountIframe\(view\.html\)\)/,
+    '挂载条件只能是「载荷里有 HTML」，不得再引回 resourceUrl'
+  )
+
+  // ③ 两个失败入口都走统一处理（超时 / 沙箱自报错）
+  // ★ 断言要**贴着回调体**取，不能给宽松字符窗口 —— 实测：
+  //   写成 `onTimeout:[\s\S]{0,220}?…` 时，改回 `goDegraded(` 也能匹配上（窗口吃到下面 onError），**假绿**。
+  const timeoutBody = source.slice(source.indexOf('onTimeout:'), source.indexOf('onError:'))
+  assert.match(timeoutBody, /handleFailure\(/, '超时入口的回调体里必须调 handleFailure')
+  const errorBody = source.slice(source.indexOf('onError:'), source.indexOf('\n  })\n  return instance'))
+  assert.match(errorBody, /handleFailure\(/, '沙箱自报错误的回调体里必须调 handleFailure')
+
+  // ④ 统一失败处理的**终点**是降级视图（绝不白屏），且**不得**再重建宿主去换数据源
   const handler = source.slice(
     source.indexOf('function handleFailure('),
     source.indexOf('function buildHost(')
   )
-  assert.match(handler, /useHosted\.value = false/, '失败处理里必须把数据源切回内联')
-  assert.match(handler, /fellBackToInline\.value = true/, '必须记录已回退（防止来回重试）')
-  assert.match(handler, /host\.value = buildHost\(\)/, '回退后要真的用新数据源重建宿主')
-  assert.match(handler, /goDegraded\(reason\)/, '回退之后仍失败才降级 —— 降级仍是终态，绝不白屏')
-  assert.match(handler, /view\.html\.trim\(\)\.length > 0/, '没有内联 HTML 时不进回退分支（别绕圈）')
-
-  // 两个失败入口都必须走 handleFailure（不能有人漏掉回退）
-  // ★ 断言要**贴着回调体**取，不能给一个宽松的字符窗口 —— 实测：写成
-  //   `onTimeout:[\s\S]{0,220}?handleFailure\(` 时，把回调体改回 `goDegraded(...)`
-  //   仍然能匹配上（窗口一路吃到下面 `onError` 里的 handleFailure），测试**假绿**。
-  const timeoutBody = source.slice(source.indexOf('onTimeout:'), source.indexOf('onError:'))
-  assert.match(timeoutBody, /handleFailure\(/, '超时入口的回调体里必须调 handleFailure（不是 goDegraded）')
-  assert.doesNotMatch(timeoutBody, /goDegraded\(/, '超时入口不得直接 goDegraded（那会跳过内联回退）')
-
-  // `onError` 的回调体到 `buildHost` 里那段 options 对象结束为止
-  const errorBody = source.slice(source.indexOf('onError:'), source.indexOf('\n  })\n  return instance'))
-  assert.match(errorBody, /handleFailure\(/, '沙箱自报错误的回调体里必须调 handleFailure')
-  assert.doesNotMatch(errorBody, /goDegraded\(/, '沙箱自报错误不得直接 goDegraded')
-
-  // iframe 必须按数据源换 key：只改同一个元素的 src/srcdoc 不保证重新导航
-  assert.match(source, /:key="useHosted \? 'hosted' : 'inline'"/, '换数据源要换 iframe 元素')
-  assert.match(
-    source,
-    /:data-resource="useHosted \? 'hosted' : 'inline'"/,
-    'data-resource 要如实反映当前数据源（CDP 脚本据此断言走了哪条路）'
+  assert.match(handler, /goDegraded\(reason\)/, '失败的终点必须是降级视图 —— 降级是终态，绝不白屏')
+  assert.doesNotMatch(
+    handler,
+    /buildHost\(\)/,
+    '不得重建宿主去切换数据源：内联是唯一数据源，重建只是把失败换个样子演一遍'
   )
+
+  // ⑤ 探针口径：`data-resource` 如实写死 inline（CDP 据此确认走了哪条路）
+  assert.match(source, /data-resource="inline"/, 'data-resource 必须如实标注当前数据源')
 })
 
 /* ================================================================== *

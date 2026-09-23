@@ -139,6 +139,20 @@ export const useAnimationStore = defineStore('animation', () => {
   }
 
   /**
+   * 当前渲染产物对应的 `payload_id`（渲染与托管**共用**这一个值）。
+   *
+   * ★★ 2026-09-23 实测缺陷：动画讲解页的动画**全部**降级成文字，
+   *   `data-degrade-reason` 全是「沙箱在 5 秒内没有就绪」。抓包看沙箱其实发了
+   *   `ready(payload_id="preview")`，而宿主等的是自己新造的 UUID —— 两边对不上，
+   *   每条消息都被宿主当别人的丢掉，于是永远等不到 ready。
+   *   两个 id 的来源：产物里那个由**渲染**决定（不传时服务端落 `"preview"`，
+   *   见 `server/app/routes/resources.py`），宿主那个由**托管**决定。
+   *   ⇒ 一次生成、两处回传；主进程工具路径早就是这么做的
+   *   （`agent/extensions/animation.ts` 的「卡片手里的那个 payload_id」注释）。
+   */
+  const renderPayloadId = ref('')
+
+  /**
    * 按模板渲染。
    *
    * ★ 渲染失败是**预期内**的（模板校验不过 / 没有匹配的模板），
@@ -146,7 +160,8 @@ export const useAnimationStore = defineStore('animation', () => {
    * ★ 渲染成功后清掉上一次的托管结果：那个 nonce 已经不该再用了。
    */
   async function render(
-    input: { templateId?: string; kpId?: string; gradeLevel?: GradeLevel } = {}
+    input: { templateId?: string; kpId?: string; gradeLevel?: GradeLevel } = {},
+    explicitPayloadId?: string
   ): Promise<void> {
     const templateId = input.templateId ?? activeTemplateId.value
     if (!templateId && !input.kpId) {
@@ -165,11 +180,15 @@ export const useAnimationStore = defineStore('animation', () => {
     renderError.value = null
     hosted.value = null
     hostError.value = null
+    // ★ 与随后托管共用的那一个 id（默认新造；显式传入是为了「同一 id 贯穿两步」的调用方/测试）。
+    const payloadId = explicitPayloadId || newPayloadId()
+    renderPayloadId.value = payloadId
     try {
       const result = await lookup.bridge.renderAnimation({
         ...(templateId ? { templateId } : {}),
         ...(input.kpId ? { kpId: input.kpId } : {}),
-        ...(input.gradeLevel ? { gradeLevel: input.gradeLevel } : {})
+        ...(input.gradeLevel ? { gradeLevel: input.gradeLevel } : {}),
+        payloadId
       })
       if (result.ok) payload.value = result.data as AnimationPayloadView
       else {
@@ -211,7 +230,11 @@ export const useAnimationStore = defineStore('animation', () => {
       bridgeError.value = lookup.message
       return null
     }
-    const id = payloadId ?? newPayloadId()
+    // ★★ 默认用**渲染时烙进产物的那一个 id**（见 `renderPayloadId`）。
+    //   不这么做的后果不是「重试一次」，而是**必然降级**：产物里是别的 id，
+    //   沙箱回的 `ready` 永远被宿主过滤 → 5 秒超时 → 整段动画变成文字。
+    //   显式传入只允许用于「你同时也把同一个 id 传给了渲染」的场景（调用方/测试）。
+    const id = payloadId || renderPayloadId.value || newPayloadId()
     hosting.value = true
     hostError.value = null
     try {

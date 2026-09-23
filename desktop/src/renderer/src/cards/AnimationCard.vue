@@ -14,8 +14,12 @@
  *    本组件只负责把 window 事件转进去。
  *
  * 3. ★ **失败/超时一律降级成文字讲解，绝不白屏**。
- *    四条降级入口：载荷里 `html` 为空（编排层已降级）、iframe 5s 没 `ready`、
- *    沙箱自报 `error`、`resourceUrl` 与 `srcdoc` 都没有。四条都走同一个 {@link goDegraded}。
+ *    三条降级入口：载荷里 `html` 为空（编排层已降级）、iframe 5s 没 `ready`、
+ *    沙箱自报 `error`。三条都走同一个 {@link goDegraded}。
+ *
+ *    ⚠️ 2026-09-23：本卡片**不再走托管地址**（原实现「托管优先、失败回退内联」已删），
+ *      理由见 `mountIframe` 上那段 —— 一句话：一次性 nonce 落到持久载荷里就必然是死地址，
+ *      再让 iframe 去取它，学生就会直面一个 `{"detail":"动画资源未通过 nonce 校验（used）"}`。
  *
  *    ⚠️ 2026-09-22（报告 1.8 / 4.3「动画内嵌白卡：删除」）：降级态原来还渲染一张
  *    `<img class="anim__fallback-img">` —— 它是主进程按**同一段降级文案**生成的 SVG
@@ -52,8 +56,32 @@ const payloadId = ref<string>(
     : `card-${props.card.id.replace(/[^A-Za-z0-9_-]/g, '_')}`
 )
 
-/** 挂 iframe 的条件：有 HTML **且**有可加载的地址/内联内容。 */
-const mountIframe = ref<boolean>(shouldMountIframe(view.html) && (view.resourceUrl !== null || view.html !== ''))
+/**
+ * 挂 iframe 的条件：**载荷里有 HTML**（`shouldMountIframe`），否则直接进降级视图。
+ *
+ * ★★ 为什么本卡片**只用内联 `srcdoc`，绝不把托管地址放进 `<iframe src>`**（2026-09-23 修复）：
+ *
+ * 旧实现「托管优先、失败再回退内联」有两处硬伤，实测都被用户撞到：
+ *
+ *   ① **载荷是持久化的，nonce 不是**。托管地址带一次性 nonce、TTL 只有 120 秒
+ *      （`server/app/routes/resources.py`：`单次消费` + `Cache-Control: no-store`）。
+ *      而这条 `resourceUrl` 会跟着会话**落盘**：切页回来重建卡片、回看历史、
+ *      隔了 2 分钟再看、甚至 Chromium 丢弃一个隐藏 iframe 文档后再加载 ——
+ *      每一种都会把同一个地址再取一次 → 403 `used` / `expired`。
+ *   ② **失败的表现是把后端错误原文摆给学生**：iframe 拿到 403 就把
+ *      `{"detail":"动画资源未通过 nonce 校验（used）"}` 当作文档渲染出来，
+ *      于是学生在对话里看到一串英文 JSON；然后还要干等 5 秒超时才回退。
+ *
+ * 而内联 HTML **永远都在**：本行的挂载条件就是 `view.html` 非空（空则根本不会建 iframe），
+ * 且托管的文件就是同一份 HTML（`hostAnimation({kpId, html})` 原样落盘）——
+ * 也就是说「内联」与「托管」内容逐字相同，走内联却没有任何网络往返、不消耗 nonce、
+ * 也不依赖 sidecar 存活（sidecar 挂了卡片照样能播）。
+ *
+ * ⚠️ 规格 D10 的「资源服务（Python 托管，带 nonce）」**没有被架空**：托管服务照旧签发与校验，
+ *   **动画讲解页**的舞台就是它的正常消费者（它每次 `renderAndHost` 现签新地址，不会复用旧地址，
+ *   实测切页回来也**不会**二次请求）。本文件只是不再当第二个消费者。
+ */
+const mountIframe = ref<boolean>(shouldMountIframe(view.html))
 
 /** 是否已进入降级视图（文字讲解）。 */
 const degraded = ref<boolean>(false)
@@ -104,9 +132,8 @@ const progressPercent = computed(() => `${Math.round(progress.value * 100)}%`)
  *   动画白做了一次。现在改成：托管路径失败**先回退内联 HTML 再试一次**，
  *   只有连内联都没有时才是真降级。
  */
-const useHosted = ref<boolean>(view.resourceUrl !== null && view.html.trim().length > 0)
-/** 已经回退过一次内联：再失败就是真失败（防来回重试）。 */
-const fellBackToInline = ref(false)
+/** ★ 上面注释解释了为什么本卡片**没有** `useHosted` 这种开关：
+ *    内联是唯一数据源，也就没有「两个数据源之间切换」可言。 */
 
 function goDegraded(reason: string): void {
   if (degraded.value) return
@@ -119,30 +146,20 @@ function goDegraded(reason: string): void {
 }
 
 /**
- * 加载失败的处理：**先回退，再降级**。
+ * 挂载时的一次性通知（保持 `handleFailure` 这个名字：两个失败入口都走它）。
  *
- * 回退是「换一份数据源，同一个载荷」，不是重试同一个坏地址 ——
- * 托管资源失败（nonce 用过 / 过期 / 文件被清）与「动画本身有问题」是两件事，
- * 前者用内联 HTML 完全能救回来。若回退后仍失败（超时 / 沙箱自报错），
- * 那时才是真的播不了，走降级视图（**绝不白屏**）。
+ * ⚠️ **不再有「切换数据源」那条分支**（见 {@link mountIframe} 的说明）：
+ *   内联是唯一数据源，所以失败 = 没救了 = 降级成文字讲解（绝不白屏）。
+ *   原来的 `useHosted=false / fellBackToInline / buildHost()` 三步已删 ——
+ *   它存在的前提是「托管地址可用」，而那个地址一旦落进会话就已经是死地址。
  */
 function handleFailure(reason: string): void {
-  if (useHosted.value && !fellBackToInline.value && view.html.trim().length > 0) {
-    fellBackToInline.value = true
-    useHosted.value = false
-    degradeReason.value = `托管资源不可用（${reason}），已改用内联 HTML 重试`
-    host.value?.dispose()
-    host.value = buildHost()
-    // iframe 元素会因 `:key` 变化被重建，attach 由 iframeEl 的 watch 接上
-    return
-  }
   goDegraded(reason)
 }
 
 function buildHost(): AnimationSandboxHost {
   const instance = new AnimationSandboxHost({
     payloadId: payloadId.value,
-    resourceUrl: useHosted.value ? (view.resourceUrl ?? undefined) : undefined,
     srcdoc: view.html || undefined,
     onReady: () => {
       phase.value = 'ready'
@@ -255,21 +272,20 @@ watch(iframeEl, (element) => {
 
     <!-- ── 可播放的沙箱 ─────────────────────────────────────────── -->
     <div v-if="mountIframe" class="anim__stage">
-      <!-- ★ `:key` 让「托管 → 内联」的回退**真的换一个 iframe 元素**：
-           只改同一个元素的 `src`/`srcdoc` 属性在某些情况下不会重新导航
-           （把 src 摘掉换成 srcdoc 尤甚），换 key 是最直白可靠的语义。 -->
+      <!-- ── 可播放的沙箱（**只用内联 `srcdoc`**，理由见 script 里 mountIframe 的注释）──
+         ⚠️ 不要给 `:src` 或把一次性 nonce 地址绑上来：载荷里的地址是**持久化的**，
+         而 nonce 单次消费 + TTL 120s，任何第二次加载都会拿到 403 JSON 被渲染给学生。
+         `data-resource` 固定为 `inline`（CDP/探针据此确认走了哪条路）。 -->
       <iframe
-        :key="useHosted ? 'hosted' : 'inline'"
         ref="iframeEl"
         class="anim__frame"
         :sandbox="iframeAttrs.sandbox"
         :referrerpolicy="iframeAttrs.referrerpolicy"
-        :src="useHosted ? (view.resourceUrl ?? undefined) : undefined"
-        :srcdoc="useHosted ? undefined : view.html"
+        :srcdoc="view.html"
         title="动画演示"
         data-testid="animation-frame"
         :data-sandbox="SANDBOX_ATTRIBUTE"
-        :data-resource="useHosted ? 'hosted' : 'inline'"
+        data-resource="inline"
         @load="onIframeLoad"
       />
 

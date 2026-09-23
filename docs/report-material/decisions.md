@@ -2620,3 +2620,121 @@ confidence 的分档也写进 prompt（0.75+ 有明确课程范围证据 / 0.6~0
 后端全量 `uv run python -m unittest discover -s tests`（1066 用例，动画模板 8 → **214** 份下全绿）·
 `tests.test_content_copy_hygiene` 9 条 · `uv run python preset-content/_meta/validate_pack.py` ·
 抽样渲染 9 份（六原型 + 同概念四学段）· 桌面 `npm test` 与 `guards:mutation` 57 条 · 出包 `check:server:packaged`。
+
+---
+
+## D-079 ★★ 对话里的动画卡片改用内联 `srcdoc`（**不把一次性 nonce 地址交给 iframe**，2026-09-23）
+
+### ① 症状与根因
+
+用户实测（便携版）：对话里模型给出的动画**当场能播**，**切走页面再切回来**就变成
+`{"detail":"动画资源未通过 nonce 校验（used）"}` —— 一串 JSON 直接摆在学生面前。
+
+根因：**同一份动画地址被取了第二次**。托管地址是一次性 nonce + TTL 120s + `Cache-Control: no-store`
+（`server/app/routes/resources.py`，单次消费是票 16 的三条性质之一）。
+第二次取数的来源不必是「组件重建」——**只要 iframe 元素还在、`src` 还在，文档被丢弃/重新导航一次就够了**
+（KeepAlive 保住的是 Vue 组件树，**iframe 文档是另一套生命周期**；隐藏期间被丢弃后再显示 = 用 `src` 重取）。
+`used` 这个 reason 本身也证明：sidecar 没重启（nonce 表在内存里），是同一次运行内的二次请求。
+
+### ② 为什么改**卡片**，而不是放宽 nonce
+
+| 方案 | 为什么不采纳 |
+| --- | --- |
+| 放宽成「TTL 内可重复取」 | ① 单次消费是票 16 的**三条反向用例之一**（有守卫钉着），削弱它是降级安全口径；② **只解 `used`，解不了 `expired`**（120 秒后回来照样 403）与 sidecar 不可用 |
+| 卡片每次挂载时**重新托管**（换新 nonce） | 只防「旧地址」，**不防 iframe 自己重取**（新地址同样被消费过一次）；且每次挂载多一次 IPC + 35KB 落盘 |
+| **卡片只用 `srcdoc`（采纳）** | 挂载条件本来就是 `view.html` 非空，而托管的**就是同一份 HTML** ⇒ 内联与托管内容逐字相同；走内联则**没有网络往返、不消费 nonce、次生加载无从谈起**，附带 sidecar 挂了也能播 |
+
+### ③ 规格 D10 没有被架空
+
+「资源服务（Python 托管，带 nonce）」是 D10 的交付物，**照旧签发与校验**；消费方改为**动画讲解页**
+（它每次 `renderAndHost` 现签新地址、不复用旧地址 —— 实测切页往返也**只发 1 次请求**）。
+对话卡片只是不再当第二个消费者。`readLoopbackUrl` 那道「只认回环地址」的投影**原样保留**
+（它是载荷投影的安全边界，测试 `animation-extension.test.ts` 继续钉它）。
+
+### ④ 守卫与证据
+
+守卫：`desktop/tests/animation-extension.test.ts` 那条由「托管失败要先回退内联」**重新表达**为
+「**根本不许出现 `:src=`**、不许 `useHosted`、挂载条件只认 html、失败终点是降级、`data-resource="inline"`」——
+⚠️ 断言必须**剥注释再扫**（注释里要解释这段历史，扫整份源码会把说明当实现，第一版就被自己的注释判红）。
+真机证据（假 provider 驱动真工具链：`generate_animation` → 渲染 → 托管 → 卡片）：
+
+```text
+卡片读数   phase=ready  status=动画已就绪  degraded=false
+iframe     data-resource=inline  hasSrcAttr=false  srclen=0  srcdoclen=31521
+切页往返   设置 → 动画讲解 → 编程 → 设置 → 回对话（4 次）后仍是 phase=ready
+动画资源请求 卡片侧 0 次（唯一 1 次来自动画讲解页自己的托管 = D10 的正当消费）
+```
+
+**验收**：`npm test` 864/864 · `guards:mutation` 57 条全红 · `typecheck` 干净。
+
+**顺带记录（不在本轮修）**：对话卡片的 `payload` **不随历史恢复** —— 重载后该轮正文仍在、卡片不渲染
+（`turn.cards` 空）。它与本缺陷无关（本缺陷发生时卡片**在场**），但「重启后动画卡片消失」值得另开一条。
+
+---
+
+## D-080 ★★ 动画的 `payload_id` **一次生成、两处回传**（渲染与托管必须同一个值，2026-09-23）
+
+### ① 症状
+
+**动画讲解页的动画全部**播不出来：每段都在 5 秒后降级成文字（「动画没播出来，先看文字要点。」）。
+用户原话「全部都是炸掉的，都没法看」。
+
+### ② 根因（一个 id 的两半各生成了一次）
+
+沙箱的 `postMessage` 靠 `payload_id` 防串台，**宿主只接受 id 等于自己那把的消息**
+（`sandbox/iframe-host.ts` 的 `handleMessage`：来源对、id 不对 → `filteredCount++` 丢弃）。
+而这个 id 有**两个**落点：
+
+| 落点 | 谁生成 | 代码 |
+| --- | --- | --- |
+| 烙进产物 HTML | **渲染**时决定；不传则由服务端落默认 `"preview"` | `server/app/routes/resources.py`：`payloadId or "preview"` |
+| 宿主手里那把 | **托管**时决定 | `stores/animation.ts`：`newPayloadId()` |
+
+页面路径（`Animation.vue` → `renderAndHost`）**渲染时不传 id、托管时自己造一个** ⇒ 两边必然不同 ⇒
+沙箱发的每条消息（含 `ready`）都被宿主当别人的**静默丢掉** ⇒ 永远等不到 ready ⇒ **5 秒超时降级**。
+
+现场证据（CDP）：
+
+```text
+宿主超时原因: "沙箱在 5 秒内没有就绪（payloadId=b12d32d4-…）"
+window 收到的 message: {"type":"ready","payload_id":"preview"}   ← 沙箱发的
+```
+
+⚠️ 错误表现**离根因很远**：看起来像「模板坏了 / 沙箱没起来 / 页面管线坏了」，
+实际只是两个字符串不相等；而且**每一段**都挂（与具体模板无关），这才是它像「整页炸掉」的原因。
+
+### ③ 一个关键对照：**主进程的工具路径一直是对的**
+
+聊天卡片（`generate_animation` 工具 → 主进程渲染 → 托管）里，
+`agent/extensions/animation.ts` 早就是「一次生成、两处回传」，它的注释甚至把这条规则写死了：
+
+> `★ 卡片手里的那个 payload_id（与 details.payloadId 同一个值）：产物里的 payload_id 必须与
+> details.payloadId 一致，否则 iframe-host 会把沙箱发来的每条消息都当成别人的（永远收不到 ready）。`
+
+⇒ **同一件事有两套实现时，行为不一致本身就是线索**：这套对、那套错，说明缺的不是知识而是让两边一致。
+修法照抄已正确的那一套：`render()` 里 `newPayloadId()` 生成一次，渲染带上它、托管用同一个
+（`renderPayloadId` 随产物走，`selectTemplate` 清空时一并作废）。
+
+### ④ 改动面（类型 → 转发 → 生成 → 使用）
+
+- `main/ipc/channels.ts`：`AnimationRenderRequest` 加 `payloadId?: string`（**注释里写明为什么必须与托管一致**）；
+- `main/ipc/handlers-data.ts`：渲染 handler 的字段白名单**转发** `payloadId`（不透传等于白改）；
+- `renderer/src/api/data.ts`：渲染桥的类型同步；
+- `renderer/src/stores/animation.ts`：`render()` 生成一次 + 新增 `renderPayloadId`，`host()` 默认用**它**。
+
+### ⑤ 验收
+
+守卫：`desktop/tests/renderer-data-plane.test.ts` 新增
+「**渲染与托管必须用同一个 payload_id**」——给假桥加了**入参记录**（`payloads`），
+断言渲染带的 id 非空、不是 `preview`、且与托管那把**相等**。
+（只数调用次数的夹具抓不到这类缺陷：两次调用都发生了，只是参数不同。）
+
+真机证据（同一台 dev 实例，修前修后对照）：
+
+```text
+修前  沙箱消息 payload_id="preview"   宿主超时原因=「沙箱在 5 秒内没有就绪」  iframe 有、5s 后降级
+修后  沙箱消息 payload_id="ec3d92d1-…"（宿主那把）  progress 一路到 1.0  degraded=false  reasons=[]
+      换模板（决策树）同样正常；切页往返后仍 degraded=false
+```
+
+`npm test` **865/865** · `guards:mutation` 57 条全红 · `typecheck` 干净。
