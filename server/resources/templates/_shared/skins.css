@@ -1,0 +1,454 @@
+/* ==========================================================================
+ * 本文件由 server/scripts/build_animation_skins.py 自动生成，请勿手工编辑。
+ * 源数据：desktop/scripts/design/tokens.source.json（soft 饱和度 · 学段轴）
+ * 学段配色来自设计令牌（唯一来源）；皮肤形态与动效在生成器里手写。
+ *
+ * 重新生成：cd server && uv run python scripts/build_animation_skins.py
+ * 漂移守卫：cd server && uv run python -m unittest tests.test_sandbox_palette -v
+ *
+ * 两个轴（都由服务端打在 <html> 上，见 app/routes/resources.py）：
+ *   data-grade  学段 → 下面这五块调色板之一
+ *   data-skin   皮肤 → illustrated（小学）/ technical（中学以上）
+ * ========================================================================== */
+
+/* ==== 生成区开始（学段调色板；勿手改） ==== */
+
+/* 小学低年级：插画化皮肤（illustrated），暖橙 */
+:root[data-grade="primary_low"],
+:root[data-grade="primary-low"] {
+  --accent: #F97316;
+  --accent-soft: #fef0e5;
+  --accent-ink: #AB5720;
+  --accent-border: #fdd5b9;
+  --accent-2: #FB7185;
+  --page: #fff9f3;
+  --surface: #FFFFFF;
+  --surface-2: #fffcf8;
+  --chip-bg: #fff5ef;
+  --chip-fg: #B85512;
+  --ink: #1B2233;
+  --muted: #616A7A;
+  --line: #E6EAF2;
+  --warn: #9A5B08;
+  --ok: #0B7A57;
+}
+
+/* 小学高年级：插画化皮肤（illustrated），晴空蓝 */
+:root[data-grade="primary_high"],
+:root[data-grade="primary-high"] {
+  --accent: #0EA5E9;
+  --accent-soft: #e4f5fd;
+  --accent-ink: #1375A6;
+  --accent-border: #b7e4f8;
+  --accent-2: #22C55E;
+  --page: #f5fbff;
+  --surface: #FFFFFF;
+  --surface-2: #f9fdff;
+  --chip-bg: #eef9fd;
+  --chip-fg: #0C79AC;
+  --ink: #1B2233;
+  --muted: #616A7A;
+  --line: #E6EAF2;
+  --warn: #9A5B08;
+  --ok: #0B7A57;
+}
+
+/* 初中：工程化皮肤（technical），靛蓝 */
+:root[data-grade="junior"] {
+  --accent: #4F46E5;
+  --accent-soft: #ecebfc;
+  --accent-ink: #4F46E5;
+  --accent-border: #cac8f7;
+  --accent-2: #7C6CF0;
+  --page: #f6f7ff;
+  --surface: #FFFFFF;
+  --surface-2: #fbfbff;
+  --chip-bg: #f3f2fd;
+  --chip-fg: #3C35AE;
+  --ink: #1B2233;
+  --muted: #616A7A;
+  --line: #E6EAF2;
+  --warn: #9A5B08;
+  --ok: #0B7A57;
+}
+
+/* 高中：工程化皮肤（technical），青绿 */
+:root[data-grade="senior"] {
+  --accent: #0D9488;
+  --accent-soft: #e4f3f2;
+  --accent-ink: #107A74;
+  --accent-border: #b6dfdb;
+  --accent-2: #0EA5E9;
+  --page: #f5fbfa;
+  --surface: #FFFFFF;
+  --surface-2: #fafdfc;
+  --chip-bg: #eef8f7;
+  --chip-fg: #0A7067;
+  --ink: #1B2233;
+  --muted: #616A7A;
+  --line: #E6EAF2;
+  --warn: #9A5B08;
+  --ok: #0B7A57;
+}
+
+/* 未指定学段时的兜底主题（base.css 里的值仍是最终回退） */
+:root[data-grade="default"] {
+  --accent: #2563EB;
+  --accent-soft: #ebf1fd;
+  --accent-ink: #2563EB;
+  --accent-border: #c6d6fa;
+  --accent-2: #EC4899;
+  --page: #FFFFFF;
+  --surface: #FFFFFF;
+  --surface-2: #F7F9FC;
+  --chip-bg: #EFF5FF;
+  --chip-fg: #1D4ED8;
+  --ink: #1B2233;
+  --muted: #616A7A;
+  --line: #E6EAF2;
+  --warn: #9A5B08;
+  --ok: #0B7A57;
+}
+
+/* ==== 生成区结束 ==== */
+
+/* ==========================================================================
+ * 皮肤与舞台基元（手写区，由生成器原样写出 —— 要改请改生成器）
+ *
+ * 两种皮肤（illustrated / technical）**共用同一套结构类**，差别全部落在下面这些
+ * 规则里；舞台基元脚本（_shared/runtime.js）不写任何色值与字号，只挂类名。
+ * 所以「一份代码、两种皮肤」这条纪律是靠本文件成立的。
+ *
+ * 命名：基元类统一 k12- 前缀（与设计令牌 --k12-* 同族），BEM 修饰符用 --。
+ * ========================================================================== */
+
+/* ---- 皮肤级刻度：字号 / 圆角 / 线宽 / 内边距（runtime.js 会读它们做折行与测量） ---- */
+:root[data-skin="illustrated"] {
+  --k12-fs-node: 19px;
+  --k12-fs-node-sub: 14px;
+  --k12-fs-link: 13.5px;
+  --k12-fs-bubble: 16.5px;
+  --k12-fs-actor: 13px;
+  --k12-fs-readout-label: 12.5px;
+  --k12-fs-readout-value: 27px;
+  --k12-fs-axis: 13px;
+  --k12-radius-node: 18px;
+  --k12-radius-panel: 18px;
+  --k12-radius-head: 13px;
+  --k12-radius-body: 12px;
+  --k12-stroke: 2.6;
+  --k12-pad: 18px;
+}
+
+:root[data-skin="technical"] {
+  --k12-fs-node: 16px;
+  --k12-fs-node-sub: 12px;
+  --k12-fs-link: 12.5px;
+  --k12-fs-bubble: 14.5px;
+  --k12-fs-actor: 12px;
+  --k12-fs-readout-label: 11.5px;
+  --k12-fs-readout-value: 24px;
+  --k12-fs-axis: 12px;
+  --k12-radius-node: 5px;
+  --k12-radius-panel: 6px;
+  --k12-radius-head: 3px;
+  --k12-radius-body: 4px;
+  --k12-stroke: 1.6;
+  --k12-pad: 13px;
+}
+
+/* ---- 外壳（标题 / 字幕 / 步骤条）—— 旧选择器一个都没改名，只加了皮肤刻度 ---- */
+:root[data-skin="illustrated"] .anim-title {
+  font-size: 15.5px;
+  letter-spacing: 0.01em;
+}
+
+:root[data-skin="technical"] .anim-title {
+  font-size: 14px;
+  letter-spacing: 0;
+}
+
+:root[data-skin="illustrated"] .anim-caption {
+  line-height: 1.72;
+}
+
+:root[data-skin="technical"] .anim-caption {
+  line-height: 1.5;
+}
+
+:root[data-skin="illustrated"] .chip {
+  border-radius: 999px;
+  padding: 3px 11px;
+}
+
+:root[data-skin="technical"] .chip {
+  border-radius: 4px;
+  padding: 2px 9px;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 舞台底板 ---- */
+.k12-stage {
+  display: block;
+}
+
+.k12-stage-bg {
+  fill: var(--surface);
+  stroke: none;
+}
+
+:root[data-skin="technical"] .k12-stage-bg {
+  stroke: var(--accent-border);
+  stroke-width: 1;
+}
+
+/* ---- 网格与坐标轴（背景层；插画皮肤里几乎是暗示，工程皮肤里是刻度纸） ---- */
+.k12-grid {
+  opacity: 0.28;
+}
+
+:root[data-skin="technical"] .k12-grid {
+  opacity: 0.8;
+}
+
+.k12-grid-line {
+  stroke: var(--accent-border);
+  stroke-width: 1;
+}
+
+.k12-grid-frame {
+  fill: none;
+  stroke: var(--accent-border);
+  stroke-width: 1;
+}
+
+.k12-axis-line {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+.k12-axis-arrow {
+  fill: var(--line);
+}
+
+.k12-axis-tick {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.k12-axis-label {
+  fill: var(--muted);
+  font-size: var(--k12-fs-axis);
+}
+
+.k12-axis-origin {
+  fill: var(--muted);
+  font-size: var(--k12-fs-axis);
+}
+
+/* ---- 节点（rounded rect + 居中文字） ---- */
+.k12-node-body {
+  fill: var(--surface);
+  stroke: var(--accent-border);
+  stroke-width: var(--k12-stroke);
+  rx: var(--k12-radius-node);
+}
+
+.k12-node--accent .k12-node-body {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+}
+
+.k12-node--muted .k12-node-body {
+  fill: var(--surface-2);
+  stroke: var(--line);
+}
+
+.k12-node--warn .k12-node-body {
+  fill: var(--surface-2);
+  fill: color-mix(in srgb, var(--warn) 14%, var(--surface));
+  stroke: var(--warn);
+}
+
+.k12-node--focus .k12-node-body {
+  stroke: var(--accent);
+  stroke-width: calc(var(--k12-stroke) + 1.4);
+}
+
+.k12-node-label {
+  fill: var(--ink);
+  font-size: var(--k12-fs-node);
+  font-weight: 650;
+}
+
+.k12-node--accent .k12-node-label {
+  fill: var(--accent-ink);
+}
+
+.k12-node--muted .k12-node-label {
+  fill: var(--muted);
+}
+
+.k12-node-sub {
+  fill: var(--muted);
+  font-size: var(--k12-fs-node-sub);
+}
+
+/* ---- 人物（插画皮肤的当家角色；工程皮肤里变成一个克制的示意体） ---- */
+.k12-actor-head {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+  stroke-width: var(--k12-stroke);
+  rx: var(--k12-radius-head);
+}
+
+.k12-actor-body {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+  stroke-width: var(--k12-stroke);
+  rx: var(--k12-radius-body);
+}
+
+.k12-actor-limb {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: calc(var(--k12-stroke) + 0.6);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.k12-actor-prop {
+  fill: var(--surface-2);
+  stroke: var(--accent-border);
+  stroke-width: 1.5;
+  rx: 4px;
+}
+
+.k12-actor-label {
+  fill: var(--muted);
+  font-size: var(--k12-fs-actor);
+}
+
+:root[data-skin="technical"] .k12-actor-limb {
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+}
+
+/* ---- 气泡 ---- */
+.k12-bubble-body {
+  fill: var(--surface);
+  stroke: var(--accent-border);
+  stroke-width: 1.6;
+  rx: var(--k12-radius-panel);
+}
+
+.k12-bubble-tail {
+  fill: var(--surface);
+  stroke: var(--accent-border);
+  stroke-width: 1.6;
+}
+
+.k12-bubble-tail-seam {
+  fill: none;
+  stroke: var(--surface);
+  stroke-width: 2.6;
+}
+
+.k12-bubble-text {
+  fill: var(--ink);
+  font-size: var(--k12-fs-bubble);
+}
+
+.k12-bubble--narrator .k12-bubble-body,
+.k12-bubble--narrator .k12-bubble-tail {
+  fill: var(--surface-2);
+  stroke: var(--line);
+}
+
+.k12-bubble--narrator .k12-bubble-tail-seam {
+  stroke: var(--surface-2);
+}
+
+.k12-bubble--accent .k12-bubble-body,
+.k12-bubble--accent .k12-bubble-tail {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+}
+
+.k12-bubble--accent .k12-bubble-tail-seam {
+  stroke: var(--accent-soft);
+}
+
+/* ---- 连接线 ---- */
+.k12-link-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: var(--k12-stroke);
+  stroke-linecap: round;
+}
+
+.k12-link-arrow {
+  fill: var(--accent);
+}
+
+.k12-link--dashed .k12-link-line {
+  stroke: var(--muted);
+  stroke-dasharray: 9 7;
+  stroke-width: 1.8;
+}
+
+.k12-link--dashed .k12-link-arrow {
+  fill: var(--muted);
+}
+
+.k12-link-pipe {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 9;
+  opacity: 0.22;
+  stroke-linecap: round;
+}
+
+.k12-link--pipe .k12-link-line {
+  stroke-width: 2;
+}
+
+.k12-link-label {
+  fill: var(--accent-ink);
+  font-size: var(--k12-fs-link);
+  font-weight: 600;
+}
+
+.k12-link-label-bg {
+  fill: var(--surface);
+  opacity: 0.94;
+}
+
+/* ---- 数值读数（工程皮肤的主力；插画皮肤里当「记分牌」用） ---- */
+.k12-readout-bg {
+  fill: var(--surface-2);
+  stroke: var(--accent-border);
+  stroke-width: 1;
+  rx: var(--k12-radius-node);
+}
+
+.k12-readout-label {
+  fill: var(--muted);
+  font-size: var(--k12-fs-readout-label);
+  letter-spacing: 0.04em;
+}
+
+.k12-readout-value {
+  fill: var(--accent-ink);
+  font-size: var(--k12-fs-readout-value);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", "Courier New", monospace;
+}
+
+.k12-readout-unit {
+  fill: var(--muted);
+  font-size: var(--k12-fs-axis);
+}

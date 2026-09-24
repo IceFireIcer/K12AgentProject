@@ -66,6 +66,8 @@ ANIME_LIB_FILENAME = "anime.min.js"
 RUNTIME_FILENAME = "runtime.js"
 #: 公共样式。
 BASE_CSS_FILENAME = "base.css"
+#: 学段皮肤（配色来自设计令牌 + 舞台基元类）。由 ``scripts/build_animation_skins.py`` 生成。
+SKINS_CSS_FILENAME = "skins.css"
 #: 学生目录下的动画托管目录：``students/<id>/animations/``
 ANIMATIONS_DIRNAME = "animations"
 #: 模板 JSON 的后缀
@@ -158,6 +160,52 @@ TEMPLATE_KEYS = frozenset(
 )
 
 GRADE_LEVELS: tuple[str, ...] = ("primary_low", "primary_high", "junior", "senior")
+
+#: ★★ **学段 → 皮肤**：这张表是这条映射的**唯一**落点（沙箱运行时只读 ``<html data-skin>``，
+#: 不自己判断学段；``skins.css`` 也只按属性选择器出样式）。
+#:
+#: 小学插画化 / 中学工程化是产品要求，不是随手分的：低龄段要「有角色、慢一点、停得住」，
+#: 中学段要「结构清楚、数字可信、别拖沓」。改这张表 = 改产品气质，请连着 11 个基元的
+#: 形态一起看（``server/resources/templates/_shared/skins.css``）。
+GRADE_TO_SKIN: Mapping[str, str] = {
+    "primary_low": "illustrated",
+    "primary_high": "illustrated",
+    "junior": "technical",
+    "senior": "technical",
+}
+#: 学段缺省时的兜底（模板没声明学段、调用方没传、传了非法值都会落到这里）。
+DEFAULT_GRADE = "default"
+#: 未知学段用哪种皮肤：工程化更「中性」，用作兜底不会在小学生面前出现反差过大的装饰。
+DEFAULT_SKIN = "technical"
+
+
+def skin_for_grade(grade_level: str) -> str:
+    """学段 → 皮肤名（未知学段一律回退，**不报错**：皮肤不该拖累动画能不能播）。"""
+    return GRADE_TO_SKIN.get(str(grade_level or "").strip(), DEFAULT_SKIN)
+
+
+def normalize_grade(grade_level: str) -> str:
+    """把学段收敛到 :data:`GRADE_LEVELS` 里的合法值（否则回退 ``default``）。
+
+    ★ 为什么是回退而不是报错：学段来自调用方（模型 / 前端），它写错一个词时
+    该出现的是「一张配色回退到默认的动画」，而不是 422 让整张卡片降级。
+    """
+    value = str(grade_level or "").strip()
+    if value in GRADE_LEVELS:
+        return value
+    return value if value == DEFAULT_GRADE else DEFAULT_GRADE
+
+
+def default_grade_for(template: "AnimationTemplate") -> str:
+    """模板没拿到学段时怎么猜：用它声明的第一个学段（内容本来就是按它写的）。
+
+    只声明一个学段的一 KP 一模板（206 份）会因此拿到准确的皮肤；跨学段模板拿到
+    声明列表里的第一个 —— 调用方（路由）本来就会传真实学段，这里只是兜底。
+    """
+    for level in template.grade_levels:
+        if level in GRADE_LEVELS:
+            return level
+    return DEFAULT_GRADE
 
 #: 演示开关（**默认关闭**，分发包里不存在实际用途）：让校验器按需失败，
 #: 从而在不动模板文件的情况下复现「重试 → 降级」这条链（票 17 的验收演练）。
@@ -681,23 +729,43 @@ def compose_animation_html(
     body: str,
     script: str,
     payload_id: str,
+    skins_css: str = "",
+    grade_level: str = "",
 ) -> str:
     """拼一份**完全自包含**的动画 HTML（CSS + 动画库 + 运行时 + 页面片段 + 模板脚本）。
 
     ``payload_id`` 以两种方式交给沙箱（沙箱运行时按优先级取用）：
       ① 注入 ``window.__K12_PAYLOAD_ID__``（``srcdoc`` 回退路径也能用 —— 那条路径没有 URL query）；
       ② 服务端托管时还会把它拼进 URL query（``?payload_id=...``）。
+
+    ★ 舞台外观的两根轴也在这里注入（这是**唯一**的落点）：
+
+      ``<html data-grade="junior" data-skin="technical">``
+
+    - ``data-grade``：学段，决定 ``skins.css`` 里的哪一块调色板生效（值来自
+      :data:`GRADE_LEVELS`，或兜底 ``default``）；
+    - ``data-skin``：皮肤（``illustrated`` / ``technical``），决定形态与动效；
+      学段 → 皮肤只用 :data:`GRADE_TO_SKIN` 这一张表（见 :func:`skin_for_grade`）。
+
+    两个属性都打在**根元素**上、不写进正文：模板代码因此完全不碰配色，学生代码更碰不到；
+    ``Sandbox.grade`` / ``Sandbox.skin`` 读的也是这两个属性，不引入第二个真相来源。
+
+    ``skins_css`` 缺省为空串 —— 那时只有 ``base.css`` 的兜底取值，动画照样完整渲染
+    （``_shared/skins.css`` 缺失不该让所有模板渲染失败）。
     """
     safe_payload_id = json.dumps(payload_id or "")
+    grade = normalize_grade(grade_level)
+    skin = skin_for_grade(grade)
+    styles = f"{css}\n{skins_css}" if skins_css.strip() else css
     return (
         "<!DOCTYPE html>\n"
-        '<html lang="zh-CN">\n'
+        f'<html lang="zh-CN" data-grade="{grade}" data-skin="{skin}">\n'
         "<head>\n"
         '<meta charset="utf-8" />\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1" />\n'
         "<title>动画讲解</title>\n"
         "<style>\n"
-        f"{css}\n"
+        f"{styles}\n"
         "</style>\n"
         "<script>\n"
         "/* 动画库（本地内联，绝不引 CDN——沙箱断网） */\n"
@@ -722,6 +790,20 @@ def compose_animation_html(
         "</body>\n"
         "</html>\n"
     )
+
+
+def read_shared_optional(root: Path, filename: str) -> str:
+    """:func:`read_shared` 的**可缺省**版本（读不到返回空串）。
+
+    ★ 只给 ``skins.css`` 这种「有更好、没有也能跑」的装饰性共享资源用：
+    模板目录旁边没有 ``_shared/skins.css``（老目录 / QA 用的临时模板集）时，
+    ``base.css`` 里的兜底取值足以让动画完整渲染，不该因此让整批模板渲染失败。
+    """
+    try:
+        return read_shared(root, filename)
+    except TemplateError:
+        logger.debug("共享资源 %s 不在（%s），跳过内联", filename, root)
+        return ""
 
 
 def apply_simulation(html: str) -> str:
@@ -757,6 +839,7 @@ def render_animation(
     payload_id: str = "",
     root: str | Path | None = None,
     fallback_text: str | None = None,
+    grade_level: str = "",
 ) -> AnimationPayload:
     """渲染一个模板 → :class:`AnimationPayload`。
 
@@ -765,6 +848,10 @@ def render_animation(
 
     ``fallback_text`` / ``fallback_image`` 保证**非空**（票 17 的验收口径）：
     没有降级文案的动画等于没有兜底。
+
+    ``grade_level`` 决定注入 ``<html data-grade/data-skin>`` 的取值（沙箱据此换配色与皮肤）。
+    不传时用 :func:`default_grade_for` 从模板声明的学段里猜一个 —— 猜错的代价只是
+    配色回退，而不是渲染失败；传了非法值时同样回退（见 :func:`normalize_grade`）。
     """
     directory = Path(root) if root is not None else templates_dir()
     resolved = resolve_params(template, params)
@@ -781,6 +868,9 @@ def render_animation(
         body=body,
         script=script,
         payload_id=payload_id,
+        # skins.css 是可缺省的装饰性资源（老模板目录没有它也要能渲染，见 read_shared_optional）
+        skins_css=read_shared_optional(directory, SKINS_CSS_FILENAME),
+        grade_level=str(grade_level or "").strip() or default_grade_for(template),
     )
     html = apply_simulation(html)
 
@@ -1129,6 +1219,9 @@ def render_animation_route(request: Request, body: dict[str, Any]) -> AnimationP
             payload_id=payload_id,
             root=directory,
             fallback_text=str(body.get("fallbackText") or "") or None,
+            # ★ 学段决定沙箱注入的 data-grade/data-skin（配色与皮肤）。显式传入时以它为准；
+            #   没传时 render_animation 会从模板声明的学段里兜底猜一个。
+            grade_level=grade_level,
         )
     except TemplateError as exc:
         # ★ 422：这是**内容不合格**，不是服务故障 —— 调用方应当重试或降级，而不是报错给用户
@@ -1292,8 +1385,11 @@ __all__ = [
     "ANIME_LIB_FILENAME",
     "AnimationTemplate",
     "CREDENTIAL_PATTERNS",
+    "DEFAULT_GRADE",
+    "DEFAULT_SKIN",
     "EXTERNAL_REFERENCE_RE",
     "FORBIDDEN_SANDBOX_FLAG",
+    "GRADE_TO_SKIN",
     "HtmlValidation",
     "KP_ID_RE",
     "NONCE_STORE",
@@ -1302,6 +1398,7 @@ __all__ = [
     "NonceStore",
     "PARAM_TYPES",
     "SIMULATE_ENV",
+    "SKINS_CSS_FILENAME",
     "TEMPLATES_DIRNAME",
     "TemplateError",
     "TemplateParameter",
@@ -1309,6 +1406,7 @@ __all__ = [
     "apply_simulation",
     "build_fallback_svg",
     "compose_animation_html",
+    "default_grade_for",
     "find_template",
     "host_animation",
     "host_animation_route",
@@ -1316,12 +1414,15 @@ __all__ = [
     "load_template",
     "load_templates",
     "match_templates",
+    "normalize_grade",
     "public_router",
     "read_shared",
+    "read_shared_optional",
     "render_animation",
     "render_animation_route",
     "resolve_params",
     "router",
+    "skin_for_grade",
     "student_data_root",
     "substitute_placeholders",
     "templates_dir",

@@ -1,4 +1,13 @@
-/* 动画卡片的公共样式（内联进每份动画 HTML；无外部字体、无外链）。 */
+/* 动画卡片的公共样式（内联进每份动画 HTML；无外部字体、无外链）。
+ *
+ * 分工（两个轴，别混）：
+ *   本文件     = **结构 + 兜底**：所有选择器与变量都在这里有一份能独立成立的取值，
+ *               所以没有皮肤样式时动画照样完整渲染（自由生成路径 / 单独打开调试）。
+ *   skins.css  = **主题**：由 server/scripts/build_animation_skins.py 从设计令牌生成，
+ *               按 <html data-grade> 换学段配色、按 <html data-skin> 换形态与动效。
+ * 换言之：这里定义的每个变量都是「学段皮肤没命中时」的回退值，**不要**在这里写死某个
+ * 学段的颜色（那种「一处来源变四处漂移」正是这套两文件结构要治的病）。
+ */
 
 :root {
   --ink: #12233b;
@@ -9,6 +18,33 @@
   --accent-soft: #e8f0fd;
   --warn: #d97706;
   --ok: #1f9d63;
+
+  /* 舞台用色（skins.css 按学段覆盖；这四个名字与设计令牌同名，少一层翻译） */
+  --accent-ink: #2f6fd0; /* 文字用的压深主色（原色只够当图形色） */
+  --accent-border: #c6d6fa;
+  --accent-2: #fb7185; /* 第二色相：只给数据可视化分段用 */
+  --page: #ffffff; /* 整页底色（学段身份最直观的一处） */
+  --surface: #ffffff; /* 卡片 / 节点 / 舞台面 */
+  --surface-2: #f5f6f9; /* 面上的嵌入块（读数面板、次要节点） */
+  --chip-bg: #e8f0fd;
+  --chip-fg: #2f6fd0;
+
+  /* 皮肤刻度（字号 / 圆角 / 线宽 / 内边距）：skins.css 按 data-skin 覆写，
+     这里是它缺席时的兜底（`_shared/skins.css` 丢了也不该把舞台画糊）。 */
+  --k12-fs-node: 16px;
+  --k12-fs-node-sub: 12px;
+  --k12-fs-link: 12.5px;
+  --k12-fs-bubble: 14.5px;
+  --k12-fs-actor: 12px;
+  --k12-fs-readout-label: 11.5px;
+  --k12-fs-readout-value: 24px;
+  --k12-fs-axis: 12px;
+  --k12-radius-node: 6px;
+  --k12-radius-panel: 6px;
+  --k12-radius-head: 3px;
+  --k12-radius-body: 4px;
+  --k12-stroke: 1.6;
+  --k12-pad: 14px;
 }
 
 * {
@@ -19,7 +55,8 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background: var(--bg);
+  /* ★ var(--page)：学段底色（skins.css 按 data-grade 换）。缺学时回退到本文件的 #ffffff。 */
+  background: var(--page);
   color: var(--ink);
   font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", system-ui, sans-serif;
   font-size: 14px;
@@ -71,8 +108,10 @@ body {
   align-items: center;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  /* 文字用 --chip-fg（设计令牌里那个压深过对比度的值），不是 --accent —— 
+     直接用主色当文字色时，橙色一档只有 2.9:1，学生读不清。 */
+  background: var(--chip-bg);
+  color: var(--chip-fg);
   font-size: 12px;
   font-weight: 600;
 }
@@ -95,4 +134,213 @@ svg {
   display: block;
   max-width: 100%;
   max-height: 100%;
+}
+
+/* ==========================================================================
+ * 舞台基元：**只写「缺了就会变成垃圾」的那几条**
+ *
+ * 分工（与文件开头那段呼应）：
+ *   这里  = 基元的**地板**：填充 / 描边 / 字体 / 字号。没有它们，SVG 的默认值会让
+ *           节点变成「黑底黑框」（fill 默认黑、stroke 默认 none）—— 那是坏掉，不是朴素。
+ *   skins.css = 基元的**主题**：圆角、线宽、间距、皮肤专属形态（都由变量控制），
+ *           以及学段色板。它按 <html data-skin> 细化，两处不冲突。
+ *
+ * ★ 为什么地板必须在这里而不是只在 skins.css：**自由生成路径不读 skins.css**
+ *   （`app/animation/compose.py` 只拼 base.css + 库 + 运行时；那条路不在本票的文件
+ *   所有权内，没动它）。基元是冻结接口，模型在自由生成里也会调 —— 那条路上不能黑屏。
+ *   模板路径没有任何损失：skins.css 在 base.css **之后**内联，同优先级下它说了算。
+ *
+ * ★ 这里一个裸色值都不许写（用变量）：学段色板只由设计令牌生成，写死就漂了。
+ * ========================================================================== */
+
+.k12-stage-bg {
+  fill: var(--surface);
+  stroke: none;
+}
+
+.k12-grid-line,
+.k12-grid-frame {
+  fill: none;
+  stroke: var(--accent-border);
+}
+
+.k12-axis-line,
+.k12-axis-tick {
+  fill: none;
+  stroke: var(--line);
+}
+
+.k12-axis-arrow {
+  fill: var(--line);
+}
+
+.k12-axis-label,
+.k12-axis-origin {
+  fill: var(--muted);
+  font-size: var(--k12-fs-axis);
+}
+
+.k12-node-body {
+  fill: var(--surface);
+  stroke: var(--accent-border);
+}
+
+.k12-node--accent .k12-node-body {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+}
+
+.k12-node--muted .k12-node-body {
+  fill: var(--surface-2);
+  stroke: var(--line);
+}
+
+.k12-node--warn .k12-node-body {
+  fill: color-mix(in srgb, var(--warn) 14%, var(--surface));
+  stroke: var(--warn);
+}
+
+.k12-node-label {
+  fill: var(--ink);
+  font-size: var(--k12-fs-node);
+}
+
+.k12-node--accent .k12-node-label {
+  fill: var(--accent-ink);
+}
+
+.k12-node--muted .k12-node-label {
+  fill: var(--muted);
+}
+
+.k12-node-sub {
+  fill: var(--muted);
+  font-size: var(--k12-fs-node-sub);
+}
+
+.k12-actor-head,
+.k12-actor-body {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+}
+
+.k12-actor-limb {
+  fill: none;
+  stroke: var(--accent);
+}
+
+.k12-actor-prop {
+  fill: var(--surface-2);
+  stroke: var(--accent-border);
+}
+
+.k12-actor-label {
+  fill: var(--muted);
+  font-size: var(--k12-fs-actor);
+}
+
+.k12-bubble-body,
+.k12-bubble-tail {
+  fill: var(--surface);
+  stroke: var(--accent-border);
+}
+
+.k12-bubble-tail-seam {
+  fill: none;
+  stroke: var(--surface);
+}
+
+.k12-bubble-text {
+  fill: var(--ink);
+  font-size: var(--k12-fs-bubble);
+}
+
+.k12-bubble--narrator .k12-bubble-body,
+.k12-bubble--narrator .k12-bubble-tail {
+  fill: var(--surface-2);
+  stroke: var(--line);
+}
+
+.k12-bubble--narrator .k12-bubble-tail-seam {
+  stroke: var(--surface-2);
+}
+
+.k12-bubble--accent .k12-bubble-body,
+.k12-bubble--accent .k12-bubble-tail {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+}
+
+.k12-bubble--accent .k12-bubble-tail-seam {
+  stroke: var(--accent-soft);
+}
+
+.k12-link-line {
+  fill: none;
+  stroke: var(--accent);
+}
+
+.k12-link-arrow {
+  fill: var(--accent);
+}
+
+.k12-link--dashed .k12-link-line {
+  stroke: var(--muted);
+}
+
+.k12-link--dashed .k12-link-arrow {
+  fill: var(--muted);
+}
+
+.k12-link-pipe {
+  fill: none;
+  stroke: var(--accent);
+  opacity: 0.22;
+}
+
+.k12-link-label {
+  fill: var(--accent-ink);
+  font-size: var(--k12-fs-link);
+}
+
+.k12-link-label-bg {
+  fill: var(--surface);
+  opacity: 0.94;
+}
+
+.k12-readout-bg {
+  fill: var(--surface-2);
+  stroke: var(--accent-border);
+}
+
+.k12-readout-label {
+  fill: var(--muted);
+  font-size: var(--k12-fs-readout-label);
+}
+
+.k12-readout-value {
+  fill: var(--accent-ink);
+  font-size: var(--k12-fs-readout-value);
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", "Courier New", monospace;
+}
+
+.k12-readout-unit {
+  fill: var(--muted);
+  font-size: var(--k12-fs-axis);
+}
+
+/* 绘图区（坐标图 / 循环跑道）：**只描边不填充**，它是一条轨道而不是一个盒子。
+ * 自动布局把它当成一条「占位记录」（不许压住别的东西），但不是实心图形 ——
+ * 所以它没有 fill，走虚线描边，两种皮肤下都成立（颜色由 --k12-* 变量给）。 */
+.k12-plot {
+  fill: none;
+  pointer-events: none;
+}
+
+.k12-track {
+  fill: none;
+  stroke: var(--accent-border);
+  stroke-width: calc(var(--k12-stroke) + 1.2);
+  stroke-dasharray: 7 6;
 }
