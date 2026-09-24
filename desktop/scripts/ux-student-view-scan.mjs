@@ -252,10 +252,17 @@ async function main() {
   console.log('\u001b[1m【学生视角】技术与运维信息扫描\u001b[0m')
 
   // ── 回到对话页（默认起点），并确保右栏是打开状态 ──────────────────────
+  // ★★ 按**结构锚**找入口（`button[data-nav="chat"]`，`AppSidebar.vue` 的 `:data-nav="item.name"`），
+  //    不按文案找 —— 第一版写的是 `textContent === '对话课堂'`，而 D-075 术语统一
+  //    （`stores/ui.ts` 的 PAGES）把这一页改成了「问问智团团」：
+  //    于是这一句**静默失效**（找不到 → 不点 → 停在上一轮的落点），
+  //    后面的「右栏三个页签」「学段 / 章节两个浮层」全部报红 —— 看起来像产品缺陷，
+  //    实际是**探针没跟上界面文案**（页 id 是稳定的，文案会变）。
+  //    ⚠️ 同类漂移的复查口径：探针里任何 `textContent` 相等匹配都该问一句「这句文案会改吗」。
   await cdp.evaluate(`(() => {
-    const entry = Array.from(document.querySelectorAll('button')).find((b) => b.textContent.trim() === '对话课堂')
+    const entry = document.querySelector('button[data-nav="chat"]')
     if (entry) entry.click()
-    return true
+    return Boolean(entry)
   })()`)
   await wait(600)
 
