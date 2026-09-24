@@ -4,34 +4,49 @@
   "name": "教学短板（难自动分层适配）",
   "concept": "教学短板（难自动分层适配）",
   "template_id": "limit-teaching",
-  "archetype": "checklist",
-  "title": "教学短板（难自动分层适配）：看懂它是怎么起作用的",
+  "archetype": "compare",
+  "skin": "technical",
+  "title": "教学短板（难自动分层适配）：两条路线并排看",
+  "open_caption": "教学短板（难自动分层适配） 有两条路线，并排放在一起看差别。",
+  "close_caption": "两边对照完，记住：AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真实发现的痛点。",
   "steps": [
     {
-      "title": "结果就是同一知识点…",
-      "hint": "AI 不能自动判断你的…",
-      "caption": "结果就是同一知识点对不同人的输出难度近乎相同"
-    },
-    {
-      "title": "由此带来三个具体影…",
-      "hint": "再分析怎么起作用",
-      "caption": "由此带来三个具体影响：低年级学生拿到超纲的表述；"
-    },
-    {
-      "title": "基础薄弱的学生拿到…",
-      "hint": "最后辨析易混点",
-      "caption": "基础薄弱的学生拿到看不懂的推导；"
+      "left": "默认只给一套中等难度的话",
+      "right": "结果就是同一知识点对不同人的输出难度近乎相同",
+      "caption": "第 1 行：左边是「AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真实发现的痛点。」，右边是「结果就是同一知识点对不同人的输出难度近乎相同」。"
     }
   ],
-  "fallback_text": "（初中讲法）教学短板（难自动分层适配）：AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真实发现的痛点。 再记一句：教学短板，指通用人工智能本身无法自动判断使用者的年龄与知识基础，不能自动调整内容难度，很难做到分层教学。 这并非纸上推测，而是教育场景实际调研发现的现实痛点，也是本课题重点关注的问题之一。 成因在于两个不对齐：一是模型不知道「你是谁」，对话。",
-  "duration_ms": 4800,
+  "data": {
+    "open": "教学短板（难自动分层适配） 有两条路线，并排放在一起看差别。",
+    "close": "两边对照完，记住：AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真实发现的痛点。",
+    "leftHeader": "一条路线的做法",
+    "rightHeader": "另一条路线的做法",
+    "rows": [
+      {
+        "left": "默认只给一套中等难度的话",
+        "right": "结果就是同一知识点对不同人的输出难度近乎相同",
+        "caption": "第 1 行：左边是「AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真实发现的痛点。」，右边是「结果就是同一知识点对不同人的输出难度近乎相同」。"
+      }
+    ]
+  },
+  "fallback_text": "（初中讲法）教学短板（难自动分层适配）：AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真实发现的痛点。 教学短板，指通用人工智能本身无法自动判断使用者的年龄与知识基础，不能自动调整内容难度，很难做到分层教学。 这并非纸上推测，而是教育场景实际调研发现的现实痛点，也是本课题重点关注的问题之一。 成因在于两个不对齐：一是模型不知道「你是谁」，对话里没有可靠的学情信息，它只能按训练语料里最普遍的表述来回答。",
+  "duration_ms": 4060,
   "params": {
-    "speed": {
+    "pairs": {
+      "type": "int",
+      "min": 3,
+      "max": 4,
+      "default": 3,
+      "description": "比几行"
+    },
+    "pace": {
       "type": "float",
-      "min": 0.5,
-      "max": 3,
-      "default": 1.2,
-      "description": "播放速度倍数"
+      "min": 0.6,
+      "max": 1.8,
+      "default": 1.0,
+      "description": "播放速度倍数，越大越快"
     }
-  }
+  },
+  "body": "<h1 class=\"anim-title\">教学短板（难自动分层适配）：两条路线并排看</h1>\n<p class=\"anim-caption\" id=\"caption\">两条路线，一行一行比</p>\n<div class=\"anim-canvas\" role=\"img\" aria-label=\"对比动画：两条路线并排逐行比较\"></div>\n<p class=\"anim-caption\"><span class=\"chip\">准备对照</span></p>\n",
+  "script": "/* K12-ARCHETYPE compare | skin=technical */\n/* k12:phases min=5 default=5 */\nvar M = Sandbox.motion;\nvar PACE = {{pace}};\nvar DATA = {\"open\": \"教学短板（难自动分层适配） 有两条路线，并排放在一起看差别。\", \"close\": \"两边对照完，记住：AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真实发现的痛点。\", \"leftHeader\": \"一条路线的做法\", \"rightHeader\": \"另一条路线的做法\", \"rows\": [{\"left\": \"默认只给一套中等难度的话\", \"right\": \"结果就是同一知识点对不同人的输出难度近乎相同\", \"caption\": \"第 1 行：左边是「AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真实发现的痛点。」，右边是「结果就是同一知识点对不同人的输出难度近乎相同」。\"}]};\nvar ROWS = DATA.rows;\nvar N = ROWS.length;\nvar SAFE = Sandbox.safe;\n\nfunction d(f) { return M.duration * f / PACE; }\nfunction fg() {\n  var host = Sandbox.stage().svg.querySelector('.k12-layer-fg');\n  var g = Sandbox.svgEl('g');\n  host.appendChild(g);\n  return g;\n}\nfunction at(g, x, y) { g.setAttribute('transform', 'translate(' + x + ' ' + y + ')'); return g; }\nfunction anchor(el) { el.style.transformBox = 'fill-box'; el.style.transformOrigin = 'center'; return el; }\nfunction pivot(x, y) { var inner = Sandbox.svgEl('g'); at(fg(), x, y).appendChild(inner); return anchor(inner); }\nfunction off(el) { el.setAttribute('opacity', '0'); return el; }\nfunction nd(o) { return anchor(Sandbox.node(o)); }\nfunction rd(o) { return anchor(Sandbox.readout(o)); }\nfunction bub(o) { return anchor(Sandbox.bubble(o)); }\nfunction person(o) { return anchor(Sandbox.actor(o)); }\n/*\n * ★★ 布局（本版新增，替掉旧版每个原型手算的 x / y / w / h）。\n *\n * 旧写法把每个站点的坐标手算成「可用宽度减去固定卡宽再除以站点数加一」：站点一多，分子变负，\n * 盒子互相压；文案一长，node() 为「永不截断」自己长高，又压住下一行；读数框钉死在右下角，\n * 与步骤条挤在一起。根因是没有任何一处知道别人占多大地方。\n *\n * 现在一律走 Sandbox.zone / row / stack：宽度均分、整行同一高度（按最费的那项给）、\n * 带与带之间有纵向游标 ， 重叠在构造上不可能。下面的 zone() 就是「新开一条带」的简写。\n */\nfunction zone(o) { return Sandbox.zone(o || {}); }\nfunction safeWidth() { return SAFE.width; }\n/* 人物站在 x、脚底落在 y 上（y 必须是「一条线」：路面 / 站的基线 / 天平横梁）。 */\nfunction walker(x, y, pose, name, scale) {\n  return person({ x: x, y: y, pose: pose || 'walk', label: name || '', scale: scale || 1 });\n}\n/* 盒子中线（连接线、人物走位都以它为准，不再手算 center）。 */\nfunction midOf(box) { return box ? box.x + box.w / 2 : 0; }\n/*\n * 一段文字要多大（与基元同一套算式）。\n *\n * ★ 用途：同一格里要轮播好几段文案时（对照两栏、读数框），先按最大的一段预留尺寸，\n *   轮播过程中盒子一次都不会长大 ， 也就不会去压邻居。旧写法正是在这里出的错：\n *   盒子按第一段文案的尺寸建好，后面长的一句让它临时长高，压住下面那一行。\n */\nfunction fitOf(o) { return Sandbox.measure(o || {}); }\nfunction needH(cells, width) {\n  var i, need = 40;\n  for (i = 0; i < cells.length; i += 1) {\n    var cell = cells[i] || {};\n    need = Math.max(need, fitOf({\n      kind: cell.kind || 'node', w: width,\n      label: cell.label, sub: cell.sub, text: cell.text, tail: cell.tail\n    }).height);\n  }\n  return need;\n}\nfunction riseIn(el, dy) { return { targets: el, opacity: [0, 1], translateY: [dy, 0], duration: d(1), easing: M.easing }; }\nfunction popIn(el) { return { targets: el, opacity: [0, 1], scale: [0.94, 1], duration: d(1), easing: M.easing }; }\nfunction slideIn(el, dx) { return { targets: el, opacity: [0, 1], translateX: [dx, 0], duration: d(1), easing: M.easing }; }\nfunction later(anim, factor) { anim.delay = d(factor); return anim; }\nfunction swapOut(el) { return { targets: el, opacity: [1, 0], duration: d(0.35), easing: 'linear' }; }\nfunction dim(el) { return { targets: el, opacity: [1, 0.55], duration: d(0.5), easing: 'linear' }; }\nfunction lit(el) { return { targets: el, opacity: [0.55, 1], duration: d(0.5), easing: 'linear' }; }\nfunction mark(el) { return { targets: el, strokeWidth: [1.1, 3.6, 1.1], duration: d(1.1), easing: M.easing }; }\nfunction bump(el) { return { targets: el, scale: [1, 1.07, 1], duration: d(0.8), easing: M.easing }; }\nfunction wipe(el) { return { targets: el, strokeWidth: [0.4, 2.6], duration: d(0.9), easing: M.easing }; }\nfunction push(meter, value) {\n  return { targets: meter, scale: [1.03, 1], duration: d(0.5), easing: M.easing, begin: function () { meter.set(value); } };\n}\n/*\n * 动小人一律动他那层 pivot（实测缺陷：对话原型的小人被切在画布上沿）。\n *\n * anime 的 scale / translateX 写的是 style.transform，而 style 会整个盖掉元素自己的\n * transform 属性（translate + scale 那一串）；直接动人物本体，他就会弹回舞台原点，\n * 位置丢了、缩放也没了，看起来就是「小人跑到画布外面」。\n * 运行时给每个人物套了两层：外层只负责摆位置（动画永不碰），\n * 内层 pivot 不带 transform 属性、专供动画。所以这里统一取 pivot。\n */\nfunction actorOf(el) { return (el && el.k12Pivot) || el; }\nfunction bumpActor(el) { return bump(actorOf(el)); }\nfunction popActor(el) { return popIn(actorOf(el)); }\nfunction hideActor(el) { return off(actorOf(el)); }\n/*\n * ★★ 相位开始时才更新字幕 / 步骤条（本票最隐蔽的一处，实测踩到）。\n *\n * Sandbox.timeline(steps, builder) 的 builder 是在建时间线时被一次性跑完的\n * （runtime.js 里那个 for 循环），不是每个相位开始时。所以在 builder 里直接调\n * h.caption / h.step，所有相位的字幕会在开播前全部写完，最后一句永远胜出：\n * 学生从第 0 秒起看到的就是收尾文案，而动画才刚开始播（截图里一眼看穿：\n * 人物还在路上，字幕已经是结论）。\n *\n * 修法：所有原型都不直接调 h.caption / h.step，而是把 builder 交给 defer() 包一层：\n * defer 收下这两个调用，改成一条 1ms 的「只会调 begin」的动画塞进该相位的最前面，\n * 由 anime 在相位边界上触发。相位正文因此可以照常写 h.caption 与 h.step，读起来还是直白。\n *\n * ★ defer 只改这一件事：它把 caption / step 变成「相位开始时」的事件，其余成员原样透传，\n *   所以原型里照旧写 h.caption，读起来与 STAGE-API 的样例一致。\n */\nfunction defer(build) {\n  return function (tl, index, h) {\n    var shim = {}, key, text = null, at = 0, total = 0;\n    for (key in h) { if (Object.prototype.hasOwnProperty.call(h, key)) shim[key] = h[key]; }\n    shim.caption = function (value) { text = value; return shim; };\n    shim.step = function (value, count) { at = value; total = count; return shim; };\n    var made = build(tl, index, shim);\n    var list = made == null ? [] : (Object.prototype.toString.call(made) === '[object Array]' ? made.slice() : [made]);\n    // step 先加、caption 后加 → 两者都在该相位的第一个 tick 触发（顺序只影响同一帧内谁后写）\n    if (total) list.unshift({ targets: { t: 0 }, t: [0, 1], duration: 1, easing: 'linear', begin: function () { Sandbox.step(at, total); } });\n    if (text != null) list.unshift({ targets: { t: 0 }, t: [0, 1], duration: 1, easing: 'linear', begin: function () { Sandbox.caption(text); } });\n    return list;\n  };\n}\nfunction say(text, at, total) {\n  return {\n    targets: { t: 0 },\n    t: [0, 1],\n    duration: 1,\n    easing: 'linear',\n    begin: function () { Sandbox.caption(text); Sandbox.step(at, total); }\n  };\n}\nfunction label(x, y, text, cls) {\n  var t = Sandbox.svgEl('text');\n  t.setAttribute('class', cls || 'k12-node-sub');\n  t.setAttribute('text-anchor', 'middle');\n  t.setAttribute('x', String(x));\n  t.setAttribute('y', String(y));\n  t.textContent = String(text);\n  fg().appendChild(t);\n  return t;\n}\nvar L = Sandbox.layout({\"bands\":[{\"id\":\"heads\",\"x\":34.0,\"y\":34.0,\"w\":652.0,\"h\":60.0},{\"id\":\"bars\",\"x\":34.0,\"y\":104.0,\"w\":652.0,\"h\":68.88}],\"cells\":[{\"id\":\"head-left\",\"kind\":\"node\",\"x\":34.0,\"y\":34.0,\"w\":321.0,\"h\":47.44,\"label\":\"一条路线的做法\",\"tone\":\"muted\",\"band\":\"heads\"},{\"id\":\"head-right\",\"kind\":\"node\",\"x\":365.0,\"y\":34.0,\"w\":321.0,\"h\":47.44,\"label\":\"另一条路线的做法\",\"tone\":\"accent\",\"band\":\"heads\"},{\"id\":\"left-0\",\"kind\":\"node\",\"x\":34.0,\"y\":104.0,\"w\":321.0,\"h\":68.88,\"label\":\"默认只给一套中等难度的话\",\"tone\":\"muted\",\"band\":\"bars\"},{\"id\":\"right-0\",\"kind\":\"node\",\"x\":365.0,\"y\":104.0,\"w\":321.0,\"h\":68.88,\"label\":\"结果就是同一知识点对不同人的输出难度近乎相同\",\"tone\":\"base\",\"band\":\"bars\"}],\"spread\":[{\"band\":\"bars\",\"prefix\":\"left-\",\"param\":\"pairs\",\"min\":3,\"max\":4,\"axis\":\"x\",\"mode\":\"center\"}],\"safe\":{\"x\":34.0,\"y\":34.0,\"right\":686.0,\"bottom\":390.0}});\nvar COUNT = Math.min({{pairs}}, N);\nvar leftHead = L.one('head-left');\nvar rightHead = L.one('head-right');\nvar leftBars = L.list('left');\nvar rightBars = L.list('right');\nvar i;\nfor (i = 0; i < leftBars.length; i += 1) {\n  off(leftBars[i]);\n  off(rightBars[i]);\n  if (i >= COUNT) { leftBars[i].setAttribute('display', 'none'); rightBars[i].setAttribute('display', 'none'); }\n}\nSandbox.play(function () {\n  return Sandbox.timeline(COUNT + 2, defer(function (tl, index, h) {\n    if (index === 0) {\n      h.caption(DATA.open);\n      h.step(1, COUNT + 2);\n      return [slideIn(leftHead, -24), slideIn(rightHead, 24), mark(rightHead.body)];\n    }\n    if (index <= COUNT) {\n      i = index - 1;\n      h.caption(ROWS[i].caption);\n      h.step(index + 1, COUNT + 2);\n      return [later(riseIn(leftBars[i], 22), 0.05), later(riseIn(rightBars[i], 22), 0.3), mark(rightBars[i].body)];\n    }\n    h.caption(DATA.close);\n    h.step(COUNT + 2, COUNT + 2);\n    var all = [], k;\n    for (k = 0; k < COUNT; k += 1) {\n      all.push(later({ targets: leftBars[k], opacity: [1, 0.7, 1], duration: d(0.7), easing: M.easing }, h.stagger * k / 1000));\n      all.push(later(bump(rightBars[k]), h.stagger * k / 1000));\n    }\n    return all;\n  }));\n});\n\nSandbox.ready({ archetype: 'compare' });\n"
 }

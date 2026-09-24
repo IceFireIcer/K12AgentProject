@@ -4,39 +4,153 @@
   "name": "自动驾驶",
   "concept": "自动驾驶",
   "template_id": "autonomous-driving",
-  "archetype": "flow",
-  "title": "自动驾驶：看懂它是怎么起作用的",
+  "archetype": "network",
+  "skin": "technical",
+  "title": "自动驾驶：信号一层层算下去",
+  "open_caption": "自动驾驶 的输入先变成数字，再一层层算下去。",
+  "close_caption": "算到最后：用摄像头和雷达感知道路，让人工智能帮汽车做行驶决策；但要区分「辅助驾驶」和「完全自主驾驶」。",
   "steps": [
     {
-      "title": "自动驾驶",
-      "hint": "是什么",
-      "caption": "先明确概念边界：用摄像头和雷达感知道路，让人工智能帮汽车做行驶决"
+      "caption": "执行由线控底盘完成转向、驱动与制动"
     },
     {
-      "title": "关键点",
-      "hint": "执行由线控底盘…",
-      "caption": "再拆机制与前提：执行由线控底盘完成转向、驱动与制动"
-    },
-    {
-      "title": "再看步",
-      "hint": "高等级在限定场…",
       "caption": "高等级在限定场景内由系统承担全部任务"
     },
     {
-      "title": "收束",
-      "hint": "记住",
-      "caption": "最后关联上下游与局限：等级之间的差别不是程度问题，"
+      "caption": "等级之间的差别不是程度问题，而是责任归属的质变"
+    },
+    {
+      "caption": "现代方案常采用「端到端」神经网络，直接由传感器输入生成控制信号"
+    },
+    {
+      "caption": "当前量产乘用车绝大多数处于辅助驾驶阶段，完全自主驾驶仅在特定区域受限运营"
+    },
+    {
+      "caption": "其二，长尾场景难以穷举，仿真与极端案例数据成为关键"
+    },
+    {
+      "caption": "其三，实时性要求高，推理阶段（2.1.2）必须在车载算力与延迟约束下完成"
+    },
+    {
+      "caption": "预测与决策需估计其他交通参与者的未来轨迹（多模态、多假设），再在安全约束下规划轨迹"
     }
   ],
-  "fallback_text": "（高中讲法）自动驾驶：用摄像头和雷达感知道路，让人工智能帮汽车做行驶决策；但要区分「辅助驾驶」和「完全自主驾驶」。 再记一句：自动驾驶是感知、决策与控制的实时闭环系统，是计算机视觉（3.4.1）在开放动态环境中最严苛的落地场景，其本质是把驾驶任务形式化为在不确定性下的序列决策问题。 感知以多模态传感器融合为核心：摄像头提供高分辨率语义信息，激光雷达提供精确。",
-  "duration_ms": 4800,
+  "data": {
+    "open": "自动驾驶 的输入先变成数字，再一层层算下去。",
+    "close": "算到最后：用摄像头和雷达感知道路，让人工智能帮汽车做行驶决策；但要区分「辅助驾驶」和「完全自主驾驶」。",
+    "inputs": [
+      {
+        "label": "驱动与制动",
+        "value": 1.0
+      },
+      {
+        "label": "输入二",
+        "value": 0.6
+      },
+      {
+        "label": "输入三",
+        "value": 0.25
+      }
+    ],
+    "hidden": [
+      {
+        "label": "单元一"
+      },
+      {
+        "label": "单元二"
+      },
+      {
+        "label": "其二"
+      }
+    ],
+    "outputs": [
+      {
+        "label": "其三"
+      },
+      {
+        "label": "多假设）"
+      }
+    ],
+    "wiresIn": "每根线的粗细就是权重的大小",
+    "wiresOut": "第二层的权重有正有负",
+    "weights": {
+      "ih": [
+        [
+          0.8,
+          -0.4,
+          0.25
+        ],
+        [
+          0.5,
+          0.6,
+          -0.3
+        ],
+        [
+          -0.2,
+          0.7,
+          0.45
+        ]
+      ],
+      "ho": [
+        [
+          0.7,
+          -0.5
+        ],
+        [
+          0.45,
+          0.6
+        ],
+        [
+          -0.35,
+          0.3
+        ]
+      ]
+    },
+    "rows": [
+      {
+        "caption": "执行由线控底盘完成转向、驱动与制动"
+      },
+      {
+        "caption": "高等级在限定场景内由系统承担全部任务"
+      },
+      {
+        "caption": "等级之间的差别不是程度问题，而是责任归属的质变"
+      },
+      {
+        "caption": "现代方案常采用「端到端」神经网络，直接由传感器输入生成控制信号"
+      },
+      {
+        "caption": "当前量产乘用车绝大多数处于辅助驾驶阶段，完全自主驾驶仅在特定区域受限运营"
+      },
+      {
+        "caption": "其二，长尾场景难以穷举，仿真与极端案例数据成为关键"
+      },
+      {
+        "caption": "其三，实时性要求高，推理阶段（2.1.2）必须在车载算力与延迟约束下完成"
+      },
+      {
+        "caption": "预测与决策需估计其他交通参与者的未来轨迹（多模态、多假设），再在安全约束下规划轨迹"
+      }
+    ]
+  },
+  "fallback_text": "（高中讲法）自动驾驶：用摄像头和雷达感知道路，让人工智能帮汽车做行驶决策；但要区分「辅助驾驶」和「完全自主驾驶」。 预测与决策需估计其他交通参与者的未来轨迹（多模态、多假设），再在安全约束下规划轨迹。 现代方案常采用「端到端」神经网络，直接由传感器输入生成控制信号。 执行由线控底盘完成转向、驱动与制动。",
+  "duration_ms": 6756,
   "params": {
-    "speed": {
-      "type": "float",
-      "min": 0.5,
+    "units": {
+      "type": "int",
+      "min": 2,
       "max": 3,
-      "default": 1.2,
-      "description": "播放速度倍数"
+      "default": 3,
+      "description": "中间层放几个单元"
+    },
+    "pace": {
+      "type": "float",
+      "min": 0.6,
+      "max": 1.8,
+      "default": 1.0,
+      "description": "播放速度倍数，越大越快"
     }
-  }
+  },
+  "body": "<h1 class=\"anim-title\">自动驾驶：信号一层层算下去</h1>\n<p class=\"anim-caption\" id=\"caption\">信号一层层传下去</p>\n<div class=\"anim-canvas\" role=\"img\" aria-label=\"网络动画：带权重的连线逐层传播信号\"></div>\n<p class=\"anim-caption\"><span class=\"chip\">准备计算</span></p>\n",
+  "script": "/* K12-ARCHETYPE network | skin=technical */\n/* k12:phases min=8 default=8 */\nvar M = Sandbox.motion;\nvar PACE = {{pace}};\nvar DATA = {\"open\": \"自动驾驶 的输入先变成数字，再一层层算下去。\", \"close\": \"算到最后：用摄像头和雷达感知道路，让人工智能帮汽车做行驶决策；但要区分「辅助驾驶」和「完全自主驾驶」。\", \"inputs\": [{\"label\": \"驱动与制动\", \"value\": 1.0}, {\"label\": \"输入二\", \"value\": 0.6}, {\"label\": \"输入三\", \"value\": 0.25}], \"hidden\": [{\"label\": \"单元一\"}, {\"label\": \"单元二\"}, {\"label\": \"其二\"}], \"outputs\": [{\"label\": \"其三\"}, {\"label\": \"多假设）\"}], \"wiresIn\": \"每根线的粗细就是权重的大小\", \"wiresOut\": \"第二层的权重有正有负\", \"weights\": {\"ih\": [[0.8, -0.4, 0.25], [0.5, 0.6, -0.3], [-0.2, 0.7, 0.45]], \"ho\": [[0.7, -0.5], [0.45, 0.6], [-0.35, 0.3]]}, \"rows\": [{\"caption\": \"执行由线控底盘完成转向、驱动与制动\"}, {\"caption\": \"高等级在限定场景内由系统承担全部任务\"}, {\"caption\": \"等级之间的差别不是程度问题，而是责任归属的质变\"}, {\"caption\": \"现代方案常采用「端到端」神经网络，直接由传感器输入生成控制信号\"}, {\"caption\": \"当前量产乘用车绝大多数处于辅助驾驶阶段，完全自主驾驶仅在特定区域受限运营\"}, {\"caption\": \"其二，长尾场景难以穷举，仿真与极端案例数据成为关键\"}, {\"caption\": \"其三，实时性要求高，推理阶段（2.1.2）必须在车载算力与延迟约束下完成\"}, {\"caption\": \"预测与决策需估计其他交通参与者的未来轨迹（多模态、多假设），再在安全约束下规划轨迹\"}]};\nvar ROWS = DATA.rows;\nvar N = ROWS.length;\nvar SAFE = Sandbox.safe;\n\nfunction d(f) { return M.duration * f / PACE; }\nfunction fg() {\n  var host = Sandbox.stage().svg.querySelector('.k12-layer-fg');\n  var g = Sandbox.svgEl('g');\n  host.appendChild(g);\n  return g;\n}\nfunction at(g, x, y) { g.setAttribute('transform', 'translate(' + x + ' ' + y + ')'); return g; }\nfunction anchor(el) { el.style.transformBox = 'fill-box'; el.style.transformOrigin = 'center'; return el; }\nfunction pivot(x, y) { var inner = Sandbox.svgEl('g'); at(fg(), x, y).appendChild(inner); return anchor(inner); }\nfunction off(el) { el.setAttribute('opacity', '0'); return el; }\nfunction nd(o) { return anchor(Sandbox.node(o)); }\nfunction rd(o) { return anchor(Sandbox.readout(o)); }\nfunction bub(o) { return anchor(Sandbox.bubble(o)); }\nfunction person(o) { return anchor(Sandbox.actor(o)); }\n/*\n * ★★ 布局（本版新增，替掉旧版每个原型手算的 x / y / w / h）。\n *\n * 旧写法把每个站点的坐标手算成「可用宽度减去固定卡宽再除以站点数加一」：站点一多，分子变负，\n * 盒子互相压；文案一长，node() 为「永不截断」自己长高，又压住下一行；读数框钉死在右下角，\n * 与步骤条挤在一起。根因是没有任何一处知道别人占多大地方。\n *\n * 现在一律走 Sandbox.zone / row / stack：宽度均分、整行同一高度（按最费的那项给）、\n * 带与带之间有纵向游标 ， 重叠在构造上不可能。下面的 zone() 就是「新开一条带」的简写。\n */\nfunction zone(o) { return Sandbox.zone(o || {}); }\nfunction safeWidth() { return SAFE.width; }\n/* 人物站在 x、脚底落在 y 上（y 必须是「一条线」：路面 / 站的基线 / 天平横梁）。 */\nfunction walker(x, y, pose, name, scale) {\n  return person({ x: x, y: y, pose: pose || 'walk', label: name || '', scale: scale || 1 });\n}\n/* 盒子中线（连接线、人物走位都以它为准，不再手算 center）。 */\nfunction midOf(box) { return box ? box.x + box.w / 2 : 0; }\n/*\n * 一段文字要多大（与基元同一套算式）。\n *\n * ★ 用途：同一格里要轮播好几段文案时（对照两栏、读数框），先按最大的一段预留尺寸，\n *   轮播过程中盒子一次都不会长大 ， 也就不会去压邻居。旧写法正是在这里出的错：\n *   盒子按第一段文案的尺寸建好，后面长的一句让它临时长高，压住下面那一行。\n */\nfunction fitOf(o) { return Sandbox.measure(o || {}); }\nfunction needH(cells, width) {\n  var i, need = 40;\n  for (i = 0; i < cells.length; i += 1) {\n    var cell = cells[i] || {};\n    need = Math.max(need, fitOf({\n      kind: cell.kind || 'node', w: width,\n      label: cell.label, sub: cell.sub, text: cell.text, tail: cell.tail\n    }).height);\n  }\n  return need;\n}\nfunction riseIn(el, dy) { return { targets: el, opacity: [0, 1], translateY: [dy, 0], duration: d(1), easing: M.easing }; }\nfunction popIn(el) { return { targets: el, opacity: [0, 1], scale: [0.94, 1], duration: d(1), easing: M.easing }; }\nfunction slideIn(el, dx) { return { targets: el, opacity: [0, 1], translateX: [dx, 0], duration: d(1), easing: M.easing }; }\nfunction later(anim, factor) { anim.delay = d(factor); return anim; }\nfunction swapOut(el) { return { targets: el, opacity: [1, 0], duration: d(0.35), easing: 'linear' }; }\nfunction dim(el) { return { targets: el, opacity: [1, 0.55], duration: d(0.5), easing: 'linear' }; }\nfunction lit(el) { return { targets: el, opacity: [0.55, 1], duration: d(0.5), easing: 'linear' }; }\nfunction mark(el) { return { targets: el, strokeWidth: [1.1, 3.6, 1.1], duration: d(1.1), easing: M.easing }; }\nfunction bump(el) { return { targets: el, scale: [1, 1.07, 1], duration: d(0.8), easing: M.easing }; }\nfunction wipe(el) { return { targets: el, strokeWidth: [0.4, 2.6], duration: d(0.9), easing: M.easing }; }\nfunction push(meter, value) {\n  return { targets: meter, scale: [1.03, 1], duration: d(0.5), easing: M.easing, begin: function () { meter.set(value); } };\n}\n/*\n * 动小人一律动他那层 pivot（实测缺陷：对话原型的小人被切在画布上沿）。\n *\n * anime 的 scale / translateX 写的是 style.transform，而 style 会整个盖掉元素自己的\n * transform 属性（translate + scale 那一串）；直接动人物本体，他就会弹回舞台原点，\n * 位置丢了、缩放也没了，看起来就是「小人跑到画布外面」。\n * 运行时给每个人物套了两层：外层只负责摆位置（动画永不碰），\n * 内层 pivot 不带 transform 属性、专供动画。所以这里统一取 pivot。\n */\nfunction actorOf(el) { return (el && el.k12Pivot) || el; }\nfunction bumpActor(el) { return bump(actorOf(el)); }\nfunction popActor(el) { return popIn(actorOf(el)); }\nfunction hideActor(el) { return off(actorOf(el)); }\n/*\n * ★★ 相位开始时才更新字幕 / 步骤条（本票最隐蔽的一处，实测踩到）。\n *\n * Sandbox.timeline(steps, builder) 的 builder 是在建时间线时被一次性跑完的\n * （runtime.js 里那个 for 循环），不是每个相位开始时。所以在 builder 里直接调\n * h.caption / h.step，所有相位的字幕会在开播前全部写完，最后一句永远胜出：\n * 学生从第 0 秒起看到的就是收尾文案，而动画才刚开始播（截图里一眼看穿：\n * 人物还在路上，字幕已经是结论）。\n *\n * 修法：所有原型都不直接调 h.caption / h.step，而是把 builder 交给 defer() 包一层：\n * defer 收下这两个调用，改成一条 1ms 的「只会调 begin」的动画塞进该相位的最前面，\n * 由 anime 在相位边界上触发。相位正文因此可以照常写 h.caption 与 h.step，读起来还是直白。\n *\n * ★ defer 只改这一件事：它把 caption / step 变成「相位开始时」的事件，其余成员原样透传，\n *   所以原型里照旧写 h.caption，读起来与 STAGE-API 的样例一致。\n */\nfunction defer(build) {\n  return function (tl, index, h) {\n    var shim = {}, key, text = null, at = 0, total = 0;\n    for (key in h) { if (Object.prototype.hasOwnProperty.call(h, key)) shim[key] = h[key]; }\n    shim.caption = function (value) { text = value; return shim; };\n    shim.step = function (value, count) { at = value; total = count; return shim; };\n    var made = build(tl, index, shim);\n    var list = made == null ? [] : (Object.prototype.toString.call(made) === '[object Array]' ? made.slice() : [made]);\n    // step 先加、caption 后加 → 两者都在该相位的第一个 tick 触发（顺序只影响同一帧内谁后写）\n    if (total) list.unshift({ targets: { t: 0 }, t: [0, 1], duration: 1, easing: 'linear', begin: function () { Sandbox.step(at, total); } });\n    if (text != null) list.unshift({ targets: { t: 0 }, t: [0, 1], duration: 1, easing: 'linear', begin: function () { Sandbox.caption(text); } });\n    return list;\n  };\n}\nfunction say(text, at, total) {\n  return {\n    targets: { t: 0 },\n    t: [0, 1],\n    duration: 1,\n    easing: 'linear',\n    begin: function () { Sandbox.caption(text); Sandbox.step(at, total); }\n  };\n}\nfunction label(x, y, text, cls) {\n  var t = Sandbox.svgEl('text');\n  t.setAttribute('class', cls || 'k12-node-sub');\n  t.setAttribute('text-anchor', 'middle');\n  t.setAttribute('x', String(x));\n  t.setAttribute('y', String(y));\n  t.textContent = String(text);\n  fg().appendChild(t);\n  return t;\n}\nvar L = Sandbox.layout({\"bands\":[{\"id\":\"net\",\"x\":34.0,\"y\":34.0,\"w\":652.0,\"h\":218.26},{\"id\":\"meters\",\"x\":34.0,\"y\":262.26,\"w\":652.0,\"h\":79.57}],\"cells\":[{\"id\":\"input-0\",\"kind\":\"node\",\"x\":34.0,\"y\":34.0,\"w\":168.0,\"h\":67.42,\"label\":\"驱动与制动\",\"sub\":\"1.0\",\"tone\":\"base\",\"band\":\"net\"},{\"id\":\"input-1\",\"kind\":\"node\",\"x\":34.0,\"y\":109.42,\"w\":168.0,\"h\":67.42,\"label\":\"输入二\",\"sub\":\"0.6\",\"tone\":\"base\",\"band\":\"net\"},{\"id\":\"input-2\",\"kind\":\"node\",\"x\":34.0,\"y\":184.84,\"w\":168.0,\"h\":67.42,\"label\":\"输入三\",\"sub\":\"0.25\",\"tone\":\"base\",\"band\":\"net\"},{\"id\":\"hidden-0\",\"kind\":\"node\",\"x\":226.0,\"y\":63.97,\"w\":168.0,\"h\":47.44,\"label\":\"单元一\",\"tone\":\"accent\",\"band\":\"net\"},{\"id\":\"hidden-1\",\"kind\":\"node\",\"x\":226.0,\"y\":119.41,\"w\":168.0,\"h\":47.44,\"label\":\"单元二\",\"tone\":\"accent\",\"band\":\"net\"},{\"id\":\"hidden-2\",\"kind\":\"node\",\"x\":226.0,\"y\":174.85,\"w\":168.0,\"h\":47.44,\"label\":\"其二\",\"tone\":\"accent\",\"band\":\"net\"},{\"id\":\"output-0\",\"kind\":\"node\",\"x\":418.0,\"y\":91.69,\"w\":168.0,\"h\":47.44,\"label\":\"其三\",\"tone\":\"base\",\"band\":\"net\"},{\"id\":\"output-1\",\"kind\":\"node\",\"x\":418.0,\"y\":147.13,\"w\":168.0,\"h\":47.44,\"label\":\"多假设）\",\"tone\":\"base\",\"band\":\"net\"},{\"id\":\"in-meter\",\"kind\":\"readout\",\"x\":34.0,\"y\":262.26,\"w\":209.33,\"h\":79.57,\"label\":\"输入\",\"band\":\"meters\"},{\"id\":\"hidden-meter\",\"kind\":\"readout\",\"x\":255.33,\"y\":262.26,\"w\":209.33,\"h\":79.57,\"label\":\"隐层算出来\",\"value\":0,\"band\":\"meters\"},{\"id\":\"out-meter\",\"kind\":\"readout\",\"x\":476.67,\"y\":262.26,\"w\":209.33,\"h\":79.57,\"label\":\"输出\",\"value\":0,\"band\":\"meters\"}],\"rails\":[{\"id\":\"wire-in-0-0\",\"from\":\"input-0\",\"to\":\"hidden-0\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-in-0-1\",\"from\":\"input-0\",\"to\":\"hidden-1\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-in-0-2\",\"from\":\"input-0\",\"to\":\"hidden-2\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-in-1-0\",\"from\":\"input-1\",\"to\":\"hidden-0\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-in-1-1\",\"from\":\"input-1\",\"to\":\"hidden-1\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-in-1-2\",\"from\":\"input-1\",\"to\":\"hidden-2\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-in-2-0\",\"from\":\"input-2\",\"to\":\"hidden-0\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-in-2-1\",\"from\":\"input-2\",\"to\":\"hidden-1\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-in-2-2\",\"from\":\"input-2\",\"to\":\"hidden-2\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-out-0-0\",\"from\":\"hidden-0\",\"to\":\"output-0\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-out-0-1\",\"from\":\"hidden-0\",\"to\":\"output-1\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-out-1-0\",\"from\":\"hidden-1\",\"to\":\"output-0\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-out-1-1\",\"from\":\"hidden-1\",\"to\":\"output-1\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-out-2-0\",\"from\":\"hidden-2\",\"to\":\"output-0\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true},{\"id\":\"wire-out-2-1\",\"from\":\"hidden-2\",\"to\":\"output-1\",\"band\":\"net\",\"style\":\"pipe\",\"directed\":true}],\"spread\":[{\"band\":\"net\",\"prefix\":\"hidden-\",\"param\":\"units\",\"min\":2,\"max\":3,\"axis\":\"x\",\"mode\":\"center\"}],\"safe\":{\"x\":34.0,\"y\":34.0,\"right\":686.0,\"bottom\":390.0}});\nvar UNITS = Math.max(2, Math.min({{units}}, DATA.hidden.length));\nvar inNodes = L.list('input');\nvar hidNodes = L.list('hidden');\nvar outNodes = L.list('output');\nvar wiresIn = L.list('wire-in');\nvar wiresOut = L.list('wire-out');\nvar inMeter = L.one('in-meter');\nvar hidMeter = L.one('hidden-meter');\nvar outMeter = L.one('out-meter');\nvar i, j, k, sum;\nvar COL = inNodes.length, OUT = outNodes.length;\nif (UNITS < hidNodes.length) hidNodes[hidNodes.length - 1].setAttribute('display', 'none');\nfor (i = 0; i < inNodes.length; i += 1) off(inNodes[i]);\nfor (j = 0; j < hidNodes.length; j += 1) off(hidNodes[j]);\nfor (k = 0; k < outNodes.length; k += 1) off(outNodes[k]);\nfor (i = 0; i < wiresIn.length; i += 1) off(wiresIn[i]);\nfor (i = 0; i < wiresOut.length; i += 1) off(wiresOut[i]);\nvar hid = [], out = [];\nfor (j = 0; j < UNITS; j += 1) {\n  sum = 0;\n  for (i = 0; i < COL; i += 1) sum += DATA.inputs[i].value * DATA.weights.ih[i][j];\n  hid.push(Math.round(sum * 100) / 100);\n}\nfor (k = 0; k < OUT; k += 1) {\n  sum = 0;\n  for (j = 0; j < UNITS; j += 1) sum += hid[j] * DATA.weights.ho[j][k];\n  out.push(Math.round(sum * 100) / 100);\n}\nfunction join(list) { return list.join(' / '); }\nfunction wireIn(i2, j2) { return wiresIn[i2 * UNITS + j2]; }\nfunction wireOut(j2, i2) { return wiresOut[j2 * OUT + i2]; }\nSandbox.play(function () {\n  return Sandbox.timeline(8, defer(function (tl, index, h) {\n    if (index === 0) {\n      h.caption(DATA.rows[0].caption);\n      h.step(1, 8);\n      var open = [push(hidMeter, 0), push(outMeter, 0)];\n      for (i = 0; i < COL; i += 1) open.push(later(slideIn(inNodes[i], -24), h.stagger * i / 1000));\n      open.push(push(inMeter, join([DATA.inputs[0].value, DATA.inputs[1].value, DATA.inputs[2].value])));\n      return open;\n    }\n    if (index === 1) {\n      h.caption('每一根线的粗细代表权重的大小，线越粗它说话越算数。');\n      h.step(2, 8);\n      var wide = [];\n      for (i = 0; i < COL; i += 1) {\n        for (j = 0; j < UNITS; j += 1) {\n          wide.push(later(\n            { targets: wireIn(i, j), opacity: [0, 1], strokeWidth: [0.4, Math.abs(DATA.weights.ih[i][j]) * 4 + 0.6], duration: d(0.9), easing: M.easing },\n            h.stagger * (i + j) / 1000\n          ));\n        }\n      }\n      return wide;\n    }\n    if (index === 2) {\n      h.caption('把三个输入乘上权重再加起来，就是隐层里每个单元收到的数：' + join(hid.map(String)) + '。');\n      h.step(3, 8);\n      var calc = [push(hidMeter, join(hid.map(String)))];\n      for (j = 0; j < UNITS; j += 1) calc.push(mark(hidNodes[j].body));\n      return calc;\n    }\n    if (index === 3) {\n      h.caption('隐层把这些数记下来，接着往下一层送。');\n      h.step(4, 8);\n      var up = [];\n      for (j = 0; j < UNITS; j += 1) up.push(later(riseIn(hidNodes[j], 18), h.stagger * j / 1000));\n      return up;\n    }\n    if (index === 4) {\n      h.caption('第二层的权重同样有正有负：负的权重要把信号压下去。');\n      h.step(5, 8);\n      var second = [];\n      for (j = 0; j < UNITS; j += 1) {\n        for (k = 0; k < OUT; k += 1) {\n          second.push(later(\n            { targets: wireOut(j, k), opacity: [0, 1], strokeWidth: [0.4, Math.abs(DATA.weights.ho[j][k]) * 5 + 0.6], duration: d(0.9), easing: M.easing },\n            h.stagger * (j + k) / 1000\n          ));\n        }\n      }\n      return second;\n    }\n    if (index === 5) {\n      h.caption('输出层的两个数就是这么算出来的，数值大的那个是这次的答案：' + join(out.map(String)) + '。');\n      h.step(6, 8);\n      var show = [push(outMeter, join(out.map(String)))];\n      for (k = 0; k < OUT; k += 1) show.push(later(riseIn(outNodes[k], 20), h.stagger * k / 1000));\n      return show;\n    }\n    if (index === 6) {\n      h.caption(DATA.rows[Math.min(1, N - 1)].caption);\n      h.step(7, 8);\n      return [mark(outNodes[0].body), bump(outNodes[0]), push(outMeter, join(out.map(String)))];\n    }\n    h.caption(DATA.close);\n    h.step(8, 8);\n    return [bump(hidNodes[0]), later(bump(outNodes[0]), 0.3), push(hidMeter, join(hid.map(String)))];\n  }));\n});\n\nSandbox.ready({ archetype: 'network' });\n"
 }

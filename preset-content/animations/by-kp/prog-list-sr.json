@@ -4,39 +4,87 @@
   "name": "列表与字典：把一批数据放在一起",
   "concept": "列表与字典：把一批数据放在一起",
   "template_id": "prog-list",
-  "archetype": "flow",
-  "title": "列表与字典：把一批数据放在一起：看懂它是怎么起作用的",
+  "archetype": "counter",
+  "skin": "technical",
+  "title": "列表与字典：把一批数据放在一起：做一次计一次数",
+  "open_caption": "列表与字典：把一批数据放在一起 要一次一次地数，数到最后才知道总数。",
+  "close_caption": "数完了：列表把一批数据按顺序排好，字典给每份数据配一个名字，方便按顺序取或按名字查。",
   "steps": [
     {
-      "title": "列表与字…",
-      "hint": "是什么",
-      "caption": "先明确概念边界：列表把一批数据按顺序排好，"
+      "event": "这是计算机科学里最早、也最实用的一组成本权衡",
+      "caption": "第 1 次：这是计算机科学里最早、也最实用的一组成本权衡"
     },
     {
-      "title": "关键点",
-      "hint": "这是计算机科学…",
-      "caption": "再拆机制与前提：这是计算机科学里最早、也最实用的一组成本权衡"
+      "event": "使用层面的经验：结构要跟着问法走，而不是反过来",
+      "caption": "第 2 次：使用层面的经验：结构要跟着问法走，而不是反过来"
     },
     {
-      "title": "再看步",
-      "hint": "使用层面的经验…",
-      "caption": "使用层面的经验：结构要跟着问法走，而不是反过来"
+      "event": "如果程序总在问「第几个」，用列表",
+      "caption": "第 3 次：如果程序总在问「第几个」，用列表"
     },
     {
-      "title": "收束",
-      "hint": "记住",
-      "caption": "最后关联上下游与局限：如果程序总在问「第几个」，用列表；"
+      "event": "总在问「名字对应的值是什么」，用字典",
+      "caption": "第 4 次：总在问「名字对应的值是什么」，用字典"
+    },
+    {
+      "event": "边界：容器的选择不是越「快」越好",
+      "caption": "第 5 次：边界：容器的选择不是越「快」越好"
+    },
+    {
+      "event": "这与 8.1 的命名规范同属一个主题，让代码表达意图，把性能留给真的需要的地方",
+      "caption": "第 6 次：这与 8.1 的命名规范同属一个主题，让代码表达意图，把性能留给真的需要的地方"
     }
   ],
-  "fallback_text": "（高中讲法）列表与字典：把一批数据放在一起：列表把一批数据按顺序排好，字典给每份数据配一个名字，方便按顺序取或按名字查。 再记一句：列表与字典是两种数据组织方式，选择它们本质上是选择访问模型：列表提供按序访问，字典提供按键映射。 这个选择会直接影响：在一段无序数据里按内容查找需要逐项比较，而字典用哈希把「按键查」做到接近常数时间。 这是。",
-  "duration_ms": 4800,
+  "data": {
+    "open": "列表与字典：把一批数据放在一起 要一次一次地数，数到最后才知道总数。",
+    "close": "数完了：列表把一批数据按顺序排好，字典给每份数据配一个名字，方便按顺序取或按名字查。",
+    "totalLabel": "字数合计",
+    "unit": "字",
+    "rows": [
+      {
+        "event": "这是计算机科学里最早、也最实用的一组成本权衡",
+        "caption": "第 1 次：这是计算机科学里最早、也最实用的一组成本权衡"
+      },
+      {
+        "event": "使用层面的经验：结构要跟着问法走，而不是反过来",
+        "caption": "第 2 次：使用层面的经验：结构要跟着问法走，而不是反过来"
+      },
+      {
+        "event": "如果程序总在问「第几个」，用列表",
+        "caption": "第 3 次：如果程序总在问「第几个」，用列表"
+      },
+      {
+        "event": "总在问「名字对应的值是什么」，用字典",
+        "caption": "第 4 次：总在问「名字对应的值是什么」，用字典"
+      },
+      {
+        "event": "边界：容器的选择不是越「快」越好",
+        "caption": "第 5 次：边界：容器的选择不是越「快」越好"
+      },
+      {
+        "event": "这与 8.1 的命名规范同属一个主题，让代码表达意图，把性能留给真的需要的地方",
+        "caption": "第 6 次：这与 8.1 的命名规范同属一个主题，让代码表达意图，把性能留给真的需要的地方"
+      }
+    ]
+  },
+  "fallback_text": "（高中讲法）列表与字典：把一批数据放在一起：列表把一批数据按顺序排好，字典给每份数据配一个名字，方便按顺序取或按名字查。 列表与字典是两种数据组织方式，选择它们本质上是选择访问模型：列表提供按序访问，字典提供按键映射。 这个选择会直接影响查找代价，在一段无序数据里按内容查找需要逐项比较，而字典用哈希把「按键查」做到接近常数时间。 这是计算机科学里最早、也最实用的一组成本权衡。",
+  "duration_ms": 4896,
   "params": {
+    "times": {
+      "type": "int",
+      "min": 3,
+      "max": 6,
+      "default": 4,
+      "description": "数几次"
+    },
     "speed": {
       "type": "float",
-      "min": 0.5,
-      "max": 3,
-      "default": 1.2,
-      "description": "播放速度倍数"
+      "min": 0.6,
+      "max": 2.0,
+      "default": 1.0,
+      "description": "播放速度倍数，越大越快"
     }
-  }
+  },
+  "body": "<h1 class=\"anim-title\">列表与字典：把一批数据放在一起：做一次计一次数</h1>\n<p class=\"anim-caption\" id=\"caption\">一次一次地数</p>\n<div class=\"anim-canvas\" role=\"img\" aria-label=\"计数动画：重复的同一件事带真实计数\"></div>\n<p class=\"anim-caption\"><span class=\"chip\">准备计数</span></p>\n",
+  "script": "/* K12-ARCHETYPE counter | skin=technical */\n/* k12:phases min=5 default=6 */\nvar M = Sandbox.motion;\nvar PACE = {{speed}};\nvar DATA = {\"open\": \"列表与字典：把一批数据放在一起 要一次一次地数，数到最后才知道总数。\", \"close\": \"数完了：列表把一批数据按顺序排好，字典给每份数据配一个名字，方便按顺序取或按名字查。\", \"totalLabel\": \"字数合计\", \"unit\": \"字\", \"rows\": [{\"event\": \"这是计算机科学里最早、也最实用的一组成本权衡\", \"caption\": \"第 1 次：这是计算机科学里最早、也最实用的一组成本权衡\"}, {\"event\": \"使用层面的经验：结构要跟着问法走，而不是反过来\", \"caption\": \"第 2 次：使用层面的经验：结构要跟着问法走，而不是反过来\"}, {\"event\": \"如果程序总在问「第几个」，用列表\", \"caption\": \"第 3 次：如果程序总在问「第几个」，用列表\"}, {\"event\": \"总在问「名字对应的值是什么」，用字典\", \"caption\": \"第 4 次：总在问「名字对应的值是什么」，用字典\"}, {\"event\": \"边界：容器的选择不是越「快」越好\", \"caption\": \"第 5 次：边界：容器的选择不是越「快」越好\"}, {\"event\": \"这与 8.1 的命名规范同属一个主题，让代码表达意图，把性能留给真的需要的地方\", \"caption\": \"第 6 次：这与 8.1 的命名规范同属一个主题，让代码表达意图，把性能留给真的需要的地方\"}]};\nvar ROWS = DATA.rows;\nvar N = ROWS.length;\nvar SAFE = Sandbox.safe;\n\nfunction d(f) { return M.duration * f / PACE; }\nfunction fg() {\n  var host = Sandbox.stage().svg.querySelector('.k12-layer-fg');\n  var g = Sandbox.svgEl('g');\n  host.appendChild(g);\n  return g;\n}\nfunction at(g, x, y) { g.setAttribute('transform', 'translate(' + x + ' ' + y + ')'); return g; }\nfunction anchor(el) { el.style.transformBox = 'fill-box'; el.style.transformOrigin = 'center'; return el; }\nfunction pivot(x, y) { var inner = Sandbox.svgEl('g'); at(fg(), x, y).appendChild(inner); return anchor(inner); }\nfunction off(el) { el.setAttribute('opacity', '0'); return el; }\nfunction nd(o) { return anchor(Sandbox.node(o)); }\nfunction rd(o) { return anchor(Sandbox.readout(o)); }\nfunction bub(o) { return anchor(Sandbox.bubble(o)); }\nfunction person(o) { return anchor(Sandbox.actor(o)); }\n/*\n * ★★ 布局（本版新增，替掉旧版每个原型手算的 x / y / w / h）。\n *\n * 旧写法把每个站点的坐标手算成「可用宽度减去固定卡宽再除以站点数加一」：站点一多，分子变负，\n * 盒子互相压；文案一长，node() 为「永不截断」自己长高，又压住下一行；读数框钉死在右下角，\n * 与步骤条挤在一起。根因是没有任何一处知道别人占多大地方。\n *\n * 现在一律走 Sandbox.zone / row / stack：宽度均分、整行同一高度（按最费的那项给）、\n * 带与带之间有纵向游标 ， 重叠在构造上不可能。下面的 zone() 就是「新开一条带」的简写。\n */\nfunction zone(o) { return Sandbox.zone(o || {}); }\nfunction safeWidth() { return SAFE.width; }\n/* 人物站在 x、脚底落在 y 上（y 必须是「一条线」：路面 / 站的基线 / 天平横梁）。 */\nfunction walker(x, y, pose, name, scale) {\n  return person({ x: x, y: y, pose: pose || 'walk', label: name || '', scale: scale || 1 });\n}\n/* 盒子中线（连接线、人物走位都以它为准，不再手算 center）。 */\nfunction midOf(box) { return box ? box.x + box.w / 2 : 0; }\n/*\n * 一段文字要多大（与基元同一套算式）。\n *\n * ★ 用途：同一格里要轮播好几段文案时（对照两栏、读数框），先按最大的一段预留尺寸，\n *   轮播过程中盒子一次都不会长大 ， 也就不会去压邻居。旧写法正是在这里出的错：\n *   盒子按第一段文案的尺寸建好，后面长的一句让它临时长高，压住下面那一行。\n */\nfunction fitOf(o) { return Sandbox.measure(o || {}); }\nfunction needH(cells, width) {\n  var i, need = 40;\n  for (i = 0; i < cells.length; i += 1) {\n    var cell = cells[i] || {};\n    need = Math.max(need, fitOf({\n      kind: cell.kind || 'node', w: width,\n      label: cell.label, sub: cell.sub, text: cell.text, tail: cell.tail\n    }).height);\n  }\n  return need;\n}\nfunction riseIn(el, dy) { return { targets: el, opacity: [0, 1], translateY: [dy, 0], duration: d(1), easing: M.easing }; }\nfunction popIn(el) { return { targets: el, opacity: [0, 1], scale: [0.94, 1], duration: d(1), easing: M.easing }; }\nfunction slideIn(el, dx) { return { targets: el, opacity: [0, 1], translateX: [dx, 0], duration: d(1), easing: M.easing }; }\nfunction later(anim, factor) { anim.delay = d(factor); return anim; }\nfunction swapOut(el) { return { targets: el, opacity: [1, 0], duration: d(0.35), easing: 'linear' }; }\nfunction dim(el) { return { targets: el, opacity: [1, 0.55], duration: d(0.5), easing: 'linear' }; }\nfunction lit(el) { return { targets: el, opacity: [0.55, 1], duration: d(0.5), easing: 'linear' }; }\nfunction mark(el) { return { targets: el, strokeWidth: [1.1, 3.6, 1.1], duration: d(1.1), easing: M.easing }; }\nfunction bump(el) { return { targets: el, scale: [1, 1.07, 1], duration: d(0.8), easing: M.easing }; }\nfunction wipe(el) { return { targets: el, strokeWidth: [0.4, 2.6], duration: d(0.9), easing: M.easing }; }\nfunction push(meter, value) {\n  return { targets: meter, scale: [1.03, 1], duration: d(0.5), easing: M.easing, begin: function () { meter.set(value); } };\n}\n/*\n * 动小人一律动他那层 pivot（实测缺陷：对话原型的小人被切在画布上沿）。\n *\n * anime 的 scale / translateX 写的是 style.transform，而 style 会整个盖掉元素自己的\n * transform 属性（translate + scale 那一串）；直接动人物本体，他就会弹回舞台原点，\n * 位置丢了、缩放也没了，看起来就是「小人跑到画布外面」。\n * 运行时给每个人物套了两层：外层只负责摆位置（动画永不碰），\n * 内层 pivot 不带 transform 属性、专供动画。所以这里统一取 pivot。\n */\nfunction actorOf(el) { return (el && el.k12Pivot) || el; }\nfunction bumpActor(el) { return bump(actorOf(el)); }\nfunction popActor(el) { return popIn(actorOf(el)); }\nfunction hideActor(el) { return off(actorOf(el)); }\n/*\n * ★★ 相位开始时才更新字幕 / 步骤条（本票最隐蔽的一处，实测踩到）。\n *\n * Sandbox.timeline(steps, builder) 的 builder 是在建时间线时被一次性跑完的\n * （runtime.js 里那个 for 循环），不是每个相位开始时。所以在 builder 里直接调\n * h.caption / h.step，所有相位的字幕会在开播前全部写完，最后一句永远胜出：\n * 学生从第 0 秒起看到的就是收尾文案，而动画才刚开始播（截图里一眼看穿：\n * 人物还在路上，字幕已经是结论）。\n *\n * 修法：所有原型都不直接调 h.caption / h.step，而是把 builder 交给 defer() 包一层：\n * defer 收下这两个调用，改成一条 1ms 的「只会调 begin」的动画塞进该相位的最前面，\n * 由 anime 在相位边界上触发。相位正文因此可以照常写 h.caption 与 h.step，读起来还是直白。\n *\n * ★ defer 只改这一件事：它把 caption / step 变成「相位开始时」的事件，其余成员原样透传，\n *   所以原型里照旧写 h.caption，读起来与 STAGE-API 的样例一致。\n */\nfunction defer(build) {\n  return function (tl, index, h) {\n    var shim = {}, key, text = null, at = 0, total = 0;\n    for (key in h) { if (Object.prototype.hasOwnProperty.call(h, key)) shim[key] = h[key]; }\n    shim.caption = function (value) { text = value; return shim; };\n    shim.step = function (value, count) { at = value; total = count; return shim; };\n    var made = build(tl, index, shim);\n    var list = made == null ? [] : (Object.prototype.toString.call(made) === '[object Array]' ? made.slice() : [made]);\n    // step 先加、caption 后加 → 两者都在该相位的第一个 tick 触发（顺序只影响同一帧内谁后写）\n    if (total) list.unshift({ targets: { t: 0 }, t: [0, 1], duration: 1, easing: 'linear', begin: function () { Sandbox.step(at, total); } });\n    if (text != null) list.unshift({ targets: { t: 0 }, t: [0, 1], duration: 1, easing: 'linear', begin: function () { Sandbox.caption(text); } });\n    return list;\n  };\n}\nfunction say(text, at, total) {\n  return {\n    targets: { t: 0 },\n    t: [0, 1],\n    duration: 1,\n    easing: 'linear',\n    begin: function () { Sandbox.caption(text); Sandbox.step(at, total); }\n  };\n}\nfunction label(x, y, text, cls) {\n  var t = Sandbox.svgEl('text');\n  t.setAttribute('class', cls || 'k12-node-sub');\n  t.setAttribute('text-anchor', 'middle');\n  t.setAttribute('x', String(x));\n  t.setAttribute('y', String(y));\n  t.textContent = String(text);\n  fg().appendChild(t);\n  return t;\n}\nvar L = Sandbox.layout({\"bands\":[{\"id\":\"board\",\"x\":34.0,\"y\":34.0,\"w\":652.0,\"h\":356.0}],\"cells\":[{\"id\":\"say-0\",\"alt\":\"say\",\"kind\":\"bubble\",\"x\":34.0,\"y\":34.0,\"w\":422.0,\"h\":78.86,\"text\":\"这是计算机科学里最早、也最实用的一组成本权衡\",\"who\":\"narrator\",\"tail\":\"left\",\"band\":\"board\"},{\"id\":\"say-1\",\"alt\":\"say\",\"kind\":\"bubble\",\"x\":34.0,\"y\":34.0,\"w\":422.0,\"h\":78.86,\"text\":\"使用层面的经验：结构要跟着问法走，而不是反过来\",\"who\":\"narrator\",\"tail\":\"left\",\"band\":\"board\"},{\"id\":\"say-2\",\"alt\":\"say\",\"kind\":\"bubble\",\"x\":34.0,\"y\":34.0,\"w\":422.0,\"h\":78.86,\"text\":\"如果程序总在问「第几个」，用列表\",\"who\":\"narrator\",\"tail\":\"left\",\"band\":\"board\"},{\"id\":\"say-3\",\"alt\":\"say\",\"kind\":\"bubble\",\"x\":34.0,\"y\":34.0,\"w\":422.0,\"h\":78.86,\"text\":\"总在问「名字对应的值是什么」，用字典\",\"who\":\"narrator\",\"tail\":\"left\",\"band\":\"board\"},{\"id\":\"say-4\",\"alt\":\"say\",\"kind\":\"bubble\",\"x\":34.0,\"y\":34.0,\"w\":422.0,\"h\":78.86,\"text\":\"边界：容器的选择不是越「快」越好\",\"who\":\"narrator\",\"tail\":\"left\",\"band\":\"board\"},{\"id\":\"say-5\",\"alt\":\"say\",\"kind\":\"bubble\",\"x\":34.0,\"y\":34.0,\"w\":422.0,\"h\":78.86,\"text\":\"这与 8.1 的命名规范同属一个主题，让代码表达意图，把性能留给真的需要的地方\",\"who\":\"narrator\",\"tail\":\"left\",\"band\":\"board\"},{\"id\":\"peg-0\",\"kind\":\"node\",\"x\":34.0,\"y\":284.0,\"w\":56.0,\"h\":47.44,\"label\":\"1\",\"tone\":\"muted\",\"band\":\"board\"},{\"id\":\"peg-1\",\"kind\":\"node\",\"x\":102.0,\"y\":284.0,\"w\":56.0,\"h\":47.44,\"label\":\"2\",\"tone\":\"muted\",\"band\":\"board\"},{\"id\":\"peg-2\",\"kind\":\"node\",\"x\":170.0,\"y\":284.0,\"w\":56.0,\"h\":47.44,\"label\":\"3\",\"tone\":\"muted\",\"band\":\"board\"},{\"id\":\"peg-3\",\"kind\":\"node\",\"x\":238.0,\"y\":284.0,\"w\":56.0,\"h\":47.44,\"label\":\"4\",\"tone\":\"muted\",\"band\":\"board\"},{\"id\":\"peg-4\",\"kind\":\"node\",\"x\":306.0,\"y\":284.0,\"w\":56.0,\"h\":47.44,\"label\":\"5\",\"tone\":\"muted\",\"band\":\"board\"},{\"id\":\"peg-5\",\"kind\":\"node\",\"x\":374.0,\"y\":284.0,\"w\":56.0,\"h\":47.44,\"label\":\"6\",\"tone\":\"muted\",\"band\":\"board\"},{\"id\":\"count-meter\",\"kind\":\"readout\",\"x\":506.0,\"y\":94.0,\"w\":180,\"h\":79.57,\"label\":\"已经数到\",\"value\":0,\"unit\":\"次\",\"band\":\"board\"},{\"id\":\"sum-meter\",\"kind\":\"readout\",\"x\":506.0,\"y\":214.0,\"w\":180,\"h\":79.57,\"label\":\"字数合计\",\"value\":0,\"unit\":\"字\",\"band\":\"board\"}],\"spread\":[{\"band\":\"board\",\"prefix\":\"say-\",\"param\":\"times\",\"min\":3,\"max\":6,\"axis\":\"x\",\"mode\":\"center\"},{\"band\":\"board\",\"prefix\":\"peg-\",\"param\":\"times\",\"min\":3,\"max\":6,\"axis\":\"x\",\"mode\":\"center\"}],\"safe\":{\"x\":34.0,\"y\":34.0,\"right\":686.0,\"bottom\":390.0}});\nvar TIMES = {{times}};\nvar COUNT = Math.min(TIMES, N);\nvar cards = L.list('say');\nvar pegs = L.list('peg');\nvar countMeter = L.one('count-meter');\nvar sumMeter = L.one('sum-meter');\nvar i, running = 0, total = 0;\nfor (i = 0; i < cards.length; i += 1) {\n  off(cards[i]);\n  if (i >= COUNT) cards[i].setAttribute('display', 'none');\n}\nfor (i = 0; i < pegs.length; i += 1) {\n  off(pegs[i]);\n  if (i >= COUNT) pegs[i].setAttribute('display', 'none');\n}\nfor (i = 0; i < COUNT; i += 1) total += ROWS[i].event.length;\nSandbox.play(function () {\n  return Sandbox.timeline(TIMES + 2, defer(function (tl, index, h) {\n    if (index === 0) {\n      h.caption(DATA.open);\n      h.step(1, COUNT + 2);\n      var open = [push(countMeter, 0), push(sumMeter, 0)];\n      for (i = 0; i < COUNT; i += 1) {\n        open.push(later(riseIn(pegs[i], 14), h.stagger * i / 1000));\n        open.push(later({ targets: pegs[i], opacity: [0, 0.3], duration: d(0.5), easing: 'linear' }, h.stagger * i / 1000));\n      }\n      return open;\n    }\n    if (index <= COUNT) {\n      i = index - 1;\n      running += ROWS[i].event.length;\n      h.caption(ROWS[i].caption + '（这一句 ' + ROWS[i].event.length + ' 个字，合计 ' + running + ' 字）');\n      h.step(index + 1, COUNT + 2);\n      var anims = [\n        later(riseIn(cards[i], 20), 0.1),\n        mark(pegs[i].body),\n        bump(pegs[i]),\n        push(countMeter, i + 1),\n        push(sumMeter, running)\n      ];\n      if (i > 0) anims.push(swapOut(cards[i - 1]));\n      return anims;\n    }\n    h.caption(DATA.close);\n    h.step(COUNT + 2, COUNT + 2);\n    var all = [];\n    for (i = 0; i < COUNT; i += 1) all.push(later(mark(pegs[i].body), h.stagger * i / 1000));\n    all.push(push(countMeter, COUNT));\n    all.push(push(sumMeter, total));\n    return all;\n  }));\n});\n\nSandbox.ready({ archetype: 'counter' });\n"
 }

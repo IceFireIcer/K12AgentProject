@@ -2,22 +2,22 @@
 """把 57 概念模板 × by-kp 分学段文案展开成「一 KP 一模板」（206 份）。
 
 背景（2026-09-22 用户裁决）：包内 57 份概念模板的 ``kp_ids`` 盖四个学段，但
-``title`` / ``fallback_text`` / 注入进 ``script`` 的步骤数据（``STAGES``/``PAIRS``）
-**只按初中写**（57 份 fallback_text 全部以「（初中讲法）」开头）。直接导入会让
-小学/高中学生看到初中文案 —— 所以要按 ``by-kp/<kp_id>.json``（分学段文案真源）
-一 KP 一份展开，文案逐学段取真源。
+``title`` / ``fallback_text`` / 注入进 ``script`` 的相位数据**只按初中写**
+（57 份 fallback_text 全部以「（初中讲法）」开头）。直接导入会让小学/高中学生看到
+初中文案 —— 所以要按 ``by-kp/<kp_id>.json``（分学段文案真源）一 KP 一份展开，
+文案与**原型**都逐学段取真源（同一个概念在小学是场景推进、在高中可能是轨迹曲线）。
 
 ★ 注入逻辑**复用 gen_animations.py，不另写一套**（两套写法必然漂移）：
 
-  本脚本 import gen_animations，取它的 ``ARCHETYPES``（六原型：
-  steps / flow / compare / layers / loop / checklist，每项 = (body_fn, script_tpl, …)），
-  然后按 gen_animations.build_template() 第 787 行的**同款两行**重放注入：
+  本脚本 import gen_animations，取它的 ``ARCHETYPES``（十四原型，每项含
+  ``core`` 脚本正文、``pace`` 参数名、``phases`` 相位数声明），然后按
+  ``gen_animations.build_by_kp()`` 的**同款三步**重放注入：
 
-      script = script_tpl.replace("__STAGES__", steps_json).replace("__PAIRS__", steps_json)
-      body   = body_fn(title)
+      body   = body_html(title, hint, aria, chip)
+      script = script_for(archetype, pace, phases_expr).replace("__DATA__", data_json)
 
-  只是 steps 数据源换成 by-kp 里该学段的 ``steps``；body / script 骨架、
-  占位符（``{{speed}}`` / ``{{rounds}}``）与 params 的配套关系全部与概念模板一致。
+  只是 ``data`` 换成 by-kp 里该学段那一份（by-kp 里存的就是**成品** body / script，
+  这里再算一遍是为了「by-kp 文件被手改坏」时当场发现，而不是把坏数据铺进产品目录）。
 
 ★ 跳过既有 8 份手作高保真模板（``server/resources/templates/`` 那 8 份）声明的
   22 个 kp —— 该集合**运行时从那 8 份的 kp_ids 现算**（不写死），避免同一 kp
@@ -53,12 +53,14 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
 EXTERNAL_RE = re.compile(r"https?://|//cdn|unpkg|jsdelivr|cdnjs|googleapis|fonts\.gstatic", re.IGNORECASE)
 #: 学生可见文案禁用标记（D-076 / P-123：裸插值会把它们原样印上屏）。
 MARKS = ("——", "**", "`")
+#: 省略号：节点文案**永不截断**是本票的产品口径，产物里一个都不许留。
+ELLIPSIS = ("…", "...")
 PARAM_TYPES = {"int", "float", "str", "bool"}
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
 
 def load_gen_animations():
-    """import 同目录的 gen_animations.py（取它的六原型；它 import 时只读输入、不写产物）。"""
+    """import 同目录的 gen_animations.py（取它的十四原型；它 import 时只读输入、不写产物）。"""
     spec = importlib.util.spec_from_file_location("gen_animations", META / "gen_animations.py")
     if spec is None or spec.loader is None:
         raise RuntimeError("无法加载 gen_animations.py")
@@ -105,14 +107,19 @@ def validate(template: dict, source_name: str) -> None:
     assert used == set(params), f"{where} 占位符 {sorted(used)} ≠ 参数 {sorted(params)}"
 
     assert "Sandbox.play(" in template["script"], f"{where} script 没注册播放实现"
+    assert "Sandbox.timeline(" in template["script"], f"{where} script 没走分相位时间线"
     assert len(template["fallback_text"].strip()) >= 30, f"{where} 降级文案太短"
 
     for key in ("body", "script", "fallback_text", "title", "concept", "label"):
         assert not EXTERNAL_RE.search(template[key]), f"{where} {key} 含外部引用"
-    # 卫生守卫的扫描面：title/concept/fallback_text/body —— 生成物不许带三种排版标记
-    for key in ("title", "concept", "fallback_text", "body", "label"):
         for mark in MARKS:
             assert mark not in template[key], f"{where} {key} 含「{mark}」"
+        for mark in ELLIPSIS:
+            assert mark not in template[key], f"{where} {key} 含省略号「{mark}」"
+    # 颜色只走类名与变量：写死色值 = 学段皮肤当场失效。
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", template["body"] + template["script"]), (
+        f"{where} 出现裸色值（颜色只许走 CSS 类与变量）"
+    )
 
 
 def main() -> int:
@@ -124,6 +131,7 @@ def main() -> int:
 
     written = 0
     skipped: list[str] = []
+    mix: dict[str, int] = {}
     for path in by_kp_files:
         item = json.loads(path.read_text(encoding="utf-8"))
         kp_id = item["kp_id"]
@@ -133,15 +141,28 @@ def main() -> int:
             continue
 
         archetype = item["archetype"]
-        assert archetype in gen.ARCHETYPES, f"{kp_id} 概念原型 {archetype!r} 不在六原型里"
-        body_fn, script_tpl, _payload_key = gen.ARCHETYPES[archetype]
+        assert archetype in gen.ARCHETYPES, f"{kp_id} 原型 {archetype!r} 不在十四原型里"
+        spec = gen.ARCHETYPES[archetype]
+        # 皮肤取自**学段**（小学 illustrated / 中学 technical），原型只是叙事骨架：
+        # 允许「小学高年级用工程系原型」这种交叉（228 里有 2 例，是有意的过渡设计，
+        # 基元本身在两种皮肤下都成立 —— STAGE-API §3.5）。这里只记录，不当错误。
+        assert item["skin"] == gen.GRADE_SKIN[item["grade_level"]], f"{kp_id} 的 skin 与学段对不上"
 
-        steps = item["steps"]
-        assert isinstance(steps, list) and steps, f"{kp_id} 没有 steps"
-        steps_json = json.dumps(steps, ensure_ascii=False)
-        # ★ 与 gen_animations.build_template() 完全同源的注入两行（别改样式，防两套漂移）
-        script = script_tpl.replace("__STAGES__", steps_json).replace("__PAIRS__", steps_json)
+        # ★ 与 gen_animations.build_by_kp() 完全同源的三步（别改样式，防两套漂移）
+        #   最后一个参数是**本份模板实际会拿到的皮肤**（学段决定），不是原型的天然皮肤：
+        #   头注释里的 skin= 要能与截图复盘对上（小学高年级拿到工程系原型时两者不同）。
         title = item["title"]
+        body = gen.body_html(title, spec["hint"], spec["aria"], spec["chip"])
+        script = gen.script_for(
+            archetype,
+            spec["pace"],
+            gen.phases_expr(archetype),
+            gen.GRADE_SKIN[item["grade_level"]],
+            item["data"],
+        ).replace("__DATA__", json.dumps(item["data"], ensure_ascii=False))
+        # by-kp 里存了成品；成品与现算必须一致（手改坏 by-kp 时当场发现）
+        assert body == item["body"], f"{kp_id} by-kp 的 body 与现算不一致（by-kp 被手改了？）"
+        assert script == item["script"], f"{kp_id} by-kp 的 script 与现算不一致（by-kp 被手改了？）"
 
         template = {
             "id": kp_id,
@@ -152,7 +173,7 @@ def main() -> int:
             "grade_levels": [item["grade_level"]],
             "duration_ms": item["duration_ms"],
             "params": item["params"],
-            "body": body_fn(title),
+            "body": body,
             "script": script,
             "fallback_text": item["fallback_text"],
         }
@@ -162,10 +183,12 @@ def main() -> int:
         text = json.dumps(template, ensure_ascii=False, indent=2) + "\n"
         target.write_bytes(text.encode("utf-8"))  # 字节写入：保证 LF（Windows 下不翻译换行）
         written += 1
+        mix[archetype] = mix.get(archetype, 0) + 1
 
     print(f"written: {written}")
     print(f"skipped (covered by existing 8): {len(skipped)} -> {sorted(skipped)}")
     print(f"by-kp total: {len(by_kp_files)}")
+    print(f"archetype mix: {json.dumps(mix, ensure_ascii=False, sort_keys=True)}")
     assert written == len(by_kp_files) - len(skipped)
     if written != 206 or len(skipped) != 22:
         print(f"⚠️ 期望 206/22，实际 {written}/{len(skipped)}", file=sys.stderr)

@@ -72,3 +72,9 @@ UI/.vite/
 
 # === 编辑器/代理工具的本地忽略文件（由工具从 .gitignore 同步生成，不是项目源文件）===
 .zcodeignore
+
+# === 动画 QA 产物（由 preset-content/_meta/{render_anim_html,screenshot_*} 生成）===
+# ★ 只挡**产物**：QA 脚本本身在 preset-content/_meta/ 下、是源码要提交；
+#   渲染出的 HTML 与截图每次跑都会重建，入库只是 6MB 噪声（2026-09-23 清掉过一次）。
+preset-content/_meta/rendered/
+preset-content/_meta/shots/
