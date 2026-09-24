@@ -111,24 +111,40 @@ function goodPayload(overrides: Record<string, unknown> = {}): Record<string, un
   }
 }
 
-/** 抓一个注册好的 Tool（假 pi 只记录注册，不做任何别的事）。 */
-function captureTool(extension: (pi: unknown) => void): {
+/**
+ * 抓一个注册好的 Tool（假 pi 只记录注册，不做任何别的事）。
+ *
+ * ⚠️ **按名字挑**，不是「最后一个赢」：本扩展现在注册**两个** Tool
+ * （`generate_animation` / `compose_animation`），后者会把前者覆盖掉 ——
+ * 于是本文件全部用例都会拿 `compose_animation` 去跑 `generate_animation` 的参数，
+ * 断言成片失效（而失败信息指向 `details.source`，看起来像载荷投影坏了）。
+ * 默认抓 `generate_animation`（本文件盯的就是它）；`compose_animation` 的单测在
+ * `tests/animation-compose-tool.test.ts`。
+ */
+function captureTool(
+  extension: (pi: unknown) => void,
+  name: string = ANIMATION_TOOL_NAME
+): {
   name: string
   parameters: unknown
   execute: (toolCallId: string, params: unknown) => Promise<unknown>
 } {
-  let captured: {
-    name: string
-    parameters: unknown
-    execute: (toolCallId: string, params: unknown) => Promise<unknown>
-  } | null = null
+  const tools = new Map<
+    string,
+    { name: string; parameters: unknown; execute: (toolCallId: string, params: unknown) => Promise<unknown> }
+  >()
   extension({
     on: () => {},
-    registerTool: (tool: { name: string; parameters: unknown; execute: (a: string, b: unknown) => Promise<unknown> }) => {
-      captured = { name: tool.name, parameters: tool.parameters, execute: tool.execute }
+    registerTool: (tool: {
+      name: string
+      parameters: unknown
+      execute: (a: string, b: unknown) => Promise<unknown>
+    }) => {
+      tools.set(tool.name, { name: tool.name, parameters: tool.parameters, execute: tool.execute })
     }
   })
-  assert.ok(captured, '扩展必须注册一个 Tool')
+  const captured = tools.get(name)
+  assert.ok(captured, `扩展必须注册 ${name}`)
   return captured
 }
 

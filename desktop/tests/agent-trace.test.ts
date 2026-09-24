@@ -671,14 +671,19 @@ test('★ G9-8c 真 HTTP 往返：learning-log 经 bridge/client.ts 发出带 X-
  * G8-5 六扩展注册表
  * ------------------------------------------------------------------ */
 
-test('G8-5 扩展清单：六个扩展、十个冻结 Tool、事件落点与票 08 逐条一致', () => {
+test('G8-5 扩展清单：六个扩展、十一个冻结 Tool、事件落点与票 08 逐条一致', () => {
   assert.deepEqual(
     AGENT_EXTENSION_SPECS.map((spec) => spec.name),
     ['animation', 'coding', 'quiz', 'profile', 'grade', 'learning-log']
   )
-  // ★ 10 = 票 08 的 9 个 + 票 20 的 remember_preference（画像扩展的「写」那一端）
-  assert.equal(AGENT_TOOL_NAMES.length, 10)
+  // ★ 11 = 票 08 的 9 个 + 票 20 的 remember_preference（画像扩展的「写」那一端）
+  //        + compose_animation（按学生具体要求现做动画的那条，2026-09-23）
+  assert.equal(AGENT_TOOL_NAMES.length, 11)
   assert.deepEqual(auditToolCoverage(), { ok: true, violations: [] })
+
+  // ★ 两个动画 Tool 都由 animation 扩展注册（同一份校验/托管/降级实现，只在选材那一步分叉）
+  const animation = AGENT_EXTENSION_SPECS.find((spec) => spec.name === 'animation')
+  assert.deepEqual(animation?.tools, ['generate_animation', 'compose_animation'])
 
   const learningLog = AGENT_EXTENSION_SPECS.find((spec) => spec.name === 'learning-log')
   assert.deepEqual(learningLog?.events, ['tool_execution_end', 'agent_end'])
@@ -706,8 +711,9 @@ test('G8-5b 注册器：核心扩展已注册；未落地的四个被点名；st
     report.missing.map((entry) => entry.name).sort(),
     ['animation', 'coding', 'grade', 'quiz']
   )
-  // 缺的 Tool = 未落地扩展负责的那 7 个 payload 类 Tool
+  // 缺的 Tool = 未落地扩展负责的那 8 个 payload 类 Tool
   assert.deepEqual(report.missingTools.slice().sort(), [
+    'compose_animation',
     'evaluate_code',
     'generate_animation',
     'generate_quiz',

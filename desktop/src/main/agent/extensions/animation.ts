@@ -1,8 +1,14 @@
 /**
- * 动画 Extension（票 16/17，执行文档 §9.2 第 1 行 / §11.2）：注册**唯一一个** Tool
- * `generate_animation`（在 §9.3 的「Tool 名 → `kind`」映射表里 → `animation`）。
+ * 动画 Extension（票 16/17，执行文档 §9.2 第 1 行 / §11.2）：注册**两个** Tool，
+ * 两个都在 §9.3 的「Tool 名 → `kind`」映射表里 → `animation`：
  *
- * ★★ 本文件是全项目**最容易翻车**的一环，四条纪律先说清楚（改之前逐条读完）：
+ *   ① `generate_animation`（票 16/17）：**模板优先** —— 选内置模板 + 填参数 + 写文案，
+ *      模板没命中才走自由生成，最后降级为文字 + 静态图；
+ *   ② `compose_animation`（**按需实时做**）：不问模板，直接把「学生具体想看什么」
+ *      变成一次自由生成；同一位学生问同一件事时**先复用**上次做的那份（零模型调用）。
+ *      它自己发的载荷 `source` 一律是 `generated`（模板路径不参与）。
+ *
+ * ★★ 本文件是全项目**最容易翻车**的一环，五条纪律先说清楚（改之前逐条读完）：
  *
  * 1. **模板优先，自由生成只是补充路径**（§11.2 的「生成策略」）。
  *    内置模板在 Python 侧（`server/resources/templates/`），模型只做
@@ -12,17 +18,30 @@
  * 2. ★★ **校验 → 重试 ≤3 → 降级，全部在 `execute()` 内部完成。**
  *    Pi 的 `tool_execution_end` 是**只读通知**（`agent/events.ts` 文件头也写着这条），
  *    它不能回写任何结果 —— 所以重试**不可能**挂在事件上，只能写在 Tool 自己里面。
- *    重试计数用本模块内的 `Map<toolCallId, retryCount>`（§6.6 / §9.4：**不放 State**）。
+ *    重试计数用本模块内的 `Map<工具名 + toolCallId, retryCount>`（§6.6 / §9.4：**不放 State**）。
+ *    ★ 键里带工具名（`retryKeyOf`）：本文件注册两个 Tool，两者的额度**互不消耗**。
  *
  * 3. **降级是「正常 payload」，不是 `error`**（票 17 的验收口径）。
- *    3 次都失败 → 用 `fallback_text` + 静态 SVG 组一个 `source: "template"` 的载荷正常下发，
+ *    3 次都失败 → 用 `fallback_text` + 静态 SVG 组一个**合法载荷**正常下发，
  *    走 `payload` 事件；**不发 `error`**。理由见 `agent/events.ts` 文件头：
  *    `error` 对 UI 是**终态**，发了它后半段正文会被丢掉；而「动画降级成文字」这件事
  *    学生还能继续听，不该把整轮对话掐掉。
  *    （`error` 只留给「连降级都做不到」的情形 —— 那种情况下本文件返回 `failed()`。）
+ *    ★ 降级载荷的 `source` 是**这条链路的实际出身**（卡片上直接显示成「内置模板 / 即时生成」）：
+ *      `generate_animation` 沿用 `template`（既有行为不变），`compose_animation` 是 `generated`。
  *
  * 4. **`execute()` 绝不抛异常**（AGENTS §5.14）：Pi 的 Extension 与 Agent 同进程，
  *    抛出去会同时带走 UI。所有分支都收敛到 `ok()` / `failed()` 两种返回。
+ *
+ * 5. ★★ **`compose_animation` 的两条「绝不」**（它是「按学生具体要求实时做」那条路径）：
+ *    - **复用不是硬依赖**：查上次做过的那份（`POST /api/animation/saved/lookup`）与
+ *      存下这次的产物（`POST /api/animation/saved/{student_id}`）都是**尽力而为** ——
+ *      端点缺失 / 500 / 超时一律只记一行日志，**不许影响这次出不出得来卡片**。
+ *      存盘失败最多是「下次还得现做」，而把复用当硬依赖会让整条能力在端点未就绪时全灭。
+ *    - **复用命中也要把 `payload_id` 取回来**：沙箱 HTML 里烘焙着**当初**那个 id
+ *      （`compose_animation_html` 注入的 `window.__K12_PAYLOAD_ID__`），卡片按它校验每条
+ *      postMessage。命中却不认得那个 id 时**宁可重新生成**，也不能发一张永远收不到
+ *      `ready` 的卡片（5 秒后必然降级，学生看到的是「加载不出来」）。
  *
  * 另外两条安全细节：
  *   - **HTML 由 Python 渲染与校验**（它才是能读到动画库与模板的一方），本文件不拼 HTML；
@@ -31,6 +50,7 @@
  *     token 由 `bridge/client.ts` 统一注入（`iframe` 那条路径才需要 nonce，见票 16）。
  */
 
+import { createHash } from 'node:crypto'
 import { Type, type Static } from '@sinclair/typebox'
 import { apiFetch } from '../../bridge/client.ts'
 import {
@@ -58,13 +78,14 @@ export interface AnimationPayloadShape {
 }
 
 /**
- * 下发给前端的动画载荷 = 契约的六个字段 + 两个**渲染侧附加字段**。
+ * 下发给前端的动画载荷 = 契约的六个字段 + 一组**渲染侧附加字段**。
  *
- * ⚠️ 为什么不把 `resourceUrl` 加进 `AnimationPayload`（pydantic 契约）：
+ * ⚠️ 为什么不把它们加进 `AnimationPayload`（pydantic 契约）：
  * 契约是**冻结**的（§6.5 六字段），加字段要走「改 pydantic → 重导 OpenAPI → 重生成 TS」
- * 那条链，而这条附加信息只对**本机渲染进程**有意义（它是带一次性 nonce 的临时地址，
- * 换个进程、过 2 分钟就失效，没有任何契约价值）。所以它按 `agent/events.ts` 的既有做法
- * （`readPayload` 里那个 `tool` / `kind`）作为**渲染侧附加字段**挂在事件载荷上。
+ * 那条链，而这些附加信息只对**本机渲染进程**有意义（`resourceUrl` 是带一次性 nonce 的
+ * 临时地址，换个进程、过 2 分钟就失效；`gradeLevel` 是主进程已经解析过的那一个，
+ * 契约里同一份信息本来就在请求侧，没有任何契约价值）。所以它们按 `agent/events.ts`
+ * 的既有做法（`readPayload` 里那个 `tool` / `kind`）作为**渲染侧附加字段**挂在事件载荷上。
  */
 export interface AnimationCardPayload extends AnimationPayloadShape {
   /**
@@ -80,6 +101,15 @@ export interface AnimationCardPayload extends AnimationPayloadShape {
   attempts?: number
   /** 非空表示这次是**降级**产物（值就是降级原因，供轨迹与排查）。 */
   degradedFrom?: string | null
+  /**
+   * ★ **实际生效的学段**（主进程注入的那个，不是模型复述的那个）。
+   *
+   * 为什么渲染侧需要它：卡片上的文案与学段有关（同一份产物在不同学段下的说法不同），
+   * 而 `payload` 里没有学段 —— 前端若自己去推断就会与主进程注入的值分叉（学段真值
+   * 只在服务端推断那一条链上，§10）。所以这里**原样透传**主进程解析出来的值，
+   * 前端只读不算。
+   */
+  gradeLevel?: string
 }
 
 /** `/api/animation/render` 的响应 = `AnimationPayload`（camelCase 由 pydantic alias 转）。 */
@@ -125,6 +155,56 @@ export interface TemplateSummaryShape {
 
 /** Tool 名（冻结；事件层按 §9.3 的表把它映射成 `payload.kind = "animation"`）。 */
 export const ANIMATION_TOOL_NAME = 'generate_animation'
+/**
+ * ★★ 第二个 Tool 名（**按需实时做**）：学生说「给我做一个……」这类**具体诉求**时用它。
+ *
+ * 与 {@link ANIMATION_TOOL_NAME} 的分工（两个都映射到 `kind = "animation"`）：
+ *   - `generate_animation`：**模板优先** —— 概念命中内置模板就用模板（快、稳、可预期）；
+ *   - `compose_animation`：**按学生说的那件事现做** —— 模板表达不了的想法走它，
+ *     并且同一位学生问同一件事时**先复用**上次做的那份（零模型调用）。
+ * 两者的载荷形状完全一致（同一个 `AnimationCardPayload`），前端不需要分辨是哪条路径。
+ */
+export const COMPOSE_ANIMATION_TOOL_NAME = 'compose_animation'
+
+/** 知识点 id 缺省时的占位（与托管路径的 `kpId || 'general'` 同一口径）。 */
+export const ANIMATION_GENERAL_KP = 'general'
+
+/**
+ * 复用键的第四维：**请求指纹**（`sha1(normalised request)`，十六进制）。
+ *
+ * 前三段是「谁 / 讲什么知识点 / 哪个学段」（学生 id 由库文件归属承担，见下面
+ * {@link animationReuseKey} 的说明）；第四段是把学生的**具体要求**归一化之后的摘要。
+ *
+ * ★ 为什么归一化（而不是原样 hash）：同一句话的输入差异（首尾空格、大小写、连续空格、
+ *   全角空格）在**学生自己看来是同一个要求**，不归一化就会把「同一个要求」算成两个键 ——
+ *   表现为「明明刚做过，再问一次又要重做一遍」（复用的意义全部落空）。
+ * ★ 为什么是 hash 而不是原话：**原话不进库**。Python 侧的 `AnimationSaveRequest.prompt_hash`
+ *   只接受十六进制串（`ANIMATION_PROMPT_HASH_PATTERN`），学生原话归 Pi 的 JSONL 会话树
+ *   —— 与「SQLite 不存对话正文」是同一条纪律，所以这里必须先 hash 再发。
+ */
+export function animationRequestHash(request: string): string {
+  const normalised = request.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase()
+  return createHash('sha1').update(normalised, 'utf8').digest('hex')
+}
+
+/**
+ * 复用键（四维，与 Python 侧 `saved_animation` 的唯一索引逐维对应）。
+ *
+ * 返回一段**只用于日志与断言**的可读串 —— 真正发出去的是拆开的四段
+ * （学生 id 进路径 / 请求体，其余三段进请求体）。把四段拼成一段留给排查用：
+ * 「为什么没命中复用」时能一眼看出是哪一维不一样。
+ *
+ * ⚠️ 学生 id 由**主进程注入**（{@link currentAgentSession}），**绝不是 Tool 参数** ——
+ *   模型连表达「读别人做过的动画」的能力都不该有（与 `submit_quiz` 的 studentId 同一条边界）。
+ */
+export function animationReuseKey(input: {
+  studentId: string
+  kpId: string
+  gradeLevel: string
+  request: string
+}): string {
+  return [input.studentId, input.kpId || ANIMATION_GENERAL_KP, input.gradeLevel, animationRequestHash(input.request)].join('|')
+}
 
 /**
  * ★ 重试硬上限（票 17：「重试无上限 = 死循环烧额度」）。
@@ -158,6 +238,23 @@ export const EXTERNAL_REFERENCE_RE = /https?:\/\/|\/\/cdn|unpkg|jsdelivr|cdnjs|g
 
 /** `payload_id` 白名单（它会被拼进 URL 与文件名）。 */
 export const PAYLOAD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+
+/* ------------------------------------------------------------------ *
+ * 学生动画库的端点（`server/app/routes/animation_library.py`）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 按复用键取一条已保存的动画（命中 → 200 + 带 `html` 的那条；未命中 → 404）。
+ *
+ * ⚠️ **静态路径**：它与 `POST /animation/saved/{student_id}` 同形，服务端的注册顺序
+ * 保证 `lookup` 不会被当成一个学生 id 吃掉。TS 侧只需照这个路径发。
+ */
+export const ANIMATION_SAVED_LOOKUP_PATH = '/api/animation/saved/lookup'
+
+/** 保存一条（服务端会再校验一次 HTML；同一复用键再存 = 覆盖）。 */
+export function animationSavedPath(studentId: string): string {
+  return `/api/animation/saved/${encodeURIComponent(studentId)}`
+}
 
 /* ------------------------------------------------------------------ *
  * 参数 schema（TypeBox `TSchema`）
@@ -211,6 +308,62 @@ export const GenerateAnimationParams = Type.Object({
 })
 
 export type GenerateAnimationParamsType = Static<typeof GenerateAnimationParams>
+
+/**
+ * `compose_animation` 的参数（**按学生具体要求实时做**）。
+ *
+ * 与 `generate_animation` 参数的根本差别：**没有 `templateId` / `params`**
+ * —— 这条路径不问模板，它把 `request`（学生到底想看什么）直接变成一次自由生成。
+ * 所以这里多出的 `request` 是**必填**：它既是生成的输入，也是复用键的第四维
+ * （`sha1(归一化后的 request)`，见 {@link animationRequestHash}）。
+ *
+ * ⚠️ 与契约的一致性：同 `generate_animation` —— 本 Tool 的入参在契约里**没有对应物**
+ * （`/api/animation/compose` 收的是**模型产出的片段** body/script/fallbackText，
+ * 不是本 Tool 的参数），所以 `check-tool-schema.mjs` 的 `TOOLS` 里**没有**登记它。
+ * 登记了反而是一条永远命中的假差异（见 `GenerateAnimationParams` 的注释）。
+ * 与「保存 / 复用」两个端点的字段对应关系（`kp_id` / `grade_level` / `prompt_hash`）
+ * 由本文件的单测盯住（`tests/animation-compose-tool.test.ts`）。
+ */
+export const ComposeAnimationParams = Type.Object({
+  concept: Type.String({
+    minLength: 1,
+    maxLength: 40,
+    description: '要讲的知识概念（用学生问题里的说法，例如「排序」「梯度下降」）'
+  }),
+  request: Type.String({
+    minLength: 1,
+    maxLength: 200,
+    description:
+      '学生具体想看什么（照他的说法写，例如「想让柱子一步一步换位置」「想看小球越滚越快」）；' +
+      '这一条决定动画怎么做，也决定能不能复用上次做过的同一份'
+  }),
+  kpId: Type.Optional(
+    Type.String({
+      maxLength: 64,
+      description: '知识点 id（例如 training-inference-jr）；从 rag_search 结果或画像里取，不确定就不要填'
+    })
+  ),
+  gradeLevel: Type.Optional(
+    Type.Union(
+      ['primary_low', 'primary_high', 'junior', 'senior'].map((level) => Type.Literal(level)),
+      { description: '当前学段（会与主进程注入的学段核对，以主进程为准）' }
+    )
+  ),
+  caption: Type.Optional(
+    Type.String({
+      maxLength: 200,
+      description: '一句话讲解（显示在动画上方；不填就用生成结果里的说明）'
+    })
+  ),
+  reuseSaved: Type.Optional(
+    Type.Boolean({
+      default: true,
+      description: '同一位学生问同一件事时复用上次做过的动画（默认开；只有在学生明确要求「重新做一个」时才设为 false）'
+    })
+  )
+})
+
+export type ComposeAnimationParamsType = Static<typeof ComposeAnimationParams>
 
 /* ------------------------------------------------------------------ *
  * 载荷投影与校验
@@ -293,16 +446,25 @@ export function withCaption(
 }
 
 /**
- * 降级载荷（票 17 的核心兜底）。**它是一个合法的 `source: "template"` 载荷**，
- * 不是错误 —— 因此它走 `payload` 事件，学生看到的是一张有文字有图的卡片。
+ * 降级载荷（票 17 的核心兜底）。**它是一个合法的载荷**，不是错误 ——
+ * 因此它走 `payload` 事件，学生看到的是一张有文字有图的卡片。
  *
  * `html` 留空串是有意的：前端看到空 `html` 就直接渲染降级视图（文字 + 静态图），
  * **不创建 iframe**（少一个必然失败的加载过程，也就少一次超时等待）。
+ *
+ * ★ `source`（2026-09-23 变成参数）：它是**这条链路的实际出身**，不是装饰 ——
+ *   卡片上那颗来源标签直接读它（`AnimationCard.vue`：
+ *   `generated` → 「即时生成」/ `template` → 「内置模板」）。
+ *   默认 `template` 是 `generate_animation` 的口径（它的降级发生在「模板没命中」之后，
+ *   沿用原来那个值，行为一字不变）；`compose_animation` 那条路径**从头到尾不问模板**，
+ *   它的降级产物必须标成 `generated` —— 否则学生看到的是「内置模板」，
+ *   而这份东西跟内置模板毫无关系（那也是对 UI 撒谎）。
  */
 export function buildFallbackPayload(
   concept: string,
   fallbackText: string,
-  fallbackImage: string | null
+  fallbackImage: string | null,
+  source: AnimationPayloadShape['source'] = 'template'
 ): AnimationPayloadShape {
   return {
     concept: concept.trim() || '本次讲解',
@@ -310,7 +472,7 @@ export function buildFallbackPayload(
     durationMs: 0,
     fallbackText: fallbackText.trim() || DEFAULT_FALLBACK_TEXT,
     fallbackImage,
-    source: 'template'
+    source
   }
 }
 
@@ -327,6 +489,37 @@ export function renderAnimationText(payload: AnimationPayloadShape): string {
     `动画已经以卡片形式显示给学生（${payload.concept}；${sourceLabel}；约 ${(
       payload.durationMs / 1000
     ).toFixed(1)} 秒）。` +
+    '卡片上有播放/暂停/重播按钮，学生会自己控制。**不要**把动画里的解说词念一遍，' +
+    '只用一两句话说明「注意看什么」，然后停下来等学生反馈。'
+  )
+}
+
+/**
+ * `compose_animation` 给模型看的一句话。
+ *
+ * 与 {@link renderAnimationText} 的差别只有一处：**复用命中的那一份要多说一句** ——
+ * 模型不知道「这张卡片是上次就做好的」，而它接下来那句话可能说成「我刚给你做了一个」。
+ * 知道这件事，它才会说「我们上次看的那张动画还在，再看一遍」这种对的表述。
+ *
+ * ★ 降级分支与 `generate_animation` **逐字相同**：学生看到的是同一张「文字 + 静态图」卡片，
+ *   模型该说的话也一样（别自己写 HTML、别解释失败）。
+ */
+export function renderComposedAnimationText(payload: AnimationPayloadShape, reused: boolean): string {
+  if (payload.html.trim().length === 0) {
+    return (
+      `「${payload.concept}」的动画这次没能生成出来，已经用文字讲解顶上（卡片里能看到）。` +
+      '请照卡片上的讲解继续，用一两句话引导学生看这张静态示意图，不要说自己「生成失败」这类技术细节。'
+    )
+  }
+  const opening = reused
+    ? `这次直接用了之前给这位学生做好的那份动画卡片（${payload.concept}；约 ${(
+        payload.durationMs / 1000
+      ).toFixed(1)} 秒）。`
+    : `按学生的要求做的动画已经以卡片形式显示（${payload.concept}；即时生成；约 ${(
+        payload.durationMs / 1000
+      ).toFixed(1)} 秒）。`
+  return (
+    opening +
     '卡片上有播放/暂停/重播按钮，学生会自己控制。**不要**把动画里的解说词念一遍，' +
     '只用一两句话说明「注意看什么」，然后停下来等学生反馈。'
   )
@@ -439,27 +632,37 @@ export function createAnimationExtension(
   /**
    * ★★ 重试计数（票 17 的硬要求）：**Extension 内的 Map，不放 State、不依赖事件回写**。
    *
-   * 键是 Pi 的 `toolCallId`：同一轮里同一个 Tool 的多次调用各自计数，
+   * 键是 `工具名 + toolCallId`：同一轮里同一个 Tool 的多次调用各自计数，
    * 不会因为「上一张卡片重试过」就让下一张卡片少试几次。
+   * ★★ 键里那一段**工具名是必需的**（本文件注册两个 Tool 之后才成立）：两个 Tool 的重试
+   *    额度必须**互不消耗** —— 只按 toolCallId 计数时，两者共用一个命名空间，
+   *    「一次 `compose_animation` 的重试」与「一次 `generate_animation` 的重试」在
+   *    计数上无法区分（诊断数字也会互相污染）。分开之后，两者各自有
+   *    `MAX_RETRIES + 1` 次尝试，互不影响（有单测钉着）。
    * 容量有上限（同屏卡片是个位数，256 足够），防止长会话把内存攒住。
    */
   const retryCounts = new Map<string, number>()
   const MAX_TRACKED_CALLS = 256
 
-  function noteRetry(toolCallId: string): number {
-    const next = (retryCounts.get(toolCallId) ?? 0) + 1
-    if (retryCounts.size >= MAX_TRACKED_CALLS && !retryCounts.has(toolCallId)) {
+  /** 重试计数的键：**两个 Tool 各算一份**（见 {@link retryCounts} 的说明）。 */
+  function retryKeyOf(toolName: string, toolCallId: string): string {
+    return `${toolName}\u0000${toolCallId}`
+  }
+
+  function noteRetry(retryKey: string): number {
+    const next = (retryCounts.get(retryKey) ?? 0) + 1
+    if (retryCounts.size >= MAX_TRACKED_CALLS && !retryCounts.has(retryKey)) {
       // 丢最旧的一半（Map 保持插入序）：长会话里不该无限攒键
       const keys = [...retryCounts.keys()].slice(0, MAX_TRACKED_CALLS / 2)
       for (const key of keys) retryCounts.delete(key)
     }
-    retryCounts.set(toolCallId, next)
+    retryCounts.set(retryKey, next)
     return next
   }
 
   /** 本次调用已经重试过几次（诊断 / 轨迹用）。 */
-  function retryCountOf(toolCallId: string): number {
-    return retryCounts.get(toolCallId) ?? 0
+  function retryCountOf(retryKey: string): number {
+    return retryCounts.get(retryKey) ?? 0
   }
 
   /** 一次带超时的请求（超时 / 网络异常都由调用方收敛成可读错误）。 */
@@ -549,6 +752,161 @@ export function createAnimationExtension(
    *     与执行文档「重试 ≤3 → 降级」的冻结口径不符，也白烧额度；
    *   - 重试耗尽 → **降级为非空 payload**，走 `payload` 事件，不发 `error`。
    */
+  /* ------------------------------------------------------------------ *
+   * 生产状态 + 两条路径共用的机制
+   * ------------------------------------------------------------------ */
+
+  /**
+   * 一次「生产」过程中的可变状态。
+   *
+   * ★ 存在的理由：`generate_animation` 的两条路径（模板 → 自由生成）**共用同一个尝试额度**
+   *   （F6），`compose_animation` 只有自由生成一条路径但用的**是同一份循环实现**。
+   *   把 `attempts` / `lastReason` / 降级素材收进一个累加器，三条链路就不会各写一套计数。
+   *   ⚠️ 它是**每次调用新建**的局部对象（不是 Extension 级状态）：并发调用之间不共享。
+   */
+  interface ProductionState {
+    /** 已经尝试了几次（模板路径 + 自由生成路径合计）。 */
+    attempts: number
+    /** 最近一次失败的可读原因（降级时原样进 `degradedFrom` 与日志）。 */
+    lastReason: string
+    /** 兜底用的降级文案（模型写的 caption → 产物带回来的 → 默认文案）。 */
+    fallbackText: string
+    /** 兜底用的静态图（产物带回来的 → 内置 SVG）。 */
+    fallbackImage: string | null
+  }
+
+  function createProductionState(caption: string | null): ProductionState {
+    return { attempts: 0, lastReason: '', fallbackText: caption ?? '', fallbackImage: null }
+  }
+
+  /**
+   * 记一次尝试（第 2 次起同时记一条重试日志）。
+   *
+   * ★ 重试计数按 `工具名 + toolCallId` 记（见 {@link retryKeyOf}）：两个 Tool 的额度互不消耗。
+   */
+  function noteAttempt(state: ProductionState, toolName: string, toolCallId: string): void {
+    state.attempts += 1
+    if (state.attempts > 1) {
+      const retryKey = retryKeyOf(toolName, toolCallId)
+      noteRetry(retryKey)
+      log(
+        `[animation] 第 ${state.attempts - 1} 次重试（toolCallId=${toolCallId}，累计重试 ${retryCountOf(
+          retryKey
+        )} 次）：${state.lastReason}`
+      )
+    }
+  }
+
+  /**
+   * 降级收口（**正常 payload，不是 error**）：文字 + 静态图。
+   *
+   * 两个 Tool 共用：`generate_animation` 在「模板未命中 + 自由生成失败」后走它，
+   * `compose_animation` 在「自由生成失败」后走它 —— 形状必须**逐字一致**，
+   * 否则两条路径降级出来的卡片会长得不一样（学生看不出区别，排查时却要分两套看）。
+   *
+   * ★ `source` 由调用方给：它是**出处标签**（卡片上直接显示「内置模板 / 即时生成」），
+   *   默认 `template`（`generate_animation` 的既有口径），`compose_animation` 传 `generated`。
+   */
+  function finishDegraded(
+    state: ProductionState,
+    concept: string,
+    cause: string,
+    source: AnimationPayloadShape['source'] = 'template'
+  ): AnimationPayloadShape {
+    if (!state.fallbackImage) {
+      // 连静态图都没有时不能空手降级：Python 的模板渲染会给，模板都没命中时用兜底 SVG
+      state.fallbackImage = buildInlineFallbackImage(concept, state.fallbackText)
+    }
+    if (!state.fallbackText) state.fallbackText = DEFAULT_FALLBACK_TEXT
+    log(
+      `[animation] 已降级为文字 + 静态图（尝试 ${state.attempts} 次；原因：${state.lastReason || cause}）` +
+        `：概念「${concept}」`
+    )
+    return buildFallbackPayload(concept, state.fallbackText, state.fallbackImage, source)
+  }
+
+  /**
+   * ★★ **自由生成循环**（**唯一一份实现**）。
+   *
+   * 谁在用它：
+   *   - `generate_animation` 的**第二条路径**（模板未命中时）—— 额度是模板路径**没花完的**
+   *     那些（`state.attempts` 已经在模板循环里涨过）；
+   *   - `compose_animation` 的**唯一路径** —— 额度从 0 开始（它不问模板）。
+   *
+   * 返回值：成功 → 载荷（**`source` 一律改写为 `generated`**，自由生成这条路径的产物不该
+   * 冒充模板产物）；失败 → `null`（调用方接着走降级）。
+   *
+   * ⚠️ `attempt`（给生成器的重试序号）从 **0** 开始，与模板路径试了几次无关 ——
+   *   生成器用它写日志与「上次失败原因」，不是全局计数。
+   */
+  async function runGenerationLoop(request: {
+    toolName: string
+    toolCallId: string
+    state: ProductionState
+    concept: string
+    kpId: string
+    gradeLevel: string
+    caption: string | null
+    payloadId: string
+    /** 尝试总量上限（次数本身，不是重试次数）。 */
+    budget: number
+  }): Promise<AnimationPayloadShape | null> {
+    if (!generate) return null
+    const { state } = request
+    let generationAttempt = 0
+    while (state.attempts < request.budget) {
+      const attempt = generationAttempt
+      generationAttempt += 1
+      noteAttempt(state, request.toolName, request.toolCallId)
+      try {
+        const raw = await generate({
+          concept: request.concept,
+          kpId: request.kpId,
+          gradeLevel: request.gradeLevel,
+          attempt,
+          previousReason: state.lastReason,
+          // ★ 卡片手里的那个 id（F2）：产物里的 payload_id 必须与 `details.payloadId` 一致，
+          //   否则 iframe-host 会把沙箱发来的每条消息都当成别人的（永远收不到 ready）。
+          payloadId: request.payloadId
+        })
+        const payload = projectAnimationPayload(raw)
+        if (payload === null) {
+          state.lastReason = '自由生成的结果字段不齐'
+          log(`[animation] 自由生成字段不齐（第 ${attempt + 1} 次），继续重试`)
+          continue
+        }
+        const validated = validateAnimationPayload(payload)
+        if (!validated.ok) {
+          state.lastReason = validated.reason
+          log(`[animation] 自由生成校验未通过（第 ${attempt + 1} 次）：${validated.reason}`)
+          continue
+        }
+        state.fallbackText = payload.fallbackText || state.fallbackText
+        state.fallbackImage = payload.fallbackImage ?? state.fallbackImage
+        return withCaption({ ...payload, source: 'generated' }, request.caption)
+      } catch (error) {
+        state.lastReason = error instanceof Error ? error.message : String(error)
+        log(`[animation] 自由生成抛异常（第 ${attempt + 1} 次）：${state.lastReason}`)
+      }
+    }
+    return null
+  }
+
+  /** 新的 `payload_id`（串台防线的身份；卡片与沙箱 HTML 里必须是同一个）。 */
+  function newPayloadId(): string {
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+  }
+
+  /**
+   * 主链路：**模板优先 → 自由生成（补充）→ 降级**。
+   *
+   * 重试的边界（票 17）：
+   *   - 模板路径的 422（校验不过）→ 重试；自由生成路径每次返回都过同一套校验 → 同样可重试；
+   *   - ★ **两条路径共用同一个尝试额度**（{@link MAX_RETRIES} + 1 = 总尝试次数，F6）：
+   *     以前两条 `for` 各自 `0..maxRetries`，最坏是 4 次渲染 + 4 次 LLM 调用（8 次），
+   *     与执行文档「重试 ≤3 → 降级」的冻结口径不符，也白烧额度；
+   *   - 重试耗尽 → **降级为非空 payload**，走 `payload` 事件，不发 `error`。
+   */
   async function produce(input: {
     toolCallId: string
     concept: string
@@ -563,11 +921,8 @@ export function createAnimationExtension(
     | { kind: 'failed'; reason: string }
   > {
     /** 兜底用的降级素材：**一路攒着**，任何一步失败都能立刻用它拼出可展示的载荷。 */
-    let fallbackText = input.caption ?? ''
-    let fallbackImage: string | null = null
-    let attempts = 0
-    let lastReason = ''
-    const payloadId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+    const state = createProductionState(input.caption)
+    const payloadId = newPayloadId()
     /**
      * ★ 模板路径与自由生成路径**共用**的尝试总量（F6）：
      * `maxRetries = 3` → 最多 4 次尝试（首次 + 3 次重试），不论钱花在哪条路径上。
@@ -575,22 +930,9 @@ export function createAnimationExtension(
      */
     const totalBudget = maxRetries + 1
 
-    /** 记一次尝试（第 2 次起同时记一条重试日志）；两条路径共用，额度才不会各算一份。 */
-    const noteAttempt = (): void => {
-      attempts += 1
-      if (attempts > 1) {
-        noteRetry(input.toolCallId)
-        log(
-          `[animation] 第 ${attempts - 1} 次重试（toolCallId=${input.toolCallId}，累计重试 ${retryCountOf(
-            input.toolCallId
-          )} 次）：${lastReason}`
-        )
-      }
-    }
-
     // ── 第一条路径：模板命中（首选） ─────────────────────────────
-    while (attempts < totalBudget) {
-      noteAttempt()
+    while (state.attempts < totalBudget) {
+      noteAttempt(state, ANIMATION_TOOL_NAME, input.toolCallId)
       const result = await renderOnce({
         templateId: input.templateId,
         kpId: input.kpId,
@@ -602,81 +944,285 @@ export function createAnimationExtension(
       })
       if (result.ok) {
         // 模板自带的降级素材要留好：前端在 iframe 超时时会用它
-        fallbackText = result.payload.fallbackText || fallbackText
-        fallbackImage = result.payload.fallbackImage ?? fallbackImage
+        state.fallbackText = result.payload.fallbackText || state.fallbackText
+        state.fallbackImage = result.payload.fallbackImage ?? state.fallbackImage
         return {
           kind: 'ok',
           payload: withCaption(result.payload, input.caption),
-          attempts,
+          attempts: state.attempts,
           payloadId
         }
       }
-      lastReason = result.reason
+      state.lastReason = result.reason
       if (!result.retryable) break
     }
 
     // ── 第二条路径：自由生成（**补充**，默认没接） ───────────────
     //   ★ 只能用**模板路径没花完的**额度（`totalBudget - attempts`）；额度用尽直接去降级。
-    if (generate) {
-      let generationAttempt = 0
-      while (attempts < totalBudget) {
-        const attempt = generationAttempt
-        generationAttempt += 1
-        noteAttempt()
-        try {
-          const raw = await generate({
-            concept: input.concept,
-            kpId: input.kpId,
-            gradeLevel: input.gradeLevel,
-            attempt,
-            previousReason: lastReason,
-            // ★ 卡片手里的那个 id（F2）：产物里的 payload_id 必须与 `details.payloadId` 一致，
-            //   否则 iframe-host 会把沙箱发来的每条消息都当成别人的（永远收不到 ready）。
-            payloadId
-          })
-          const payload = projectAnimationPayload(raw)
-          if (payload === null) {
-            lastReason = '自由生成的结果字段不齐'
-            log(`[animation] 自由生成字段不齐（第 ${attempt + 1} 次），继续重试`)
-            continue
-          }
-          const validated = validateAnimationPayload(payload)
-          if (!validated.ok) {
-            lastReason = validated.reason
-            log(`[animation] 自由生成校验未通过（第 ${attempt + 1} 次）：${validated.reason}`)
-            continue
-          }
-          fallbackText = payload.fallbackText || fallbackText
-          fallbackImage = payload.fallbackImage ?? fallbackImage
-          return {
-            kind: 'ok',
-            payload: withCaption({ ...payload, source: 'generated' }, input.caption),
-            attempts,
-            payloadId
-          }
-        } catch (error) {
-          lastReason = error instanceof Error ? error.message : String(error)
-          log(`[animation] 自由生成抛异常（第 ${attempt + 1} 次）：${lastReason}`)
+    const generated = await runGenerationLoop({
+      toolName: ANIMATION_TOOL_NAME,
+      toolCallId: input.toolCallId,
+      state,
+      concept: input.concept,
+      kpId: input.kpId,
+      gradeLevel: input.gradeLevel,
+      caption: input.caption,
+      payloadId,
+      budget: totalBudget
+    })
+    if (generated !== null) {
+      return { kind: 'ok', payload: generated, attempts: state.attempts, payloadId }
+    }
+
+    // ── 第三条路径：降级（**正常 payload，不是 error**） ──────────
+    return {
+      kind: 'degraded',
+      payload: finishDegraded(state, input.concept, '模板未命中'),
+      attempts: state.attempts,
+      reason: state.lastReason || '模板未命中，且没有可用的生成路径',
+      payloadId
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 学生动画库（**复用 / 存库**，两条路径都是尽力而为）
+   * ------------------------------------------------------------------ *
+   * ⚠️ 这里的每一次请求都**不许把这次出卡搞砸**：端点缺失（404）/ 未就绪（503）/
+   *    校验不过（422）/ 服务出错（500）/ 超时 —— 一律只记一行日志然后继续。
+   *    复用的价值是「省一次模型调用」，不是「没有它就做不出来」。
+   * ------------------------------------------------------------------ */
+
+  /** 知识点 id 在库里的归一化（缺省用 `general`）：**查库与存库必须用同一个值**，否则永不命中。 */
+  function libraryKpId(kpId: string): string {
+    return kpId.trim() || ANIMATION_GENERAL_KP
+  }
+
+  /**
+   * 从**已保存的** HTML 里取回 `payload_id`。
+   *
+   * ★★ 为什么必须取回而不是新造一个：沙箱 HTML 是**成品**，`window.__K12_PAYLOAD_ID__`
+   *    在当初拼装时就烘焙进去了（`compose_animation_html`），卡片按**自己手里那个 id**
+   *    校验每条 postMessage。命中复用却发一个新 id，等于这张卡片永远收不到 `ready`
+   *    —— 5 秒后必然走超时降级（学生看到的是「加载不出来」，而库里那份明明是好的）。
+   *   取不回来时**宁可重新生成**（见 {@link lookupSavedAnimation} 的调用点）。
+   *
+   * 判据是拼装器写下的那一行（json.dumps 出来的双引号串），并用 {@link PAYLOAD_ID_RE}
+   * 卡住字符集 —— 它来自磁盘上的文件，不该被无条件信任。
+   */
+  function readSavedPayloadId(html: string): string | null {
+    const matched = /window\.__K12_PAYLOAD_ID__\s*=\s*"([^"]*)"/.exec(html)
+    const candidate = matched?.[1] ?? ''
+    return PAYLOAD_ID_RE.test(candidate) ? candidate : null
+  }
+
+  /**
+   * 查一份可复用的产物（命中 → 载荷 + 它自己的 `payload_id`；否则 `null`）。
+   *
+   * 未命中与「端点还没有」在**行为上是同一件事**：接着现做一份。所以任何非 2xx 都返回
+   * `null`，只把状态码写进日志（区分「库里确实没有」与「端点没落地」靠这一行）。
+   */
+  async function lookupSavedAnimation(input: {
+    studentId: string
+    kpId: string
+    gradeLevel: string
+    request: string
+  }): Promise<{ payload: AnimationPayloadShape; payloadId: string } | null> {
+    const promptHash = animationRequestHash(input.request)
+    try {
+      const response = await call(ANIMATION_SAVED_LOOKUP_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          studentId: input.studentId,
+          kpId: libraryKpId(input.kpId),
+          gradeLevel: input.gradeLevel,
+          // ★ 只发**摘要**：学生原话一个字都不进库（与「不存对话正文」同一条纪律）
+          promptHash
+        })
+      })
+      if (!response.ok) {
+        log(
+          `[animation] 没有可复用的动画（HTTP ${response.status}；404 = 库里确实没有），这一步现做一份`
+        )
+        return null
+      }
+      const raw: unknown = await response.json()
+      const payload = projectAnimationPayload(raw)
+      if (payload === null) {
+        log('[animation] 复用命中的载荷字段不齐，改为现做一份')
+        return null
+      }
+      const validated = validateAnimationPayload(payload)
+      if (!validated.ok) {
+        log(`[animation] 复用命中的载荷没通过校验（${validated.reason}），改为现做一份`)
+        return null
+      }
+      const savedPayloadId = readSavedPayloadId(payload.html)
+      if (savedPayloadId === null) {
+        // ★ 见 readSavedPayloadId：宁可不复用，也不发一张永远收不到 ready 的卡片
+        log('[animation] 复用命中，但产物里的 payload_id 取不回来，改为现做一份（避免卡片永远等不到就绪）')
+        return null
+      }
+      return { payload: { ...payload, source: 'generated' }, payloadId: savedPayloadId }
+    } catch (error) {
+      log(
+        `[animation] 复用查询失败（不影响本次出卡，改为现做一份）：${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+      return null
+    }
+  }
+
+  /**
+   * 把刚生成的产物存进学生动画库（**尽力而为**，返回是否真的存下）。
+   *
+   * 不存的两种情况（都是有意的，不是失败）：
+   *   - **降级产物**（`html` 为空）：库里只留能播的动画，文字 + 静态图那一份没必要存；
+   *   - **没有绑定学生**（`studentId` 为空）：动画库是一人一份（§8.2），落不到具体人名下。
+   */
+  async function saveGeneratedAnimation(input: {
+    studentId: string
+    kpId: string
+    gradeLevel: string
+    request: string
+    payload: AnimationPayloadShape
+  }): Promise<boolean> {
+    if (!input.studentId) return false
+    if (input.payload.html.trim().length === 0) {
+      log('[animation] 本次是降级产物（没有可播放的 HTML），不入动画库')
+      return false
+    }
+    try {
+      const response = await call(animationSavedPath(input.studentId), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kpId: libraryKpId(input.kpId),
+          gradeLevel: input.gradeLevel,
+          concept: input.payload.concept,
+          promptHash: animationRequestHash(input.request),
+          durationMs: input.payload.durationMs,
+          html: input.payload.html,
+          fallbackText: input.payload.fallbackText,
+          ...(input.payload.fallbackImage ? { fallbackImage: input.payload.fallbackImage } : {})
+        })
+      })
+      if (!response.ok) {
+        // 422（HTML 没通过服务端二次校验）/ 404（端点没落地）/ 503（没有数据目录）都走这里
+        log(
+          `[animation] 这次的动画没能存进动画库（HTTP ${response.status}），不影响本次显示；下次会重新做一份`
+        )
+        return false
+      }
+      log(
+        `[animation] 已存入学生动画库（${animationReuseKey({
+          studentId: input.studentId,
+          kpId: input.kpId,
+          gradeLevel: input.gradeLevel,
+          request: input.request
+        })}），下次同一个要求可以直接复用`
+      )
+      return true
+    } catch (error) {
+      log(
+        `[animation] 存动画库失败（不影响本次显示）：${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+      return false
+    }
+  }
+
+  /**
+   * ★★ `compose_animation` 的主链路：**先复用 → 现做 → 存库 → （失败才）降级**。
+   *
+   * 与 {@link produce} 的差别（两条链路都不许改对方的脾气）：
+   *   - **不问模板**：学生说的是「我想要什么样的动画」，模板表达不了才需要这个 Tool；
+   *   - **先查库**：同一位学生问同一件事（复用键四维全中）→ 直接回上次那份，**零模型调用**；
+   *   - **成功后存库**：尽力而为，失败只记日志（复用是增强，不是依赖）。
+   */
+  async function produceComposed(input: {
+    toolCallId: string
+    studentId: string
+    concept: string
+    request: string
+    kpId: string
+    gradeLevel: string
+    caption: string | null
+    reuseSaved: boolean
+  }): Promise<
+    | { kind: 'ok'; payload: AnimationPayloadShape; attempts: number; payloadId: string; reused: boolean }
+    | { kind: 'degraded'; payload: AnimationPayloadShape; attempts: number; reason: string; payloadId: string; reused: false }
+  > {
+    const state = createProductionState(input.caption)
+    const totalBudget = maxRetries + 1
+
+    // ── 第一步：复用（默认开；`reuseSaved: false` 时跳过 —— 学生明确要「重新做一个」） ──
+    if (input.reuseSaved && input.studentId) {
+      const saved = await lookupSavedAnimation({
+        studentId: input.studentId,
+        kpId: input.kpId,
+        gradeLevel: input.gradeLevel,
+        request: input.request
+      })
+      if (saved !== null) {
+        log(
+          `[animation] 复用已保存的动画（${
+            // 键里带请求指纹，日志只打「学生 / 知识点 / 学段 + 指纹前 8 位」，不落原话
+            animationReuseKey({
+              studentId: input.studentId,
+              kpId: input.kpId,
+              gradeLevel: input.gradeLevel,
+              request: input.request
+            })
+          }）：本次没有模型调用`
+        )
+        return {
+          kind: 'ok',
+          payload: saved.payload,
+          attempts: 0,
+          payloadId: saved.payloadId,
+          reused: true
         }
       }
     }
 
-    // ── 第三条路径：降级（**正常 payload，不是 error**） ──────────
-    if (!fallbackImage) {
-      // 连静态图都没有时不能空手降级：Python 的模板渲染会给，模板都没命中时用兜底 SVG
-      fallbackImage = buildInlineFallbackImage(input.concept, fallbackText)
+    // ── 第二步：现做一份（**与 generate_animation 的自由生成路径同一份实现**） ──
+    const payloadId = newPayloadId()
+    const generated = await runGenerationLoop({
+      toolName: COMPOSE_ANIMATION_TOOL_NAME,
+      toolCallId: input.toolCallId,
+      state,
+      concept: input.concept,
+      kpId: input.kpId,
+      gradeLevel: input.gradeLevel,
+      caption: input.caption,
+      payloadId,
+      budget: totalBudget
+    })
+
+    if (generated !== null) {
+      // ── 第三步：存库（**尽力而为**：失败只影响「下次还得现做」） ──
+      await saveGeneratedAnimation({
+        studentId: input.studentId,
+        kpId: input.kpId,
+        gradeLevel: input.gradeLevel,
+        request: input.request,
+        payload: generated
+      })
+      return { kind: 'ok', payload: generated, attempts: state.attempts, payloadId, reused: false }
     }
-    if (!fallbackText) fallbackText = DEFAULT_FALLBACK_TEXT
-    log(
-      `[animation] 已降级为文字 + 静态图（尝试 ${attempts} 次；原因：${lastReason || '模板未命中'}）` +
-        `：概念「${input.concept}」`
-    )
+
+    // ── 第四条：降级（形状与 generate_animation 的降级一致，**出处标成 generated**：
+    //     这条路径从头到尾不问模板，标 template 会让卡片显示「内置模板」＝ 对 UI 撒谎） ──
     return {
       kind: 'degraded',
-      payload: buildFallbackPayload(input.concept, fallbackText, fallbackImage),
-      attempts,
-      reason: lastReason || '模板未命中，且没有可用的生成路径',
-      payloadId
+      payload: finishDegraded(state, input.concept, '这次没有可用的生成路径', 'generated'),
+      attempts: state.attempts,
+      reason: state.lastReason || '这次没有可用的生成路径',
+      payloadId,
+      reused: false
     }
   }
 
@@ -807,12 +1353,111 @@ export function createAnimationExtension(
             payloadId: outcome.payloadId,
             resourceUrl,
             attempts: outcome.attempts,
-            degradedFrom: outcome.kind === 'degraded' ? outcome.reason : null
+            degradedFrom: outcome.kind === 'degraded' ? outcome.reason : null,
+            // ★ 渲染侧要的那一维：**主进程解析出来的学段**（不是模型复述的那个）
+            gradeLevel
           }
           return toolSuccess(renderAnimationText(outcome.payload), details)
         } catch (error) {
           // 兜底异常：给一句可读中文 + 统一失败形状（event 层据此发 degraded 的 error 事件）
           return toolFailure('动画讲解这一步没有完成。请直接用文字把这个概念讲清楚。', error)
+        }
+      }
+    })
+
+    /**
+     * ★★ 第二个 Tool：**按学生具体要求实时做**（模板不参与）。
+     *
+     * 为什么值得再开一个 Tool（而不是给 `generate_animation` 加个开关）：
+     * 模型面对的是**一句自然语言要求**（「想让小球越滚越快」），而 `generate_animation`
+     * 的参数面是「选模板 + 填参数」—— 把两种意图塞进同一个参数面，模型要么把 `request`
+     * 硬塞进 `concept`（概念名被写坏、复用键跟着错），要么退化成「先硬凑一个模板」。
+     * 分开之后：`request` **必填**，模板参数**不存在**，两条路径各说各的事。
+     *
+     * 三条行为（与冻结口径一致）：
+     *   ① 复用优先（`reuseSaved` 默认开）：同一位学生 + 同一个知识点 + 同一学段 +
+     *      同一个要求 → 直接回上次那份，**零模型调用**；
+     *   ② 没命中就现做（**与 `generate_animation` 的自由生成同一份实现**：模型出片段 →
+     *      Python 拼装 + 校验 → 不过则重试 → 仍不过降级）；
+     *   ③ 成功的产物**尽力存库**（失败只记日志）。
+     *
+     * ⚠️ 与 `generate_animation` 一样：`execute()` **绝不抛**；失败收敛成可读中文；
+     *    降级走 `payload` 事件（`source` 仍是 `generated`，学生那侧看到的是「即时生成」）。
+     */
+    pi.registerTool({
+      name: COMPOSE_ANIMATION_TOOL_NAME,
+      label: '按需做动画',
+      description:
+        '按学生说出的具体要求**当场做一张动画卡片**（不套内置模板）。学生说「我想要……的动画」' +
+        '「能不能让小球……」「做一个能看到……的过程」这类**描述得很具体**的要求时用它；' +
+        '只是想让某个知识点有个动画，用 generate_animation（模板更快更稳）。' +
+        '同一位学生问同一件事时会直接复用上次做好的那一份；做不出来时同样会降级为文字 + 静态图，不会失败。',
+      promptSnippet: 'compose_animation：按学生的具体要求现做一张动画（同一位学生问同一件事会复用上次那份）',
+      promptGuidelines: [
+        'request 要照学生说的写（他想看到什么在动、怎么动），不要改写成教科书式的知识点定义。',
+        '学生要的是一个知识点本身有个演示时用 generate_animation；只有在要求**具体到画面**时才用本工具。',
+        '做不出来时系统会降级成文字 + 静态图，**你不需要**自己写 HTML，也不要向学生解释失败原因。'
+      ],
+      parameters: ComposeAnimationParams,
+      execute: async (toolCallId: string, params: ComposeAnimationParamsType) => {
+        // ★ 整段 execute 包在 try/catch 里：Pi 与 UI 同进程，抛异常会同时带走两者。
+        try {
+          const concept = readNonEmptyString(params?.concept)
+          if (concept === null) {
+            return toolFailure('做动画要先知道讲什么概念（例如「排序」「循环」）。')
+          }
+          const request = readNonEmptyString(params?.request)
+          if (request === null) {
+            return toolFailure('做动画要先知道学生想看什么，请把他说的那件事用一两句话写进 request。')
+          }
+          const session = currentAgentSession()
+          const kpId = readNonEmptyString(params?.kpId) ?? ''
+          // ★ 学段以**会话**为准（与 generate_animation / rag-search.ts 同一口径）
+          const gradeLevel =
+            readNonEmptyString(session?.gradeLevel) ?? readNonEmptyString(params?.gradeLevel) ?? 'primary_high'
+          const caption = readNonEmptyString(params?.caption)
+          // 默认**复用**（`undefined` 也算开）：省一次模型调用是这个 Tool 的一半意义
+          const reuseSaved = params?.reuseSaved !== false
+
+          const outcome = await produceComposed({
+            toolCallId:
+              typeof toolCallId === 'string' && toolCallId.length > 0 ? toolCallId : 'compose-animation',
+            studentId: session?.studentId ?? '',
+            concept,
+            request,
+            kpId,
+            gradeLevel,
+            caption,
+            reuseSaved
+          })
+
+          if (outcome.kind === 'degraded') {
+            log(`[animation] 按需做动画降级下发（第 ${outcome.attempts} 次尝试后）：${outcome.reason}`)
+          }
+
+          // 托管（票 16）：与 generate_animation 同一条口径 —— 只有真动画才托管，降级产物不托管。
+          let resourceUrl: string | null = null
+          if (outcome.payload.html.trim().length > 0 && session?.studentId) {
+            resourceUrl = await hostHtml(
+              session.studentId,
+              libraryKpId(kpId),
+              outcome.payloadId,
+              outcome.payload.html
+            )
+          }
+
+          const details: AnimationCardPayload = {
+            ...outcome.payload,
+            payloadId: outcome.payloadId,
+            resourceUrl,
+            attempts: outcome.attempts,
+            degradedFrom: outcome.kind === 'degraded' ? outcome.reason : null,
+            gradeLevel
+          }
+          return toolSuccess(renderComposedAnimationText(outcome.payload, outcome.reused), details)
+        } catch (error) {
+          // 兜底异常：给一句可读中文 + 统一失败形状（event 层据此发 degraded 的 error 事件）
+          return toolFailure('这一步没有做成动画。请直接用文字把学生想看的那件事讲清楚。', error)
         }
       }
     })

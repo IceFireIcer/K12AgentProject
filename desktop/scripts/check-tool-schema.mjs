@@ -37,8 +37,8 @@
  *    这是执行文档 §6.3 要求的「TypeBox 与 pydantic 一致性断言」，不是「跳过」。
  *
  * ★ 工具清单（`TOOLS`）的完整性**不再自我比对**：清单从**真实注册表**派生 ——
- *   `AGENT_TOOL_NAMES`（六个扩展实际注册的 10 个 Tool）与 `PAYLOAD_TOOL_NAMES`
- *   （`kindForTool` 表里的 7 个 payload Tool）。新增一个 Tool 但没登记进本脚本 → 退出码 1。
+ *   `AGENT_TOOL_NAMES`（六个扩展实际注册的 11 个 Tool）与 `PAYLOAD_TOOL_NAMES`
+ *   （`kindForTool` 表里的 8 个 payload Tool）。新增一个 Tool 但没登记进本脚本 → 退出码 1。
  *
  * 用法：node scripts/check-tool-schema.mjs     （`npm run check:tool-schema`）
  * 退出码：0 = 一致；1 = 有漂移（含清单失效）；2 = 脚本自身出错（读不到文件 / import 失败）。
@@ -289,6 +289,79 @@ const ALLOWED_DIFFS = [
     reason:
       '模型写的一句话讲解在扩展里被映射成 `fallbackText` 发出（produce() 的 ' +
       '`...(input.caption ? { fallbackText: input.caption } : {})`），端点没有 `caption` 这个键。'
+  },
+
+  /* ── compose_animation ⇄ AnimationSavedLookupRequest（复用键那条请求体）──────── */
+  {
+    tool: 'compose_animation',
+    field: 'studentId',
+    kind: 'contract-only',
+    reason:
+      '★ 安全边界（同 submit_quiz / evaluate_code）：学生 id 由主进程注入（`currentAgentSession()`），' +
+      '**绝不允许模型填** —— 一旦成为模型参数，就能构造出「复用别人做过的动画」的调用。'
+  },
+  {
+    tool: 'compose_animation',
+    field: 'promptHash',
+    kind: 'contract-only',
+    reason:
+      '复用键的第四维由主进程算（`sha1(归一化后的 request)`，见 extensions/animation.ts 的 ' +
+      '`animationRequestHash`）：**学生原话一个字都不进库**（`promptHash` 只收十六进制），' +
+      '模型也不该有机会自己造一个摘要（造错 = 复用永远不命中）。'
+  },
+  {
+    tool: 'compose_animation',
+    field: 'kpId',
+    kind: 'required-contract',
+    reason:
+      '复用键里知识点 id 必填（库里按它建唯一索引），而 Tool 侧是可选的：' +
+      '模型不确定时不该编一个知识点 id，缺省由主进程归一成 `general`（`libraryKpId`）。'
+  },
+  {
+    tool: 'compose_animation',
+    field: 'kpId',
+    kind: 'bounds-contract',
+    reason: '契约侧 `min_length=1`（空串不是合法知识点 id）；Tool 侧靠「缺省归一成 general」承担这件事，不声明下界。'
+  },
+  {
+    tool: 'compose_animation',
+    field: 'gradeLevel',
+    kind: 'required-contract',
+    reason:
+      '学段由系统判定，模型不能决定（同 rag_search）：契约里复用键的学段必填（它就是唯一索引的一维），' +
+      '而 Tool 参数里那个可选字段只是「复述」——主进程注入的会话学段才是真值。'
+  },
+  {
+    tool: 'compose_animation',
+    field: 'concept',
+    kind: 'tool-only',
+    reason:
+      '展示用的概念名是**生成输入**（自由生成要它写文案），不是复用键的一维 —— ' +
+      '`AnimationSavedLookupRequest` 里没有这个字段（保存时的 `concept` 在 `AnimationSaveRequest` 里）。'
+  },
+  {
+    tool: 'compose_animation',
+    field: 'request',
+    kind: 'tool-only',
+    reason:
+      '★ 学生具体想看什么（本 Tool 的存在理由）只由主进程**摘要成 promptHash** 之后才进请求体：' +
+      '原话一个字都不进契约（与「SQLite 不存对话正文」同一条纪律）。'
+  },
+  {
+    tool: 'compose_animation',
+    field: 'caption',
+    kind: 'tool-only',
+    reason:
+      '同 generate_animation：模型写的一句话讲解在扩展里被映射成产物与保存请求体的 `fallbackText`，' +
+      '复用键那条请求体里没有 `caption` 这个键。'
+  },
+  {
+    tool: 'compose_animation',
+    field: 'reuseSaved',
+    kind: 'tool-only',
+    reason:
+      '「先复用还是重新做」是**模型侧的开关**（学生说「重新做一个」时才关）：' +
+      '查库请求体里没有这个选择，跳过查询就是不发那次请求。'
   }
 ]
 
@@ -383,6 +456,26 @@ const TOOLS = [
     }
   },
   {
+    tool: 'compose_animation',
+    exportName: 'ComposeAnimationParams',
+    module: 'src/main/agent/extensions/animation.ts',
+    /**
+     * ★ 对照物是**复用键那条请求体**（`POST /api/animation/saved/lookup` 的 body）。
+     *
+     * 为什么不沿用 `generate_animation` 的 `bodyKeysFrom`（从 Python 源码抽 `body.get("…")`）：
+     *   那个「自由生成合流端点」`/api/animation/compose` 收的是**模型产出的片段**
+     *   （body / script / fallbackText…，由 `animation/generator.ts` 发），与本 Tool 的
+     *   参数面（concept / request / kpId / gradeLevel / caption / reuseSaved）**不是同一件事**
+     *   —— 拿它当对照物会得到一堆恒真的假差异。
+     *   本 Tool 自己真正发出去的那条请求体是**查库**（四维复用键），它由
+     *   `AnimationSavedLookupRequest` 精确描述：两个字段是模型参数（kpId / gradeLevel），
+     *   另两个由主进程注入或算出（studentId / promptHash，见 ALLOWED_DIFFS 里的逐条理由）。
+     *   所以这里用最严的第一种模式（逐字段比类型 / 枚举 / 必填 / 边界）。
+     */
+    contract: 'AnimationSavedLookupRequest',
+    contractNote: 'POST /api/animation/saved/lookup 的请求体 = 复用键四维（学生 / 知识点 / 学段 / 请求指纹）'
+  },
+  {
     tool: 'remember_preference',
     exportName: 'RememberPreferenceParams',
     module: 'src/main/agent/extensions/profile.ts',
@@ -397,8 +490,8 @@ const TOOLS = [
  * ⚠️ 这里曾经是一份与 `TOOLS` 平行的硬编码数组（`EXPECTED_TOOLS`）—— 两边永远是同一份，
  * 于是「工具清单本身也要完整」那条断言只是在跟自己比，少登记一个 Tool 也发现不了。
  * 现在改从两个**有生产意义**的来源读：
- *   ① `AGENT_TOOL_NAMES`：六个扩展**实际注册**的 10 个 Tool（`extensions/index.ts`）；
- *   ② `PAYLOAD_TOOL_NAMES`：`kindForTool` 表里的 7 个会发 `payload` 事件的 Tool。
+ *   ① `AGENT_TOOL_NAMES`：六个扩展**实际注册**的 11 个 Tool（`extensions/index.ts`）；
+ *   ② `PAYLOAD_TOOL_NAMES`：`kindForTool` 表里的 8 个会发 `payload` 事件的 Tool。
  * 少登记任何一个 → 退出码 1（这才是防「清单漏项」的机器判据）。
  */
 const REGISTERED_TOOLS_MODULE = 'src/main/agent/extensions/index.ts'
@@ -834,8 +927,8 @@ console.log(`契约来源：${OPENAPI_PATH}`)
 /**
  * ★ 工具清单本身也要完整：判据从**真实注册表**派生，不再拿同一份硬编码列表跟自己比。
  *
- *   - `AGENT_TOOL_NAMES`：六个扩展实际注册的全部 10 个 Tool（含不发 payload 的三个）；
- *   - `PAYLOAD_TOOL_NAMES`：`kindForTool` 表里的 7 个 payload Tool（少一个前端会收到未知 kind）。
+ *   - `AGENT_TOOL_NAMES`：六个扩展实际注册的全部 11 个 Tool（含不发 payload 的三个）；
+ *   - `PAYLOAD_TOOL_NAMES`：`kindForTool` 表里的 8 个 payload Tool（少一个前端会收到未知 kind）。
  *
  * 两个来源都会真的 import（不是读文本 grep）：表被改名 / 被删都会在这里报错。
  */

@@ -10,7 +10,7 @@
  * 本文件提供三样东西：
  *   1. **清单**（{@link AGENT_EXTENSION_SPECS}）：六个扩展各自的文件、归属票、注册的 Tool 与订阅的事件；
  *   2. **注册器**（{@link createAgentExtensionRegistry} + {@link registerAgentExtensions}）：
- *      把工厂挂到 Pi 上，并给出「谁没落地 / 谁注册失败 / 10 个冻结 Tool 缺哪几个」的报告；
+ *      把工厂挂到 Pi 上，并给出「谁没落地 / 谁注册失败 / 11 个冻结 Tool 缺哪几个」的报告；
  *   3. **会话上下文**（{@link bindAgentSession}）：当前学生的身份与轮次上下文。
  *
  * ★ 并行开发说明：`animation.ts` / `coding.ts` / `quiz.ts` / `grade.ts` 由票 14–19 各自落地，
@@ -112,7 +112,7 @@ export function currentAgentSession(): AgentSessionContext | null {
 }
 
 /* ------------------------------------------------------------------ *
- * 清单（六扩展 + 十个冻结 Tool）
+ * 清单（六扩展 + 十一个冻结 Tool）
  * ------------------------------------------------------------------ */
 
 export type AgentExtensionName = 'animation' | 'coding' | 'quiz' | 'profile' | 'grade' | 'learning-log'
@@ -142,9 +142,17 @@ export const AGENT_EXTENSION_SPECS: readonly AgentExtensionSpec[] = [
     name: 'animation',
     ticket: '16/17',
     file: './animation.ts',
-    tools: ['generate_animation'],
+    // ★ 两个 Tool（2026-09-23 新增第二个）：`generate_animation` 是**模板优先**那条，
+    //   `compose_animation` 是「按学生具体要求现场做 + 同一位学生问同一件事就复用」那条。
+    //   两者都发 `payload` 事件（kind 都是 `animation`），由同一个扩展注册，
+    //   因为它们的产物形状、校验、托管、降级全都共用一套实现（只在选材那一步分叉）。
+    tools: ['generate_animation', 'compose_animation'],
     events: ['tool_execution_start', 'tool_execution_end'],
-    dependsOn: ['Python /resources/animation/<student>/<kp> 一次性 nonce', 'sandboxed iframe（禁止 allow-same-origin）']
+    dependsOn: [
+      'Python /resources/animation/<student>/<kp> 一次性 nonce',
+      'sandboxed iframe（禁止 allow-same-origin）',
+      'Python /api/animation/compose（自由生成合流）与 /api/animation/saved/**（复用与存库）'
+    ]
   },
   {
     name: 'coding',
@@ -195,14 +203,20 @@ export const AGENT_EXTENSION_SPECS: readonly AgentExtensionSpec[] = [
 ]
 
 /**
- * ★ 十个冻结 Tool 名（票 08 第二项：**全部**要注册）。
+ * ★ 十一个冻结 Tool 名（票 08 第二项：**全部**要注册）。
  *
- * 其中 7 个会发 `payload` 事件（映射表在 `ipc/tool-kinds.ts`，**全仓唯一一处**）；
+ * 其中 8 个会发 `payload` 事件（映射表在 `ipc/tool-kinds.ts`，**全仓唯一一处**）；
  * `rag_search`（票 13，走 `citation` 事件）、`get_student_profile` 与
  * `remember_preference`（画像：一个只影响 Prompt、一个是写回偏好）**不发** payload。
+ *
+ * ★ 计数口径：`10` → `11` 是 2026-09-23 加 `compose_animation` 那一次
+ *   （票 08 的 9 个 + 票 20 的 `remember_preference` + 这次的按需动画）。
+ *   ⚠️ 数字写在这里只是注释 —— **唯一的机器判据**是 `auditToolCoverage()` 与
+ *   `scripts/check-tool-schema.mjs`（后者从本常量派生清单完整性），别在两处各记一个数。
  */
 export const AGENT_TOOL_NAMES = [
   'generate_animation',
+  'compose_animation',
   'get_code_template',
   'get_coding_hint',
   'evaluate_code',
@@ -217,10 +231,10 @@ export const AGENT_TOOL_NAMES = [
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number]
 
 /**
- * 十个冻结 Tool 里**不属于六个扩展**的那些：`rag_search`（票 13）。
+ * 十一个冻结 Tool 里**不属于六个扩展**的那些：`rag_search`（票 13）。
  *
  * 它由 RAG 轨单独注册（检索结果走 `citation` 事件，不发 `payload`），所以不在
- * {@link AGENT_EXTENSION_SPECS} 里；但「10 个全部要注册」是票 08 的验收口径，缺了就少一条能力，
+ * {@link AGENT_EXTENSION_SPECS} 里；但「全部要注册」是票 08 的验收口径，缺了就少一条能力，
  * 因此这里显式登记，缺它同样会被 {@link auditToolCoverage} 报出来。
  */
 export const AGENT_TOOL_NAMES_OUTSIDE_EXTENSIONS = ['rag_search'] as const

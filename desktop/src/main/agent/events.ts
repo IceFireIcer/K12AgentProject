@@ -31,7 +31,7 @@
  *   | `agent_end`（正常收尾）                        | `willRetry !== true`         | `done`   |
  *   | `agent_settled`                               | 尚未发过终态                  | `done`   |
  *   | `tool_execution_end`（`rag_search`）          | 结果里有合法 citations        | `citation` |
- *   | `tool_execution_end`（Tool→kind 表内的 7 个工具） | 未失败                     | `payload` |
+ *   | `tool_execution_end`（Tool→kind 表内的 8 个工具） | 未失败                     | `payload` |
  *   | `tool_execution_end`                          | `isError` / 结果标记为失败    | `error`（`degraded:true`，**不终结本轮**） |
  *   | `session_shutdown`                            | 会话终结（非本轮）            | （不发） |
  *   | 其它任意事件                                   | —                             | （忽略，计数） |
@@ -913,10 +913,17 @@ export function describeRuntimeFailure(error: unknown): string {
   )
 }
 
-/** 面向学生说「某某工具没成功」时的工具名口语化（不暴露内部 Tool 名）。 */
+/**
+ * 面向学生说「某某工具没成功」时的工具名口语化（不暴露内部 Tool 名）。
+ *
+ * ⚠️ 两个动画 Tool 给的是**同一句**「动画演示」：它们在学生眼里是同一件事
+ * （都产出一张动画卡片），失败说明也该是同一句 —— 区分「模板优先 / 现场做」
+ * 是教师视角的排障信息，不该出现在学生面前的文案里。
+ */
 export function toolDescription(toolName: string): string {
   const table: Record<string, string> = {
     generate_animation: '动画演示',
+    compose_animation: '动画演示',
     get_code_template: '代码模板',
     get_coding_hint: '提示',
     evaluate_code: '代码检查',

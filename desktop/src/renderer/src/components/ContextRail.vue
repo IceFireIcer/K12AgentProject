@@ -244,12 +244,16 @@ const traceNote = TRACE_TEACHER_NOTE
 
 /**
  * Tool 名的中文说法（轨迹里给人看的一句）。
- * ★ 表里只放**真的会出现在轨迹里**的那些（与 `ipc/tool-kinds.ts` 的 7 个 + 不发 payload 的 3 个）。
+ * ★ 表里只放**真的会出现在轨迹里**的那些（与 `ipc/tool-kinds.ts` 的 8 个 + 不发 payload 的 3 个）。
  *   不在这张表里的按原名显示 —— 那是新 Tool 上了但这里还没登记，如实显示比猜一个准。
+ * ★ `compose_animation`（按学生具体要求现做的那条）刻意用**区别于**「生成动画」的说法：
+ *   两者都是动画卡片，但这一条的产物是**当场按学生描述做出来的**——
+ *   轨迹里分得出来，学生才不会以为「明明说过一次了怎么又做了一张」。
  */
 const TOOL_LABELS: Record<string, string> = {
   rag_search: '查教材',
   generate_animation: '生成动画',
+  compose_animation: '按需做动画',
   get_code_template: '取代码模板',
   get_coding_hint: '分级求助',
   evaluate_code: '代码评估',
