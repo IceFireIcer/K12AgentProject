@@ -193,7 +193,7 @@ K12Agent/
 | --- | --- |
 | 桌面壳 | Electron 44 + electron-vite 5 + Vite 7 + Vue 3.5 + Pinia 4 + TypeScript 5.9（strict） |
 | 组件与样式 | Element Plus（按需引入）· lucide 图标 · 设计 token 由 `tokens.source.json` 生成（6 组配色 × 3 档饱和度 = 18 套，正文 16px 基准） |
-| Agent 编排 | Pi Agent SDK `@earendil-works/pi-coding-agent ^0.85.1`（主进程内嵌；6 个 Extension / 10 个 Tool） |
+| Agent 编排 | Pi Agent SDK `@earendil-works/pi-coding-agent ^0.85.1`（主进程内嵌；6 个 Extension / 11 个 Tool） |
 | 后端 | Python 3.12（uv 锁定）+ FastAPI + uvicorn + pydantic v2（契约唯一来源） |
 | 数据 | `kb.sqlite`（只读知识库：chunk / 向量 / FTS5 / 依赖图 / 题库）· `learning.db`（一人一份）· Pi JSONL 会话树（一人一份） |
 | 检索 | sqlite-vec 向量检索 → 云端嵌入兜底 → FTS5（trigram 分词）→ 依赖图/大纲，四级降级一次调用内走完 |
@@ -209,6 +209,11 @@ K12Agent/
   代价（跨语言契约、双进程生命周期）**是用冻结契约 + 守卫测试换掉的**，这是主动权衡而非妥协。
 - **动画「模板优先 + 生成补充」**：自由生成不稳定，所以先查模板、再让模型生成，产物必须过校验，
   重试共享一个总预算，仍失败就降级成文字 + 静态图——**宁可朴素，不可白屏**。
+- **两条皮肤、十二个原型**：内置模板按学段走两套视觉语言（小学插画化 / 中学工程图），
+  由 12 个「机制型」原型批量生成，全部用真实时间轴而非淡入淡出；学段色板与 App 同源
+  （`tokens.source.json` 生成 `skins.css`，有漂移守卫）。
+- **按需生成 + 按学生存档**：现做的动画存进该学生的库，键是「知识点 + 学段 + 请求指纹」，
+  同一个说法再要一次直接复播（0 次云端调用）；换学段就是另一份产物。
 - **零 CDN**：动画库内联进产物、Pyodide 与 Monaco 本地自托管，断网演示不翻车。
 - **一人一库、Pi 会话显式改道**：未成年人数据最小化采集，`learning.db` 与 Pi 会话树都按学生隔离，
   存储目录名与品牌名解耦（改品牌不会把学生的数据「改丢」）。
