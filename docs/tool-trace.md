@@ -3,15 +3,15 @@
 > 由 `desktop/src/main/agent/trace.ts` 从 Pi 的 `tool_call` / `tool_execution_start` / `tool_execution_end` 事件导出。**本文件替代原方案的 LangGraph 状态流转图**（执行文档 §9.4 第 4 条）。
 > 参数只记摘要：键名 + 规模（`«文本 12 字»`），密钥与个人信息类键一律省略 —— 轨迹图是要进报告与汇报 PPT 的，不落原始输入是数据合规要求。
 
-- 生成时间：2026-09-22T03:18:09.082Z
+- 生成时间：2026-09-24T17:17:36.989Z
 - 轮数：0
 - Tool 调用次数：0
-- 模型：deepseek/deepseek-flash
+- 模型：deepseek/deepseek-v4-flash
 
 ```mermaid
 flowchart TD
   %% 由 desktop/src/main/agent/trace.ts 自动生成，请勿手改
-  %% 生成时间：2026-09-22T03:18:09.082Z｜轮数：0｜调用：0 次
+  %% 生成时间：2026-09-24T17:17:36.989Z｜轮数：0｜调用：0 次
   %% 参数只记摘要（不含原文 / 密钥 / 学生个人信息）
   classDef turn fill:#e3f2fd,stroke:#1565c0,stroke-width:1px,color:#0d47a1
   classDef ok fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px,color:#1b5e20

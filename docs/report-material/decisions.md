@@ -2738,3 +2738,35 @@ window 收到的 message: {"type":"ready","payload_id":"preview"}   ← 沙箱�
 ```
 
 `npm test` **865/865** · `guards:mutation` 57 条全红 · `typecheck` 干净。
+
+---
+
+## D-081 ★★ 内置动画模板重写：14 个机制型原型 + 两套皮肤按学段切 + 色板与 App 令牌同源（2026-09-25）
+
+**日期**：2026-09-25
+
+**决策**：内置模板从「6 个 archetype 字符串模板批量生成」重写为「14 个机制型原型
+（scene / dialogue / contrast_kid / accumulate_kid / checklist_kid / flow / compare / layers /
+loop / tree / network / matrix / trace / counter）批量生成 206 份 + 8 份手作 premium = 214 份」；
+外观由**两套皮肤**按学段二分：小学两档 = `illustrated`（插画）、初高中 = `technical`（工程图），
+映射只有一处（`resources.py::GRADE_TO_SKIN`）；皮肤色板**不手写**，由 App 同一份设计令牌
+（`tokens.source.json` → `build_animation_skins.py` → `skins.css`）单向生成。
+模板脚本只描述「讲什么 + 什么顺序」（STAGE-API 冻结基元），动效由 `Sandbox.timeline`
+驱动真实 anime.js 时间轴，阶段数有下限（插画 ≥4 / 工程 ≥5）。
+
+**理由**：改造前实测 214 份里 206 份同质化 —— `anime()` 调用数为 0（动画库内联着却只有淡入淡出）、
+步数固定 3~4、时长全是 4800ms、节点文字硬截 4 字，去掉标题只剩 6 种 body / 6 种 script；
+「同一个知识点小学要看插画小人、初高中要看工程图」是教学差异，不是难度数字差异。
+色板若在动画侧另养一份，与 App 配色必然漂移（学生对不上很出戏），所以走令牌单向生成 +
+漂移守卫（`test_sandbox_palette` 22 条）。
+
+**被否决的方案**：① 每个原型手写 4 份学段变体 —— 改一处要改四处，工作量与漂移风险都不可控；
+② 动画侧自配色板 —— 与 App 设计令牌脱节；③ 沿用旧 6 个字符串模板 —— 实测同质化是根因本身；
+④ 让模型自由发挥 HTML —— 一次性生成失败率过高是立项时的头号风险（模板优先策略的前提不动）。
+
+**代价 / 风险**：`skins.css` 是生成物，改色必须回 `tokens.source.json` 再跑生成器（多一步，
+CI 查 diff）；皮肤二分意味着小学低/高共一份视觉（靠 `Sandbox.motion` 的节奏预设区分）；
+模板作者多一套冻结 API 要学（STAGE-API.md + 守卫兜住）。
+
+**服务哪条评分**：多模态交互质量 25%（动画从「会动」变「真动画」）+ 教育适配性 20%（皮肤按学段切）。
+

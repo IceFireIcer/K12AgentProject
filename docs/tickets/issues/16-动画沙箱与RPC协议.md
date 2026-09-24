@@ -46,3 +46,15 @@ postMessage RPC **每条消息都带 `payload_id`**，宿主侧只接受
 2. **`{body}` 占位符被漏掉**：模板脚本跑在一个**空白 DOM** 上。
 
 > 沙箱强度三连（`parent.document` / `localStorage` / `fetch` 侧车）在票 23 的现场演示中复核。
+
+### ✅ 2026-09-25 追加（动画系统改造收尾，提交 `89a0fc3..0242a42`）
+
+- **按学生存档的库产物落盘**：`students/<id>/animations/saved/`（与一次性 nonce 托管的临时文件
+  **分目录** —— 清临时产物不会顺手扫掉学生收藏的动画），库里只存相对路径；
+  入库前服务端用与渲染/托管**同一套** `validate_animation_html` 再校验一次。
+- **复用命中也要认回 `payload_id`**：库里那份 HTML 烘焙着当初的 id，播它时必须原样取回
+  （`readSavedPayloadId`，主进程工具路径与渲染 store 各一份实现）；取不回来宁可重新生成，
+  不发一张永远等不到 `ready` 的卡片。
+- 复用键 = `(student, kp, grade, prompt_hash)`，学段是身份的一部分；学生原话不进库（只存十六进制摘要）。
+  详见 `server/app/routes/animation_library.py` 模块注释与 D-081 / 票 17 追加记录。
+
