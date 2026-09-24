@@ -53,14 +53,17 @@
  *     只会稀释它。按报告口径，那份声明**只在编程页页脚保留一处**，本页整句删掉。
  *     （「断网也能演示」这条技术事实仍然完整地留在下面的 `<TeacherGate>` 里，评委看得到。）
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Library, Pause, Play, RotateCcw, Wand2 } from 'lucide-vue-next'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import { Library, Pause, Play, RotateCcw, Trash2, Wand2 } from 'lucide-vue-next'
 import SurfacePanel from '@/components/SurfacePanel.vue'
 import PageIdentity from '@/components/PageIdentity.vue'
 import TeacherGate from '@/components/TeacherGate.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../labels'
-import { useAnimationStore } from '../stores/animation'
+import { useAnimationStore, type AnimationTab, type SavedAnimationPlayable } from '../stores/animation'
 import { useChatStore } from '../stores/chat'
+import { useConfirm } from '../stores/confirm'
+import { GRADE_AXIS_OF, GRADE_LEVEL_OF, useThemeStore } from '../stores/theme'
 import {
   AnimationSandboxHost,
   SANDBOX_ATTRIBUTE,
@@ -71,15 +74,86 @@ import type { GradeLevel } from '@shared/ipc-events'
 
 const anim = useAnimationStore()
 const chat = useChatStore()
+const theme = useThemeStore()
+const confirm = useConfirm()
+
+/* ------------------------------------------------------------------ *
+ * 分页（内置模板 / 我的动画）
+ *
+ * ★ 为什么用一个**注册表**而不是在模板里写两个 `<button>`：按钮、内容区、
+ *   以及「当前在哪一页」三者必须一致（`study/tabs.ts` 是同一手法）。当前页存在
+ *   `stores/animation.ts`（`activeTab`），注册表在这里 —— 与学习档案页的分工一致
+ *   （那边当前页在 `stores/ui.ts`）。
+ *
+ * ⚠️ 与学习档案页**只有一处不同**：那边每页是一个独立组件 + `<KeepAlive>`，
+ *   这里两个分页都在本文件里、靠 `v-show` 切换。理由是本页的两个分页**共用一个页面级沙箱宿主**
+ *   （`host` / `iframeEl` / `window` 的 message 监听都在本页），拆成两个子组件会让
+ *   「切到我的动画再切回来」把舞台的宿主与 iframe 拆掉重建 —— 动画会从头播一遍，
+ *   而这正是 `<KeepAlive>` 在档案页要避免的那种损失。`v-show` 直接给出同一效果：
+ *   两份内容都挂载、只切换显示，播放进度与 ready 状态都不会丢。
+ * ------------------------------------------------------------------ */
+const ANIM_TABS: readonly { id: AnimationTab; label: string; hint: string }[] = [
+  { id: 'builtin', label: '内置模板', hint: '挑一段现成的动画看' },
+  { id: 'mine', label: '我的动画', hint: '看智团团给你做过的那些动画' }
+]
 
 /**
  * 学段：**只读对话 store 里那份判定结果**（没有就不传、也不猜）。
  *
  * ★ 本页不推断学段、也不改写学段 —— 判定的唯一落点在服务端（`grade/rules.py`）。
  *   拿不到时按「全部模板」列出来，并在胶片条上如实说明（见下面的 `gradeNote`）。
+ * ★ 跨学段预览（下面 `previewLevel`）会**临时**把它换成另一档：
+ *   那是 `stores/theme.ts` 的预览机制，只影响显示，既不写库也不动学生的记录。
  */
-const grade = computed<GradeLevel | null>(() => chat.currentGrade)
+const studentGrade = computed<GradeLevel | null>(() => chat.currentGrade)
+
+/**
+ * 预览中的学段（`null` = 没在预览）。
+ *
+ * ★★ **复用 `stores/theme.ts` 的既有预览机制**（`previewGrade` / `setPreviewGrade` /
+ *   `clearPreview`）：它与配色预览是同一个开关 —— 切换预览时整个界面（含配色）
+ *   一起按那一档显示，学生能直观看出「同一件事在别的年级是怎么讲的」。
+ * ★ 它**不写任何学生记录**：`previewGrade` 是渲染进程里的一个本地值，
+ *   学生的真实学段只在 `chat.currentGrade` 里、由服务端判定这条链写。
+ * ★ 离开本页时必须收起（见 `onDeactivated`）：留着会让整个应用停在预览配色上，
+ *   看起来像「我的年级被改了」。
+ */
+const previewLevel = computed<GradeLevel | null>(() => {
+  const key = theme.previewGrade
+  return key === null ? null : (GRADE_LEVEL_OF[key] ?? null)
+})
+
+/** 界面上实际按哪一档筛（预览优先；没预览就是学生自己的学段）。 */
+const grade = computed<GradeLevel | null>(() => previewLevel.value ?? studentGrade.value)
 const gradeLabel = computed(() => (grade.value === null ? null : GRADE_LABELS[grade.value]))
+/** 学生自己的学段名（预览时用来向学生说明「现在看的是哪一档」）。 */
+const studentGradeLabel = computed(() =>
+  studentGrade.value === null ? null : GRADE_LABELS[studentGrade.value]
+)
+
+/** 预览开关（点当前那一档 = 收起预览）。 */
+function togglePreview(level: GradeLevel): void {
+  if (previewLevel.value === level) {
+    theme.clearPreview()
+    return
+  }
+  // 契约的学段 → 配色轴的键：只认 `GRADE_AXIS_OF` 这一张表（两处各写一份迟早分叉）
+  theme.setPreviewGrade(GRADE_AXIS_OF[level])
+}
+
+/** 四个真实学段（预览切换器按它排开；顺序与配色轴上的顺序一致）。 */
+const GRADE_CHOICES: readonly GradeLevel[] = ['primary_low', 'primary_high', 'junior', 'senior']
+
+/** 学生能看到的那一档说明（预览时明说这是在看别的年级，且他自己的年级没变）。 */
+const previewNote = computed(() => {
+  if (previewLevel.value === null) {
+    return `看的都是${gradeLabel.value ?? GRADE_UNKNOWN_LABEL}这一档的内容`
+  }
+  const own = studentGradeLabel.value
+  return own === null
+    ? `现在按${gradeLabel.value ?? GRADE_UNKNOWN_LABEL}显示`
+    : `现在按${gradeLabel.value ?? GRADE_UNKNOWN_LABEL}显示，你所在的${own}没有变，点一下就能回来`
+})
 
 /** 学段字面量 → 中文名（模板声明的是机器字面量 `junior` 这种；本页不另写一张表）。
  *  ★ 一个学段一个名字只有一个实现：下面两个拼装函数与卡片上的学段标签都调它。 */
@@ -332,9 +406,6 @@ watch(iframeEl, (element) => {
   if (element !== null && host !== null) host.attach(element)
 })
 
-// 学段一变就重取模板清单（判定的唯一落点在服务端，本页只跟着它走）
-watch(grade, () => void syncTemplates(), { immediate: true })
-
 onMounted(() => {
   window.addEventListener('message', onWindowMessage)
 })
@@ -344,10 +415,12 @@ onMounted(() => {
  *
  * ⚠️ 本页在 `App.vue` 的 `<KeepAlive>` 里：切到别的页触发的是 `onDeactivated`，
  *    这里**不处理**它 —— 正因为宿主一直活着，切回来时动画进度与 ready 状态才还在。
+ *    （`onDeactivated` 只做一件事：收起跨学段预览，见下面那段。）
  */
 onBeforeUnmount(() => {
   window.removeEventListener('message', onWindowMessage)
   teardownHost()
+  teardownMineHost()
 })
 
 /* ------------------------------------------------------------------ *
@@ -412,6 +485,192 @@ const paramNote = computed(() => {
   const params = anim.activeTemplate?.params ?? []
   return params.length === 0 ? '' : `可调参数 ${params.length} 项（本次用默认值）`
 })
+
+/* ================================================================== *
+ * 「我的动画」分页：清单 / 播放 / 删除
+ *
+ * ★★ 播放用的是**这一页自己的第二个沙箱宿主**（`mineHost` / `mineFrameEl`），
+ *   与舞台那个宿主并存、互不干扰：消息按 `payload_id` 配对
+ *   （`iframe-host.ts` 的 `handleMessage` 两道过滤），两张动画同屏不会串台 ——
+ *   这条性质在 `animation-extension.test.ts` 里已被钉住。
+ * ★ 库里那条产物的 `payloadId` 是从**它自己的 HTML 里读回来的**（烘焙在成品里），
+ *   不是新造的：新造一个的话沙箱回的每条消息都对不上号，卡片会白等 5 秒然后降级。
+ * ================================================================== */
+
+/** 正在播的那一条（`null` = 还没选）。 */
+const playable = ref<SavedAnimationPlayable | null>(null)
+const minePhase = ref<'loading' | 'ready' | 'degraded'>('loading')
+const mineProgress = ref(0)
+/** 内部降级原因（**只进 `data-*`**，不摆给学生看）。 */
+const mineDegradeReason = ref('')
+/** 指令没发出去这类可读提示（沙箱还没就绪）。 */
+const mineControlError = ref('')
+const minePlaying = ref(false)
+/** 删除失败 / 读不到那一条时的可读说明。 */
+const mineActionNotice = ref('')
+
+const mineFrameEl = ref<HTMLIFrameElement | null>(null)
+/** 非响应式：宿主只在装载 / 卸载时进出（与舞台那个同一手法）。 */
+let mineHost: AnimationSandboxHost | null = null
+
+/** 当前这一份能不能真的播（库里那条要有 HTML）。 */
+const mineCanMount = computed(() => playable.value !== null && shouldMountIframe(playable.value.html))
+
+/** 「我的动画」清单的学段说明（预览时如实说这是别的年级）。 */
+const mineMeta = computed(() => {
+  const items = anim.savedItems.length
+  if (previewLevel.value !== null) {
+    return `这个年级里做过 ${items} 段（预览中）`
+  }
+  return `给你做过 ${items} 段`
+})
+
+/** 读一档的清单（分页切过来、或学段变化时调；同一档并发只发一次）。 */
+async function loadMine(): Promise<void> {
+  await anim.loadSaved(grade.value === null ? {} : { gradeLevel: grade.value })
+}
+
+/** 学生点清单里的一条：取回它的 HTML 并装上沙箱。 */
+async function playSaved(savedId: string): Promise<void> {
+  mineActionNotice.value = ''
+  teardownMineHost()
+  minePhase.value = 'loading'
+  mineProgress.value = 0
+  minePlaying.value = false
+  mineControlError.value = ''
+  mineDegradeReason.value = ''
+  const next = await anim.readSavedAnimation(savedId)
+  if (next === null) {
+    playable.value = null
+    mineActionNotice.value = anim.savedError ?? '这条动画这次打不开，换一条试试。'
+    return
+  }
+  playable.value = next
+  await nextTick()
+  if (mineFrameEl.value !== null) attachMineHost()
+}
+
+/** 建宿主（与舞台那个同一套回调，只是状态落在本分页自己的 ref 上）。 */
+function buildMineHost(target: SavedAnimationPlayable): AnimationSandboxHost {
+  return new AnimationSandboxHost({
+    payloadId: target.payloadId,
+    srcdoc: target.html,
+    onReady: () => {
+      minePhase.value = 'ready'
+      mineDegradeReason.value = ''
+      mineControlError.value = ''
+      // 就绪后由我们明确发一条 play：动画是不是在播，由这条指令定义
+      minePlaying.value = mineHost?.post('play') ?? false
+    },
+    onProgress: (value) => {
+      mineProgress.value = value
+      if (value >= 1) minePlaying.value = false
+    },
+    onTimeout: (payloadId) => mineDegraded(`沙箱在 5 秒内没有就绪（payloadId=${payloadId}）`),
+    onError: (message) => mineDegraded(`沙箱自报错误：${message || '(无说明)'}`)
+  })
+}
+
+function attachMineHost(): void {
+  const target = playable.value
+  const element = mineFrameEl.value
+  if (target === null || element === null) return
+  mineHost = buildMineHost(target)
+  mineHost.attach(element)
+}
+
+/** 沙箱不可用 → 退到文字讲解（**绝不白屏**）。 */
+function mineDegraded(reason: string): void {
+  minePhase.value = 'degraded'
+  mineDegradeReason.value = reason
+  minePlaying.value = false
+  teardownMineHost()
+}
+
+function teardownMineHost(): void {
+  mineHost?.dispose()
+  mineHost = null
+}
+
+function postToMine(type: 'play' | 'pause' | 'replay'): void {
+  const sent = mineHost?.post(type) ?? false
+  mineControlError.value = sent ? '' : '这条播放指令没有发出去（动画还没准备好）。'
+}
+
+function toggleMinePlay(): void {
+  if (minePhase.value !== 'ready') return
+  const next = minePlaying.value ? 'pause' : 'play'
+  postToMine(next)
+  minePlaying.value = next === 'play'
+}
+
+function replayMine(): void {
+  if (minePhase.value !== 'ready') return
+  mineProgress.value = 0
+  postToMine('replay')
+  minePlaying.value = true
+}
+
+function onMineFrameLoad(): void {
+  mineHost?.handleLoad()
+}
+
+/**
+ * 删一条：**先确认再删**（走全局那一个确认框，与删除会话同一套）。
+ *
+ * 删的是正在播的那一条时，连同沙箱一起收掉（不然画面还在动、清单里已经没了）。
+ */
+async function removeSaved(savedId: string, title: string): Promise<void> {
+  const ok = await confirm.ask({
+    title: `删掉「${title}」这段动画？`,
+    body: '删掉之后这段就没了，想再看要重新做一份。',
+    danger: true,
+    confirmText: '删掉'
+  })
+  if (!ok) return
+  mineActionNotice.value = ''
+  const result = await anim.deleteSaved(savedId)
+  if (!result.ok) {
+    mineActionNotice.value = result.message ?? '这条没删掉，稍后再试一次。'
+    return
+  }
+  if (playable.value?.item.id === savedId) {
+    teardownMineHost()
+    playable.value = null
+  }
+}
+
+/** 分页 / 学段变化时把「我的动画」那一份清单取上（同一档去重）。 */
+watch(
+  () => [anim.activeTab, grade.value] as const,
+  ([tab]) => {
+    if (tab !== 'mine') return
+    void loadMine()
+  },
+  { immediate: true }
+)
+
+// 学段一变（含预览切换）就重取模板清单 —— 判定的唯一落点在服务端，本页只跟着它走
+watch(grade, () => void syncTemplates(), { immediate: true })
+
+/**
+ * 切到「我的动画」时补一次清单：`KeepAlive` 不重挂，`onMounted` 一辈子只跑一次，
+ * 而学生可能刚在对话里生成了一段新动画（档案页的 `onActivated` 是同一条理由）。
+ */
+onActivated(() => {
+  if (anim.activeTab === 'mine') void loadMine()
+})
+
+/**
+ * 离开本页时**收起跨学段预览**。
+ *
+ * ★ 必须收：预览是与配色联动的全局开关（`theme.previewGrade`），留着会让整个应用
+ *   停在别的年级的配色上，学生只会以为自己的年级被改了。
+ * ★ 只收预览，**不动**任何学生记录（预览本来就没写过它们）。
+ */
+onDeactivated(() => {
+  if (theme.previewing) theme.clearPreview()
+})
 </script>
 
 <template>
@@ -427,7 +686,51 @@ const paramNote = computed(() => {
       hint="先挑一个动画，再点播放"
     />
 
-    <!-- ══ 舞台：全宽主对象 ══════════════════════════════════════════════ -->
+    <!-- ══ 分页（内置模板 / 我的动画）═════════════════════════════════════
+         与学习档案页的分页同一配方（`.tab` / `.tab--on`）：同一组导航在两处
+         必须是同一个长相。 -->
+    <nav class="study__tabs" role="tablist" aria-label="动画讲解分页">
+      <button
+        v-for="tab in ANIM_TABS"
+        :key="tab.id"
+        class="tab"
+        type="button"
+        role="tab"
+        :class="{ 'tab--on': anim.activeTab === tab.id }"
+        :aria-selected="anim.activeTab === tab.id"
+        :title="tab.hint"
+        :data-testid="`animation-tab-${tab.id}`"
+        @click="anim.setTab(tab.id)"
+      >
+        {{ tab.label }}
+      </button>
+    </nav>
+
+    <!-- ══ 跨学段预览：同一件事在别的年级怎么讲 ════════════════════════════
+         ★ 它只改**显示**（`theme` 的预览开关），不写学生的任何记录 —— 下面那句
+           说明就是对学生说的这件事。 -->
+    <div class="gradebar" data-testid="animation-gradebar">
+      <span class="gradebar__label">按哪个年级看</span>
+      <button
+        v-for="level in GRADE_CHOICES"
+        :key="level"
+        type="button"
+        class="gradebar__btn"
+        :class="{ 'gradebar__btn--on': grade === level }"
+        :aria-pressed="grade === level"
+        :data-testid="`animation-grade-${level}`"
+        @click="togglePreview(level)"
+      >{{ gradeName(level) }}</button>
+      <span class="gradebar__note" data-testid="animation-gradebar-note">{{ previewNote }}</span>
+    </div>
+
+    <!-- ══ 分页①：内置模板（本页原有的舞台 + 底部胶片条）═══════════════════
+         ⚠️ 两个分页都用 `v-show` 而不是 `v-if`：舞台那个沙箱宿主与本分页绑在一起，
+            `v-if` 会在切分页时把它整个拆掉 —— 切回来动画从头播一遍、播放进度清零
+            （档案页用 `<KeepAlive>` 避免的正是这种损失；这里两个分页在同一个文件里，
+            两个都保持挂载是同一件事的更直接做法，所以不需要 KeepAlive）。 -->
+    <div v-show="anim.activeTab === 'builtin'" class="pane">
+    <!-- 舞台：全宽主对象 -->
     <SurfacePanel flush class="anim__stage-card">
       <header class="anim__head">
         <div class="anim__head-text">
@@ -669,6 +972,158 @@ const paramNote = computed(() => {
         </p>
       </TeacherGate>
     </section>
+    </div>
+
+    <!-- ══ 分页②：我的动画（智团团给你做过的那些）═══════════════════════════
+         ★ 只列**当前这一档学段**的产物：同一个知识点在不同年级是不同的两份东西
+           （讲法不同），混在一起列出来，学生挑的时候根本不知道哪一份是自己看得懂的。
+         ★ 空态用共用的 `EmptyState`（它的文件头写着这类文案的写法：只说处境与下一步）。 -->
+    <section v-show="anim.activeTab === 'mine'" class="mine" aria-label="我的动画">
+      <header class="strip__head">
+        <Library :size="14" class="strip__ico" />
+        <span class="strip__title">我的动画</span>
+        <span class="strip__meta" data-testid="animation-mine-meta">{{ mineMeta }}</span>
+      </header>
+
+      <p v-if="anim.savedError" class="mine__error" data-testid="animation-mine-error">
+        {{ anim.savedError }}
+      </p>
+      <p v-if="mineActionNotice" class="mine__error" data-testid="animation-mine-notice">
+        {{ mineActionNotice }}
+      </p>
+
+      <EmptyState
+        v-if="anim.savedLoading && anim.savedItems.length === 0"
+        tone="loading"
+        title="正在找你的动画"
+        desc="马上就好，都是在这台电脑上完成的。"
+      />
+      <EmptyState
+        v-else-if="anim.savedItems.length === 0"
+        tone="empty"
+        data-testid="animation-mine-empty"
+        title="这里还没有你的动画"
+        :desc="
+          `${gradeLabel ?? GRADE_UNKNOWN_LABEL}这一档还做过动画。回对话里说一句「用动画再讲一遍」，或者换一档学段看看。`
+        "
+      />
+
+      <template v-else>
+        <!-- 清单：沿用胶片条的视觉语言（`.tpl` 那一族），一行一张、可以横向滚。
+             点一张就装上下面那个沙箱播它。 -->
+        <div class="strip__track">
+          <div
+            v-for="item in anim.savedItems"
+            :key="item.id"
+            class="tpl mine__item"
+            :class="{ 'tpl--on': playable?.item.id === item.id }"
+            :data-testid="`animation-saved-${item.id}`"
+          >
+            <button
+              type="button"
+              class="mine__open"
+              :data-testid="`animation-saved-play-${item.id}`"
+              @click="playSaved(item.id)"
+            >
+              <span class="tpl__top">
+                <span class="tpl__name">{{ item.title || item.concept }}</span>
+              </span>
+              <span class="tpl__concept">{{ item.concept }}</span>
+              <span class="tpl__grades">
+                <span class="tpl__grade">{{ gradeName(item.gradeLevel) }}</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              class="mine__trash"
+              :title="`删掉「${item.title || item.concept}」`"
+              :aria-label="`删掉「${item.title || item.concept}」`"
+              :data-testid="`animation-saved-delete-${item.id}`"
+              @click="removeSaved(item.id, item.title || item.concept)"
+            >
+              <Trash2 :size="13" />
+            </button>
+          </div>
+        </div>
+
+        <!-- 播它：**本分页自己的沙箱宿主**（与舞台那个并存，靠 payload_id 防串台）。 -->
+        <div v-if="playable" class="mine__stage" data-testid="animation-mine-stage">
+          <template v-if="mineCanMount && minePhase !== 'degraded'">
+            <iframe
+              ref="mineFrameEl"
+              class="anim__frame"
+              :sandbox="iframeAttrs.sandbox"
+              :referrerpolicy="iframeAttrs.referrerpolicy"
+              :srcdoc="playable.html"
+              :title="playable.item.title || playable.item.concept"
+              data-testid="animation-mine-frame"
+              data-resource="inline"
+              :data-sandbox="SANDBOX_ATTRIBUTE"
+              @load="onMineFrameLoad"
+            />
+            <p v-if="minePhase === 'loading'" class="anim__veil" data-testid="animation-mine-loading">
+              动画正在准备…（等太久的话，会用文字把要点讲给你）
+            </p>
+          </template>
+          <div v-else class="anim__fallback" data-testid="animation-mine-fallback">
+            <p class="anim__fallback-text">{{ playable.item.fallbackText }}</p>
+            <!-- 提示语按报告 C15 的口径：说清「没播出来 + 先看哪」就够了。
+                 内部原因（沙箱没就绪之类）只进 `data-*`。 -->
+            <p
+              class="anim__reason"
+              data-testid="animation-mine-degrade-notice"
+              :data-degrade-reason="mineDegradeReason || null"
+            >
+              {{ DEGRADED_NOTICE_TEXT }}
+            </p>
+          </div>
+        </div>
+
+        <!-- 播放控制：只在真播的时候出现（没画面时摆一排按钮只会让人以为坏了）。 -->
+        <footer v-if="playable && mineCanMount && minePhase === 'ready'" class="anim__foot">
+          <button
+            type="button"
+            class="anim__play"
+            :title="minePlaying ? '暂停' : '播放'"
+            data-testid="animation-mine-play"
+            @click="toggleMinePlay"
+          >
+            <component :is="minePlaying ? Pause : Play" :size="15" />
+          </button>
+          <button
+            type="button"
+            class="anim__ghost anim__ghost--icon"
+            title="重新播放"
+            data-testid="animation-mine-replay"
+            @click="replayMine"
+          >
+            <RotateCcw :size="14" />
+          </button>
+          <div class="anim__progress">
+            <span class="anim__fill" :style="{ width: `${Math.round(mineProgress * 100)}%` }" />
+          </div>
+          <span class="k12-num anim__time">
+            {{ minePlaying ? '播放中' : '已暂停' }} · {{ Math.round(mineProgress * 100) }}%
+          </span>
+        </footer>
+        <p v-if="mineControlError" class="mine__error" data-testid="animation-mine-control-error">
+          {{ mineControlError }}
+        </p>
+      </template>
+
+      <TeacherGate label="我的动画是怎么存下来的">
+        <p class="anim__strip-note">
+          <span class="k12-label">存储</span>
+          每一条按「知识点 + 学段 + 请求指纹」存一份，一位学生一份库。
+          同一个知识点在不同学段是两条不同的记录（讲法不同），互不覆盖。
+        </p>
+        <p class="anim__strip-note">
+          <span class="k12-label">播放</span>
+          列表里的产物自带它的防串台标识（烘焙在 HTML 里），本页用它装载第二套沙箱宿主 ——
+          与舞台那个并存、互不干扰（消息按标识配对）。库里没有 HTML 的那一条不装载沙箱。
+        </p>
+      </TeacherGate>
+    </section>
   </div>
 </template>
 
@@ -682,6 +1137,145 @@ const paramNote = computed(() => {
   flex-direction: column;
   gap: var(--k12-gap);
   padding: 18px 22px 24px;
+}
+
+/* ── 分页导航 / 学段切换（与学习档案页的 `.tab` 同一配方）────────────────── */
+.study__tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.tab {
+  padding: 5px 12px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-pill);
+  background: transparent;
+  color: var(--k12-muted-2);
+  font-size: var(--k12-fs-sm);
+  cursor: pointer;
+}
+.tab:hover {
+  color: var(--k12-fg);
+  border-color: var(--k12-accent);
+}
+/* 选中：accent-soft 底 + accent-border 描边 + accent-ink 文字
+ * （与 `views/Study.vue` 的 `.tab--on`、胶片条的 `.tpl--on` 同一配方）。 */
+.tab--on {
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  color: var(--k12-accent-ink);
+  font-weight: 600;
+}
+
+/* 跨学段预览那一行：**只改显示**（`stores/theme.ts` 的预览开关），不动学生记录。 */
+.gradebar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.gradebar__label {
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
+}
+.gradebar__btn {
+  padding: 3px 10px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-xs);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .gradebar__btn:hover {
+    border-color: var(--k12-accent-ink);
+    color: var(--k12-accent-ink);
+  }
+}
+.gradebar__btn--on {
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  color: var(--k12-accent-ink);
+  font-weight: 650;
+}
+.gradebar__note {
+  font-size: var(--k12-fs-xs);
+  color: var(--k12-muted);
+  margin-left: 4px;
+}
+
+/* 两个分页各是一段纵向流（与 `.anim` 同一个间距口径）。 */
+.pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--k12-gap);
+}
+
+.mine {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.mine__item {
+  /* 胶片条的项宽 220px 在这里不够放一颗删除按钮 → 稍宽一点；高度仍随内容（下限保留）。 */
+  width: 248px;
+  position: relative;
+  padding: 0;
+  cursor: default;
+}
+/* 点整张卡 = 播这一段（删除是另一颗按钮，单独放在右上角，不会误触）。 */
+.mine__open {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  /* 右下留出删除按钮的位置，标题不会钻到它下面 */
+  padding-right: 34px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+}
+.mine__trash {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: var(--k12-r-control);
+  background: transparent;
+  color: var(--k12-muted);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .mine__trash:hover {
+    border-color: var(--k12-bad-border);
+    background: var(--k12-bad-soft);
+    color: var(--k12-bad);
+  }
+}
+.mine__stage {
+  position: relative;
+  min-height: 300px;
+  margin-top: 6px;
+  padding: 18px;
+  border-radius: var(--k12-r-card);
+  background: var(--k12-fg);
+}
+.mine__error {
+  padding: 8px 11px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-warn-soft);
+  color: var(--k12-warn);
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
 }
 
 /* ── 舞台卡（全宽主对象）──────────────────────────────────────────────── */

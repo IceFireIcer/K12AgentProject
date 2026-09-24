@@ -78,6 +78,39 @@ export interface DataBridge {
   }): Promise<DataCallResult>
   hostAnimation(payload: { kpId: string; html: string; payloadId: string }): Promise<DataCallResult>
 
+  /**
+   * 当前学生的动画库清单（**不含 HTML**）。
+   * ★ 入参里没有 studentId：身份由主进程决定，渲染进程指定不了。
+   */
+  readSavedAnimations(payload?: { gradeLevel?: GradeLevel; kpId?: string }): Promise<DataCallResult>
+  /** 取库里的一条（**带 HTML**，可交给沙箱播）。 */
+  readSavedAnimation(payload: { savedId: string }): Promise<DataCallResult>
+  /** 存一条进动画库（`promptHash` 是摘要 —— 学生原话不进库）。 */
+  saveAnimationToLibrary(payload: {
+    kpId: string
+    gradeLevel: GradeLevel
+    concept: string
+    promptHash: string
+    title: string
+    durationMs: number
+    html: string
+    fallbackText: string
+    fallbackImage?: string
+  }): Promise<DataCallResult>
+  /** 删一条（只可能删到自己的）。 */
+  deleteSavedAnimation(payload: { savedId: string }): Promise<DataCallResult>
+  /**
+   * 按需现做一份动画（「在线生成」的**兜底**路径：那一轮开不起来时才用它）。
+   * ★ 主进程做完会自己存库，调用方不需要再存一次。
+   */
+  composeAnimation(payload: {
+    kpId?: string
+    gradeLevel?: GradeLevel
+    concept: string
+    request: string
+    caption?: string
+  }): Promise<DataCallResult>
+
   readKnowledgeStats(): Promise<DataCallResult>
   readKnowledgePoints(payload?: { gradeLevel?: GradeLevel }): Promise<DataCallResult>
   importKnowledge(payload: {
@@ -94,8 +127,15 @@ export interface DataBridge {
 /** 能力探测结果：要么就绪（bridge），要么带一句可读中文（message）。 */
 export type DataBridgeLookup = { ready: true; bridge: DataBridge } | { ready: false; message: string }
 
-/** 探测的必需方法（**全都要有**：少一个就说明这套能力没接完，那就不该半可用）。 */
-const REQUIRED_METHODS = [
+/**
+ * 探测的必需方法（**全都要有**：少一个就说明这套能力没接完，那就不该半可用）。
+ *
+ * ★ 导出是为了让测试夹具**从这一处派生**，而不是各留一份拷贝：
+ *   两个测试文件原先各有一份 hand-maintained 清单，加了 5 个动画库方法之后
+ *   两份都忘了跟，于是能力探测判定「桥不齐」→ 39 条测试集体假红。
+ *   拷贝必然漂移，所以只留一个真相。
+ */
+export const REQUIRED_METHODS = [
   'getStudent',
   'readProfile',
   'readRecommendation',
@@ -110,6 +150,11 @@ const REQUIRED_METHODS = [
   'readAnimationTemplates',
   'renderAnimation',
   'hostAnimation',
+  'readSavedAnimations',
+  'readSavedAnimation',
+  'saveAnimationToLibrary',
+  'deleteSavedAnimation',
+  'composeAnimation',
   'readKnowledgeStats',
   'readKnowledgePoints',
   'importKnowledge',
@@ -161,6 +206,11 @@ export function resolveDataBridge(host: unknown = globalThis.window?.api): DataB
       readAnimationTemplates: (payload) => api.readAnimationTemplates!(payload ?? {}),
       renderAnimation: (payload) => api.renderAnimation!(payload),
       hostAnimation: (payload) => api.hostAnimation!(payload),
+      readSavedAnimations: (payload) => api.readSavedAnimations!(payload ?? {}),
+      readSavedAnimation: (payload) => api.readSavedAnimation!(payload),
+      saveAnimationToLibrary: (payload) => api.saveAnimationToLibrary!(payload),
+      deleteSavedAnimation: (payload) => api.deleteSavedAnimation!(payload),
+      composeAnimation: (payload) => api.composeAnimation!(payload),
       readKnowledgeStats: () => api.readKnowledgeStats!(),
       readKnowledgePoints: (payload) => api.readKnowledgePoints!(payload ?? {}),
       importKnowledge: (payload) => api.importKnowledge!(payload),
@@ -198,6 +248,12 @@ export type CodingHintView = Schemas['CodingHint']
 export type CodeEvaluationView = Schemas['CodeEvaluation']
 /** 动画载荷。 */
 export type AnimationPayloadView = Schemas['AnimationPayload']
+/** 动画库里的一条（**不含 html**；清单与保存回执都用它）。 */
+export type AnimationSavedItemView = Schemas['AnimationSavedItem']
+/** 动画库清单（`gradeLevel` / `kpId` 回显本次的过滤条件）。 */
+export type AnimationSavedListView = Schemas['AnimationSavedListResponse']
+/** 库里的一条**带 html**（可以交给沙箱播的那一份）。 */
+export type AnimationSavedView = Schemas['AnimationSavedView']
 /** 知识库体检数字。 */
 export type KnowledgeStatsView = Schemas['KnowledgeStats']
 /** 知识点清单。 */

@@ -311,6 +311,33 @@ export const IPC = {
    */
   animationHost: 'animation:host',
 
+  // ── 动画：**学生自己的动画库**（保存 / 读取 / 删除）+ 按需现做 ─────────────
+  //
+  // ★★ 五条都是 invoke，**都不进 `PUSH_CHANNELS`**。
+  // ★★ **学生身份由主进程决定**（`handlers-data.ts` 的 `studentId()` → `resolveActiveStudentId`）：
+  //    渲染进程递不了、也改不了学生 id —— 一旦它能指定，「读别人做过的动画」就只是一个
+  //    字符串的距离（库里一人一份 `learning.db`，靠库文件归属完成隔离）。
+  //    所以下面这些请求类型里**一个 studentId 字段都没有**，这是有意的，不要"补全"它。
+  // ★ 复用键 = `(student_id, kp_id, grade_level, prompt_hash)`：同一个知识点在不同学段
+  //    是**两份不同的产物**（讲法不同），所以 `gradeLevel` 是清单/保存的必需维度。
+  /** 渲染进程 → 主进程：该学生的动画库清单（`GET /api/animation/saved/{id}`，**不回 html**）。 */
+  animationSavedList: 'animation:saved-list',
+  /** 渲染进程 → 主进程：取库里的一条（`GET /api/animation/saved/{id}/{saved_id}`，**带 html**）。 */
+  animationSavedGet: 'animation:saved-get',
+  /** 渲染进程 → 主进程：把一份已生成好的动画存进库里（`POST /api/animation/saved/{id}`）。 */
+  animationSavedSave: 'animation:saved-save',
+  /** 渲染进程 → 主进程：删掉库里的一条（`DELETE /api/animation/saved/{id}/{saved_id}`）。 */
+  animationSavedDelete: 'animation:saved-delete',
+  /**
+   * 渲染进程 → 主进程：**按需现做一份动画**（不走对话那条路）。
+   *
+   * ★★ 它是「在线生成」按钮的**直连兜底**：正常情况下那张卡片走对话（模型调
+   *   `compose_animation` 那条 Tool 路径），只有在**这一轮根本开不起来**时才用这条通道
+   *   （没有可用的模型 / 发送失败）。所以它的定位是"备用发电机"，不是主路径。
+   * ★ 它**自己会存库**（做完就进该学生的动画库），渲染进程不需要再调 `animationSavedSave`。
+   */
+  animationCompose: 'animation:compose',
+
   // ── 教材知识库（数据层检视页）─────────────────────────────────────────
   /** 渲染进程 → 主进程：知识库体检数字（`GET /api/knowledge/stats`）。 */
   knowledgeStats: 'knowledge:stats',
@@ -787,6 +814,71 @@ export interface AnimationHostRequest {
   kpId: string
   html: string
   payloadId: string
+}
+
+/* ------------------------------------------------------------------ *
+ * 学生动画库（保存 / 读取 / 删除）+ 按需现做：跨 IPC 的请求类型
+ *
+ * ★★ 这四组里**没有 `studentId`** —— 身份由主进程解析（见 `IPC.animationSavedList`
+ *   上方那段）。契约里 `AnimationSaveRequest` / `AnimationSavedLookupRequest` 都有
+ *   `studentId`，它由 `wire/data.ts` 的包装函数**内部注入**，不进这些类型。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 动画库清单的入参（两个过滤条件都可省略 = 全都要）。
+ *
+ * ★ `gradeLevel` 是**过滤**而不是"权限"：服务端只回该学生自己的库，
+ *   学段这一维只是「只看这一档」（跨学段预览就是靠它换一个值再查一次）。
+ */
+export interface AnimationSavedListRequest {
+  gradeLevel?: GradeLevel
+  kpId?: string
+}
+
+/** 取库里一条的入参（`savedId` 会被拼进路径，主进程与 Python 各校验一次字符集）。 */
+export interface AnimationSavedGetRequest {
+  savedId: string
+}
+
+/**
+ * 存一条的入参。
+ *
+ * ★ `promptHash` 是**十六进制摘要**（Python 侧的 `prompt_hash` 只收十六进制字符）：
+ *   学生原话一个字都不进库 —— 与「SQLite 不存对话正文」是同一条纪律。
+ *   调用方（渲染进程）用主进程导出的 `animationRequestHash` 算它。
+ * ★ `gradeLevel` 是**复用键的一维**（同知识点不同学段是两份产物），不是装饰。
+ */
+export interface AnimationSavedSaveRequest {
+  kpId: string
+  gradeLevel: GradeLevel
+  concept: string
+  promptHash: string
+  title: string
+  durationMs: number
+  html: string
+  fallbackText: string
+  fallbackImage?: string
+}
+
+/** 删一条的入参（只可能是自己的：库文件按学生分）。 */
+export interface AnimationSavedDeleteRequest {
+  savedId: string
+}
+
+/**
+ * 按需现做一份动画的入参（「在线生成」的直连兜底）。
+ *
+ * ★ `request` = **学生想看什么**（照他的说法写）—— 它既是生成的输入，
+ *   也是复用键里的请求指纹那一维（同一位学生问同一件事应当命中同一份）。
+ * ★ `reuseSaved` **不在这里**：这条通道的语义是「按当前学段与概念现做一份」，
+ *   库里已经有的话由清单那条路直接播（零生成），不需要再做一次。
+ */
+export interface AnimationComposeRequest {
+  kpId?: string
+  gradeLevel?: GradeLevel
+  concept: string
+  request: string
+  caption?: string
 }
 
 /** 导入教材的入参（正文走 JSON，不是 multipart —— 见通道注释）。 */

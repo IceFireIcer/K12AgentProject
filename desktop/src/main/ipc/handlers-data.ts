@@ -20,8 +20,13 @@ import { DEFAULT_GRADE_LEVEL } from '../agent/prompts/grade.ts'
 import { ipcMain, type WebContents } from 'electron'
 import {
   IPC,
+  type AnimationComposeRequest,
   type AnimationHostRequest,
   type AnimationRenderRequest,
+  type AnimationSavedDeleteRequest,
+  type AnimationSavedGetRequest,
+  type AnimationSavedListRequest,
+  type AnimationSavedSaveRequest,
   type AnimationTemplatesRequest,
   type CodeHintRequest,
   type CodeRunHintRequest,
@@ -36,6 +41,20 @@ import {
 import { dataRequests, requestJson } from '../wire/data.ts'
 import type { TraceRecordForUi } from '../agent/trace.ts'
 import type { TraceEntry, TraceSnapshot } from '../../shared/ipc-events.ts'
+// ★★ 动画的两条实现复用（**不重写第二套**）：
+//   · `agent/animation/generator.ts`：模型出片段 → Python 拼装 + 校验 的那一条出口；
+//   · `agent/extensions/animation.ts`：载荷投影 / 校验 / 重试上限 / 复用键的**唯一实现**
+//     （Tool 那边用的也是它）。这里只是把它们编排起来，不复制任何判据。
+import {
+  MAX_RETRIES,
+  animationRequestHash,
+  projectAnimationPayload,
+  validateAnimationPayload,
+  withCaption,
+  type AnimationPayloadShape
+} from '../agent/extensions/animation.ts'
+import { createAnimationGenerator } from '../agent/animation/generator.ts'
+import type { TextCompleter } from '../agent/safety/review.ts'
 
 /** 题库一次最多取几道（与后端 `GET /api/quiz/bank` 的约束一致）。 */
 export const QUIZ_BANK_MAX_COUNT = 10
@@ -46,6 +65,18 @@ export const CODE_HINT_MIN_LEVEL = 1
 export const CODE_HINT_MAX_LEVEL = 3
 /** 导入教材的正文字符上限（与契约 `KnowledgeImportRequest.markdown` 的 max_length 一致）。 */
 export const MAX_IMPORT_MARKDOWN_CHARS = 400_000
+/** 动画概念名的字符上限（与 `compose_animation` 的 Tool 参数同一口径）。 */
+export const MAX_ANIMATION_CONCEPT_CHARS = 40
+/** 「学生想看什么」的字符上限（同上）。 */
+export const MAX_ANIMATION_REQUEST_CHARS = 200
+/** 一句话讲解的上限（同上）。 */
+export const MAX_ANIMATION_CAPTION_CHARS = 200
+/** 动画库条目 id 的字符集（与 Python `ANIMATION_SAVED_ID_PATTERN` / 契约同口径）。 */
+export const ANIMATION_SAVED_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+/** 知识点 id 的字符集（Python `KP_ID_RE` 同口径；空串表示「没有绑定知识点」）。 */
+export const ANIMATION_KP_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+/** 请求指纹（**十六进制摘要**；Python 的 `prompt_hash` 只收十六进制字符）。 */
+export const ANIMATION_PROMPT_HASH_RE = /^[0-9a-fA-F]{8,128}$/
 
 /** 四个学段字面量（与契约 `GradeLevel` 逐字一致；此处只做运行期白名单）。 */
 const GRADE_LEVELS = ['primary_low', 'primary_high', 'junior', 'senior'] as const
@@ -93,6 +124,21 @@ function readInt(value: unknown, min: number, max: number, fallback?: number): n
 }
 
 /**
+ * 一个新的 `payload_id`（沙箱『这是谁的消息』的身份）。
+ *
+ * ★ 字符集与长度与 Python 的 `validate_payload_id`（`^[A-Za-z0-9_-]{1,64}$`）一致：
+ *   它会被服务端拼进**文件名与 URL query**，带别的字符会被拒。
+ * ★ 与 `agent/extensions/animation.ts` 的 `newPayloadId()` 是**同一套形状的两份实现**
+ *   （那边是 Tool 闭包里的私有函数）。这里不共用是为了不 widening 那个模块的导出面 ——
+ *   代价是两处各一行，收益是 Agent 扩展的模块边界不被 IPC 层穿透。
+ */
+export function newAnimationPayloadId(): string {
+  const cryptoRef = globalThis.crypto as { randomUUID?: () => string } | undefined
+  if (cryptoRef && typeof cryptoRef.randomUUID === 'function') return cryptoRef.randomUUID()
+  return `anim-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
  * 注册全部新增通道。
  *
  * @param options.resolveStudentId 学生 id 解析（生产恒为 `resolveActiveStudentId`）。
@@ -105,11 +151,25 @@ export function registerDataHandlers(options: {
   currentGradeLevel: () => string | null
   /** 数据层请求注入点（测试用；生产恒为默认出口）。 */
   requests?: typeof dataRequests
+  /**
+   * **文本补全器**（`animation:compose` 的直连生成用；生产默认 `null` = 没有）。
+   *
+   * ★★ 为什么是可注入的、且默认 `null`：直连生成要「模型出片段」，而补全器
+   *   （`runtime.ts` 里那个 `lazyComplete`）是 ChatRuntime 的**闭包内部状态**，
+   *   既不导出也没有访问器。本文件不拥有那个运行时，所以**不自己造一个 Pi 会话**
+   *   （那会变成第二套装配，且每次点按钮都要付一次装配代价）。
+   *   接线的位置在 `ipc/handlers.ts`（ChatRuntime 的持有者）——
+   *   一行 `animationCompleter: () => runtime?.<补全器>` 就能点亮这条路。
+   * ★ 拿不到补全器时**不是失败**：下面会退到「按当前学段重新渲染内置模板」那条路
+   *   （零模型调用，断网也能用），再不行才给一句可读提示。
+   */
+  animationCompleter?: () => TextCompleter | null
 }): void {
   // ★ 本文件里**所有**要用到学生身份的地方都只经这一个取数口（拼 URL 的与塞 body 的都算）：
   //   散开写就会出现「某一条通道忘了注入」——而它的表现是整条链路 422 全哑，不是一句报错。
   const studentId = (): string => options.resolveStudentId()
   const req = options.requests ?? dataRequests
+  const animationCompleter = options.animationCompleter ?? ((): TextCompleter | null => null)
 
   /* ---------------------------------------------------------------- *
    * 学生身份：读当前学生；**库里没有就建一个**
@@ -308,6 +368,235 @@ export function registerDataHandlers(options: {
     if (!payloadId) return { ok: false, message: '托管失败：缺少 payloadId（沙箱消息靠它防串台）。' }
     return await req.animationHost(studentId(), { kpId, html, payloadId })
   })
+
+  /* ---------------------------------------------------------------- *
+   * 学生动画库（清单 / 取一条 / 存一条 / 删一条）
+   *
+   * ★★ 五条通道（含下面的「按需现做」）**都不接受渲染进程递来的学生 id**：
+   *   身份一律走 `studentId()`（= `resolveActiveStudentId()`）。库里一人一份
+   *   `learning.db`，「查自己的库」这个动作本身就完成了学生隔离 —— 而它成立的前提
+   *   恰恰是「id 只能由主进程决定」。所以 `channels.ts` 的这几个请求类型里
+   *   **没有** studentId 字段（那是刻意的，别"补全"它）。
+   * ★ 学段与知识点是**过滤维度**（不是权限）：跨学段预览就是换一个学段再查一次。
+   * ---------------------------------------------------------------- */
+  ipcMain.handle(IPC.animationSavedList, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    const request = (payload ?? {}) as Partial<AnimationSavedListRequest>
+    const query: AnimationSavedListRequest = {}
+    if (request.gradeLevel !== undefined) {
+      const level = readGradeLevel(request.gradeLevel)
+      if (level === null) return { ok: false, message: '读取失败：学段不合法。' }
+      query.gradeLevel = level
+    }
+    if (typeof request.kpId === 'string' && request.kpId.trim().length > 0) {
+      const kpId = request.kpId.trim()
+      if (!ANIMATION_KP_ID_RE.test(kpId)) return { ok: false, message: '读取失败：知识点不合法。' }
+      query.kpId = kpId
+    }
+    return await req.animationSavedList(studentId(), query)
+  })
+
+  ipcMain.handle(IPC.animationSavedGet, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    const request = (payload ?? {}) as Partial<AnimationSavedGetRequest>
+    const savedId = typeof request.savedId === 'string' ? request.savedId.trim() : ''
+    // ★ id 会被拼进路径：白名单挡在拼接之前（Python 侧还有一道同口径的校验）
+    if (!ANIMATION_SAVED_ID_RE.test(savedId)) {
+      return { ok: false, message: '这条动画读不出来，换一条试试。' }
+    }
+    return await req.animationSavedGet(studentId(), { savedId })
+  })
+
+  ipcMain.handle(IPC.animationSavedSave, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    const request = (payload ?? {}) as Partial<AnimationSavedSaveRequest>
+    const kpId = readText(request.kpId, 64)
+    if (!kpId || !ANIMATION_KP_ID_RE.test(kpId)) {
+      return { ok: false, message: '保存失败：缺少知识点信息。' }
+    }
+    const gradeLevel = readGradeLevel(request.gradeLevel)
+    if (gradeLevel === null) return { ok: false, message: '保存失败：学段不合法。' }
+    const concept = readText(request.concept, MAX_ANIMATION_CONCEPT_CHARS)
+    if (!concept) return { ok: false, message: '保存失败：缺少概念名称。' }
+    // ★★ 只收**摘要**（十六进制）：学生原话一个字都不进库 ——
+    //   与「SQLite 不存对话正文」同一条纪律（Python 侧的字段名就是 promptHash）。
+    const promptHash =
+      typeof request.promptHash === 'string' && ANIMATION_PROMPT_HASH_RE.test(request.promptHash)
+        ? request.promptHash
+        : ''
+    if (!promptHash) return { ok: false, message: '保存失败：动画指纹不合法。' }
+    const durationMs = readInt(request.durationMs, 1, 120_000)
+    if (durationMs === null) return { ok: false, message: '保存失败：动画时长不合法。' }
+    const html = typeof request.html === 'string' ? request.html : ''
+    if (html.length === 0) return { ok: false, message: '保存失败：没有可保存的动画内容。' }
+    const fallbackText = readText(request.fallbackText, 600)
+    if (!fallbackText) return { ok: false, message: '保存失败：缺少文字讲解。' }
+    const title = readText(request.title, 120) ?? concept
+    const body: AnimationSavedSaveRequest = {
+      kpId,
+      gradeLevel,
+      concept,
+      promptHash,
+      title,
+      durationMs,
+      html,
+      fallbackText,
+      ...(typeof request.fallbackImage === 'string' && request.fallbackImage.length > 0
+        ? { fallbackImage: request.fallbackImage }
+        : {})
+    }
+    return await req.animationSavedSave(studentId(), body)
+  })
+
+  ipcMain.handle(IPC.animationSavedDelete, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    const request = (payload ?? {}) as Partial<AnimationSavedDeleteRequest>
+    const savedId = typeof request.savedId === 'string' ? request.savedId.trim() : ''
+    if (!ANIMATION_SAVED_ID_RE.test(savedId)) {
+      return { ok: false, message: '删除失败：这条动画不在你的动画库里。' }
+    }
+    return await req.animationSavedDelete(studentId(), { savedId })
+  })
+
+  /* ---------------------------------------------------------------- *
+   * 按需现做一份动画（`animation:compose`）
+   *
+   * ★★ 它是「在线生成」按钮的**直连兜底**：正常路径是让学生那句话走一轮对话
+   *   （模型调 `compose_animation`），只有当**这一轮根本开不起来**时才用这条。
+   * ★ 两条腿，按「有没有模型」分工（都不产生白屏，拿不到就返回可读中文）：
+   *     ① **模型出片段 → Python 拼装 + 校验 → 重试 ≤3**（`createAnimationGenerator`）：
+   *        与 Tool 那条路**同一份实现、同一个校验器**，只是没有对话回合；
+   *     ② 拿不到模型（或模型那条腿失败）→ **按当前学段重新渲染内置模板**：
+   *        零模型调用、断网也能用，正好覆盖「按当前学段重画」这个诉求。
+   *   两条都失败 → `{ok:false, message}`：**卡片照旧显示原来那段动画**，
+   *   学生看到的是一句可读的话，而不是一块空白。
+   * ★ 成功就**自动存库**（尽力而为：存不进只影响「下次还得现做」，不影响这次显示）。
+   * ---------------------------------------------------------------- */
+  ipcMain.handle(IPC.animationCompose, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    const request = (payload ?? {}) as Partial<AnimationComposeRequest>
+
+    const concept = readText(request.concept, MAX_ANIMATION_CONCEPT_CHARS)
+    if (!concept) return { ok: false, message: '这个知识点暂时做不出新动画，先看现在这段。' }
+    const wanted = readText(request.request, MAX_ANIMATION_REQUEST_CHARS) ?? concept
+    const caption = readText(request.caption, MAX_ANIMATION_CAPTION_CHARS)
+
+    const rawKpId = typeof request.kpId === 'string' ? request.kpId.trim() : ''
+    if (rawKpId && !ANIMATION_KP_ID_RE.test(rawKpId)) {
+      return { ok: false, message: '这个知识点暂时做不出新动画，先看现在这段。' }
+    }
+    const kpId = rawKpId
+    // ★ 学段：请求里给了就用它（「按当前学段重画」要的正是那一档），否则用**主进程**当前的
+    //   生效学段（服务端推断出来的那个），再不行才是冷启动默认值 —— 绝不用前端的猜测。
+    const gradeLevel =
+      readGradeLevel(request.gradeLevel) ?? readGradeLevel(options.currentGradeLevel?.()) ?? DEFAULT_GRADE_LEVEL
+
+    const payloadId = newAnimationPayloadId()
+    const student = studentId()
+
+    const outcome = await produceComposedAnimation({
+      kpId,
+      gradeLevel,
+      concept,
+      request: wanted,
+      caption,
+      payloadId
+    })
+    if (outcome === null) {
+      return {
+        ok: false,
+        message: '新的动画这次没做出来，先看现在这段就好。'
+      }
+    }
+
+    // 尽力而为地存库：只有**真动画**（有 HTML）才存，且没有知识点时不存
+    // （复用键的第一维就是知识点，落不到「讲的是哪一课」名下）。
+    if (outcome.html.trim().length > 0 && kpId) {
+      await req.animationSavedSave(student, {
+        kpId,
+        gradeLevel,
+        concept: outcome.concept,
+        promptHash: animationRequestHash(wanted),
+        title: concept,
+        durationMs: outcome.durationMs,
+        html: outcome.html,
+        fallbackText: outcome.fallbackText,
+        ...(outcome.fallbackImage ? { fallbackImage: outcome.fallbackImage } : {})
+      })
+    }
+
+    // ★ 渲染侧附加字段（与 Tool 那条路**同一形状**）：`payloadId` 是沙箱的串台防线，
+    //   `gradeLevel` 是实际生效的学段（卡片据此判断要不要提供「按当前学段重画」）。
+    return {
+      ok: true,
+      data: { ...outcome, payloadId, gradeLevel }
+    }
+  })
+
+  /**
+   * 直连生成的两条腿（模型 → 模板兜底）。拿不到载荷时返回 `null`（调用方给可读提示）。
+   *
+   * ★ 「重试 ≤3」的额度**与 Tool 那边同一个常量**（{@link MAX_RETRIES}）：
+   *   两条路各自最多 4 次尝试，超了就收手 —— 无限重试等于把额度烧穿。
+   * ★ 每一次产物都过**同一套校验**（`projectAnimationPayload` + `validateAnimationPayload`）：
+   *   缺字段 / 有外部引用 / 时长非法一律不进卡片（那是白屏与"断网打不开"的成因）。
+   */
+  async function produceComposedAnimation(input: {
+    kpId: string
+    gradeLevel: string
+    concept: string
+    request: string
+    caption: string | null
+    payloadId: string
+  }): Promise<(AnimationPayloadShape & { attempts: number }) | null> {
+    // ── 腿①：模型出片段 → Python 拼装 + 校验（与 Tool 同一条实现） ──────────
+    const complete = animationCompleter()
+    if (complete) {
+      const generate = createAnimationGenerator({ complete })
+      let previousReason: string | undefined
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+        try {
+          const raw = await generate({
+            concept: input.concept,
+            kpId: input.kpId,
+            gradeLevel: input.gradeLevel,
+            attempt,
+            ...(previousReason ? { previousReason } : {}),
+            payloadId: input.payloadId
+          })
+          const projected = projectAnimationPayload(raw)
+          if (projected === null) {
+            previousReason = '自由生成的结果字段不齐'
+            continue
+          }
+          const validated = validateAnimationPayload(projected)
+          if (!validated.ok) {
+            previousReason = validated.reason
+            continue
+          }
+          return {
+            ...withCaption({ ...projected, source: 'generated' }, input.caption),
+            attempts: attempt + 1
+          }
+        } catch (error) {
+          previousReason = error instanceof Error ? error.message : String(error)
+        }
+      }
+    }
+
+    // ── 腿②：按这一档学段重新渲染**内置模板**（零模型调用；断网也能用） ──────
+    if (!input.kpId) return null
+    const rendered = await req.animationRender({
+      kpId: input.kpId,
+      gradeLevel: input.gradeLevel as AnimationRenderRequest['gradeLevel'],
+      params: {},
+      // ★ 把同一个 payload_id 交给渲染：服务端不传时落 `"preview"`，
+      //   与卡片手里那把对不上 → 沙箱永远等不到 ready（实测踩过，见 channels.ts 的注释）。
+      payloadId: input.payloadId,
+      ...(input.caption ? { fallbackText: input.caption } : {})
+    })
+    if (!rendered.ok) return null
+    const projected = projectAnimationPayload(rendered.data)
+    if (projected === null) return null
+    const validated = validateAnimationPayload(projected)
+    if (!validated.ok) return null
+    return { ...withCaption(projected, input.caption), attempts: 1 }
+  }
 
   /* ---------------------------------------------------------------- *
    * 教材知识库

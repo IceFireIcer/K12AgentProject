@@ -50,6 +50,10 @@ registerHooks({
  * 假 window.api：**可控时延**（这是本组的关键 —— 缺陷只在并发下出现）
  * ------------------------------------------------------------------ */
 
+// 顶层 await：必须在任何 store 被 import 之前拿到这份清单 ——
+// store 一加载就会探测 window.api，桥不齐的话整块数据面被判不可用。
+const { REQUIRED_METHODS } = await import('../src/renderer/src/api/data.ts')
+
 /** 一次记录下来的请求（含它对应的延迟与解析函数）。 */
 interface PendingCall {
   method: string
@@ -70,26 +74,14 @@ interface Harness {
   count: (method: string) => number
 }
 
-const DATA_METHODS = [
-  'getStudent',
-  'readProfile',
-  'readRecommendation',
-  'readGradeSignals',
-  'readGradeHistory',
-  'readQuizBank',
-  'gradeQuiz',
-  'readQuizProgress',
-  'readCodeTemplate',
-  'readCodeHint',
-  'analyzeCodeRun',
-  'readAnimationTemplates',
-  'renderAnimation',
-  'hostAnimation',
-  'readKnowledgeStats',
-  'readKnowledgePoints',
-  'importKnowledge',
-  'rebuildKnowledge'
-] as const
+/**
+ * 假桥要提供的方法 = 探测要求的那些（`onTraceChanged` 单独装，见下）。
+ *
+ * ★ 从 `REQUIRED_METHODS` 派生，不另抄一份：抄的那份在加动画库方法时漏跟了，
+ *   结果探测判定「桥不齐」→ 本文件 11 条测试集体假红。
+ *   定义在 `installControllableBridge` 之前，因为下面要按它建空桶。
+ */
+const DATA_METHODS = REQUIRED_METHODS.filter((method) => method !== 'onTraceChanged')
 
 /**
  * 装一个**手动放行**的假桥。

@@ -53,6 +53,7 @@ registerHooks({
 })
 
 const chatModule = await import('../src/renderer/src/stores/chat.ts')
+const { REQUIRED_METHODS } = await import('../src/renderer/src/api/data.ts')
 const { resetWiringNotices } = await import('../src/renderer/src/api/wiring-notice.ts')
 
 /* ------------------------------------------------------------------ *
@@ -590,7 +591,16 @@ function installQuizBridge(options: {
   bankFailure?: string
   gradeFailure?: string
 }): void {
+  // 本组只关心闯关那几条；其余方法按 `REQUIRED_METHODS` 批量补空实现 ——
+  // 手抄一份清单会漂移：漏一次就让探测判定「桥不齐」，整组测试集体假红。
+  const stubs: Record<string, unknown> = {}
+  for (const method of REQUIRED_METHODS) {
+    if (method === 'onTraceChanged') continue
+    stubs[method] = async () => ({ ok: false as const, message: '本组不测' })
+  }
+
   const api = {
+    ...stubs,
     readQuizProgress: async () => ({
       ok: true as const,
       data: { studentId: 's1', gradeLevel: 'junior', seeded: true, levels: [] }
@@ -603,22 +613,6 @@ function installQuizBridge(options: {
       options.gradeFailure !== undefined
         ? { ok: false as const, message: options.gradeFailure }
         : { ok: true as const, data: { qid: 'q1', correct: true, scoredBy: 'rule', feedback: '答对了', masteryDelta: 0.1 } },
-    // 其余数据面方法不在本组的能力范围内（`resolveDataBridge` 要求它们都在，所以给空实现）
-    getStudent: async () => ({ ok: false as const, message: '本组不测' }),
-    readProfile: async () => ({ ok: false as const, message: '本组不测' }),
-    readRecommendation: async () => ({ ok: false as const, message: '本组不测' }),
-    readGradeSignals: async () => ({ ok: false as const, message: '本组不测' }),
-    readGradeHistory: async () => ({ ok: false as const, message: '本组不测' }),
-    readCodeTemplate: async () => ({ ok: false as const, message: '本组不测' }),
-    readCodeHint: async () => ({ ok: false as const, message: '本组不测' }),
-    analyzeCodeRun: async () => ({ ok: false as const, message: '本组不测' }),
-    readAnimationTemplates: async () => ({ ok: false as const, message: '本组不测' }),
-    renderAnimation: async () => ({ ok: false as const, message: '本组不测' }),
-    hostAnimation: async () => ({ ok: false as const, message: '本组不测' }),
-    readKnowledgeStats: async () => ({ ok: false as const, message: '本组不测' }),
-    readKnowledgePoints: async () => ({ ok: false as const, message: '本组不测' }),
-    importKnowledge: async () => ({ ok: false as const, message: '本组不测' }),
-    rebuildKnowledge: async () => ({ ok: false as const, message: '本组不测' }),
     onTraceChanged: () => () => {}
   }
   ;(globalThis as unknown as { window: unknown }).window = { api }

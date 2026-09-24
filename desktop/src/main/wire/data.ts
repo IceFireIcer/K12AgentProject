@@ -18,6 +18,10 @@ import {
   KNOWLEDGE_LONG_TASK_TIMEOUT_MS,
   type AnimationHostRequest,
   type AnimationRenderRequest,
+  type AnimationSavedDeleteRequest,
+  type AnimationSavedGetRequest,
+  type AnimationSavedListRequest,
+  type AnimationSavedSaveRequest,
   type AnimationTemplatesRequest,
   type CodeHintRequest,
   type CodeRunHintRequest,
@@ -152,6 +156,40 @@ export const ANIMATION_RENDER_PATH = '/api/animation/render'
 /** 动画托管（`POST /api/animation/host/{student_id}/{kp_id}` → 一次性 nonce 地址）。 */
 export function animationHostPath(studentId: string, kpId: string): string {
   return `/api/animation/host/${encodeURIComponent(studentId)}/${encodeURIComponent(kpId)}`
+}
+
+/* ------------------------------------------------------------------ *
+ * 学生动画库（`server/app/routes/animation_library.py`）
+ *
+ * ★ 学生 id 由**主进程**注入（这些工厂的 `studentId` 参数是内部参数，
+ *   不在 `channels.ts` 的请求类型里）—— 与 `quizBank` / `quizGrade` 同一条纪律：
+ *   前端能指定身份 = 能读别人做过的动画。
+ * ⚠️ 这几条路径与 `agent/extensions/animation.ts` 里的 `animationSavedPath` /
+ *   `ANIMATION_SAVED_LOOKUP_PATH` **是同一组端点**（那边给 Tool 用、这边给 IPC 用）。
+ *   两处各写一次是有意的取舍：`wire/` 是最底层的数据平面，不该反向依赖 Agent 工具模块；
+ *   路径形状由两边各自的测试钉住（`tests/animation-library-ui.test.ts` 与
+ *   `tests/animation-compose-tool.test.ts`）。改端点时**两处都要改**。
+ * ------------------------------------------------------------------ */
+
+/** 该学生的动画库清单（`GET /api/animation/saved/{id}`，可选按学段 / 知识点过滤）。 */
+export function animationSavedListPath(studentId: string, request: AnimationSavedListRequest = {}): string {
+  const base = `/api/animation/saved/${encodeURIComponent(studentId)}`
+  const query = new URLSearchParams()
+  // ⚠️ 参数名用服务端声明过的那个（`gradeLevel` / `kpId`，`routes/animation_library.py` 的 Query 主名）
+  if (request.gradeLevel) query.set('gradeLevel', request.gradeLevel)
+  if (request.kpId) query.set('kpId', request.kpId)
+  const qs = query.toString()
+  return qs ? `${base}?${qs}` : base
+}
+
+/** 保存一条（同上路径，POST）。 */
+export function animationSavedWritePath(studentId: string): string {
+  return `/api/animation/saved/${encodeURIComponent(studentId)}`
+}
+
+/** 取一条 / 删一条（`/api/animation/saved/{id}/{saved_id}`；`savedId` 服务端还会校验字符集）。 */
+export function animationSavedItemPath(studentId: string, savedId: string): string {
+  return `${animationSavedWritePath(studentId)}/${encodeURIComponent(savedId)}`
 }
 
 /** 知识库体检（`GET /api/knowledge/stats`）。 */
@@ -315,6 +353,39 @@ export const dataRequests = {
       method: 'POST',
       body: { html: request.html, payloadId: request.payloadId }
     }),
+
+  /* ── 学生动画库（清单 / 取一条 / 存一条 / 删一条）──────────────────────────
+   * ★★ 四条都**不接受**渲染进程递来的学生 id（见这些工厂上方的说明）：
+   *   id 是包装函数的内部参数，由 `handlers-data.ts` 从主进程解析后传进来。
+   * ★ 都是**纯转发**：存库时的 HTML 二次校验、复用键唯一性、覆盖旧文件
+   *   全在 Python（`routes/animation_library.py`），这里一个判据都不加。
+   * ------------------------------------------------------------------ */
+
+  animationSavedList: (studentId: string, request: AnimationSavedListRequest = {}) =>
+    requestJson(animationSavedListPath(studentId, request)),
+
+  animationSavedGet: (studentId: string, request: AnimationSavedGetRequest) =>
+    requestJson(animationSavedItemPath(studentId, request.savedId)),
+
+  animationSavedSave: (studentId: string, request: AnimationSavedSaveRequest) =>
+    requestJson(animationSavedWritePath(studentId), {
+      method: 'POST',
+      body: {
+        kpId: request.kpId,
+        gradeLevel: request.gradeLevel,
+        concept: request.concept,
+        // ★ 只发**摘要**：学生原话一个字都不进库（与「不存对话正文」同一条纪律）
+        promptHash: request.promptHash,
+        title: request.title,
+        durationMs: request.durationMs,
+        html: request.html,
+        fallbackText: request.fallbackText,
+        ...(request.fallbackImage ? { fallbackImage: request.fallbackImage } : {})
+      }
+    }),
+
+  animationSavedDelete: (studentId: string, request: AnimationSavedDeleteRequest) =>
+    requestJson(animationSavedItemPath(studentId, request.savedId), { method: 'DELETE' }),
 
   knowledgeStats: () => requestJson(KNOWLEDGE_STATS_PATH),
   knowledgePoints: (request: KnowledgePointsRequest = {}) =>

@@ -73,7 +73,7 @@ registerHooks({
   }
 })
 
-const { resolveDataBridge } = await import('../src/renderer/src/api/data.ts')
+const { resolveDataBridge, REQUIRED_METHODS } = await import('../src/renderer/src/api/data.ts')
 const { resetWiringNotices } = await import('../src/renderer/src/api/wiring-notice.ts')
 
 /* ------------------------------------------------------------------ *
@@ -99,26 +99,13 @@ interface FakeBridge {
   traceListeners: number
 }
 
-const DATA_METHODS = [
-  'getStudent',
-  'readProfile',
-  'readRecommendation',
-  'readGradeSignals',
-  'readGradeHistory',
-  'readQuizBank',
-  'gradeQuiz',
-  'readQuizProgress',
-  'readCodeTemplate',
-  'readCodeHint',
-  'analyzeCodeRun',
-  'readAnimationTemplates',
-  'renderAnimation',
-  'hostAnimation',
-  'readKnowledgeStats',
-  'readKnowledgePoints',
-  'importKnowledge',
-  'rebuildKnowledge'
-] as const
+/**
+ * 假桥要提供的方法 = 探测要求的那些（`onTraceChanged` 单独装，见下）。
+ *
+ * ★ 从 `REQUIRED_METHODS` 派生，不另抄一份：抄的那份在加动画库方法时漏跟了，
+ *   结果探测判定「桥不齐」→ 本文件 25 条测试集体假红。
+ */
+const DATA_METHODS = REQUIRED_METHODS.filter((method) => method !== 'onTraceChanged')
 
 /** 装一个假桥；`omit` 里的方法不提供（用来验能力探测）。 */
 function installFakeBridge(omit: readonly string[] = []): FakeBridge {
@@ -262,6 +249,58 @@ function defaultResponse(method: string, payload?: Record<string, unknown>): unk
         filename: 'f.html',
         expiresInMs: 120000,
         singleUse: true
+      }
+    case 'readSavedAnimations':
+      // 清单**不带 html**（回整份 HTML 会让列表白白拖着几十 KB）。
+      // 过滤条件要回显 —— 界面据此显示「初中 · 循环」这类筛选状态，而不是自己记一份。
+      return {
+        studentId: 'student_001',
+        gradeLevel: typeof payload?.gradeLevel === 'string' ? payload.gradeLevel : null,
+        kpId: typeof payload?.kpId === 'string' ? payload.kpId : null,
+        items: [],
+        total: 0
+      }
+    case 'readSavedAnimation':
+      // 单条**带 html**，交给沙箱播；id 回显请求那把。
+      return {
+        id: typeof payload?.savedId === 'string' ? payload.savedId : 'saved-1',
+        kpId: 'prog-loop-jr',
+        gradeLevel: 'junior',
+        concept: '循环',
+        promptHash: 'a'.repeat(40),
+        title: '循环：同一段代码重复跑',
+        durationMs: 5200,
+        fallbackText: '循环让同一段代码重复执行。',
+        fallbackImage: null,
+        createdAt: 0,
+        uses: 1,
+        html: '<html><body><div id="stage"></div></body></html>'
+      }
+    case 'saveAnimationToLibrary':
+      return {
+        id: 'saved-new',
+        kpId: 'prog-loop-jr',
+        gradeLevel: 'junior',
+        concept: '循环',
+        promptHash: 'b'.repeat(40),
+        title: '循环',
+        durationMs: 5000,
+        fallbackText: '循环。',
+        fallbackImage: null,
+        createdAt: 0,
+        uses: 0
+      }
+    case 'deleteSavedAnimation':
+      return { deleted: true, id: typeof payload?.savedId === 'string' ? payload.savedId : 'saved-1' }
+    case 'composeAnimation':
+      // 按需现做：产物形状与 renderAnimation 一致，但来源是「现做的」。
+      return {
+        concept: typeof payload?.concept === 'string' ? payload.concept : '循环',
+        html: '<html><body><div id="stage"></div></body></html>',
+        durationMs: 5000,
+        fallbackText: '现做的一段动画。',
+        source: 'generated',
+        gradeLevel: 'junior'
       }
     case 'readKnowledgeStats':
       return {

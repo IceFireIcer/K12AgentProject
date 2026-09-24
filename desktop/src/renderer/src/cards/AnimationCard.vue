@@ -35,6 +35,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { InlineCard } from '../api/events'
+import { GRADE_LABELS } from '../labels'
 import {
   AnimationSandboxHost,
   SANDBOX_ATTRIBUTE,
@@ -44,9 +45,81 @@ import {
   type AnimationPayloadView
 } from '../sandbox/iframe-host'
 
-const props = defineProps<{ card: InlineCard }>()
+/**
+ * 卡片上的**来源切换**与动作按钮（这一层的状态在父组件 `InlineCard.vue` 手里）。
+ *
+ * ★★ 为什么状态在父组件而不是这里：本卡片在 `onMounted` 里**只读一次**载荷
+ *   （`const view = readAnimationPayload(props.card.payload)`），新载荷进同一个实例
+ *   是不会重渲染的。所以「换一份来播」这件事必须靠**重建组件**完成 ——
+ *   父组件按来源给它换 `:key`，实例重建，载荷被重新读一遍。
+ *   本组件因此只做两件事：把当前来源显示出来、把学生的点击**报上去**。
+ *
+ * ★ 学生看到的三个动作：
+ *   · 「内置 / 我的」两态切换：内置 = 这张卡片带来的那一份；我的 = 动画库里存过的。
+ *   · 「在线生成」：让智团团现场再做一个新的（优先走对话那一条，见父组件的编排）。
+ *   · 「按当前学段重画」：只在**卡片的学段与学生当前学段不一致**时出现。
+ */
+const props = withDefaults(
+  defineProps<{
+    card: InlineCard
+    /** 当前播放的是哪一份（`builtin` = 本卡载荷，`mine` = 库里那一份）。 */
+    source?: 'builtin' | 'mine'
+    /** 库里有没有这个知识点在本学段的那一份（没有时「我的」不可选）。 */
+    hasSaved?: boolean
+    /** 实际生效的学段（内置那份来自载荷的 `gradeLevel`，我的那份来自库记录）。 */
+    gradeLevel?: string | null
+    /** 学生**当前**学段（与卡片学段不同才提供「按当前学段重画」）。 */
+    currentGrade?: string | null
+    /** 正在做新动画（按钮显示进行中并禁用）。 */
+    generating?: boolean
+    /** 父组件给的提示（没做成、已经去问了……），`null` = 不显示。 */
+    notice?: string | null
+  }>(),
+  {
+    source: 'builtin',
+    hasSaved: false,
+    gradeLevel: null,
+    currentGrade: null,
+    generating: false,
+    notice: null
+  }
+)
+
+const emit = defineEmits<{
+  /** 学生在「内置 / 我的」之间切换。 */
+  (event: 'switch-source', source: 'builtin' | 'mine'): void
+  /** 点「在线生成」：要一份**新的**（不复用库里那份）。 */
+  (event: 'generate'): void
+  /** 点「按当前学段重画」：按学生现在的年级做一份。 */
+  (event: 'redraw'): void
+}>()
 
 const view: AnimationPayloadView = readAnimationPayload(props.card.payload)
+
+/**
+ * 卡片学段的中文名（认不出时给空串 → 那颗 chip 不渲染）。
+ *
+ * ★ **只读不算**：学段真值来自服务端推断 → 主进程透传（`payload.gradeLevel`），
+ *   前端自己推一个出来的后果是「卡片标着 A、回答按 B 讲」。
+ */
+const gradeChip = computed<string>(() => {
+  const level = props.gradeLevel
+  return level && level in GRADE_LABELS ? GRADE_LABELS[level as keyof typeof GRADE_LABELS] : ''
+})
+
+/**
+ * 要不要提供「按当前学段重画」。
+ *
+ * 判据是**两个学段都在且不相等**：卡片那份是给别的年级做的，而学生现在这个年级
+ * 自己看得懂的说法与它不一样（同一个知识点在不同学段本来就是两份产物）。
+ * 任一为空都不提供（例如学段还没判出来时，我们说不出「哪个才对」）。
+ */
+const canRedraw = computed<boolean>(
+  () =>
+    props.currentGrade !== null &&
+    props.gradeLevel !== null &&
+    props.currentGrade !== props.gradeLevel
+)
 
 /** 载荷里带的 `payload_id`；缺省时自己造一个（旧载荷 / 手写测试数据）。 */
 const payloadId = ref<string>(
@@ -253,9 +326,34 @@ watch(iframeEl, (element) => {
     <header class="anim__head">
       <span class="title">动画讲解</span>
       <span v-if="view.concept" class="chip" data-testid="animation-concept">{{ view.concept }}</span>
-      <span class="chip chip--accent" data-testid="animation-source">
-        {{ view.source === 'generated' ? '即时生成' : '内置模板' }}
+      <!-- ── 来源两态切换（内置 / 我的）──────────────────────────────────
+           原来是**一颗只读的来源标签**（内置模板 / 即时生成）：学生看到它，却改不了它。
+           现在它是两个可点的按钮 —— 「内置」是本张卡片带来的那一份，「我的」是动画库里
+           存过的那一份（没有时按钮不可点，而不是点了报错）。
+           ⚠️ 选中态的配方与 `views/Animation.vue` 的 `.tpl--on`、`views/Study.vue` 的
+             `.tab--on` **一致**（accent-soft 底 + accent-border 描边 + accent-ink 文字）：
+             同一个「我在看这一份」的意思，在三处必须是同一个长相。 -->
+      <span class="src" role="group" aria-label="动画来源">
+        <button
+          type="button"
+          class="src__btn"
+          :class="{ 'src__btn--on': source === 'builtin' }"
+          :aria-pressed="source === 'builtin'"
+          data-testid="animation-source-builtin"
+          @click="emit('switch-source', 'builtin')"
+        >内置</button>
+        <button
+          type="button"
+          class="src__btn"
+          :class="{ 'src__btn--on': source === 'mine' }"
+          :aria-pressed="source === 'mine'"
+          :disabled="!hasSaved"
+          :title="hasSaved ? '看我保存过的那一份' : '这一份还没有保存过'"
+          data-testid="animation-source-mine"
+          @click="emit('switch-source', 'mine')"
+        >我的</button>
       </span>
+      <span v-if="gradeChip" class="chip" data-testid="animation-grade">{{ gradeChip }}</span>
       <span
         class="chip"
         :class="degraded ? 'chip--warn' : phase === 'ready' ? 'chip--ok' : ''"
@@ -265,10 +363,29 @@ watch(iframeEl, (element) => {
         {{ (view.durationMs / 1000).toFixed(1) }}s
       </span>
       <span class="spacer" />
+      <button
+        type="button"
+        class="btn"
+        :disabled="generating"
+        data-testid="animation-redraw"
+        v-if="canRedraw"
+        @click="emit('redraw')"
+      >按当前学段重画</button>
+      <button
+        type="button"
+        class="btn btn--primary"
+        :disabled="generating"
+        data-testid="animation-generate"
+        @click="emit('generate')"
+      >{{ generating ? '正在做…' : '在线生成' }}</button>
       <button class="btn btn--ghost" type="button" data-testid="animation-expand" @click="toggleExpand">
         {{ expanded ? '收起' : '全屏' }}
       </button>
     </header>
+
+    <!-- 父组件给的提示（没做成 / 已经去问了）：**只说学生能感知的事**，
+         内部原因（哪个环节失败）留在控制台，不摆在这里。 -->
+    <p v-if="notice" class="anim__notice" data-testid="animation-notice">{{ notice }}</p>
 
     <!-- ── 可播放的沙箱 ─────────────────────────────────────────── -->
     <div v-if="mountIframe" class="anim__stage">
@@ -406,10 +523,69 @@ watch(iframeEl, (element) => {
   color: var(--k12-warn);
 }
 
-.chip--accent {
+/* ⚠️ `.chip--accent` 已删：那颗**只读的来源标签**被下面这个两态控件取代了
+ * （学生现在能在这两份之间切换，而不是读一句别人定好的结论）。
+ * 留一条没人用的规则，下一个读代码的人会以为某处还在用它。 */
+
+/* ── 来源两态控件（内置 / 我的）────────────────────────────────────────
+ * 与 `.chip` 同一档外形（同样的圆角与内边距），但它是**可点的**：
+ * 两个按钮共用一层描边，中间不留缝 —— 一眼能看出「这两个里选一个」。
+ * ⚠️ 不引 Element Plus（本卡片刻意只用自带的最小样式：卡片要被塞进 Markdown 消息流里，
+ *    一个组件库的样式会跟着它的全局副作用一起进来）。 */
+.src {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface-2);
+  overflow: hidden;
+}
+
+.src__btn {
+  border: none;
+  background: transparent;
+  padding: 2px 11px;
+  color: var(--k12-muted);
+  font-size: var(--k12-fs-xs);
+  font-weight: 600;
+  line-height: var(--k12-lh-ui);
+  cursor: pointer;
+}
+
+.src__btn + .src__btn {
+  border-left: 1px solid var(--k12-border);
+}
+
+/* 选中态：accent-soft 底 + accent-border 描边 + accent-ink 文字。
+ * 与 `views/Animation.vue` 的 `.tpl--on`、`views/Study.vue` 的 `.tab--on` 同一配方 ——
+ * 「我在看这一份」这个意思在三处必须是同一个长相。 */
+.src__btn--on {
   background: var(--k12-accent-soft);
   border-color: var(--k12-accent-border);
   color: var(--k12-accent-ink);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .src__btn:hover:not(:disabled) {
+    color: var(--k12-accent-ink);
+  }
+}
+
+.src__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.anim__notice {
+  margin-top: 10px;
+  padding: 8px 11px;
+  border-radius: var(--k12-r-inset);
+  /* 「这次没做成 / 已经去问了」是**状态说明**而不是报错：用中性底，
+   * 不涂成红色（红的留给「连文字都看不成」那种真正的失败）。 */
+  background: var(--k12-surface-2);
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-xs);
+  line-height: var(--k12-lh-body);
 }
 
 .anim__head {

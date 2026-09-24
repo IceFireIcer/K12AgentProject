@@ -14,8 +14,13 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import {
   IPC,
+  type AnimationComposeRequest,
   type AnimationHostRequest,
   type AnimationRenderRequest,
+  type AnimationSavedDeleteRequest,
+  type AnimationSavedGetRequest,
+  type AnimationSavedListRequest,
+  type AnimationSavedSaveRequest,
   type AnimationTemplatesRequest,
   type ChapterCallResult,
   type ChapterSetResult,
@@ -267,6 +272,31 @@ export interface K12Api {
   renderAnimation(payload: AnimationRenderRequest): Promise<StudyCallResult>
   /** 把动画 HTML 托管成一次性 nonce 地址（iframe 带不了 header，所以不能用 token）。 */
   hostAnimation(payload: AnimationHostRequest): Promise<StudyCallResult>
+  /**
+   * ★★ 读**当前学生的动画库清单**（`GET /api/animation/saved/{id}`，**不含 HTML**）。
+   *
+   * ★ 入参里**没有 studentId**：身份由主进程决定，渲染进程递不了也改不了
+   *   （库里一人一份，能指定 id 就等于能读别人做过的动画）。
+   * ★ 可带 `gradeLevel` / `kpId` 只看一档 —— 跨学段预览就是换一个学段再查一次。
+   */
+  readSavedAnimations(payload?: AnimationSavedListRequest): Promise<StudyCallResult>
+  /** ★ 取库里的一条（**带 HTML**，可以交给沙箱播）。 */
+  readSavedAnimation(payload: AnimationSavedGetRequest): Promise<StudyCallResult>
+  /**
+   * ★ 把一份已经生成好的动画存进库里。
+   * ★ `promptHash` 是**十六进制摘要**：学生原话一个字都不进库。
+   */
+  saveAnimationToLibrary(payload: AnimationSavedSaveRequest): Promise<StudyCallResult>
+  /** ★ 删掉库里的一条（只可能删到自己的）。 */
+  deleteSavedAnimation(payload: AnimationSavedDeleteRequest): Promise<StudyCallResult>
+  /**
+   * ★★ **按需现做一份动画**（不经过对话那条路）。
+   *
+   * 正常情况下「在线生成」走对话（模型会调做动画的工具）；这条通道是**兜底**：
+   * 那一轮开不起来（没有可用的模型 / 发送失败）时由主进程自己把动画做出来。
+   * 做完会**自动存库**，所以调用方不需要再存一次。
+   */
+  composeAnimation(payload: AnimationComposeRequest): Promise<StudyCallResult>
   /** 知识库体检数字（规模 / 学段 / 向量可用性 / 是否是用户重建的那一份）。 */
   readKnowledgeStats(): Promise<StudyCallResult>
   /** 知识点清单（教材知识库页的表格；可按学段过滤）。 */
@@ -561,6 +591,23 @@ const api: K12Api = {
   hostAnimation: (payload): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.animationHost, payload) as Promise<StudyCallResult>,
 
+  // ── 学生动画库（读清单 / 取一条 / 存一条 / 删一条）+ 按需现做 ────────────────
+  // ★ 一律不带 studentId：身份由主进程决定（递进去就等于允许读别人的动画库）。
+  readSavedAnimations: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.animationSavedList, payload) as Promise<StudyCallResult>,
+
+  readSavedAnimation: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.animationSavedGet, payload) as Promise<StudyCallResult>,
+
+  saveAnimationToLibrary: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.animationSavedSave, payload) as Promise<StudyCallResult>,
+
+  deleteSavedAnimation: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.animationSavedDelete, payload) as Promise<StudyCallResult>,
+
+  composeAnimation: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.animationCompose, payload) as Promise<StudyCallResult>,
+
   // ── 教材知识库（读三条 + 写两条；写的那两条用长超时，见主进程）─────────────
   readKnowledgeStats: (): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.knowledgeStats) as Promise<StudyCallResult>,
@@ -741,6 +788,12 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.animationTemplates,
   IPC.animationRender,
   IPC.animationHost,
+  // 学生动画库 + 按需现做（invoke；**身份由主进程决定**，请求类型里没有 studentId）
+  IPC.animationSavedList,
+  IPC.animationSavedGet,
+  IPC.animationSavedSave,
+  IPC.animationSavedDelete,
+  IPC.animationCompose,
   // 教材知识库（invoke；导入/重建是写操作，用长超时）
   IPC.knowledgeStats,
   IPC.knowledgePoints,

@@ -15,7 +15,7 @@
  *   G7  ★ 对话事件流必须经「主进程 IPC ↔ preload 白名单通道」传递（正向断言两端都在用同一批通道）
  *   G8  ★ 通道名只在 `src/main/ipc/channels.ts` 声明一次（主进程与 preload 共用同一来源）
  *   G9  ★ preload 只暴露白名单方法，不暴露通用 `ipcRenderer` 转发
- *   G10 ★ `TOOL_TO_KIND` 单一定义：7 个 Tool 在表内，`rag_search` / `get_student_profile` 不在表内
+ *   G10 ★ `TOOL_TO_KIND` 单一定义：8 个 Tool 在表内，`rag_search` / `get_student_profile` 不在表内
  *   G11 ★ 6 事件载荷字段与契约逐字一致（`shared/ipc-events.ts`）
  *   G12 ★ 渲染进程接事件是**订阅回调**：不存在解析层（无 `TextDecoder` / `EventSource`）
  *   G13 ★ 明文 LLM 配置只有主进程能取；`shared/provider-catalog.ts`（唯一的契约例外）
@@ -689,6 +689,13 @@ const EXPECTED_API_METHODS = [
   'readAnimationTemplates',
   'renderAnimation',
   'hostAnimation',
+  // 学生动画库 + 按需现做：**身份由主进程决定**，所以这些方法的入参里没有 studentId。
+  // 库里存的是「按知识点 + 学段 + 请求指纹」分开的产物（同学段之外互不复用）。
+  'readSavedAnimations',
+  'readSavedAnimation',
+  'saveAnimationToLibrary',
+  'deleteSavedAnimation',
+  'composeAnimation',
   // 教材知识库：读三条 + 写两条。
   // ★ 写的那两条（导入 / 重建）用**长超时** —— 重建要跑整份教材的嵌入，
   //   用默认 8s 会把一次成功的重建报成超时。
@@ -861,13 +868,14 @@ test('G13: 明文 LLM 配置（含 API Key）只有主进程能取，渲染进�
 
 // ── G10 Tool → payload.kind 映射表 ───────────────────────────────────
 
-test('G10: TOOL_TO_KIND 只有一处定义；7 个 Tool 在表内，画像/检索不在表内', () => {
+test('G10: TOOL_TO_KIND 只有一处定义；8 个 Tool 在表内，画像/检索不在表内', () => {
   const table = stringLiteralRecord(readSource(toolKindsFile), 'TOOL_TO_KIND', toolKindsFile)
 
   assert.deepEqual(
     table,
     {
       generate_animation: 'animation',
+      compose_animation: 'animation',
       get_code_template: 'coding',
       get_coding_hint: 'coding',
       evaluate_code: 'coding',
