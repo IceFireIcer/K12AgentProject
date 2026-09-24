@@ -63,6 +63,7 @@ from app.routes.settings import router as settings_router  # noqa: E402
 from app.routes.students import router as students_router  # noqa: E402
 from app.routes.study import router as study_router  # noqa: E402
 from app.animation.compose import router as animation_compose_router  # noqa: E402
+from app.routes.animation_library import router as animation_library_router  # noqa: E402
 from app.safety.guard import install_log_redaction  # noqa: E402
 from app.safety.route import router as safety_router  # noqa: E402
 from app.security import (  # noqa: E402
@@ -216,6 +217,11 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
     # ★ 不挂载的话，`animation.ts` 的 `generate` 会拿到 404 并降级 —— 表面上「有兜底」，
     #   但「自由生成」这条链路**永远不可达**（与被审计出的缺陷同一形态）。
     app.include_router(animation_compose_router)
+    # 学生动画库（生成过的动画存下来复用）：**进 OpenAPI**，与上面两条不同 ——
+    # 它是主进程与前端都要调的**产品能力**（存 / 列 / 取 / 删 / 复用），
+    # 类型由契约生成（`desktop/src/shared/api-types.ts`），不像合成/托管那样只是内部管道。
+    # ★ 路由内部按学生分库（`learning.db` 归属）+ 再校验 HTML + 路径包含断言，见模块头。
+    app.include_router(animation_library_router)
 
     # ★ 中间件顺序是**有讲究的**，别调换：
     #   Starlette 的洋葱模型里「最后 add 的在最外层」，所以：

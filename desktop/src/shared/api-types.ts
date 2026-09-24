@@ -17,6 +17,100 @@
  */
 
 export interface paths {
+    "/api/animation/saved/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 按复用键取一条已保存的动画（命中带 html，uses 加一）
+         * @description 复用键 ``(studentId, kpId, gradeLevel, promptHash)`` 全中的那一条。
+         *
+         *     - 命中 → **200** + 带 ``html`` 的那条（``uses`` 自增一次，便于观察复用真的发生了）；
+         *     - 未命中 → **404**（调用方据此走生成路径，而不是拿一份空动画去渲染）;
+         *     - 学生 id 非法 → **422**；没显式 ``--data-dir`` → **503**（见模块头）。
+         *
+         *     ★ ``gradeLevel`` 参与命中判定：学生学段变了之后再问同一个知识点，
+         *       这里**必然不命中**（那是要求里的「按学段分开」），走生成 → 保存新的那一份。
+         */
+        post: operations["lookup_saved_animation_api_animation_saved_lookup_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/animation/saved/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 该学生的动画库清单（不含 html，按创建时间倒序）
+         * @description 列该学生保存过的动画。**不回 html**：列表上没人看动画正文，而回整份会让响应变成几 MB。
+         *
+         *     过滤条件回显在响应里（``gradeLevel`` / ``kpId`` 为 ``None`` 表示没过滤），
+         *     前端据此显示筛选状态，不用自己记一份。
+         */
+        get: operations["list_saved_animations_api_animation_saved__student_id__get"];
+        put?: never;
+        /**
+         * 保存一条动画（校验 HTML 后落盘，复用键冲突则覆盖）
+         * @description 把一份**已生成**的动画存进该学生的动画库（回执**不带 html**）。
+         *
+         *     - HTML 过不了 ``validate_animation_html()`` → **422** + 可读中文原因
+         *       （与渲染/托管同一套判据，见模块头）；
+         *     - 体积超过 ``MAX_HTML_BYTES`` → **422**；
+         *     - 同一个复用键再存一次 = **覆盖**那一条（``id`` 与文件都换成新的），而不是追加
+         *       —— 否则「再问一次」会让库里堆满几乎相同的记录。
+         *
+         *     ★ 覆盖时**保留** ``uses``：那是「这条复用键被用了几次」的计数，
+         *       重新生成一次不代表以前那些复用的需求没发生过。
+         */
+        post: operations["save_saved_animation_api_animation_saved__student_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/animation/saved/{student_id}/{saved_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 取一条已保存的动画（带 html）
+         * @description 按 id 取一条（**带 html**）。
+         *
+         *     ★ 学生维度由**库文件归属**承担：这里开的是 ``{student_id}`` 自己的库，
+         *       所以拿着别人的条目 id 来问，结果是 **404**（那条记录不在这个文件里）。
+         *       另有 ``savedId`` 字符集校验 → **422**（它会被拼进文件名）。
+         */
+        get: operations["get_saved_animation_api_animation_saved__student_id___saved_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * 删一条已保存的动画（只删自己的）
+         * @description 删掉一条记录 + 它落盘的 HTML。**只可能删到自己的**（同 :func:`get_saved_animation`）。
+         *
+         *     库里没有这条 id → **404**（不静默当成功：调用方据此知道「这里本来就没有这一条」，
+         *     而不是以为自己删掉了别人看得见的东西）。
+         */
+        delete: operations["delete_saved_animation_api_animation_saved__student_id___saved_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/code/hint/{kp_id}": {
         parameters: {
             query?: never;
@@ -1081,6 +1175,162 @@ export interface components {
              * @enum {string}
              */
             source: "template" | "generated";
+        };
+        /**
+         * AnimationSaveRequest
+         * @description ``POST /api/animation/saved/{student_id}``：把一份动画**存进该学生的动画库**。
+         *
+         *     ``html`` 是**完整自包含**的沙箱产物（模板渲染或自由生成的结果）；
+         *     服务端会拿 ``validate_animation_html()`` 再校验一次——不合格 → 422 + 可读原因，
+         *     因此库里不会出现「存下来了但播不出来」的产物（同托管路径的二次校验口径）。
+         */
+        AnimationSaveRequest: {
+            /** Concept */
+            concept: string;
+            /** Durationms */
+            durationMs: number;
+            /** Fallbackimage */
+            fallbackImage?: string | null;
+            /** Fallbacktext */
+            fallbackText: string;
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Html */
+            html: string;
+            /** Kpid */
+            kpId: string;
+            /** Prompthash */
+            promptHash: string;
+            /**
+             * Title
+             * @default
+             */
+            title: string;
+        };
+        /**
+         * AnimationSavedItem
+         * @description 动画库里的一条（**不含 html**）：列表与保存回执用它。
+         *
+         *     ``html`` 单独由 :class:`AnimationSavedView` 带出去 —— 列表里回整份 HTML 会让
+         *     「列出 20 条」的响应变成几 MB，而列表上根本没人看动画正文。
+         */
+        AnimationSavedItem: {
+            /** Concept */
+            concept: string;
+            /**
+             * Createdat
+             * @default 0
+             */
+            createdAt: number;
+            /** Durationms */
+            durationMs: number;
+            /** Fallbackimage */
+            fallbackImage?: string | null;
+            /** Fallbacktext */
+            fallbackText: string;
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Id */
+            id: string;
+            /** Kpid */
+            kpId: string;
+            /** Prompthash */
+            promptHash: string;
+            /** Title */
+            title: string;
+            /**
+             * Uses
+             * @default 0
+             */
+            uses: number;
+        };
+        /**
+         * AnimationSavedListResponse
+         * @description ``GET /api/animation/saved/{student_id}``：该学生的动画库清单（**不含 html**）。
+         *
+         *     ``grade_level`` / ``kp_id`` 回显**本次的过滤条件**（``None`` = 没过滤）：
+         *     前端据此显示「初中 · 循环」这类筛选状态，而不是自己记一份。
+         */
+        AnimationSavedListResponse: {
+            /** Gradelevel */
+            gradeLevel?: string | null;
+            /** Items */
+            items?: components["schemas"]["AnimationSavedItem"][];
+            /** Kpid */
+            kpId?: string | null;
+            /** Studentid */
+            studentId: string;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /**
+         * AnimationSavedLookupRequest
+         * @description ``POST /api/animation/saved/lookup``：按**复用键**取一条（命中即返回带 html 的那条）。
+         *
+         *     ★ 学生 id 在**请求体**里（不是路径里）：这条路由与
+         *     ``POST /api/animation/saved/{student_id}`` 同形，学生 id 再进路径就会有两个候选匹配
+         *     （见路由模块里「静态路径必须先注册」那条注释）。
+         */
+        AnimationSavedLookupRequest: {
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Kpid */
+            kpId: string;
+            /** Prompthash */
+            promptHash: string;
+            /** Studentid */
+            studentId: string;
+        };
+        /**
+         * AnimationSavedView
+         * @description 取一条（``GET .../{saved_id}`` / ``lookup`` 命中）：**带 html**（沙箱产物本体）。
+         */
+        AnimationSavedView: {
+            /** Concept */
+            concept: string;
+            /**
+             * Createdat
+             * @default 0
+             */
+            createdAt: number;
+            /** Durationms */
+            durationMs: number;
+            /** Fallbackimage */
+            fallbackImage?: string | null;
+            /** Fallbacktext */
+            fallbackText: string;
+            /**
+             * Gradelevel
+             * @enum {string}
+             */
+            gradeLevel: "primary_low" | "primary_high" | "junior" | "senior";
+            /** Html */
+            html: string;
+            /** Id */
+            id: string;
+            /** Kpid */
+            kpId: string;
+            /** Prompthash */
+            promptHash: string;
+            /** Title */
+            title: string;
+            /**
+             * Uses
+             * @default 0
+             */
+            uses: number;
         };
         /**
          * ChapterInfo
@@ -2987,6 +3237,174 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    lookup_saved_animation_api_animation_saved_lookup_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnimationSavedLookupRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnimationSavedView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_saved_animations_api_animation_saved__student_id__get: {
+        parameters: {
+            query?: {
+                /** @description 只看某个学段（留空 = 全部） */
+                gradeLevel?: string;
+                /** @description 只看某个知识点（留空 = 全部） */
+                kpId?: string;
+            };
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnimationSavedListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_saved_animation_api_animation_saved__student_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnimationSaveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnimationSavedItem"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_saved_animation_api_animation_saved__student_id___saved_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+                saved_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnimationSavedView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_saved_animation_api_animation_saved__student_id___saved_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+                saved_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_coding_hint_api_code_hint__kp_id__get: {
         parameters: {
             query?: {

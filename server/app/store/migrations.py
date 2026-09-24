@@ -9,6 +9,8 @@
 - 迁移以 ``(set_name, version)`` 记账。**set_name 是给其他轨道留的并行通道**：
   票 14（题库）需要新表时，自己带一组 ``Migration`` 用 ``set_name="quiz"`` 调
   :func:`ensure_migrated` 即可，不必改本文件、也不会和 ``kb`` 的版本号打架。
+  已有的并行通道：``quiz``（变式题仓库）与 ``animation``（学生动画库），
+  两组的 DDL 与 ``Migration`` 都写在 ``store/learning.py`` 里（**本文件只提供机制**）。
 - 每条迁移在**一个具名 SAVEPOINT** 里执行并当场记账；任一步失败 → 整体回滚、版本号不前进
   （这条是**真**保证，见下面那条纪律 + :func:`ensure_migrated` 的注释）。
 - ★★ **迁移里不许用 ``conn.executescript``**：它会**先隐式 COMMIT**

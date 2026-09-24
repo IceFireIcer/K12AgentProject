@@ -29,6 +29,17 @@
      它**只在本文件与 Python 侧存在**，绝不出现在任何出参模型里（§6.3 答案泄漏防护：
      对外一律 ``QuizQuestionOut``，结构上没有答案字段）。
 
+3. **学生动画库**（``saved_animation`` 表，票 24 的「生成过的动画存下来复用」）：
+   同样走 ``set_name="animation"`` 的并行通道（:data:`ANIMATION_MIGRATION_SET`）。
+   ★ 复用键是 ``(kp_id, grade_level, prompt_hash)`` —— 学生身份由**库文件归属**承担
+     （一人一份 ``learning.db``），学段是键的一部分：同一个知识点在小学低与初中
+     必须是**两份不同的产物**（讲法不同）。
+   ★★ **只存请求指纹，不存学生原话**：``prompt_hash`` 是调用方算好的十六进制摘要，
+     展示文字（``concept`` / ``title`` / 降级文案）是模型侧的产出 —— 与「SQLite 不存
+     对话正文」（§8.1）同一条纪律，原话归 Pi 的 JSONL 会话树。
+   ★ 动画 HTML **不进库**：库里只留 ``html_path``，正文落在该学生的
+     ``students/<id>/animations/saved/`` 下（路由层负责路径与校验）。
+
 当前教材章节（``student.current_chapter``）
 ------------------------------------------
 学生显式选定的「在学哪一章」是**软偏好**（只进画像 Prompt，不做检索硬过滤），
@@ -47,6 +58,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -67,6 +79,9 @@ logger = logging.getLogger(__name__)
 
 #: 变式题仓库的迁移组名（``migrations.py`` 预留的并行通道，见模块头）。
 QUIZ_MIGRATION_SET = "quiz"
+
+#: 学生动画库的迁移组名（同一个并行通道；**不占 learning 组的版本号**）。
+ANIMATION_MIGRATION_SET = "animation"
 
 #: :meth:`LearningStore.question_attempt` 单次扫描的学习记录行数上限。
 #: ★ 为什么是「有界扫描 + 内存比对 qid」而不是加索引 / 加列：见那个方法的 docstring
@@ -115,6 +130,56 @@ QUIZ_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="LLM 变式题仓库（含标准答案，仅 Python 侧）", apply=_apply_quiz_v1),
     Migration(version=2, name="主观题评分细则列（rubric）", apply=_apply_quiz_v2),
 )
+
+
+#: ``saved_animation`` 表：该学生生成过的动画（**复用键 = 知识点 + 学段 + 请求指纹**）。
+#:
+#: ★ 为什么复用键里必须有 ``grade_level``（用户点名要求）：同一个知识点在小学低与初中
+#:   是**两份不同的产物**（讲法不同），少了这一维就会把初中生的动画端给小学生。
+#: ★ 为什么只有 ``prompt_hash`` 没有原话（合规硬约束）：见模块头第 3 条 ——
+#:   「SQLite 不存对话正文」这条纪律在这里的形态就是「只留指纹，不留原话」。
+#: ★ ``html_path`` 而不是把 HTML 存进库：正文是**大块文本**且已按学生分目录落盘，
+#:   入库会让一人一库的 ``learning.db`` 迅速膨胀，还要在两处之间保持一致（以文件为准）。
+_ANIMATION_V1 = """
+CREATE TABLE IF NOT EXISTS saved_animation (
+  id             TEXT PRIMARY KEY,
+  kp_id          TEXT NOT NULL,
+  grade_level    TEXT NOT NULL,                -- 四学段之一（复用键的一维）
+  concept        TEXT NOT NULL,                -- 展示用概念名，**不是**学生原话
+  prompt_hash    TEXT NOT NULL,                -- ★ 请求指纹（十六进制摘要），原话不进库
+  title          TEXT NOT NULL,
+  duration_ms    INTEGER NOT NULL,
+  html_path      TEXT NOT NULL,                -- 沙箱 HTML 的落盘路径（正文不进库）
+  fallback_text  TEXT NOT NULL,
+  fallback_image TEXT,
+  created_at     INTEGER NOT NULL,             -- Unix **秒**（路由层用 to_contract_ms 转毫秒）
+  uses           INTEGER NOT NULL DEFAULT 0    -- 被复用了几次（每次 lookup 命中 +1）
+);
+-- ★ **UNIQUE** 而不是普通索引：它就是「复用键」本身 —— 同学生 + 同知识点 + 同学段 +
+--   同指纹只允许一条，``save_animation`` 的 ON CONFLICT 也认它（普通索引做不了冲突目标）。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_animation_key
+  ON saved_animation(kp_id, grade_level, prompt_hash);
+"""
+
+
+def _apply_animation_v1(conn: sqlite3.Connection) -> None:
+    # 与 ``_apply_quiz_v1`` 同一纪律：用 ``execute_script``（逐条 execute），
+    # 不用会隐式提交的 ``conn.executescript``（见 ``migrations.py`` 的模块头）。
+    execute_script(conn, _ANIMATION_V1)
+
+
+ANIMATION_MIGRATIONS: tuple[Migration, ...] = (
+    Migration(version=1, name="学生动画库（知识点 + 学段 + 请求指纹复用）", apply=_apply_animation_v1),
+)
+
+
+def new_saved_animation_id() -> str:
+    """生成一个动画库条目 id（短、URL 安全，形状与 ``payload_id`` 白名单一致）。
+
+    形状与 ``app/animation/compose.py`` 的 ``_fallback_payload_id`` 同一套
+    （``[A-Za-z0-9_-]{1,64}``）：它会被拼进文件名（经 sha1）与 URL 路径。
+    """
+    return "anim-" + secrets.token_hex(8)
 
 
 @dataclass(frozen=True)
@@ -222,6 +287,31 @@ class GeneratedQuestionRecord:
     created_at: int | None
 
 
+@dataclass(frozen=True)
+class SavedAnimationRecord:
+    """``saved_animation`` 表的一行（**学生动画库的一条**）。
+
+    ★ 没有 ``html`` 字段，只有 :attr:`html_path`：正文落在磁盘上（见模块头第 3 条），
+      读正文是路由层的事（它才能做「路径没跑出学生目录」的断言）。
+    ★ :attr:`prompt_hash` 是**请求指纹**（十六进制摘要），不是学生原话 —— 它只用于复用命中。
+    """
+
+    id: str
+    kp_id: str
+    grade_level: str
+    concept: str
+    prompt_hash: str
+    title: str
+    duration_ms: int
+    html_path: str
+    fallback_text: str
+    fallback_image: str | None
+    #: Unix **秒**（与 ``learning.db`` 其它时间列同尺度；路由层用 ``to_contract_ms`` 换算）。
+    created_at: int
+    #: 被复用了几次（lookup 命中一次 +1）。
+    uses: int
+
+
 class AttemptRecord(NamedTuple):
     """某道题**最近一次**作答（:meth:`LearningStore.question_attempt` 的返回）。
 
@@ -254,6 +344,9 @@ class LearningStore:
         # 变式题仓库（见模块头）**按需建表**：见 :meth:`ensure_quiz_tables` 的注释。
         self._quiz_ready = False
         self.quiz_version = 0
+        # 学生动画库同一条口径（**不在 __init__ 里建**）：见 :meth:`ensure_animation_tables`。
+        self._animation_ready = False
+        self.animation_version = 0
 
     # ------------------------------------------------------------ 学生 --
     def upsert_student(self, student_id: str, nickname: str, grade_level: str) -> StudentRecord:
@@ -580,6 +673,154 @@ class LearningStore:
         sql += " ORDER BY created_at, qid"
         return [_generated_from_row(row) for row in self.conn.execute(sql, params)]
 
+    # ------------------------------------------------------------ 学生动画库 --
+    def ensure_animation_tables(self) -> int:
+        """确保 ``saved_animation`` 存在，返回该迁移组的版本号。
+
+        ★ 与 :meth:`ensure_quiz_tables` **同一条理由与做法**（这里只差一个 set_name）：
+          建表会在 ``schema_version`` 里多记一行 ``("animation", 1)``，而
+          「新学生的 ``schema_version`` 恰为 learning 1..4」是既有验收的断言口径
+          （``tests/test_profile_routes.py`` / ``tests/test_chapter_selection.py``）。
+          动画库只有真被用到时才建，因此那两条断言对「只画像不存动画」的路径逐字不变。
+
+        ★ 它**不改 learning 组**：新增表一律走 ``set_name="animation"`` 这条并行通道
+          （``migrations.py`` 预留），learning 组的版本号留给画像/学段那些轨。
+        """
+        if not self._animation_ready:
+            self.animation_version = ensure_migrated(
+                self.conn, ANIMATION_MIGRATIONS, set_name=ANIMATION_MIGRATION_SET
+            )
+            self._animation_ready = True
+        return self.animation_version
+
+    def save_animation(
+        self,
+        *,
+        saved_id: str,
+        kp_id: str,
+        grade_level: str,
+        concept: str,
+        prompt_hash: str,
+        title: str,
+        duration_ms: int,
+        html_path: str,
+        fallback_text: str,
+        fallback_image: str | None = None,
+    ) -> SavedAnimationRecord:
+        """保住一条动画（**复用键冲突时覆盖那一条**，不追加第二行）。
+
+        ★ 为什么冲突就覆盖：复用键是 ``(kp_id, grade_level, prompt_hash)``，
+          同一个学生、同一个知识点、同一个学段、同一句提问 —— 那是**同一件事**。
+          追加会让「再问一次」每次多一条几乎相同的记录，动画库越用越乱；
+          覆盖则让「重新生成」自然地更新那一份（``id`` 换成新的，旧 HTML 文件由路由层
+          在调用本方法之后删掉 —— 库里以新 id 为准，不会有两条指向同一个文件）。
+
+        ★ 冲突目标是 :data:`_ANIMATION_V1` 里那个 **UNIQUE** 索引，所以它是「复用键本身」，
+          不是一条顺手加的普通索引（普通索引做不了 ``ON CONFLICT`` 的目标）。
+        """
+        self.ensure_animation_tables()
+        self.conn.execute(
+            "INSERT INTO saved_animation"
+            "(id, kp_id, grade_level, concept, prompt_hash, title, duration_ms, html_path, "
+            " fallback_text, fallback_image, created_at, uses) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,0) "
+            "ON CONFLICT(kp_id, grade_level, prompt_hash) DO UPDATE SET "
+            "id=excluded.id, concept=excluded.concept, title=excluded.title, "
+            "duration_ms=excluded.duration_ms, html_path=excluded.html_path, "
+            "fallback_text=excluded.fallback_text, fallback_image=excluded.fallback_image, "
+            "created_at=excluded.created_at",
+            (
+                saved_id,
+                kp_id,
+                grade_level,
+                concept,
+                prompt_hash,
+                title,
+                int(duration_ms),
+                html_path,
+                fallback_text,
+                fallback_image or None,
+                int(time.time()),
+            ),
+        )
+        self.conn.commit()
+        got = self.get_animation(saved_id)
+        assert got is not None
+        return got
+
+    def get_animation(self, saved_id: str) -> SavedAnimationRecord | None:
+        """按 id 取一条（**不带学生维度**：学生维度的隔离由路由层用库文件归属保证）。"""
+        self.ensure_animation_tables()
+        row = self.conn.execute(
+            "SELECT id, kp_id, grade_level, concept, prompt_hash, title, duration_ms, "
+            "html_path, fallback_text, fallback_image, created_at, uses "
+            "FROM saved_animation WHERE id = ?",
+            (saved_id,),
+        ).fetchone()
+        return None if row is None else _saved_animation_from_row(row)
+
+    def find_animation(
+        self, *, kp_id: str, grade_level: str, prompt_hash: str
+    ) -> SavedAnimationRecord | None:
+        """按**复用键**取一条（不含学生维：学生维由库文件归属承担）。
+
+        学段是键的一部分，所以「小学低存的那份」与「初中问的同一件事」**必然不命中**。
+        """
+        self.ensure_animation_tables()
+        row = self.conn.execute(
+            "SELECT id, kp_id, grade_level, concept, prompt_hash, title, duration_ms, "
+            "html_path, fallback_text, fallback_image, created_at, uses "
+            "FROM saved_animation WHERE kp_id = ? AND grade_level = ? AND prompt_hash = ?",
+            (kp_id, grade_level, prompt_hash),
+        ).fetchone()
+        return None if row is None else _saved_animation_from_row(row)
+
+    def list_animations(
+        self, *, kp_id: str | None = None, grade_level: str | None = None
+    ) -> list[SavedAnimationRecord]:
+        """列该学生的动画库（**按创建时间倒序**，最新的在前）。
+
+        ★ 倒序**显式写在 SQL 里**（不靠调用方 reverse）：`created_at` 是**秒**，
+          同一秒内保存的两条光看时间分不出先后，所以再按 ``id`` 兜一层 ——
+          否则「刚存的那条排第二」这种偏差会随保存速度随机出现。
+        """
+        self.ensure_animation_tables()
+        sql = (
+            "SELECT id, kp_id, grade_level, concept, prompt_hash, title, duration_ms, "
+            "html_path, fallback_text, fallback_image, created_at, uses FROM saved_animation"
+        )
+        params: list[object] = []
+        if kp_id:
+            sql += " WHERE kp_id = ?"
+            params.append(kp_id)
+            if grade_level:
+                sql += " AND grade_level = ?"
+                params.append(grade_level)
+        elif grade_level:
+            sql += " WHERE grade_level = ?"
+            params.append(grade_level)
+        sql += " ORDER BY created_at DESC, id DESC"
+        return [_saved_animation_from_row(row) for row in self.conn.execute(sql, tuple(params))]
+
+    def touch_animation_use(self, saved_id: str) -> None:
+        """复用它一次（``uses`` 自增 1）。**自增下推到 SQL**：不做「读出来加一再写回」。"""
+        self.ensure_animation_tables()
+        self.conn.execute(
+            "UPDATE saved_animation SET uses = uses + 1 WHERE id = ?", (saved_id,)
+        )
+        self.conn.commit()
+
+    def delete_animation(self, saved_id: str) -> bool:
+        """删一条（返回是否真的删掉了）。
+
+        ★ 学生维度由**库文件归属**承担（每条路由都先开这个学生的库），所以这里按 id 删
+          天然只可能删到自己的 —— 别人的记录在别人的文件里，这条路根本看不见它。
+        """
+        self.ensure_animation_tables()
+        cursor = self.conn.execute("DELETE FROM saved_animation WHERE id = ?", (saved_id,))
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     # ------------------------------------------------------------ 学习记录 --
     def add_history(
         self,
@@ -899,7 +1140,28 @@ def _generated_from_row(row: sqlite3.Row) -> GeneratedQuestionRecord:
     )
 
 
+def _saved_animation_from_row(row: sqlite3.Row) -> SavedAnimationRecord:
+    """``saved_animation`` 行 → 记录（列全是标量，无需宽松解析）。"""
+    image = row["fallback_image"]
+    return SavedAnimationRecord(
+        id=str(row["id"]),
+        kp_id=str(row["kp_id"]),
+        grade_level=str(row["grade_level"]),
+        concept=str(row["concept"]),
+        prompt_hash=str(row["prompt_hash"]),
+        title=str(row["title"] or ""),
+        duration_ms=int(row["duration_ms"] or 0),
+        html_path=str(row["html_path"]),
+        fallback_text=str(row["fallback_text"] or ""),
+        fallback_image=None if image is None or not str(image) else str(image),
+        created_at=int(row["created_at"] or 0),
+        uses=int(row["uses"] or 0),
+    )
+
+
 __all__ = [
+    "ANIMATION_MIGRATIONS",
+    "ANIMATION_MIGRATION_SET",
     "AttemptRecord",
     "GeneratedQuestionRecord",
     "LearningStore",
@@ -907,5 +1169,7 @@ __all__ = [
     "ProgressRecord",
     "QUIZ_MIGRATIONS",
     "QUIZ_MIGRATION_SET",
+    "SavedAnimationRecord",
     "StudentRecord",
+    "new_saved_animation_id",
 ]

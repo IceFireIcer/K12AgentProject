@@ -24,7 +24,10 @@
 - 学段信号：`GradeSignal` / `GradeSignals` / `GradeOverrideRequest` / `GradeOverrideResponse`；
 - 六个 Extension 的 payload（§6.5）：`AnimationPayload` / `CodeTemplate` / `CodingHint` /
   `CodeError` / `CodeEvaluation` / `QuizQuestion`(内部) / `QuizQuestionOut`(对外) /
-  `QuizPayload` / `QuizResult`。
+  `QuizPayload` / `QuizResult`；
+- 学生动画库（`AnimationSaveRequest` / `AnimationSavedItem` / `AnimationSavedView` /
+  `AnimationSavedListResponse` / `AnimationSavedLookupRequest`）：生成物**按学生存下来**、
+  **按学段隔离**、可复用可删除。★ 表里只有请求指纹（`promptHash`），**不收学生原话**。
 
 **不定义** `Intent` 字面量（路由由 LLM 选 Tool 自然产生，不是代码级字段）；
 **不引入** `ModuleResult<T>` / `ModuleError` 那套 `{success, error}` 包装
@@ -1175,6 +1178,131 @@ class AnimationPayload(CamelModel):
     source: Literal["template", "generated"]
 
 
+# ---------------------------------------------------------------------------
+# 学生动画库（``/api/animation/saved/**``）
+#
+# 生成过的动画**按学生存下来**：同一个学生再问同一件事时直接复用（零模型调用），
+# 学生可以删除，且**按学段隔离**——同一个知识点在小学低与初中是两份不同的产物
+# （讲法不同，混用会把孩子看不懂的那一份端出来）。
+#
+# ★★ 复用键是 ``(student_id, kp_id, grade_level, prompt_hash)``：
+#    - ``student_id`` 由**库文件的归属**承担（一人一份 ``learning.db``，见 §8.2）；
+#    - 后三维是 ``saved_animation`` 上的唯一索引（见 ``store/learning.py``）。
+#
+# ★★ **绝不收学生原话**：请求里没有任何承载正文的字段，只有调用方算好的
+#    ``prompt_hash``（十六进制摘要）+ 展示文字（``concept`` / ``title`` / 降级文案）。
+#    这与「SQLite 不存对话正文」（§8.1）是同一条纪律——原话归 Pi 的 JSONL 会话树。
+# ---------------------------------------------------------------------------
+#: 知识点 id 的长度上限（与 ``routes/profile.py`` 的 ``KP_ID_MAX_CHARS`` 同量级）。
+ANIMATION_KP_ID_MAX_CHARS = 64
+#: 学生 id 的长度上限（★ 与 ``routes/students.py`` 的 ``STUDENT_ID_RE`` **同一个数**：
+#: 它们是同一套白名单，取小了一侧会拒掉合法 id、取大了另一侧会 422，两边都不好看）。
+ANIMATION_STUDENT_ID_MAX_CHARS = 64
+#: 概念名 / 标题的长度上限（它们会进卡片与 Prompt，是**上限而不是建议**）。
+ANIMATION_CONCEPT_MAX_CHARS = 120
+ANIMATION_TITLE_MAX_CHARS = 120
+#: 降级文案上限：与 ``app/animation/compose.py`` 的 ``MAX_FALLBACK_TEXT_CHARS`` **同一个数**
+#: （两处各写一个数就会出现「生成时能过、保存时被拒」这种自相矛盾）。
+ANIMATION_FALLBACK_TEXT_MAX_CHARS = 600
+#: ``prompt_hash`` 的长度上限：sha1 = 40 位、sha256 = 64 位，留一倍余量给将来的算法。
+ANIMATION_PROMPT_HASH_MAX_CHARS = 128
+#: 静态兜底图上限（dataURL SVG，几 KB 量级；上限只是拦住「整张位图塞进来」）。
+ANIMATION_FALLBACK_IMAGE_MAX_CHARS = 256 * 1024
+#: ``saved_animation.id`` 的字符集（与 ``validate_payload_id`` 同一形状）。
+ANIMATION_SAVED_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+#: 请求指纹的形状：**只收十六进制**——学生原话连一个字符都进不来（由类型承担，不靠人记得）。
+ANIMATION_PROMPT_HASH_PATTERN = r"^[0-9a-fA-F]+$"
+
+
+class AnimationSaveRequest(CamelModel):
+    """``POST /api/animation/saved/{student_id}``：把一份动画**存进该学生的动画库**。
+
+    ``html`` 是**完整自包含**的沙箱产物（模板渲染或自由生成的结果）；
+    服务端会拿 ``validate_animation_html()`` 再校验一次——不合格 → 422 + 可读原因，
+    因此库里不会出现「存下来了但播不出来」的产物（同托管路径的二次校验口径）。
+    """
+
+    kp_id: str = Field(min_length=1, max_length=ANIMATION_KP_ID_MAX_CHARS)
+    #: ★ 复用键的一维：学段不同就是**两份不同的产物**（同知识点、不同讲法）。
+    grade_level: GradeLevel
+    #: 展示用的概念名（学生可见），**不是**学生原话。
+    concept: str = Field(min_length=1, max_length=ANIMATION_CONCEPT_MAX_CHARS)
+    #: 调用方算好的**十六进制请求指纹**（sha1 / sha256）。原话不进本接口，见模块头。
+    prompt_hash: str = Field(
+        min_length=8,
+        max_length=ANIMATION_PROMPT_HASH_MAX_CHARS,
+        pattern=ANIMATION_PROMPT_HASH_PATTERN,
+    )
+    #: 卡片标题；空串时服务端用 ``concept`` 兜底（与 ``/animation/compose`` 同一口径）。
+    title: str = Field(default="", max_length=ANIMATION_TITLE_MAX_CHARS)
+    duration_ms: int = Field(gt=0, le=120_000)
+    html: str = Field(min_length=1)
+    fallback_text: str = Field(min_length=1, max_length=ANIMATION_FALLBACK_TEXT_MAX_CHARS)
+    #: 静态兜底图（dataURL）；空串 / 缺省一律落成 ``None``（库里只留一种「空」）。
+    fallback_image: str | None = Field(default=None, max_length=ANIMATION_FALLBACK_IMAGE_MAX_CHARS)
+
+
+class AnimationSavedItem(CamelModel):
+    """动画库里的一条（**不含 html**）：列表与保存回执用它。
+
+    ``html`` 单独由 :class:`AnimationSavedView` 带出去 —— 列表里回整份 HTML 会让
+    「列出 20 条」的响应变成几 MB，而列表上根本没人看动画正文。
+    """
+
+    id: str
+    kp_id: str
+    grade_level: GradeLevel
+    concept: str
+    #: 请求指纹（**十六进制摘要**，见 :class:`AnimationSaveRequest`）—— 不是学生原话。
+    prompt_hash: str
+    title: str
+    duration_ms: int
+    fallback_text: str
+    fallback_image: str | None = None
+    #: 首次保存时间（**Unix 毫秒**，与 ``Student.createdAt`` 同尺度）。
+    created_at: int = 0
+    #: 被复用了几次（命中一次 lookup 加一）。
+    uses: int = 0
+
+
+class AnimationSavedView(AnimationSavedItem):
+    """取一条（``GET .../{saved_id}`` / ``lookup`` 命中）：**带 html**（沙箱产物本体）。"""
+
+    html: str
+
+
+class AnimationSavedListResponse(CamelModel):
+    """``GET /api/animation/saved/{student_id}``：该学生的动画库清单（**不含 html**）。
+
+    ``grade_level`` / ``kp_id`` 回显**本次的过滤条件**（``None`` = 没过滤）：
+    前端据此显示「初中 · 循环」这类筛选状态，而不是自己记一份。
+    """
+
+    student_id: str
+    grade_level: str | None = None
+    kp_id: str | None = None
+    items: list[AnimationSavedItem] = Field(default_factory=list)
+    total: int = 0
+
+
+class AnimationSavedLookupRequest(CamelModel):
+    """``POST /api/animation/saved/lookup``：按**复用键**取一条（命中即返回带 html 的那条）。
+
+    ★ 学生 id 在**请求体**里（不是路径里）：这条路由与
+    ``POST /api/animation/saved/{student_id}`` 同形，学生 id 再进路径就会有两个候选匹配
+    （见路由模块里「静态路径必须先注册」那条注释）。
+    """
+
+    student_id: str = Field(min_length=1, max_length=ANIMATION_STUDENT_ID_MAX_CHARS)
+    kp_id: str = Field(min_length=1, max_length=ANIMATION_KP_ID_MAX_CHARS)
+    grade_level: GradeLevel
+    prompt_hash: str = Field(
+        min_length=8,
+        max_length=ANIMATION_PROMPT_HASH_MAX_CHARS,
+        pattern=ANIMATION_PROMPT_HASH_PATTERN,
+    )
+
+
 class CodeTemplate(CamelModel):
     """编程模板载荷（§11.3 / 票 19）。``scaffold`` 必须含明确的 TODO 标记。"""
 
@@ -1443,6 +1571,12 @@ CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     GradeOverrideResponse,
     # 六个 Extension 的 payload
     AnimationPayload,
+    # 学生动画库（生成物按学生存下来、按学段隔离、可复用可删除）
+    AnimationSaveRequest,
+    AnimationSavedItem,
+    AnimationSavedView,
+    AnimationSavedListResponse,
+    AnimationSavedLookupRequest,
     CodeTemplate,
     CodingHint,
     CodeError,

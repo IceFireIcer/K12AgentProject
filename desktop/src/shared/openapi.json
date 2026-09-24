@@ -52,6 +52,338 @@
         "title": "AnimationPayload",
         "type": "object"
       },
+      "AnimationSaveRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/animation/saved/{student_id}``：把一份动画**存进该学生的动画库**。\n\n``html`` 是**完整自包含**的沙箱产物（模板渲染或自由生成的结果）；\n服务端会拿 ``validate_animation_html()`` 再校验一次——不合格 → 422 + 可读原因，\n因此库里不会出现「存下来了但播不出来」的产物（同托管路径的二次校验口径）。",
+        "properties": {
+          "concept": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Concept",
+            "type": "string"
+          },
+          "durationMs": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 120000.0,
+            "title": "Durationms",
+            "type": "integer"
+          },
+          "fallbackImage": {
+            "anyOf": [
+              {
+                "maxLength": 262144,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallbackimage"
+          },
+          "fallbackText": {
+            "maxLength": 600,
+            "minLength": 1,
+            "title": "Fallbacktext",
+            "type": "string"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "html": {
+            "minLength": 1,
+            "title": "Html",
+            "type": "string"
+          },
+          "kpId": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Kpid",
+            "type": "string"
+          },
+          "promptHash": {
+            "maxLength": 128,
+            "minLength": 8,
+            "pattern": "^[0-9a-fA-F]+$",
+            "title": "Prompthash",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "maxLength": 120,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kpId",
+          "gradeLevel",
+          "concept",
+          "promptHash",
+          "durationMs",
+          "html",
+          "fallbackText"
+        ],
+        "title": "AnimationSaveRequest",
+        "type": "object"
+      },
+      "AnimationSavedItem": {
+        "additionalProperties": false,
+        "description": "动画库里的一条（**不含 html**）：列表与保存回执用它。\n\n``html`` 单独由 :class:`AnimationSavedView` 带出去 —— 列表里回整份 HTML 会让\n「列出 20 条」的响应变成几 MB，而列表上根本没人看动画正文。",
+        "properties": {
+          "concept": {
+            "title": "Concept",
+            "type": "string"
+          },
+          "createdAt": {
+            "default": 0,
+            "title": "Createdat",
+            "type": "integer"
+          },
+          "durationMs": {
+            "title": "Durationms",
+            "type": "integer"
+          },
+          "fallbackImage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallbackimage"
+          },
+          "fallbackText": {
+            "title": "Fallbacktext",
+            "type": "string"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "promptHash": {
+            "title": "Prompthash",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "uses": {
+            "default": 0,
+            "title": "Uses",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kpId",
+          "gradeLevel",
+          "concept",
+          "promptHash",
+          "title",
+          "durationMs",
+          "fallbackText"
+        ],
+        "title": "AnimationSavedItem",
+        "type": "object"
+      },
+      "AnimationSavedListResponse": {
+        "additionalProperties": false,
+        "description": "``GET /api/animation/saved/{student_id}``：该学生的动画库清单（**不含 html**）。\n\n``grade_level`` / ``kp_id`` 回显**本次的过滤条件**（``None`` = 没过滤）：\n前端据此显示「初中 · 循环」这类筛选状态，而不是自己记一份。",
+        "properties": {
+          "gradeLevel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gradelevel"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AnimationSavedItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "kpId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kpid"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "studentId"
+        ],
+        "title": "AnimationSavedListResponse",
+        "type": "object"
+      },
+      "AnimationSavedLookupRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/animation/saved/lookup``：按**复用键**取一条（命中即返回带 html 的那条）。\n\n★ 学生 id 在**请求体**里（不是路径里）：这条路由与\n``POST /api/animation/saved/{student_id}`` 同形，学生 id 再进路径就会有两个候选匹配\n（见路由模块里「静态路径必须先注册」那条注释）。",
+        "properties": {
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "kpId": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Kpid",
+            "type": "string"
+          },
+          "promptHash": {
+            "maxLength": 128,
+            "minLength": 8,
+            "pattern": "^[0-9a-fA-F]+$",
+            "title": "Prompthash",
+            "type": "string"
+          },
+          "studentId": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Studentid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId",
+          "kpId",
+          "gradeLevel",
+          "promptHash"
+        ],
+        "title": "AnimationSavedLookupRequest",
+        "type": "object"
+      },
+      "AnimationSavedView": {
+        "additionalProperties": false,
+        "description": "取一条（``GET .../{saved_id}`` / ``lookup`` 命中）：**带 html**（沙箱产物本体）。",
+        "properties": {
+          "concept": {
+            "title": "Concept",
+            "type": "string"
+          },
+          "createdAt": {
+            "default": 0,
+            "title": "Createdat",
+            "type": "integer"
+          },
+          "durationMs": {
+            "title": "Durationms",
+            "type": "integer"
+          },
+          "fallbackImage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallbackimage"
+          },
+          "fallbackText": {
+            "title": "Fallbacktext",
+            "type": "string"
+          },
+          "gradeLevel": {
+            "enum": [
+              "primary_low",
+              "primary_high",
+              "junior",
+              "senior"
+            ],
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "html": {
+            "title": "Html",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "promptHash": {
+            "title": "Prompthash",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "uses": {
+            "default": 0,
+            "title": "Uses",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "kpId",
+          "gradeLevel",
+          "concept",
+          "promptHash",
+          "title",
+          "durationMs",
+          "fallbackText",
+          "html"
+        ],
+        "title": "AnimationSavedView",
+        "type": "object"
+      },
       "ChapterInfo": {
         "additionalProperties": false,
         "description": "一章教材（四学段共 24 章，来自知识点 front-matter 的 ``chapter_title``）。",
@@ -3294,6 +3626,266 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/animation/saved/lookup": {
+      "post": {
+        "description": "复用键 ``(studentId, kpId, gradeLevel, promptHash)`` 全中的那一条。\n\n- 命中 → **200** + 带 ``html`` 的那条（``uses`` 自增一次，便于观察复用真的发生了）；\n- 未命中 → **404**（调用方据此走生成路径，而不是拿一份空动画去渲染）;\n- 学生 id 非法 → **422**；没显式 ``--data-dir`` → **503**（见模块头）。\n\n★ ``gradeLevel`` 参与命中判定：学生学段变了之后再问同一个知识点，\n  这里**必然不命中**（那是要求里的「按学段分开」），走生成 → 保存新的那一份。",
+        "operationId": "lookup_saved_animation_api_animation_saved_lookup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnimationSavedLookupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnimationSavedView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "按复用键取一条已保存的动画（命中带 html，uses 加一）",
+        "tags": [
+          "animation"
+        ]
+      }
+    },
+    "/api/animation/saved/{student_id}": {
+      "get": {
+        "description": "列该学生保存过的动画。**不回 html**：列表上没人看动画正文，而回整份会让响应变成几 MB。\n\n过滤条件回显在响应里（``gradeLevel`` / ``kpId`` 为 ``None`` 表示没过滤），\n前端据此显示筛选状态，不用自己记一份。",
+        "operationId": "list_saved_animations_api_animation_saved__student_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "只看某个学段（留空 = 全部）",
+            "in": "query",
+            "name": "gradeLevel",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "只看某个学段（留空 = 全部）",
+              "title": "Gradelevel",
+              "type": "string"
+            }
+          },
+          {
+            "description": "只看某个知识点（留空 = 全部）",
+            "in": "query",
+            "name": "kpId",
+            "required": false,
+            "schema": {
+              "default": "",
+              "description": "只看某个知识点（留空 = 全部）",
+              "title": "Kpid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnimationSavedListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "该学生的动画库清单（不含 html，按创建时间倒序）",
+        "tags": [
+          "animation"
+        ]
+      },
+      "post": {
+        "description": "把一份**已生成**的动画存进该学生的动画库（回执**不带 html**）。\n\n- HTML 过不了 ``validate_animation_html()`` → **422** + 可读中文原因\n  （与渲染/托管同一套判据，见模块头）；\n- 体积超过 ``MAX_HTML_BYTES`` → **422**；\n- 同一个复用键再存一次 = **覆盖**那一条（``id`` 与文件都换成新的），而不是追加\n  —— 否则「再问一次」会让库里堆满几乎相同的记录。\n\n★ 覆盖时**保留** ``uses``：那是「这条复用键被用了几次」的计数，\n  重新生成一次不代表以前那些复用的需求没发生过。",
+        "operationId": "save_saved_animation_api_animation_saved__student_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnimationSaveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnimationSavedItem"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "保存一条动画（校验 HTML 后落盘，复用键冲突则覆盖）",
+        "tags": [
+          "animation"
+        ]
+      }
+    },
+    "/api/animation/saved/{student_id}/{saved_id}": {
+      "delete": {
+        "description": "删掉一条记录 + 它落盘的 HTML。**只可能删到自己的**（同 :func:`get_saved_animation`）。\n\n库里没有这条 id → **404**（不静默当成功：调用方据此知道「这里本来就没有这一条」，\n而不是以为自己删掉了别人看得见的东西）。",
+        "operationId": "delete_saved_animation_api_animation_saved__student_id___saved_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "saved_id",
+            "required": true,
+            "schema": {
+              "title": "Saved Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "删一条已保存的动画（只删自己的）",
+        "tags": [
+          "animation"
+        ]
+      },
+      "get": {
+        "description": "按 id 取一条（**带 html**）。\n\n★ 学生维度由**库文件归属**承担：这里开的是 ``{student_id}`` 自己的库，\n  所以拿着别人的条目 id 来问，结果是 **404**（那条记录不在这个文件里）。\n  另有 ``savedId`` 字符集校验 → **422**（它会被拼进文件名）。",
+        "operationId": "get_saved_animation_api_animation_saved__student_id___saved_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "saved_id",
+            "required": true,
+            "schema": {
+              "title": "Saved Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnimationSavedView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "取一条已保存的动画（带 html）",
+        "tags": [
+          "animation"
+        ]
+      }
+    },
     "/api/code/hint/{kp_id}": {
       "get": {
         "description": "取一条提示（供 ``get_coding_hint`` Tool 调用：学生点「求助」时）。\n\n★ **级别由调用方决定、由本端点封顶**：\n  - 调用方（``coding.ts``）维护「该 kp 上已经给过第几级」，据此要**下一级** ——\n    它在有状态的那一侧强制「一次只升一级」，这是「不跳级」的落点；\n  - 本端点只保证**不越界**：``level`` 超过模板实际写了几级时，退到模板的最高级\n    （宁可给最高级的提示，也不要因为越界而让学生的「求助」按钮点了没反应）。\n\n没有该 kp 的模板（= 没有提示素材）→ **404 + 可读中文**，\n由编排层退回「用对话引导」（这是能力受限，不是崩溃）。",
