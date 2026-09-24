@@ -1,12 +1,15 @@
 /* 动画卡片的公共样式（内联进每份动画 HTML；无外部字体、无外链）。
  *
  * 分工（两个轴，别混）：
- *   本文件     = **结构 + 兜底**：所有选择器与变量都在这里有一份能独立成立的取值，
+ *   本文件     = 结构加兜底：所有选择器与变量都在这里有一份能独立成立的取值，
  *               所以没有皮肤样式时动画照样完整渲染（自由生成路径 / 单独打开调试）。
- *   skins.css  = **主题**：由 server/scripts/build_animation_skins.py 从设计令牌生成，
+ *   skins.css  = 主题：由 server/scripts/build_animation_skins.py 从设计令牌生成，
  *               按 <html data-grade> 换学段配色、按 <html data-skin> 换形态与动效。
- * 换言之：这里定义的每个变量都是「学段皮肤没命中时」的回退值，**不要**在这里写死某个
+ * 换言之：这里定义的每个变量都是「学段皮肤没命中时」的回退值，不要在这里写死某个
  * 学段的颜色（那种「一处来源变四处漂移」正是这套两文件结构要治的病）。
+ *
+ * 本文件的地板风格 = illustrated（绘本场景）：更大更暖、圆角大、投影软而大、装饰层可见。
+ * 自由生成路径只拼本文件，所以它渲染出来的观感就是这张地板的样子。
  */
 
 :root {
@@ -30,7 +33,10 @@
   --chip-fg: #2f6fd0;
 
   /* 皮肤刻度（字号 / 圆角 / 线宽 / 内边距）：skins.css 按 data-skin 覆写，
-     这里是它缺席时的兜底（`_shared/skins.css` 丢了也不该把舞台画糊）。 */
+     这里是它缺席时的兜底（「_shared/skins.css」丢了也不该把舞台画糊）。
+     标题与字幕单列一组：外壳的层级感由它们撑起来，别退回脚注大小。 */
+  --k12-fs-title: 20px;
+  --k12-fs-caption: 13.5px;
   --k12-fs-node: 16px;
   --k12-fs-node-sub: 12px;
   --k12-fs-link: 12.5px;
@@ -67,15 +73,19 @@ body {
   position: relative;
   width: 100%;
   height: 100vh;
-  padding: 14px 16px;
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  /* 标题与舞台之间的呼吸：不给够，标题就只是「贴在上面的一行小字」 */
+  gap: 12px;
 }
 
+/* 外壳：标题锁版醒目（字重 700 + var(--ink)），字幕给足对比与行高，不做脚注。 */
 .anim-title {
-  font-size: 14px;
-  font-weight: 650;
+  font-size: var(--k12-fs-title);
+  font-weight: 700;
+  line-height: 1.28;
+  letter-spacing: 0.005em;
   color: var(--ink);
   margin: 0;
   flex: 0 0 auto;
@@ -83,10 +93,10 @@ body {
 
 .anim-caption {
   margin: 0;
-  font-size: 12.5px;
-  line-height: 1.6;
+  font-size: var(--k12-fs-caption);
+  line-height: 1.7;
   color: var(--muted);
-  min-height: 1.6em;
+  min-height: 1.7em;
   flex: 0 0 auto;
 }
 
@@ -106,14 +116,16 @@ body {
 .chip {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
+  padding: 3px 10px;
   border-radius: 999px;
-  /* 文字用 --chip-fg（设计令牌里那个压深过对比度的值），不是 --accent —— 
+  /* 文字用 --chip-fg（设计令牌里那个压深过对比度的值），不是 --accent；
      直接用主色当文字色时，橙色一档只有 2.9:1，学生读不清。 */
   background: var(--chip-bg);
   color: var(--chip-fg);
   font-size: 12px;
   font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
 }
 
 .bar {
@@ -137,25 +149,30 @@ svg {
 }
 
 /* ==========================================================================
- * 舞台基元：**只写「缺了就会变成垃圾」的那几条**
+ * 舞台基元：只写「缺了就会变成垃圾」的那几条
  *
  * 分工（与文件开头那段呼应）：
- *   这里  = 基元的**地板**：填充 / 描边 / 字体 / 字号。没有它们，SVG 的默认值会让
- *           节点变成「黑底黑框」（fill 默认黑、stroke 默认 none）—— 那是坏掉，不是朴素。
- *   skins.css = 基元的**主题**：圆角、线宽、间距、皮肤专属形态（都由变量控制），
+ *   这里  = 基元的地板：填充 / 描边 / 字体 / 字号 / 投影 / 装饰色。
+ *           没有它们，SVG 的默认值会让节点变成「黑底黑框」（fill 默认黑、
+ *           stroke 默认 none），那是坏掉，不是朴素。地板同样给出深度与装饰：
+ *           自由生成路径只读本文件，它也得有绘本的立体感与氛围。
+ *   skins.css = 基元的主题：圆角、线宽、间距、投影刻度、皮肤专属形态（都由变量控制），
  *           以及学段色板。它按 <html data-skin> 细化，两处不冲突。
  *
- * ★ 为什么地板必须在这里而不是只在 skins.css：**自由生成路径不读 skins.css**
- *   （`app/animation/compose.py` 只拼 base.css + 库 + 运行时；那条路不在本票的文件
- *   所有权内，没动它）。基元是冻结接口，模型在自由生成里也会调 —— 那条路上不能黑屏。
- *   模板路径没有任何损失：skins.css 在 base.css **之后**内联，同优先级下它说了算。
+ * ★ 为什么地板必须在这里而不是只在 skins.css：自由生成路径不读 skins.css
+ *   （「app/animation/compose.py」只拼 base.css + 库 + 运行时；那条路不在本票的文件
+ *   所有权内，没动它）。基元是冻结接口，模型在自由生成里也会调它，那条路上不能黑屏。
+ *   模板路径没有任何损失：skins.css 在 base.css 之后内联，同优先级下它说了算。
  *
- * ★ 这里一个裸色值都不许写（用变量）：学段色板只由设计令牌生成，写死就漂了。
+ * ★ 这里一个裸色值都不许写（用变量或 color-mix 派生）：学段色板只由设计令牌生成，
+ *   写死就漂了。
  * ========================================================================== */
 
 .k12-stage-bg {
   fill: var(--surface);
-  stroke: none;
+  /* 绘本底板：边框比节点淡一档，只用来收住舞台，不抢主体。 */
+  stroke: color-mix(in srgb, var(--accent-border) 45%, var(--surface));
+  stroke-width: 1;
 }
 
 .k12-grid-line,
@@ -180,13 +197,60 @@ svg {
   font-size: var(--k12-fs-axis);
 }
 
+/* ---- 深度：投影只挂在组容器上（g.k12-node / g.k12-bubble / g.k12-readout），
+        不给每个子形状加、也不给网格与轴线加（否则既脏又慢）。
+        颜色一律由既有变量派生，学段换色时投影跟着走。 ---- */
+.k12-node,
+.k12-bubble,
+.k12-readout {
+  filter: drop-shadow(0 3px 4px color-mix(in srgb, var(--ink) 9%, transparent));
+}
+
+/* 焦点：投影加深一档，让「现在看这里」在两种皮肤下都一眼可辨。 */
+.k12-node--focus {
+  filter: drop-shadow(0 4px 7px color-mix(in srgb, var(--accent-ink) 20%, transparent));
+}
+
+/* ---- 装饰层：绘本场景元素（地面 / 太阳 / 云 / 小丘）。
+        生成器负责画并挂类名，本文件负责给颜色；工程皮肤在 skins.css 里收隐。 ---- */
+.k12-decor-ground,
+.k12-decor-sun,
+.k12-decor-cloud,
+.k12-decor-hill {
+  pointer-events: none;
+}
+
+.k12-decor-ground {
+  fill: color-mix(in srgb, var(--surface-2) 82%, var(--accent-border));
+  stroke: none;
+  rx: 18px;
+}
+
+.k12-decor-sun {
+  fill: var(--accent-soft);
+  stroke: none;
+  opacity: 0.55;
+}
+
+.k12-decor-cloud {
+  fill: color-mix(in srgb, var(--surface) 70%, var(--accent-soft) 30%);
+  stroke: none;
+  opacity: 0.85;
+}
+
+.k12-decor-hill {
+  fill: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
+  stroke: none;
+  opacity: 0.95;
+}
+
 .k12-node-body {
   fill: var(--surface);
   stroke: var(--accent-border);
 }
 
 .k12-node--accent .k12-node-body {
-  fill: var(--accent-soft);
+  fill: color-mix(in srgb, var(--accent-soft) 74%, var(--accent-border));
   stroke: var(--accent);
 }
 
@@ -200,9 +264,16 @@ svg {
   stroke: var(--warn);
 }
 
+.k12-node--focus .k12-node-body {
+  fill: color-mix(in srgb, var(--accent-soft) 60%, var(--surface));
+  stroke: var(--accent);
+  stroke-width: calc(var(--k12-stroke) + 1.4);
+}
+
 .k12-node-label {
   fill: var(--ink);
   font-size: var(--k12-fs-node);
+  font-weight: 700;
 }
 
 .k12-node--accent .k12-node-label {
@@ -267,12 +338,13 @@ svg {
 
 .k12-bubble--accent .k12-bubble-body,
 .k12-bubble--accent .k12-bubble-tail {
-  fill: var(--accent-soft);
+  fill: color-mix(in srgb, var(--accent-soft) 72%, var(--accent-border));
   stroke: var(--accent);
 }
 
+/* 缝合线必须与气泡的填充同色（它是那条共用边的补笔），改填充就得一起改。 */
 .k12-bubble--accent .k12-bubble-tail-seam {
-  stroke: var(--accent-soft);
+  stroke: color-mix(in srgb, var(--accent-soft) 72%, var(--accent-border));
 }
 
 .k12-link-line {
@@ -316,11 +388,13 @@ svg {
 .k12-readout-label {
   fill: var(--muted);
   font-size: var(--k12-fs-readout-label);
+  letter-spacing: 0.05em;
 }
 
 .k12-readout-value {
   fill: var(--accent-ink);
   font-size: var(--k12-fs-readout-value);
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", "Courier New", monospace;
 }
@@ -330,8 +404,8 @@ svg {
   font-size: var(--k12-fs-axis);
 }
 
-/* 绘图区（坐标图 / 循环跑道）：**只描边不填充**，它是一条轨道而不是一个盒子。
- * 自动布局把它当成一条「占位记录」（不许压住别的东西），但不是实心图形 ——
+/* 绘图区（坐标图 / 循环跑道）：只描边不填充，它是一条轨道而不是一个盒子。
+ * 自动布局把它当成一条「占位记录」（不许压住别的东西），但不是实心图形；
  * 所以它没有 fill，走虚线描边，两种皮肤下都成立（颜色由 --k12-* 变量给）。 */
 .k12-plot {
   fill: none;
@@ -343,4 +417,5 @@ svg {
   stroke: var(--accent-border);
   stroke-width: calc(var(--k12-stroke) + 1.2);
   stroke-dasharray: 7 6;
+  stroke-linecap: round;
 }

@@ -306,10 +306,19 @@
    * illustrated：慢、带一点回弹（easeOutBack）、相位之间停得久 —— 小学要「看得清、跟得上」；
    * technical  ：快、克制（easeInOutQuad）、停顿短 —— 中学要「密度高、不拖沓」。
    * 这两种气质是产品要求（小学插画化 / 中学工程化），不是随手选的参数。
+   *
+   * ★ holdMs 是「这一相位演完之后、下一相位开始之前」的空档，也就是学生盯着这一屏
+   *   正文（节点 + 字幕）的时间。它必须够读完一句话：一个相位的可见时间大约是
+   *   duration + holdMs，两档都按「不少于 1.2 秒」定（插画档 1.6 秒上下，工程档贴着 1.2 秒）。
+   *   原来 620 / 380 两档，工程档只有 0.84 秒，中学的相位正文（常带数字与标签）根本读不完，
+   *   看着就像「一闪而过」。所以这里只加了 holdMs，duration 的分档（慢 / 快）一个字没动。
+   *
+   * ⚠️ preset-content/_meta/gen_animations.py 的 MOTION 是这两个数的副本（它用它估 duration_ms）。
+   *   那边跟着改了，DURATION_RANGES 的区间也得一起看一眼。
    */
   var MOTION_PRESETS = {
-    illustrated: { duration: 720, easing: 'easeOutBack', stagger: 140, holdMs: 620 },
-    technical: { duration: 460, easing: 'easeInOutQuad', stagger: 90, holdMs: 380 }
+    illustrated: { duration: 720, easing: 'easeOutBack', stagger: 140, holdMs: 880 },
+    technical: { duration: 460, easing: 'easeInOutQuad', stagger: 90, holdMs: 740 }
   }
 
   var MOTION = (function () {
@@ -521,11 +530,26 @@
     return element
   }
 
-  /** 箭头（默认朝 +x；rotation 是角度）。用路径而不是 marker：marker 的配色没法跟着 CSS 类走。 */
-  function arrowHead(className, x, y, rotation) {
+  /*
+   * 箭头（默认朝 +x；rotation 是角度）。用路径而不是 marker：marker 的配色没法跟着 CSS 类走。
+   *
+   * length / halfWidth 由调用方按「线宽」给：坐标轴是 1.7 的细线，连接线是 --k12-stroke，
+   * 粗管道是 9。一套尺寸套在所有线宽上，细线上显笨重、粗管道上又被吞掉，所以分档。
+   * 默认值是细线那一档；轴的箭头更钝一点（刻度感），链接的箭头更尖（指向感）。
+   *
+   * 三角形背后那条边往尖端收了 0.16 倍（不是一根平直的竖边）：箭头的两腰因此更长，
+   * 同样长度下看着更锐，也不再是「一个等腰三角形贴在线上」那种示意图形。
+   */
+  function arrowHead(className, x, y, rotation, length, halfWidth) {
+    var size = numberOf(length, 11)
+    var half = numberOf(halfWidth, 4.2)
+    var backX = -size * 0.84
     var element = Sandbox.svgEl('path')
     element.setAttribute('class', className)
-    element.setAttribute('d', 'M 0 0 L -13 -5.5 L -13 5.5 Z')
+    element.setAttribute(
+      'd',
+      'M 0 0 L ' + -size + ' ' + -half + ' L ' + backX + ' 0 L ' + -size + ' ' + half + ' Z'
+    )
     element.setAttribute('transform', 'translate(' + x + ' ' + y + ') rotate(' + rotation + ')')
     return element
   }
@@ -607,11 +631,13 @@
     var group = Sandbox.svgEl('g')
     group.setAttribute('class', 'k12-grid')
     var index
-    for (index = 0; index <= columns; index += 1) {
+    // 只画内部格线：最外那两条与下面的 k12-grid-frame 完全重合，画两遍只是把一条线描粗
+    // （还让「边框」有了两种线端）。网格因此是「框 + 里面的格子」，与刻度纸的样子一致。
+    for (index = 1; index < columns; index += 1) {
       var columnX = x + (width * index) / columns
       group.appendChild(svgLine('k12-grid-line', columnX, y, columnX, y + height))
     }
-    for (index = 0; index <= rows; index += 1) {
+    for (index = 1; index < rows; index += 1) {
       var rowY = y + (height * index) / rows
       group.appendChild(svgLine('k12-grid-line', x, rowY, x + width, rowY))
     }
@@ -640,16 +666,18 @@
     var right = x + width
     group.appendChild(svgLine('k12-axis-line', x, bottom, right, bottom))
     group.appendChild(svgLine('k12-axis-line', x, bottom, x, y))
-    group.appendChild(arrowHead('k12-axis-arrow', right, bottom, 0))
-    group.appendChild(arrowHead('k12-axis-arrow', x, y, -90))
+    // 轴箭头比连接线的钝一点、也长一点：轴是「量尺」的一端，箭头太尖会像在指方向
+    group.appendChild(arrowHead('k12-axis-arrow', right, bottom, 0, 13, 5.2))
+    group.appendChild(arrowHead('k12-axis-arrow', x, y, -90, 13, 5.2))
     var index
+    // 刻度长 6（原来 5）：与 1.7 的轴线摆在一起读得出「有刻度」，又不至于像一段网格线
     for (index = 1; index < 5; index += 1) {
       var tickX = x + (width * index) / 5
-      group.appendChild(svgLine('k12-axis-tick', tickX, bottom, tickX, bottom + 5))
+      group.appendChild(svgLine('k12-axis-tick', tickX, bottom, tickX, bottom + 6))
     }
     for (index = 1; index < 4; index += 1) {
       var tickY = bottom - (height * index) / 4
-      group.appendChild(svgLine('k12-axis-tick', x - 5, tickY, x, tickY))
+      group.appendChild(svgLine('k12-axis-tick', x - 6, tickY, x, tickY))
     }
     if (opts.xLabel) {
       paintText(group, String(opts.xLabel), {
@@ -760,7 +788,13 @@
       height = needed
       body.setAttribute('height', String(height))
     }
-    var top = y + height / 2 - (labelHeight + gap + subHeight) / 2
+    // ★ 文字块的高度只用「真的会画出来的那几行」算：
+    //   metrics.midGap 是主副两行之间的间隔，只有两行都在时它才该进这个总高。
+    //   只有副标题（没有主标题）时它仍然占着位置，等于把副标题往下推半个 gap，
+    //   看着就不是居中（盒子被内容撑高之后尤其明显）。这里只改居中用的算式，
+    //   nodeMetrics 一个数都没动（生成器侧照同一套预留尺寸）。
+    var textGap = label && sub ? gap : 0
+    var top = y + height / 2 - (labelHeight + textGap + subHeight) / 2
     var labelElement = null
     if (label) {
       labelElement = paintText(group, label, {
@@ -778,7 +812,7 @@
       subElement = paintText(group, sub, {
         className: 'k12-node-sub',
         x: x + width / 2,
-        y: top + labelHeight + gap + subHeight / 2,
+        y: top + labelHeight + textGap + subHeight / 2,
         maxWidth: innerWidth,
         fontSize: subSize,
         minFontSize: 10,
@@ -845,6 +879,30 @@
     head.setAttribute('height', '26')
     head.setAttribute('rx', '13')
     group.appendChild(head)
+    /*
+     * 脸：只有插画皮肤画（工程皮肤是克制的示意体，点与弧会把它变成卡通，不该出现）。
+     *
+     * ★ 一根线也不新增：眼睛与笑都用既有的 k12-actor-limb。那条规则在 skins.css 里
+     *   已经是「圆头收笔」，于是一段极短的线就落成一个圆点（眼睛），一条下凹的二次曲线
+     *   就是笑。颜色 / 线宽 / 收笔形状全部由 skins.css 说了算，这里只给坐标。
+     *   （顺带说明为什么只画在插画皮肤：工程皮肤那条规则把收笔改成方头，
+     *   同样的短段会变成小方块，脸就散了。）
+     *
+     * ★ 位置写进元素自己的几何属性（x1 / y1 / d），脸上不套任何 transform：
+     *   与人物那套「位置与动画分两层」是同一个道理（见 layout() 里 seat / pivot 的注释）。
+     *   anime 的 scale / translate 写的是 style.transform，会整段盖掉元素自己的 transform
+     *   属性；把坐标留在属性上，将来谁给眼睛加个眨眼的缩放都不会把它弹回原点。
+     */
+    if (SKIN === 'illustrated') {
+      // 眼睛：头从 -92 到 -66，中点是 -79，双眼落在中点稍上一点
+      group.appendChild(limb(-4.3, -83.4, -4.3, -83.2))
+      group.appendChild(limb(4.3, -83.4, 4.3, -83.2))
+      // 笑：一条下凹的弧（控制点拉在两端连线的下方），比几段折线拼出来的自然
+      var smile = Sandbox.svgEl('path')
+      smile.setAttribute('class', 'k12-actor-limb')
+      smile.setAttribute('d', 'M -5.2 -75 Q 0 -71 5.2 -75')
+      group.appendChild(smile)
+    }
     // 手
     if (pose === 'point') {
       group.appendChild(limb(12, -58, 38, -66))
@@ -958,24 +1016,55 @@
     group.appendChild(body)
 
     if (tail !== 'none') {
-      var firstX = tail === 'right' ? x + boxWidth - 32 : x + 14
-      var secondX = firstX + 18
-      var tipX = tail === 'right' ? x + boxWidth - 4 : x + 4
+      /*
+       * 尾巴几何。
+       *
+       * ★ 基准边（贴在框底的那条）要让开圆角的「弧段」再起：让开的距离跟着面板圆角走
+       *   （插画皮肤 18，工程皮肤 6，见 skins.css 的 --k12-radius-panel）。原来写死 14，
+       *   而插画皮肤的圆角是 18，于是这条基准边正落在圆弧上，缝合线一横抹过去就把框底
+       *   那圈描边擦出一道缺口（整条框底看起来断了一截）。取 max(14, 圆角 + 2)，两个皮肤都成立。
+       *
+       * ★ 尾巴的「占位」一个数都没变：尖端仍在框底下方 14（与 bubbleMetrics 的 tailRoom 同源，
+       *   生成器侧照它预留高度）。变的只是这道三角的形状：基准边收到 18，离框角远的那条长边
+       *   走一段浅弧（手绘感，不再是尺子画的直角三角形），基准边整体抬进框里 0.4，
+       *   好让自己那圈描边被缝合线盖干净（原来两端各露 1.5 的一小截双描边）。
+       */
       var bottomY = y + boxHeight
+      var panelRadius = scaleVariable('--k12-radius-panel', 14)
+      var baseInset = Math.max(14, panelRadius + 2)
+      var baseWidth = 18
+      // 靠近框角那条底边叫 nearX，离尖端远的那条叫 farX
+      var nearX = tail === 'right' ? x + boxWidth - baseInset - baseWidth : x + baseInset
+      var farX = nearX + baseWidth
+      var tipX = tail === 'right' ? x + boxWidth - 5 : x + 5
+      var baseY = bottomY - 0.4
+      var tipY = bottomY + 14
+      // 长边（farX 到尖端）弯一点：控制点朝尖端一侧拉，弧往外鼓，看着是「吹出来」而不是「切下来」
+      var lean = Math.abs(farX - tipX)
+      var controlX = tipX + (tipX > farX ? -1 : 1) * lean * 0.3
       var path = Sandbox.svgEl('path')
       path.setAttribute('class', 'k12-bubble-tail')
       path.setAttribute(
         'd',
-        'M ' + firstX + ' ' + bottomY + ' L ' + secondX + ' ' + bottomY + ' L ' + tipX + ' ' + (bottomY + 14) + ' Z'
+        'M ' + nearX + ' ' + baseY + ' L ' + farX + ' ' + baseY +
+          ' Q ' + controlX + ' ' + (baseY + (tipY - baseY) * 0.5) + ' ' + tipX + ' ' + tipY + ' Z'
       )
       group.appendChild(path)
-      // 缝合线：把尾巴与框共享的那条边盖掉（否则框底会横穿尾巴）
-      group.appendChild(svgLine('k12-bubble-tail-seam', firstX + 1.5, bottomY, secondX - 1.5, bottomY))
+      // 缝合线：把尾巴与框共享的那条边盖掉（否则框底会横穿尾巴）。
+      // 一直盖到基准边的两端（只各留 0.5，免得把尾巴外沿的描边也抹掉）。
+      group.appendChild(svgLine('k12-bubble-tail-seam', nearX + 0.5, bottomY, farX - 0.5, bottomY))
     }
+    /*
+     * 文字在框里居中（框高本身就是「行数 x 行高 + 上下内边距」，所以不用再算边距）。
+     *
+     * 唯一的光学补偿：带尾巴时，框底下面还多出一截 14 高的三角，整块形状的重心偏下，
+     * 文字按几何居中看着就像「贴着下沿」。所以有尾巴时把正文整体抬 1.5（不涉及字号与折行，
+     * 折行与测量一个数都没动）。
+     */
     paintText(group, text, {
       className: 'k12-bubble-text',
       x: x + boxWidth / 2,
-      y: y + boxHeight / 2,
+      y: y + boxHeight / 2 - (tail === 'none' ? 0 : 1.5),
       maxWidth: Math.max(60, boxWidth - pad * 2),
       fontSize: scaleVariable('--k12-fs-bubble', 15),
       minFontSize: 10.5,
@@ -1064,12 +1153,23 @@
     }
     var angle = Math.atan2(end.y - start.y, end.x - start.x)
     var directed = !!opts.directed
-    var stop = directed
-      ? { x: end.x - Math.cos(angle) * 11, y: end.y - Math.sin(angle) * 11 }
-      : end
+    // 箭头的尺寸跟着线宽分档（见 arrowHead 的说明）：粗管道那一档大，细实线与虚线那一档小
+    var headSize = style === 'pipe' ? 14 : style === 'dashed' ? 10 : 11
+    var headHalf = style === 'pipe' ? 5.4 : style === 'dashed' ? 3.8 : 4.2
+    // 线在箭头的「尾沿」之前收住（原来的 11 是按 13 长的箭头调的；箭头一变小，
+    // 那个缺口就会露到箭头外面，看成一截没接上的短线）
+    var stop
+    if (directed) {
+      var gap = headSize - 1.8
+      stop = { x: end.x - Math.cos(angle) * gap, y: end.y - Math.sin(angle) * gap }
+    } else {
+      stop = end
+    }
     group.appendChild(svgLine('k12-link-line', start.x, start.y, stop.x, stop.y))
     if (directed) {
-      group.appendChild(arrowHead('k12-link-arrow', end.x, end.y, (angle * 180) / Math.PI))
+      group.appendChild(
+        arrowHead('k12-link-arrow', end.x, end.y, (angle * 180) / Math.PI, headSize, headHalf)
+      )
     }
     var label = opts.label == null ? '' : String(opts.label)
     if (label) {
@@ -1136,6 +1236,16 @@
     }
   }
 
+  /*
+   * central 基线大约比字面的视觉中心低多少（em）。
+   *
+   * 本文件的文字都按 dominant-baseline: central 画（对中文是最准的一档：字面上下对称）。
+   * 只有读数框里的单位想要另一件事：压在数字的「基线」上，读起来才像「3 次」，
+   * 而不是一个飘在数字半腰的小字。要把单位的基线对到数字的基线上，就得把两条
+   * central 基线之差补回来，这个差值约等于 0.36em（数字字号与单位字号之差乘上它）。
+   */
+  var CENTRAL_BASELINE_DROP = 0.36
+
   /** 数值读数：标签 + 等宽数字 + 单位（工程皮肤的主力，插画皮肤当记分牌）。 */
   function readout(options) {
     var opts = options || {}
@@ -1153,6 +1263,13 @@
     var unit = opts.unit == null ? '' : String(opts.unit)
 
     if (metrics.needed > height) height = metrics.needed
+    /*
+     * 内容整块垂直居中：盒子被子带（或邻居）拉高时，标签与数字不该贴着上沿，
+     * 否则下面空一大片，读数看着像没对齐。高度恰好够用时这里就是 pad，
+     * 与「贴着上沿 + pad」完全等价，所以短盒子一个像素都没动。
+     */
+    var contentHeight = metrics.labelHeight + metrics.midGap + metrics.valueHeight
+    var contentTop = y + (height - contentHeight) / 2
     var group = Sandbox.svgEl('g')
     group.setAttribute('class', 'k12-readout')
     var back = Sandbox.svgEl('rect')
@@ -1168,7 +1285,7 @@
         className: 'k12-readout-label',
         anchor: 'start',
         x: x + pad,
-        y: y + pad + metrics.labelHeight / 2,
+        y: contentTop + metrics.labelHeight / 2,
         maxWidth: width - pad * 2,
         fontSize: labelSize,
         minFontSize: 9.5,
@@ -1177,7 +1294,7 @@
     }
     // ★ 数值的**顶部**顶在标签底部之下（不是「距底边往上量」）：写死高度时的那种
     //   算法会让 27px 的数字往上吃掉标签 —— 两串字叠在一起，两个都读不出。
-    var valueTop = y + pad + metrics.labelHeight + metrics.midGap
+    var valueTop = contentTop + metrics.labelHeight + metrics.midGap
     var valueY = valueTop + metrics.valueHeight / 2
     var valueElement = null
     var unitElement = null
@@ -1206,7 +1323,16 @@
       })
       var used = measuredWidth(valueElement)
       if (used <= 0) used = estimatedWidth(text, valueSize)
-      if (unitElement) unitElement.setAttribute('x', String(x + pad + used + 5))
+      if (unitElement) {
+        // 单位落在数字的基线上（见 CENTRAL_BASELINE_DROP 的说明）。数字若被缩过号，
+        // 就从画好的元素上把真实字号读回来，免得基线越缩越对不齐。
+        var paintedSize = numberOf(
+          valueElement && valueElement.style ? parseFloat(valueElement.style.fontSize) : NaN,
+          valueSize
+        )
+        unitElement.setAttribute('x', String(x + pad + used + 5))
+        unitElement.setAttribute('y', String(valueY + (paintedSize - unitSize) * CENTRAL_BASELINE_DROP))
+      }
       return group
     }
     renderValue(opts.value == null ? '' : opts.value)

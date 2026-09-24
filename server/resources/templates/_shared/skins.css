@@ -113,27 +113,36 @@
 /* ==== 生成区结束 ==== */
 
 /* ==========================================================================
- * 皮肤与舞台基元（手写区，由生成器原样写出 —— 要改请改生成器）
+ * 皮肤与舞台基元（手写区，由生成器原样写出，要改请改生成器）
  *
- * 两种皮肤（illustrated / technical）**共用同一套结构类**，差别全部落在下面这些
+ * 两种皮肤（illustrated / technical）共用同一套结构类，差别全部落在下面这些
  * 规则里；舞台基元脚本（_shared/runtime.js）不写任何色值与字号，只挂类名。
  * 所以「一份代码、两种皮肤」这条纪律是靠本文件成立的。
  *
+ * 两种质感各有一条主线：
+ *   illustrated（小学）：绘本场景。大字号 / 大圆角 / 软而大的投影 / 装饰层可见。
+ *   technical（初中、高中）：工程蓝图绘本。克制精确、小而紧的投影，氛围靠刻度纸
+ *                            与框架撑住，装饰层一律收隐。
+ * 层级：标题锁版醒目、字幕可读、焦点元素在视觉上跳出来。
+ *
  * 命名：基元类统一 k12- 前缀（与设计令牌 --k12-* 同族），BEM 修饰符用 --。
+ * 颜色纪律：本段一个裸色值都不许写，一律 var() 或 color-mix() 派生。
  * ========================================================================== */
 
 /* ---- 皮肤级刻度：字号 / 圆角 / 线宽 / 内边距（runtime.js 会读它们做折行与测量） ---- */
 :root[data-skin="illustrated"] {
-  --k12-fs-node: 19px;
-  --k12-fs-node-sub: 14px;
+  --k12-fs-title: 22px;
+  --k12-fs-caption: 14.5px;
+  --k12-fs-node: 20px;
+  --k12-fs-node-sub: 14.5px;
   --k12-fs-link: 13.5px;
-  --k12-fs-bubble: 16.5px;
+  --k12-fs-bubble: 17px;
   --k12-fs-actor: 13px;
   --k12-fs-readout-label: 12.5px;
-  --k12-fs-readout-value: 27px;
+  --k12-fs-readout-value: 28px;
   --k12-fs-axis: 13px;
-  --k12-radius-node: 18px;
-  --k12-radius-panel: 18px;
+  --k12-radius-node: 20px;
+  --k12-radius-panel: 20px;
   --k12-radius-head: 13px;
   --k12-radius-body: 12px;
   --k12-stroke: 2.6;
@@ -141,13 +150,15 @@
 }
 
 :root[data-skin="technical"] {
+  --k12-fs-title: 17px;
+  --k12-fs-caption: 13.5px;
   --k12-fs-node: 16px;
-  --k12-fs-node-sub: 12px;
-  --k12-fs-link: 12.5px;
-  --k12-fs-bubble: 14.5px;
-  --k12-fs-actor: 12px;
+  --k12-fs-node-sub: 12.5px;
+  --k12-fs-link: 13px;
+  --k12-fs-bubble: 15px;
+  --k12-fs-actor: 12.5px;
   --k12-fs-readout-label: 11.5px;
-  --k12-fs-readout-value: 24px;
+  --k12-fs-readout-value: 25px;
   --k12-fs-axis: 12px;
   --k12-radius-node: 5px;
   --k12-radius-panel: 6px;
@@ -157,34 +168,39 @@
   --k12-pad: 13px;
 }
 
-/* ---- 外壳（标题 / 字幕 / 步骤条）—— 旧选择器一个都没改名，只加了皮肤刻度 ---- */
+/* ---- 外壳（标题 / 字幕 / 步骤条），旧选择器一个都没改名，只加了皮肤刻度 ---- */
 :root[data-skin="illustrated"] .anim-title {
-  font-size: 15.5px;
-  letter-spacing: 0.01em;
+  font-size: var(--k12-fs-title);
+  font-weight: 700;
+  letter-spacing: 0.005em;
 }
 
 :root[data-skin="technical"] .anim-title {
-  font-size: 14px;
+  font-size: var(--k12-fs-title);
+  font-weight: 700;
   letter-spacing: 0;
 }
 
 :root[data-skin="illustrated"] .anim-caption {
-  line-height: 1.72;
+  font-size: var(--k12-fs-caption);
+  line-height: 1.75;
 }
 
 :root[data-skin="technical"] .anim-caption {
-  line-height: 1.5;
+  font-size: var(--k12-fs-caption);
+  line-height: 1.55;
 }
 
 :root[data-skin="illustrated"] .chip {
   border-radius: 999px;
   padding: 3px 11px;
+  letter-spacing: 0.02em;
 }
 
 :root[data-skin="technical"] .chip {
   border-radius: 4px;
-  padding: 2px 9px;
-  letter-spacing: 0.02em;
+  padding: 3px 9px;
+  letter-spacing: 0.06em;
   font-variant-numeric: tabular-nums;
 }
 
@@ -193,11 +209,14 @@
   display: block;
 }
 
+/* 绘本底板：边框比节点淡一档，只用来收住舞台，不抢主体。 */
 .k12-stage-bg {
   fill: var(--surface);
-  stroke: none;
+  stroke: color-mix(in srgb, var(--accent-border) 45%, var(--surface));
+  stroke-width: 1;
 }
 
+/* 工程底板：实边收得紧，刻度纸的格框由下面的 grid-frame 给。 */
 :root[data-skin="technical"] .k12-stage-bg {
   stroke: var(--accent-border);
   stroke-width: 1;
@@ -209,7 +228,7 @@
 }
 
 :root[data-skin="technical"] .k12-grid {
-  opacity: 0.8;
+  opacity: 0.7;
 }
 
 .k12-grid-line {
@@ -221,6 +240,13 @@
   fill: none;
   stroke: var(--accent-border);
   stroke-width: 1;
+}
+
+/* 工程皮肤的刻度纸感：外框压深一档、走长虚线，像图框而不是卡片边。 */
+:root[data-skin="technical"] .k12-grid-frame {
+  stroke: color-mix(in srgb, var(--accent-border) 78%, var(--muted));
+  stroke-width: 1.2;
+  stroke-dasharray: 14 6;
 }
 
 .k12-axis-line {
@@ -249,6 +275,64 @@
   font-size: var(--k12-fs-axis);
 }
 
+/* ---- 深度：投影只挂在组容器上（g.k12-node / g.k12-bubble / g.k12-readout），
+        不给每个子形状加、也不给网格与轴线加（否则既脏又慢）。
+        插画大而软、工程小而紧，两种皮肤的立体感都从这一处来。 ---- */
+:root[data-skin="illustrated"] .k12-node,
+:root[data-skin="illustrated"] .k12-bubble,
+:root[data-skin="illustrated"] .k12-readout {
+  filter: drop-shadow(0 3px 4px color-mix(in srgb, var(--ink) 9%, transparent));
+}
+
+:root[data-skin="technical"] .k12-node,
+:root[data-skin="technical"] .k12-bubble,
+:root[data-skin="technical"] .k12-readout {
+  filter: drop-shadow(0 1px 1.5px color-mix(in srgb, var(--ink) 8%, transparent));
+}
+
+/* ---- 装饰层（绘本场景：地面 / 太阳 / 云 / 小丘）
+        生成器负责画并挂类名，本文件负责颜色与显隐。插画皮肤里都看得见；
+        工程皮肤靠 opacity 收隐（比 display 稳，避免测量侧拿到零尺寸）。 ---- */
+.k12-decor-ground {
+  fill: color-mix(in srgb, var(--surface-2) 82%, var(--accent-border));
+  stroke: none;
+  rx: 18px;
+}
+
+:root[data-skin="technical"] .k12-decor-ground {
+  opacity: 0;
+}
+
+.k12-decor-sun {
+  fill: var(--accent-soft);
+  stroke: none;
+  opacity: 0.55;
+}
+
+:root[data-skin="technical"] .k12-decor-sun {
+  opacity: 0;
+}
+
+.k12-decor-cloud {
+  fill: color-mix(in srgb, var(--surface) 70%, var(--accent-soft) 30%);
+  stroke: none;
+  opacity: 0.85;
+}
+
+:root[data-skin="technical"] .k12-decor-cloud {
+  opacity: 0;
+}
+
+.k12-decor-hill {
+  fill: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
+  stroke: none;
+  opacity: 0.95;
+}
+
+:root[data-skin="technical"] .k12-decor-hill {
+  opacity: 0;
+}
+
 /* ---- 节点（rounded rect + 居中文字） ---- */
 .k12-node-body {
   fill: var(--surface);
@@ -257,9 +341,11 @@
   rx: var(--k12-radius-node);
 }
 
+/* 强调节点：填充朝主色浅调压深一档，描边再加重一点，和普通面拉开距离。 */
 .k12-node--accent .k12-node-body {
-  fill: var(--accent-soft);
+  fill: color-mix(in srgb, var(--accent-soft) 74%, var(--accent-border));
   stroke: var(--accent);
+  stroke-width: calc(var(--k12-stroke) + 0.2);
 }
 
 .k12-node--muted .k12-node-body {
@@ -268,19 +354,33 @@
 }
 
 .k12-node--warn .k12-node-body {
-  fill: var(--surface-2);
   fill: color-mix(in srgb, var(--warn) 14%, var(--surface));
   stroke: var(--warn);
 }
 
+/* 焦点：填充微亮 + 描边加粗 + 投影加深一档，「现在看这里」两种皮肤下都要跳出来。 */
 .k12-node--focus .k12-node-body {
+  fill: color-mix(in srgb, var(--accent-soft) 60%, var(--surface));
   stroke: var(--accent);
   stroke-width: calc(var(--k12-stroke) + 1.4);
+}
+
+:root[data-skin="illustrated"] .k12-node--focus {
+  filter: drop-shadow(0 5px 9px color-mix(in srgb, var(--accent-ink) 24%, transparent));
+}
+
+:root[data-skin="technical"] .k12-node--focus {
+  filter: drop-shadow(0 2px 3px color-mix(in srgb, var(--accent-ink) 26%, transparent));
 }
 
 .k12-node-label {
   fill: var(--ink);
   font-size: var(--k12-fs-node);
+  font-weight: 700;
+}
+
+/* 工程皮肤的字重收一档：700 在细网格里显得吵。 */
+:root[data-skin="technical"] .k12-node-label {
   font-weight: 650;
 }
 
@@ -337,7 +437,7 @@
   stroke-linejoin: miter;
 }
 
-/* ---- 气泡 ---- */
+/* ---- 气泡（描边比节点细一档：插画皮肤的大圆角已经够重了） ---- */
 .k12-bubble-body {
   fill: var(--surface);
   stroke: var(--accent-border);
@@ -351,15 +451,17 @@
   stroke-width: 1.6;
 }
 
+/* 缝合线比描边宽一圈，才盖得住尾巴与本体那条共用边。 */
 .k12-bubble-tail-seam {
   fill: none;
   stroke: var(--surface);
-  stroke-width: 2.6;
+  stroke-width: 2.8;
 }
 
 .k12-bubble-text {
   fill: var(--ink);
   font-size: var(--k12-fs-bubble);
+  font-weight: 550;
 }
 
 .k12-bubble--narrator .k12-bubble-body,
@@ -372,14 +474,18 @@
   stroke: var(--surface-2);
 }
 
+/* 强调气泡：填充朝主色浅调压深一档，比普通气泡更抢眼。 */
 .k12-bubble--accent .k12-bubble-body,
 .k12-bubble--accent .k12-bubble-tail {
-  fill: var(--accent-soft);
+  fill: color-mix(in srgb, var(--accent-soft) 72%, var(--accent-border));
   stroke: var(--accent);
+  stroke-width: 1.8;
 }
 
+/* 缝合线必须与气泡填充同色（它是那条共用边的补笔），改填充就得一起改。 */
 .k12-bubble--accent .k12-bubble-tail-seam {
-  stroke: var(--accent-soft);
+  stroke: color-mix(in srgb, var(--accent-soft) 72%, var(--accent-border));
+  stroke-width: 3;
 }
 
 /* ---- 连接线 ---- */
@@ -412,6 +518,11 @@
   stroke-linecap: round;
 }
 
+/* 工程皮肤的管道收成平口：圆头在网格里显得软。 */
+:root[data-skin="technical"] .k12-link-pipe {
+  stroke-linecap: butt;
+}
+
 .k12-link--pipe .k12-link-line {
   stroke-width: 2;
 }
@@ -419,7 +530,7 @@
 .k12-link-label {
   fill: var(--accent-ink);
   font-size: var(--k12-fs-link);
-  font-weight: 600;
+  font-weight: 650;
 }
 
 .k12-link-label-bg {
@@ -427,7 +538,19 @@
   opacity: 0.94;
 }
 
-/* ---- 数值读数（工程皮肤的主力；插画皮肤里当「记分牌」用） ---- */
+/* ---- 轨道（循环跑道 / 绘图区）：虚线节奏按皮肤分档，跑道的圆头只留给插画 ---- */
+:root[data-skin="illustrated"] .k12-track {
+  stroke-dasharray: 7 6;
+  stroke-linecap: round;
+}
+
+:root[data-skin="technical"] .k12-track {
+  stroke-dasharray: 11 5;
+  stroke-linecap: butt;
+}
+
+/* ---- 数值读数（工程皮肤的主力；插画皮肤里当「记分牌」用）
+         label 与 value 的字号差拉大、value 加粗，读数一眼可辨。 ---- */
 .k12-readout-bg {
   fill: var(--surface-2);
   stroke: var(--accent-border);
@@ -438,12 +561,14 @@
 .k12-readout-label {
   fill: var(--muted);
   font-size: var(--k12-fs-readout-label);
-  letter-spacing: 0.04em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
 }
 
 .k12-readout-value {
   fill: var(--accent-ink);
   font-size: var(--k12-fs-readout-value);
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", "Courier New", monospace;
 }
@@ -451,4 +576,5 @@
 .k12-readout-unit {
   fill: var(--muted);
   font-size: var(--k12-fs-axis);
+  font-weight: 600;
 }
