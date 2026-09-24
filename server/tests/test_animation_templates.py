@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -45,6 +46,99 @@ REQUIRED_THEMES = ("排序", "神经网络", "决策树", "梯度下降", "循�
 
 #: 外部引用的判据（与 `resources.py` 的正则同源，测试里独立写一份做交叉验证）。
 EXTERNAL_RE = r"https?://|//cdn|unpkg|jsdelivr|cdnjs|googleapis|fonts\.gstatic"
+
+# --------------------------------------------------------------------------- #
+# 生成的 206 份（票 A2 重写后的那批）的质量判据
+#
+# ★ 为什么守卫认「生成的」而不是「全部 214 份」：8 份手作高保真模板（premium）是
+#   本票的**质量标尺**，不是被本票重写的对象 —— 它们的脚本用的是自己的 rAF 循环、
+#   自己的文案风格，有的（decision-tree）caption 里本来就带「…」。把它们一起扫，
+#   要么当场全红、要么就得给它们开豁免，而豁免会把守卫的判据稀释掉。
+#   所以判据的扫描面 = 带生成标记的那批，premium 的**质量**由人看（截图 + 评审）。
+# --------------------------------------------------------------------------- #
+
+#: 生成器写在脚本第一行的原型标记（`preset-content/_meta/gen_animations.py` 的契约）。
+GENERATED_MARKER_RE = re.compile(r"^/\* K12-ARCHETYPE ([a-z_]+) \| skin=([a-z]+) \*/", re.M)
+
+#: 生成器写在第二行的相位数声明：`/* k12:phases min=<最少> default=<默认> */`。
+#: 相位数是 JS 字面量时用它，是表达式（`COUNT + 2`）时守卫照**这个声明**判 ——
+#: 声明与真实表达式的一致性由 `preset-content/_meta/gen_animations.py` 自己的断言兜住
+#: （`build_by_kp()` 里 `phases_expr` 就是 `ARCHETYPES[..]["phases"]` 的第二项）。
+PHASES_MARKER_RE = re.compile(r"/\* k12:phases min=(\d+) default=(\d+) \*/")
+
+#: 学段 → 皮肤（**只读**：真源在 `server/app/routes/resources.py::GRADE_TO_SKIN`）。
+ILLUSTRATED_GRADES = ("primary_low", "primary_high")
+
+#: 相位下限：插画系（小学）≥ 4，工程系（中学）≥ 5 —— 用户抱怨的原话是「放几个方框、
+#: 渐入渐出就草草了事」，4/5 是「有过程可看」的地板，不是目标值（实际 min 见报告）。
+MIN_PHASES = {"illustrated": 4, "technical": 5}
+
+#: 每（原型 × 皮肤）的 duration_ms 允许区间 —— **独立副本**（守卫不许读生成器的输出）。
+#: ⚠️ 与 `preset-content/_meta/gen_animations.py::DURATION_RANGES` 必须逐字一致：
+#: 那张表改了这里不改，本守卫会红；这里改了那边不改，生成器自己的断言会红。
+DURATION_RANGES: dict[tuple[str, str], tuple[int, int]] = {
+    ("scene", "illustrated"): (6800, 9200),
+    ("dialogue", "illustrated"): (6800, 9200),
+    ("contrast_kid", "illustrated"): (6600, 9000),
+    ("accumulate_kid", "illustrated"): (6600, 9000),
+    ("checklist_kid", "illustrated"): (6600, 9000),
+    ("flow", "technical"): (4000, 6400),
+    ("compare", "technical"): (3800, 6200),
+    ("layers", "technical"): (4000, 6400),
+    ("loop", "technical"): (4400, 12000),
+    ("tree", "technical"): (4400, 7200),
+    ("network", "technical"): (4800, 7600),
+    ("matrix", "technical"): (4200, 7000),
+    ("trace", "technical"): (5400, 9600),
+    ("counter", "technical"): (4000, 7200),
+    ("scene", "technical"): (4400, 7000),
+    ("dialogue", "technical"): (4400, 7000),
+    ("contrast_kid", "technical"): (4200, 6800),
+    ("accumulate_kid", "technical"): (4200, 6800),
+    ("checklist_kid", "technical"): (4200, 6800),
+    ("flow", "illustrated"): (6600, 9200),
+    ("compare", "illustrated"): (6600, 9200),
+    ("layers", "illustrated"): (6600, 9200),
+    ("loop", "illustrated"): (7000, 18000),
+    ("tree", "illustrated"): (7000, 9600),
+    ("network", "illustrated"): (7400, 11000),
+    ("matrix", "illustrated"): (7000, 9600),
+    ("trace", "illustrated"): (7400, 13000),
+    ("counter", "illustrated"): (6800, 9600),
+}
+
+#: 可以出现的可动画属性（至少要凑够两种 —— 「只渐变不变化」正是被投诉的那种动画）。
+ANIMATABLE_PROPS = (
+    "opacity",
+    "scale",
+    "translateX",
+    "translateY",
+    "stroke",
+    "strokeWidth",
+    "rotate",
+)
+
+#: 色值字面量判据（与 `_meta/expand_templates.py` 同源）：颜色只许走 CSS 类与变量。
+RAW_COLOUR_RE = r"#[0-9a-fA-F]{3,8}\b|rgba?\("
+
+#: 学生面文案的禁忌标记（内容卫生守卫同款，本文件在**动画这一半**再盯一遍）。
+FORBIDDEN_MARKS = ("…", "...", "——", "**", "`")
+
+
+def _generated_templates() -> list:
+    """发货目录里**由生成器产出**的那 206 份（带 `K12-ARCHETYPE` 标记）。"""
+    return [
+        template
+        for template in R.load_templates(TEMPLATES_DIR)
+        if GENERATED_MARKER_RE.search(template.script)
+    ]
+
+
+def _phases_of(template) -> tuple[int, int]:
+    """(最少相位, 默认相位)：字面量取脚本里的真值，表达式取生成器的声明。"""
+    match = PHASES_MARKER_RE.search(template.script)
+    assert match, f"{template.id} 的脚本里没有相位数声明（生成器契约变了？）"
+    return int(match.group(1)), int(match.group(2))
 
 
 def _write_template(root: Path, payload: dict, name: str | None = None) -> Path:
@@ -656,6 +750,534 @@ class TestTemplateMatching(unittest.TestCase):
         for template in general:
             for level in R.GRADE_LEVELS:
                 self.assertTrue(R.template_usable_for(template, level))
+
+
+class TestGeneratedAnimationQuality(unittest.TestCase):
+    """★ A2 的质量守卫：206 份生成模板必须「真的在讲、真的在动」。
+
+    用户口径（原话）：「现在的内置的动画我看了都做的很潦草，不要草草放几个方框、放个
+    渐入渐出动效就草草了事，给 K12 的学生根本无法理解」，另外还有一条「动画得有审美，
+    而且确保根据学段也能切换」。
+
+    所以判据都是**结构性**的（能不能在 CI 上稳定跑），不掺像素比对：
+
+    1. 走真 anime.js 时间线（``Sandbox.timeline(``），不是 rAF + 线性 t；
+    2. 相位数够看：插画系 ≥ 4、工程系 ≥ 5；
+    3. 文案零省略号（节点永不截断是本票的产品口径）；
+    4. ``duration_ms`` 在（原型 × 皮肤）区间内，且不是全库一个数；
+    5. 每份至少两种可动画属性（只动不透明度 = 被投诉的那种）；
+    6. 没有裸色值（写死颜色 = 学段皮肤当场失效）；
+    7. **端到端**不截断：真渲染一份，节点标签的整句要能在产物里找到。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.templates = R.load_templates(TEMPLATES_DIR)
+        cls.generated = _generated_templates()
+        assert cls.generated, "一份生成的模板都没认出来（生成标记变了？）"
+
+    def test_生成模板确实在库里且占绝大多数(self) -> None:
+        """★ 守卫不许空转：认不出生成的模板时，下面按它遍历的断言会**全绿空跑**。"""
+        self.assertGreater(
+            len(self.generated), 200, f"只认出 {len(self.generated)} 份生成模板（应当是 206）"
+        )
+        self.assertGreater(
+            len(self.templates) - len(self.generated),
+            0,
+            "发货目录里应当还有手作高保真模板（它们是本票的质量标尺）",
+        )
+
+    def test_每份生成模板都走_anime_时间线(self) -> None:
+        """★ 不是 rAF 手搓进度：``Sandbox.timeline(N, builder)`` 才是真时间线（相位 + 停顿）。"""
+        for template in self.generated:
+            with self.subTest(template=template.id):
+                self.assertIn(
+                    "Sandbox.timeline(",
+                    template.script,
+                    f"{template.id} 没用 Sandbox.timeline（退回了手搓进度？）",
+                )
+                self.assertIn("Sandbox.motion", template.script, f"{template.id} 没取 Sandbox.motion")
+                self.assertNotIn(
+                    "requestAnimationFrame",
+                    template.script,
+                    f"{template.id} 里出现 requestAnimationFrame（旧写法回来了）",
+                )
+
+    def test_相位数够看(self) -> None:
+        """★ 插画系 ≥ 4 相位、工程系 ≥ 5 相位（用户抱怨的正是「两三个方框就完事」）。"""
+        for template in self.generated:
+            with self.subTest(template=template.id):
+                minimum, default = _phases_of(template)
+                skin = R.skin_for_grade(template.grade_levels[0])
+                # 头注释里的 skin= 必须与学段推出的皮肤一致（小学高年级用工程系原型时也一致）
+                header = GENERATED_MARKER_RE.search(template.script).group(2)
+                self.assertEqual(
+                    header,
+                    skin,
+                    f"{template.id} 头注释的 skin={header} 与学段 {template.grade_levels[0]} 推出的 {skin} 不符",
+                )
+                self.assertGreaterEqual(
+                    minimum,
+                    MIN_PHASES[skin],
+                    f"{template.id}（{skin}）最少只有 {minimum} 个相位，低于 {MIN_PHASES[skin]}",
+                )
+                self.assertGreaterEqual(
+                    default, minimum, f"{template.id} 的默认相位数 {default} 小于最少相位 {minimum}"
+                )
+
+    def test_文案里零省略号(self) -> None:
+        """★ 「永不截断」的第一道：可见文案与脚本里一个 `…` / `...` 都不许有。"""
+        for template in self.generated:
+            with self.subTest(template=template.id):
+                for field in ("body", "script", "title", "concept", "fallback_text", "label"):
+                    text = getattr(template, field)
+                    for mark in ("…", "..."):
+                        self.assertNotIn(
+                            mark,
+                            text,
+                            f"{template.id}.{field} 出现省略号「{mark}」（文案被截断了？）",
+                        )
+
+    def test_时长按原型与皮肤分档_不是全库一个数(self) -> None:
+        """★ 每份的 duration_ms 落在（原型 × 皮肤）的区间里，且**不是所有模板都一样**。"""
+        durations = [template.duration_ms for template in self.generated]
+        for template in self.generated:
+            with self.subTest(template=template.id):
+                match = GENERATED_MARKER_RE.search(template.script)
+                archetype = match.group(1)
+                skin = match.group(2)
+                self.assertIn(
+                    (archetype, skin),
+                    DURATION_RANGES,
+                    f"{template.id} 的原型组合 {(archetype, skin)} 不在区间表里（生成器加了新原型？）",
+                )
+                low, high = DURATION_RANGES[(archetype, skin)]
+                self.assertGreaterEqual(template.duration_ms, low, f"{template.id} 时长低于区间下界")
+                self.assertLessEqual(template.duration_ms, high, f"{template.id} 时长高于区间上界")
+
+        # 旧版是「一律 4800」；本票要求一概念一节奏（同原型同皮肤内也要有散布）
+        self.assertGreater(
+            len(set(durations)),
+            20,
+            f"206 份模板只有 {len(set(durations))} 种时长（退回了「全库一个数」？）",
+        )
+        # 同（原型 × 皮肤）组内也不许只有一个值 —— 组内一致 = 参数化程度退化了
+        for archetype, skin in sorted({(m.group(1), m.group(2)) for t in self.generated for m in [GENERATED_MARKER_RE.search(t.script)]}):
+            group = [
+                template.duration_ms
+                for template in self.generated
+                if GENERATED_MARKER_RE.search(template.script).groups() == (archetype, skin)
+            ]
+            if len(group) < 3:
+                continue
+            with self.subTest(group=f"{archetype}/{skin}"):
+                self.assertGreater(
+                    len(set(group)),
+                    1,
+                    f"{archetype}/{skin} 这一组 {len(group)} 份的时长全都一样（参数化退化了）",
+                )
+
+    def test_每份至少两种可动画属性(self) -> None:
+        """★ 只动不透明度（渐入渐出）正是被投诉的「潦草」；至少要有两种属性一起动。"""
+        for template in self.generated:
+            with self.subTest(template=template.id):
+                seen = {
+                    name
+                    for name in ANIMATABLE_PROPS
+                    if re.search(r"\b" + name + r"\s*:", template.script)
+                }
+                if re.search(r"\b\w+\.set\(", template.script):
+                    seen.add("readout().set(")  # 数值读数变化也算一种（真算的证据）
+                self.assertGreaterEqual(
+                    len(seen),
+                    2,
+                    f"{template.id} 只动了 {sorted(seen)}（至少两种属性，别只做渐入渐出）",
+                )
+
+    def test_没有裸色值(self) -> None:
+        """★ 写死 `#rrggbb` = 那份模板永远只属于一个学段（皮肤切换当场失效）。"""
+        for template in self.generated:
+            with self.subTest(template=template.id):
+                match = re.search(RAW_COLOUR_RE, template.body + template.script)
+                self.assertIsNone(
+                    match,
+                    f"{template.id} 出现裸色值「{match and match.group(0)}」（颜色只许走 CSS 类与变量）",
+                )
+
+    def test_时长与缓动取自_motion_而不是写死(self) -> None:
+        """★ 模板不许写死 `duration: 800` 这类绝对值（皮肤要能改掉节奏）。"""
+        for template in self.generated:
+            with self.subTest(template=template.id):
+                literal = re.findall(r"duration:\s*(\d+)\s*[,}]", template.script)
+                offending = [value for value in literal if int(value) > 4]
+                self.assertEqual(
+                    offending,
+                    [],
+                    f"{template.id} 写死了 duration: {offending}（应当走 Sandbox.motion 或用 d() 换算）",
+                )
+
+    def test_渲染后完整文案真的上屏_不截断(self) -> None:
+        """★★ 端到端的不截断证据：真渲染，节点标签的**整句**要能在产物里找到。
+
+        这条是「结构断言」之外的兜底：`body` / `script` 里没有省略号 ≠ 学生看得到整句话。
+        所以取数据里最长的那个节点标签，渲染后断言它整句出现在 HTML 里（节点标签是**一次
+        性写进 tspan** 的，不会因为折行/缩字号而分片，所以整句一定在源码里出现）。
+        """
+        checked = 0
+        for template in self.generated:
+            match = re.search(r"var DATA = (\{.*?\});\n", template.script, re.S)
+            if not match:
+                continue
+            data = json.loads(match.group(1))
+            labels = []
+
+            def _collect(value: object) -> None:
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if key in ("label", "station", "sub", "title", "ask", "layer", "right", "left") and isinstance(item, str):
+                            labels.append(item)
+                        else:
+                            _collect(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        _collect(item)
+
+            _collect(data)
+            labels = [label for label in labels if len(label) >= 4]
+            if not labels:
+                continue
+            longest = max(labels, key=len)
+            with self.subTest(template=template.id):
+                html = R.render_animation(template, params=None, payload_id="unit").html
+                self.assertIn(
+                    longest,
+                    html,
+                    f"{template.id} 的节点标签「{longest}」没有整句出现在产物里（被截断了？）",
+                )
+                # ★ 省略号只在**模板自己那两段**里查：内联的库 / 共享 CSS 是别人的资产
+                #   （anime.min.js 与 base.css 的注释里本来就有），查整份产物等于查错了对象。
+                segment = R.extract_template_script(html)
+                self.assertNotIn("…", segment, f"{template.id} 的脚本段里出现省略号")
+                body_start = html.index('<div id="stage">')
+                body_end = html.index(R.READY_MARKER)
+                self.assertNotIn("…", html[body_start:body_end], f"{template.id} 的页面片段里出现省略号")
+                # 全文另有 <title> 兜底（悬停可见）—— 这条保证「缩字号到底」时还有退路
+                self.assertIn("<title", html, f"{template.id} 的节点没有 <title> 全文")
+            checked += 1
+            if checked >= 12:  # 抽样即可：渲染 200+ 份会让本文件跑成分钟级
+                break
+        self.assertGreaterEqual(checked, 12, f"只核了 {checked} 份模板的文案上屏（样本太少）")
+
+
+# --------------------------------------------------------------------------- #
+# 布局守卫（票 A3：用户投诉「文字、图标、小人位置都是错位重叠的」）
+#
+# ★ 为什么能在**不开浏览器**的前提下守住「不重叠」：生成器把每个盒子的坐标与尺寸
+#   算成一份**布局清单**内联进脚本（`Sandbox.layout({...})` 的第一个参数），
+#   运行时照单画。清单就是几何本身 —— 于是「盒盒重叠 / 出舞台 / 标签等于副标题 /
+#   人物压盒子」这几类缺陷都能在 CI 上用纯算术验出来（毫秒级、无像素比对）。
+#
+# ★ 清单里的坐标是生成器按**真几何**算的（文本折行 + 缩字号 + 内边距都与运行时同一套
+#   算式），但它仍然是「声明」；「实际画出来是不是这样」由运行时的对账兜住
+#   （`Sandbox.layout()` 会把「实际比清单大」记进 `window.__K12_LAYOUT__` 的 overflow
+#   条目，截图流水线会读它）。本文件只管**声明自洽**这一半。
+# --------------------------------------------------------------------------- #
+
+#: 舞台与安全边距（与 `runtime.js` 的 STAGE_WIDTH / SAFE_MARGIN 同源）。
+STAGE_WIDTH = 720
+STAGE_HEIGHT = 420
+SAFE_MARGIN = 34
+SAFE_BOTTOM = STAGE_HEIGHT - 30
+
+#: 布局清单的入口（生成器 `script_for` 写进脚本的那一行）。
+PLAN_RE = re.compile(r"Sandbox\.layout\((\{.*?\})\);", re.S)
+
+#: 盒子类清单项的类型（`text` 是裸注释、`blank` 是空档，都不算「有底板的盒子」）。
+SOLID_KINDS = ("node", "readout", "bubble")
+
+
+def _plan_of(template) -> dict:
+    """从模板脚本里取出布局清单（`Sandbox.layout({...})` 的第一个参数）。"""
+    match = PLAN_RE.search(template.script)
+    assert match, f"{template.id} 的脚本里没有布局清单（生成器契约变了？）"
+    return json.loads(match.group(1))
+
+
+def _cells(plan: dict) -> list[dict]:
+    return [cell for cell in plan.get("cells") or [] if cell.get("kind") != "blank"]
+
+
+def _hidden_by_spread(cell: dict, plan: dict) -> bool:
+    """这一格会不会被参数调到最小时**隐藏**（隐藏的格子不参与碰撞判定）。
+
+    `spread` 是生成器声明的「这一组格子随参数增减」：参数取最小值时，编号 >= min 的
+    那些格子不显示（`display:none`），所以它们与别人的重叠是看不见的 —— 判它们等于
+    给守卫制造假红。参数取**最大值**时反而全部都在，所以这里只放行「必然隐藏」的那些。
+    """
+    cell_id = str(cell.get("id") or "")
+    for spread in plan.get("spread") or []:
+        prefix = str(spread.get("prefix") or "")
+        if not cell_id.startswith(prefix):
+            continue
+        tail = cell_id[len(prefix) :].lstrip("-_")
+        if tail.isdigit() and int(tail) >= int(spread.get("min") or 0):
+            return True
+    return False
+
+
+def _overlap(a: dict, b: dict) -> tuple[float, float]:
+    over_x = min(float(a["x"]) + float(a["w"]), float(b["x"]) + float(b["w"])) - max(
+        float(a["x"]), float(b["x"])
+    )
+    over_y = min(float(a["y"]) + float(a["h"]), float(b["y"]) + float(b["h"])) - max(
+        float(a["y"]), float(b["y"])
+    )
+    return over_x, over_y
+
+
+def _actor_rect(actor: dict) -> tuple[float, float, float, float]:
+    """人物的占位矩形（与运行时同源：含脚下那行名字）。"""
+    scale = float(actor.get("scale") or 1)
+    label = str(actor.get("label") or "")
+    label_width = max(40.0, min(160.0, len(label) * 13.0)) if label else 40.0
+    room = 30.0 if label else 0.0
+    return (
+        float(actor["x"]) - label_width / 2 * scale,
+        float(actor["y"]) - 96 * scale,
+        label_width * scale,
+        (96 + room) * scale,
+    )
+
+
+class TestGeneratedLayoutGeometry(unittest.TestCase):
+    """★ 布局清单的几何守卫：盒盒不重叠、不出舞台、标签≠副标题、人物站得住。
+
+    用户口径（原话）：「有的文字 图标 还有你自己画的小人位置都是错位重叠的 记得修复」。
+    这一组盯的就是它，而且**不需要开浏览器**：清单里的每个盒子都带坐标与尺寸。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.generated = _generated_templates()
+        assert cls.generated, "一份生成的模板都没认出来（生成标记变了？）"
+        cls.plans = {template.id: _plan_of(template) for template in cls.generated}
+
+    def test_每份生成模板都带布局清单(self) -> None:
+        """★ 守卫不许空转：清单缺失时下面按它遍历的断言会**全绿空跑**。"""
+        self.assertGreaterEqual(len(self.plans), 200, "带布局清单的模板太少（生成器回退了？）")
+        for template_id, plan in self.plans.items():
+            with self.subTest(template=template_id):
+                self.assertTrue(plan.get("bands"), f"{template_id} 的清单里没有带（纵向定位手段没了）")
+                self.assertTrue(plan.get("cells"), f"{template_id} 的清单里没有格子")
+
+    def test_没有空白盒子(self) -> None:
+        """★★ 每个画出来的盒子都得有字。
+
+        ★ 实测缺陷（用户在截图里看到的「空白方框」）：`blank` 只该**占位**
+          （把同一行其他格子推到想要的位置），`_plan_need` 会跳过它算高度，
+          但发格子那一步漏了它 —— 运行时按 `node` 画，画布上就多一个空框。
+          19 份模板中招，而且全都停在同一个坐标上。
+          读数也一样：标签取空串就成了「只有数字、没有说明」的框。
+        """
+        checked = 0
+        for template_id, plan in self.plans.items():
+            for cell in _cells(plan):
+                if cell.get("kind") == "blank":
+                    self.fail(f"{template_id}:{cell.get('id')} 把占位格也画出来了（会变成空白方框）")
+                text = str(cell.get("label") or cell.get("text") or "").strip()
+                with self.subTest(template=template_id, cell=cell.get("id")):
+                    self.assertTrue(
+                        text,
+                        f"{template_id}:{cell.get('id')} 是个没有文字的 {cell.get('kind')} 盒子",
+                    )
+                checked += 1
+        self.assertGreaterEqual(checked, 200, f"只核了 {checked} 个盒子（样本太少）")
+
+    def test_盒子两两不重叠(self) -> None:
+        """★★ 核心断言：同一屏上任何两个**有底板的盒子**都不许相交。
+
+        同槽位的轮换成员（`alt`）例外 —— 它们占同一个矩形，同一时刻只显示一个
+        （`dialogue` 的问答气泡、`counter` 的话术轮播都是这个用法）。
+        """
+        checked = 0
+        for template_id, plan in self.plans.items():
+            cells = [cell for cell in _cells(plan) if not _hidden_by_spread(cell, plan)]
+            for index, cell in enumerate(cells):
+                self.assertIn("x", cell, f"{template_id}:{cell.get('id')} 缺 x")
+                for other in cells[index + 1 :]:
+                    if cell.get("alt") and cell.get("alt") == other.get("alt"):
+                        continue
+                    over_x, over_y = _overlap(cell, other)
+                    with self.subTest(template=template_id, pair=(cell.get("id"), other.get("id"))):
+                        self.assertFalse(
+                            over_x > 1 and over_y > 1,
+                            f"{template_id}：「{cell.get('id')}」与「{other.get('id')}」重叠 "
+                            f"{over_x:.1f}×{over_y:.1f}（盒子必须各占一块，不许压在一起）",
+                        )
+            checked += 1
+        self.assertGreaterEqual(checked, 200, f"只核了 {checked} 份模板的布局（样本太少）")
+
+    def test_盒子都在安全区里(self) -> None:
+        """★ 出舞台 = 学生看不到半截；安全边距是给步骤条与卡片圆角留的。"""
+        for template_id, plan in self.plans.items():
+            cells = [cell for cell in _cells(plan) if not _hidden_by_spread(cell, plan)]
+            for cell in cells:
+                with self.subTest(template=template_id, cell=cell.get("id")):
+                    x, y = float(cell["x"]), float(cell["y"])
+                    right, bottom = x + float(cell["w"]), y + float(cell["h"])
+                    self.assertGreaterEqual(x, SAFE_MARGIN - 0.5, f"{template_id}:{cell['id']} 越出左边")
+                    self.assertGreaterEqual(y, SAFE_MARGIN - 0.5, f"{template_id}:{cell['id']} 越出上边")
+                    self.assertLessEqual(right, STAGE_WIDTH - SAFE_MARGIN + 0.5, f"{template_id}:{cell['id']} 越出右边")
+                    self.assertLessEqual(bottom, SAFE_BOTTOM + 0.5, f"{template_id}:{cell['id']} 越出下边（会被步骤条吃掉）")
+
+    def test_带与带之间不重叠(self) -> None:
+        """★ 带是纵向定位的唯一手段：后一条带必须排在前一条的下沿之下。"""
+        for template_id, plan in self.plans.items():
+            bands = plan.get("bands") or []
+            for index, band in enumerate(bands):
+                for other in bands[index + 1 :]:
+                    bottom = float(band["y"]) + float(band["h"])
+                    with self.subTest(template=template_id, pair=(band["id"], other["id"])):
+                        self.assertLessEqual(
+                            bottom,
+                            float(other["y"]) + 0.5,
+                            f"{template_id}：带「{band['id']}」压到了「{other['id']}」",
+                        )
+
+    def test_标签与副标题不是同一句(self) -> None:
+        """★★ 用户看到的「同一句话在一个框里印了两遍」：数据构造的缺陷，不是排版。
+
+        根因是旧版让**同一段文字**既当主标题又当副标题（短标签与副标题取了同一个
+        budget）。现在标题与副标题是两个角色：取不到更长的句子时**副标题留空**。
+        """
+        for template_id, plan in self.plans.items():
+            cells = _cells(plan)
+            for cell in cells:
+                label = cell.get("label")
+                sub = cell.get("sub")
+                if not sub:
+                    continue
+                with self.subTest(template=template_id, cell=cell.get("id")):
+                    self.assertNotEqual(
+                        label,
+                        sub,
+                        f"{template_id}：{cell['id']} 的主标题与副标题是同一句「{label}」",
+                    )
+
+    def test_清单里没有重复的盒子_id(self) -> None:
+        """id 撞车 = `L.one()` 取错件（动画会去动错误的盒子）。"""
+        for template_id, plan in self.plans.items():
+            ids = [str(cell.get("id")) for cell in _cells(plan)] + [
+                str(actor.get("id")) for actor in plan.get("actors") or []
+            ]
+            duplicates = {value for value in ids if ids.count(value) > 1}
+            with self.subTest(template=template_id):
+                self.assertEqual(duplicates, set(), f"{template_id} 里有重复 id：{sorted(duplicates)}")
+
+    def test_人物都在舞台里且不压在盒子上(self) -> None:
+        """★★ 用户投诉的「小人站在莫名其妙的地方」：人物必须站在讲得通的位置上。
+
+        「讲得通」在这份清单里有三档判据：
+          ① 人物整体在安全区里（没被截掉）；
+          ② 不压任何盒子（压住盒子 = 「错位重叠」的另一种形态）；
+          ③ 若声明了 `on`（站在哪条线 / 哪个路上），脚底必须**正好落在那条线上** ——
+             这是「站在路边」「站在底座上」这类语义的机械表达。
+        """
+        actors_seen = 0
+        for template_id, plan in self.plans.items():
+            actors = plan.get("actors") or []
+            cells = [cell for cell in _cells(plan) if not _hidden_by_spread(cell, plan)]
+            rails = {str(rail["id"]): rail for rail in plan.get("rails") or []}
+            for actor in actors:
+                actors_seen += 1
+                ax, ay, aw, ah = _actor_rect(actor)
+                with self.subTest(template=template_id, actor=actor.get("id")):
+                    self.assertGreaterEqual(ax, SAFE_MARGIN - 0.5, f"{template_id}:{actor['id']} 越出左边")
+                    self.assertGreaterEqual(ay, SAFE_MARGIN - 0.5, f"{template_id}:{actor['id']} 越出上边")
+                    self.assertLessEqual(ax + aw, STAGE_WIDTH - SAFE_MARGIN + 0.5, f"{template_id}:{actor['id']} 越出右边")
+                    self.assertLessEqual(ay + ah, SAFE_BOTTOM + 0.5, f"{template_id}:{actor['id']} 越出下边")
+                for cell in cells:
+                    over_x, over_y = _overlap(
+                        {"x": ax, "y": ay, "w": aw, "h": ah}, cell
+                    )
+                    with self.subTest(template=template_id, actor=actor.get("id"), cell=cell.get("id")):
+                        self.assertFalse(
+                            over_x > 1 and over_y > 1,
+                            f"{template_id}：人物「{actor['id']}」压在盒子「{cell.get('id')}」上 "
+                            f"（{over_x:.1f}×{over_y:.1f}）",
+                        )
+                line = rails.get(str(actor.get("on") or ""))
+                if line is None:
+                    continue
+                start, end = line.get("from"), line.get("to")
+                if isinstance(start, list) and isinstance(end, list) and abs(float(start[1]) - float(end[1])) < 0.5:
+                    with self.subTest(template=template_id, actor=actor.get("id"), rail=line.get("id")):
+                        self.assertAlmostEqual(
+                            float(actor["y"]),
+                            float(start[1]),
+                            delta=1.0,
+                            msg=f"{template_id}：人物「{actor['id']}」的脚底不在他声明的那条线上",
+                        )
+        self.assertGreaterEqual(actors_seen, 50, f"只核了 {actors_seen} 个人物（样本太少，守卫可能空跑）")
+
+    def test_每个原型都至少有一份模板走新的布局清单(self) -> None:
+        """★ 覆盖度自检：十四原型一个都不能漏（漏了的原型就是没被这组守卫覆盖到）。"""
+        archetypes = set()
+        for template in self.generated:
+            match = GENERATED_MARKER_RE.search(template.script)
+            if match:
+                archetypes.add(match.group(1))
+        expected = {
+            "scene", "dialogue", "contrast_kid", "accumulate_kid", "checklist_kid",
+            "flow", "compare", "layers", "loop", "tree", "network", "matrix", "trace", "counter",
+        }
+        self.assertEqual(expected - archetypes, set(), f"这些原型一份模板都没有：{sorted(expected - archetypes)}")
+
+    def test_运行时确实按清单建盒子(self) -> None:
+        """★ 正向证据：清单不是摆设 —— 脚本里真的调了 `Sandbox.layout(`。"""
+        for template in self.generated:
+            with self.subTest(template=template.id):
+                self.assertIn("Sandbox.layout(", template.script, f"{template.id} 没有用布局清单")
+                self.assertNotRegex(
+                    template.script,
+                    r"var GAP = \(\d+ - \d+ \* COUNT\)",
+                    f"{template.id} 里还有手算的负 gap 公式（旧写法回来了？）",
+                )
+
+    def test_人物的位置与动画分成两层(self) -> None:
+        """★★ 实测缺陷：对话原型的小人被切在画布上沿、脚底跑到 y=33（应该在 228）。
+
+        根因不在清单，而在**运行时**：anime 的 `scale` / `translateX` 写的是
+        style.transform，而 style 会**整个盖掉**元素自己的 `transform` 属性 ——
+        把位置留在人物本体上、却去动它，位置就被抹掉了（人物弹回舞台原点）。
+
+        判据是结构性的，不看像素：运行时必须给每个人物建**两层**
+          ① 外层只写 transform 属性（摆位置），且不进任何动画；
+          ② 内层不带 transform（动画从空开始写），并把 `k12Pivot` 指给它。
+        这样「摆位置」与「做动画」在结构上就不可能互相覆盖。
+        """
+        runtime = self.runtime_source()
+        with self.subTest(check="外层只摆位置"):
+            self.assertIn(
+                "translate(' + actorX + ' ' + actorY + ')",
+                runtime,
+                "人物外层没有按 x/y 摆位置（位置又回到会被动画覆盖的那一层了）",
+            )
+        with self.subTest(check="内层不带 transform"):
+            match = re.search(r"var pivot = Sandbox\.svgEl\('g'\)([\s\S]{0,400}?)pivot\.appendChild", runtime)
+            self.assertIsNotNone(match, "没找到人物的内层 pivot 建法（结构变了？）")
+            self.assertNotIn(
+                "setAttribute('transform'",
+                match.group(1),
+                "内层 pivot 自己带 transform 属性；动画一写 style.transform 就会把它盖掉",
+            )
+        with self.subTest(check="动画用内层"):
+            self.assertIn("actorGroup.k12Pivot = pivot", runtime, "k12Pivot 没指向内层（模板会动错元素）")
+
+    def runtime_source(self) -> str:
+        """公共运行时 `runtime.js` 的源码（人物分层那条守卫要读它）。"""
+        path = TEMPLATES_DIR / "_shared" / "runtime.js"
+        return path.read_text(encoding="utf-8")
 
 
 def _iter_routes(app_or_router: object) -> list[object]:

@@ -44,7 +44,7 @@ const DESKTOP_ROOT = resolve(HERE, '..')
 const animation = await import('../src/main/agent/extensions/animation.ts')
 const generator = await import('../src/main/agent/animation/generator.ts')
 
-const { createAnimationExtension } = animation
+const { ANIMATION_TOOL_NAME, createAnimationExtension } = animation
 const {
   ANIMATION_COMPOSE_PATH,
   RetryableGenerationError,
@@ -57,18 +57,27 @@ const {
  * 工具
  * ================================================================== */
 
-/** 抓一个注册好的 Tool（与 animation-extension.test.ts 同一形态）。 */
+/**
+ * 抓一个注册好的 Tool（与 animation-extension.test.ts 同一形态）。
+ *
+ * ⚠️ **按名字挑**，不是「最后一个赢」：扩展现在注册**两个** Tool
+ * （`generate_animation` / `compose_animation`），后者会把前者覆盖掉 ——
+ * 于是本文件全部用例都会拿 `compose_animation` 去跑自由生成的用例
+ * （它自己带查库/存库，参数面也不一样），断言成片失效且看不出原因。
+ * 本文件盯的是 `generate_animation` 的自由生成补充路径，所以默认抓它。
+ */
 function captureTool(extension: (pi: unknown) => void): {
   execute: (toolCallId: string, params: unknown) => Promise<unknown>
 } {
-  let captured: { execute: (a: string, b: unknown) => Promise<unknown> } | null = null
+  const tools = new Map<string, { execute: (a: string, b: unknown) => Promise<unknown> }>()
   extension({
     on: () => {},
-    registerTool: (tool: { execute: (a: string, b: unknown) => Promise<unknown> }) => {
-      captured = { execute: tool.execute }
+    registerTool: (tool: { name: string; execute: (a: string, b: unknown) => Promise<unknown> }) => {
+      tools.set(tool.name, { execute: tool.execute })
     }
   })
-  if (!captured) throw new Error('扩展必须注册一个 Tool')
+  const captured = tools.get(ANIMATION_TOOL_NAME)
+  if (!captured) throw new Error(`扩展必须注册 ${ANIMATION_TOOL_NAME}`)
   return captured
 }
 
