@@ -46,8 +46,8 @@
  *   - 还没定下来（`currentGrade === null`）：`当前：还没认出年级`，**不显示来源那一句**
  *     （还没定下来的东西没有「怎么定下来的」可言），也**不拿冷启动默认值冒充判定结果**；
  *   - 已定下来：`当前：初中` + 来源标签（「谁定的」这件事只有 labels.ts 一处说法）；
- *   - 变化时多一行一次性提示：系统判出来的是「我按初中的说法来讲。」，
- *     学生自己选的是「已按你选的初中的来讲。」（见 store 的 `gradeNotice`）。
+ *   - ★ 2026-09-25：**顶栏不再有任何一次性提示**（原先的「已按你选的X来讲。」
+ *     与「之前学过的东西都还在哦」两张浮动纸条已按用户口径彻底去掉，见模板里那段说明）。
  */
 import { computed, ref } from 'vue'
 import { GRADE_LEVELS } from '../api/grade'
@@ -55,8 +55,7 @@ import { useDismissable } from '../composables/useDismissable'
 import {
   GRADE_LABELS,
   GRADE_UNKNOWN_LABEL,
-  gradeOriginLabel,
-  gradeSwitchDetail
+  gradeOriginLabel
 } from '../labels'
 import { useChatStore } from '../stores/chat'
 import type { GradeLevel } from '@shared/ipc-events'
@@ -119,24 +118,16 @@ function togglePicker(): void {
 }
 
 /**
- * 手动切换学段后的**第二句**（回答「会不会丢记录」）。
+ * ★★ 2026-09-25（用户口径「把这两个弹出提示彻底去掉」）：**顶栏不再有任何浮动回执**。
  *
- * ★★ 为什么这句话在**这里**而不是 store 里：`stores/chat.ts` 的 `gradeNotice`
- *   只放 `gradeManualNotice()` 那一句（「已按你选的初中来讲。」），而
- *   `desktop/scripts/verify-ui.mjs` 与 `tests/renderer-grade.test.ts` 都按
- *   `/^已按你选的.+来讲。$/` **整串**匹配那一个节点 —— 把第二句拼进同一段文本
- *   会让那两条守卫同时变红（它们验的是「回执到底有没有出现」，不能为了多一句话而放宽）。
- *   所以这里是**追加一个独立节点**，主句一字不动。
- * ★ 只在「学生自己刚选完」的时刻出现：`gradeNotice` 非空 **且**来源是 `explicit`。
- *   系统自动适配那句（`gradeAdaptNotice`）配的是 inferred —— 那时说「之前学的都还在」
- *   是废话（学生没做任何动作），而且会把「系统替我改了」说成「你选的」。
+ *   此前顶栏这一格会在切换学段时弹出两张纸条（绿底「已按你选的X来讲。」+
+ *   白底「智团团会换成X的说法和你聊，之前学过的东西都还在哦。」）—— 它们**浮**在
+ *   内容之上、出现在**每一页**，而且是没人问就冒出来的通知。
+ *
+ *   现在「生效了没有」由**这一格自己**回答：chip 上的学段值就是服务端回执
+ *   （`data-grade` / `data-origin` 都由推送写回），学生点完看到的值一变即为生效证据。
+ *   系统自动适配那句仍在**设置页**以流内一行字给出（`settings-grade-notice`）。
  */
-const switchDetail = computed(() => {
-  if (chat.gradeNotice === null) return ''
-  if (chat.gradeOrigin !== 'explicit') return ''
-  const level = chat.currentGrade
-  return level === null ? '' : gradeSwitchDetail(level)
-})
 
 async function choose(level: GradeLevel): Promise<void> {
   if (busy.value) return
@@ -217,33 +208,12 @@ async function choose(level: GradeLevel): Promise<void> {
       <p v-if="errorText" class="grade__warn" data-testid="grade-set-error">{{ errorText }}</p>
     </div>
 
-    <!-- 两截「额外信息」包一层：非紧凑时它是普通块（与原来一样逐条占行），
-         紧凑时整层浮到 chip 下方 —— 见下面 `.grade--compact .grade__extras`。
-         包一层而不是各自绝对定位：两条同时出现（提示 + 通道缺失）会叠在一起。 -->
+    <!-- 这一层现在**只剩一件事**：判定通道缺失时的一行说明（主进程尚未接线）。
+         ★★ 2026-09-25：两张「切换学段」的浮动纸条已按用户口径**彻底去掉** ——
+            顶栏是全局 chrome，通知不该长在上面；学段生效的证据是 chip 上的值本身。
+         包一层（而不是直接把说明挂在根上）的理由没变：紧凑形态下它要整层浮到
+         chip 下方，且不占文档流行高（否则顶栏会往下长一截）。 -->
     <div class="grade__extras">
-      <!-- ★★ 顶栏（`compact`）**只留「学生自己刚选完」那条回执**（2026-09-22 走查改）：
-           原先系统自动适配那句（`我按小学高年级的说法来讲。`）在顶栏上是一条**绿底椭圆浮条**
-           —— 它出现在**每一页**（顶栏是全局 chrome），而且**没人问就冒出来**、
-           还浮在内容之上。走查结论：那是层级放错了（通知不该长在全局顶栏上）。
-           现在自动适配那句话只在**设置页**那一处显示（in-flow 的一行字，不浮动）。
-           ★ 手动那条**保留**：学生自己点完必须当场看到生效（D-037），
-             而且它紧挨着刚点的那枚按钮，属于「对我这个动作的回执」。
-           ⚠️ 这个节点里**只有**那一句话（`已按你选的X来讲。` / `我按X的说法来讲。`）——
-              验收脚本按整串匹配它，第二句不许塞进来（见脚本里 `switchDetail` 的说明）。 -->
-      <p
-        v-if="chat.gradeNotice && (!isCompact || chat.gradeOrigin === 'explicit')"
-        class="grade__notice"
-        data-testid="grade-notice"
-      >
-        {{ chat.gradeNotice }}
-      </p>
-
-      <!-- 第二句（只在学生自己选完之后出现）：回答「那我之前学的还在吗」。
-           独立节点，与上面那句各占一行。 -->
-      <p v-if="switchDetail" class="grade__notice-detail" data-testid="grade-notice-detail">
-        {{ switchDetail }}
-      </p>
-
       <!-- 判定通道缺失（主进程尚未接线）：说清原因，不让指示器永远沉默地停在「待判定」 -->
       <p v-if="chat.gradeBridgeError" class="grade__warn" data-testid="grade-indicator-note">
         {{ chat.gradeBridgeError }}
@@ -380,23 +350,11 @@ async function choose(level: GradeLevel): Promise<void> {
   font-weight: 600;
 }
 
-.grade__notice {
-  margin-top: 5px;
-  font-size: var(--k12-fs-xs);
-  color: var(--k12-good);
-}
+/* 一次性提示（`.grade__notice` / `.grade__notice-detail`）的样式已随节点一起删掉
+ * （2026-09-25 用户口径「彻底去掉」）—— 顶栏不再弹任何纸条。 */
 
-/* 第二句（「之前学过的东西都还在哦」）：与主句同色但**轻一档** ——
- * 主句是「已生效」的回执，它只是解释，不该抢在同一条线上。 */
-.grade__notice-detail {
-  margin-top: 4px;
-  font-size: var(--k12-fs-xs);
-  line-height: var(--k12-lh-body);
-  color: var(--k12-fg-2);
-}
-
-/* 一次性提示与通道缺失说明的**共同容器**（见模板里的说明）。
- * 非紧凑时是普通块：两条各自占一行，与改造前逐字一样。 */
+/* 通道缺失说明的**容器**（见模板里的说明）。
+ * 非紧凑时是普通块；紧凑形态下整层浮到 chip 下方（见下）。 */
 .grade__extras {
   min-width: 0;
 }
@@ -486,8 +444,9 @@ async function choose(level: GradeLevel): Promise<void> {
   text-align: left;
 }
 
-/* 提示与通道说明都是浮层里的**流内**子项（纸条底色 + 浮层阴影）。
- * 包一层而不是各自绝对定位：两条同时出现（提示 + 通道缺失）会叠在一起。
+/* ★★ 2026-09-25：这一层原先还承载两张「切换学段」的纸条，现已按用户口径**彻底去掉**
+ *   —— 它只剩「判定通道缺失」一种内容（`.grade__warn`）。
+ * 通道说明是浮层里的**流内**子项（纸条底色 + 浮层阴影）。
  * ⚠️ 选择器用 `.grade__extras >` 限定：`grade-set-error` 也是 `.grade__warn`，
  *    但它住在选项面板里，不该被染成顶栏的纸条（下面单独给它一条间距）。 */
 .grade--compact .grade__extras {
@@ -528,35 +487,6 @@ async function choose(level: GradeLevel): Promise<void> {
  *    只是离右边远一点。失败方向是安全的。 */
 .shell__main:has(.rail--closed) .grade--compact .grade__extras {
   right: 10px;
-}
-
-/* 提示纸条（绿色椭圆）—— ★ 2026-09-22 起**只剩「学生自己刚选完」那条**：
- * 系统自动适配那句已经不在顶栏渲染（见模板里那段说明：绿底浮条出现在每一页、
- * 且没人问就冒出来，走查判定为层级放错）。所以这条样式现在服务的场景是
- * 「学生点了选项 → 紧挨着他刚点的地方给一句回执」，几秒后随下一次操作消失。
- * ⚠️ 别把自动适配那句再加回顶栏：它属于设置页那一处（in-flow 的一行字）。 */
-.grade--compact .grade__extras > .grade__notice {
-  margin: 0;
-  padding: 3px 10px;
-  white-space: nowrap;
-  border-radius: var(--k12-r-pill);
-  background: var(--k12-good-soft);
-  border: 1px solid var(--k12-good-border);
-  box-shadow: var(--k12-shadow-float);
-}
-
-/* 第二句在顶栏那一格里是一张**较长的纸条**：`nowrap` 会让它在 320px 上限处
- * 直接溢出（顶栏是固定高单行，露在右栏上是实打实的错位）——
- * 所以这一条改成允许换行，宽度由 `.grade__extras` 的 max-width 兜住。 */
-.grade--compact .grade__extras > .grade__notice-detail {
-  margin: 0;
-  padding: 3px 10px;
-  white-space: normal;
-  border-radius: var(--k12-r-inset);
-  background: var(--k12-surface);
-  border: 1px solid var(--k12-border-strong);
-  box-shadow: var(--k12-shadow-float);
-  color: var(--k12-fg-2);
 }
 
 .grade--compact .grade__extras > .grade__warn {

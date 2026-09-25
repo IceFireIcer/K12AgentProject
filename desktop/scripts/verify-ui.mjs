@@ -893,6 +893,9 @@ const gradeProbe = await evaluate(`(() => {
     originText: text('[data-testid="grade-origin-label"]'),
     hintText: text('[data-testid="grade-indicator-hint"]'),
     noticeText: text('[data-testid="grade-notice"]'),
+    // ★ 2026-09-25：顶栏那两张「切换学段」浮动纸条已彻底去掉，节点本身不该再存在。
+    hasNoticeNode: document.querySelector('[data-testid="grade-notice"]') !== null,
+    hasNoticeDetailNode: document.querySelector('[data-testid="grade-notice-detail"]') !== null,
     missingChannelNote: text('[data-testid="grade-indicator-note"]'),
     // ★ 默认收起：这里必须是 false（不点开就没有选项列表、也没有任何选项按钮）
     optionsVisibleBeforeClick: options !== null,
@@ -957,13 +960,13 @@ if (gradeProbe?.present !== true) {
     GRADE_LEVELS.indexOf(gradeProbe.grade) === GRADE_LABELS.indexOf(gradeProbe.badgeText),
     `data-grade="${gradeProbe.grade}" ↔ 徽章「${gradeProbe.badgeText}」`
   )
-  if (gradeProbe.noticeText) {
-    check(
-      '学段变化提示可读（「我按…的说法来讲。」或「已按你选的…来讲。」）',
-      /^我按.+的说法来讲。$/.test(gradeProbe.noticeText) || /^已按你选的.+来讲。$/.test(gradeProbe.noticeText),
-      `提示文案：「${gradeProbe.noticeText}」`
-    )
-  }
+  check(
+    '★ 顶栏不再有「切换学段」浮动纸条（grade-notice / grade-notice-detail 节点都不存在）',
+    // ★ 2026-09-25 用户口径「把这两个弹出提示彻底去掉」：这两张纸条是**浮**在内容之上、
+    //   出现在每一页的通知，层级放错了。学段生效的证据是 chip 上的值本身（上面几条已验）。
+    gradeProbe.hasNoticeNode === false && gradeProbe.hasNoticeDetailNode === false,
+    `grade-notice=${gradeProbe.hasNoticeNode}，grade-notice-detail=${gradeProbe.hasNoticeDetailNode}`
+  )
 
   // ── 展开后四档都在（点一下就真的点开了）──
   const opened = await evaluate(`(() => {
@@ -1087,6 +1090,9 @@ if (gradeProbe?.present !== true) {
           origin: indicator ? indicator.getAttribute('data-origin') || '' : '',
           originText: text('[data-testid="grade-origin-label"]'),
           noticeText: text('[data-testid="grade-notice"]'),
+          // ★ 2026-09-25：顶栏两张浮动纸条已去掉 —— 这里验的是「点了之后也没冒出来」
+          hasNoticeNode: document.querySelector('[data-testid="grade-notice"]') !== null,
+          hasNoticeDetailNode: document.querySelector('[data-testid="grade-notice-detail"]') !== null,
           errorText: text('[data-testid="grade-set-error"]'),
           optionsStillOpen: !!document.querySelector('[data-testid="grade-options"]')
         }
@@ -1104,9 +1110,9 @@ if (gradeProbe?.present !== true) {
         `来源标签「${after?.originText}」`
       )
       check(
-        '★ 手动切换有一次性回执（「已按你选的X来讲。」）',
-        /^已按你选的.+来讲。$/.test(String(after?.noticeText ?? '')),
-        `回执「${after?.noticeText}」`
+        '★ 点完后顶栏也不冒纸条（学段生效的证据就是 chip 上的值，不靠通知）',
+        after?.hasNoticeNode === false && after?.hasNoticeDetailNode === false,
+        `grade-notice=${after?.hasNoticeNode}，grade-notice-detail=${after?.hasNoticeDetailNode}`
       )
       check(
         '成功之后选项列表自动收起（失败才留着让学生重试）',

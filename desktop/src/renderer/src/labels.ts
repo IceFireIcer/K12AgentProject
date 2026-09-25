@@ -114,19 +114,6 @@ export function gradeManualNotice(grade: GradeLevel): string {
 }
 
 /**
- * 学生手动切换学段后的**第二句**（场景说明），与 `gradeManualNotice` 一起给。
- *
- * ★ 走查结论：原提示「已按你选的初中来讲」对 K12 学生太短、太机械 ——
- *   切换学段会改变整站配色、教材难度与讲话方式，学生看到界面变了却只得到
- *   一句 9 个字的回执，会困惑「那我之前学的记录还在吗」。
- * ★ 所以这里补的**只回答那一个问题**：记录在不在。不解释冷却轮数、
- *   不说「系统判定」—— 那些是规则细节，不是学生这一刻的疑问。
- */
-export function gradeSwitchDetail(grade: GradeLevel): string {
-  return `智团团会换成${GRADE_LABELS[grade]}的说法和你聊，之前学过的东西都还在哦。`
-}
-
-/**
  * 内容被安全规则拦下时，学生看到的**唯一**一句话。
  *
  * ★★ 为什么必须收口、且**不渲染后端给的 reason**：
