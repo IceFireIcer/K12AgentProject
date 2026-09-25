@@ -20,8 +20,13 @@ Electron 主进程（Pi），LLM 调用归它独占；**Python 侧不许装任�
 只有「登记过评分细则的生成题」才走得通 —— 拿一道选择题的 ``qid`` 走主观路径直接 409。
 
 **闯关闭环（票 15 / 关卡 D）**：``progress`` 表是**唯一权威**（前端只读、不自持状态机）。
-状态机是纯函数 :func:`advance_stage`，解锁规则是 :func:`unlocked_successor_ids`；
-两者都被 ``server/tests/test_quiz_loop.py`` 端到端跑过。
+状态机是纯函数 :func:`advance_stage`，行为由 ``server/tests/test_quiz_loop.py`` 端到端跑过。
+
+★ **不再有关卡锁定**（2026-09-25 起）：:func:`advance_stage` **永不产出** ``locked``，
+所有可用知识点一开始就可作答，做哪一关、什么时候做都由学生自己决定。
+``learning → quizzed → mastered`` 只是**进度反馈**（配 :func:`badge_for` 的徽章），
+不构成任何准入限制。契约 ``ProgressStage`` 仍保留 ``"locked"`` 取值（冻结枚举不改），
+但后端已不再写它 —— 该取值只用于读**旧的** ``progress`` 行。
 
 **判分口径（客观题，``scored_by="rule"``）**：choice / blank / code_blank 三类都走
 :func:`normalize_answer` 归一化后比较 —— 空白、全角、大小写、中英文标点一律等价
@@ -91,7 +96,7 @@ MAX_QUESTION_COUNT = 10
 #: 免得两处各写一个默认值，将来改一个忘一个）。
 COLD_START_GRADE = DEFAULT_COLD_START_GRADE
 
-#: ★ 冷启动的**种子关卡**：依赖图里一个可用知识点都没有时的最后兜底
+#: ★ 冷启动的**默认关卡兜底**：依赖图里一个可用知识点都没有时，用它当默认关卡列表
 #: （人工骨架的四个入口知识点，见 ``knowledge/manifest.json``）。
 #: 没有它的话，「新学生 + 空图」会得到一条空路径 —— 而冷启动必须能开始，
 #: 这是票 15/20 明确列出的验收项（「不报空指针、有默认路径」）。
@@ -103,6 +108,9 @@ COLD_START_GRADE = DEFAULT_COLD_START_GRADE
 #:   ``ai-definition-pl``（「人工智能的定义」，小学低年级），它同时是整张依赖图的根，
 #:   对四个学段都在兼容范围内，因此是所有分支共同的兜底。
 #:   每个学段再各给一个**本学段**的起点，让路径不必都从小学低年级那一条线开始走。
+#:
+#: ★ 2026-09-25：它现在只决定「默认把哪几关摆出来」（:func:`_seed_default_path`），
+#:   **不再是「哪几关可解锁」** —— 摆出来的每一关都直接是 ``learning``（可作答）。
 COLD_START_LEVEL_SEEDS: dict[str, tuple[str, ...]] = {
     "primary_low": ("ai-definition-pl",),
     "primary_high": ("ai-definition-ph",),
@@ -127,18 +135,22 @@ _OPTION_LETTERS = "ABCDEF"
 STUDENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # ------------------------------------------------------------------ 闯关 --
-#: 关卡状态机（``contracts.py`` 的 ``ProgressStage``，**唯一权威在 learning.db 的 progress 表**）。
+#: ``progress`` 表里出现过的合法取值（``contracts.py`` 的 ``ProgressStage``，
+#: **唯一权威在 learning.db 的 progress 表**）。
+#: ★ ``"locked"`` 是**历史取值**：后端自 2026-09-25 起不再写它（见模块头），
+#:   留在这里只为读旧库里的行 —— 契约枚举本身也**不许改**。
 PROGRESS_STAGES: tuple[str, ...] = ("locked", "learning", "quizzed", "mastered")
 
 #: 一道题的分值：一次答对 ``quizzed + 1``。**不是掌握度**（掌握度按题累加、限幅 ±0.2）。
 #: ``progress`` 表没有数值列，所以「答对几道」记在徽章里（见 :func:`award_level`）。
 BADGE_LEVELS: tuple[str, ...] = ("起步", "初通", "熟练", "精通", "大师")
 
-#: ★ 解锁后继关卡的**门槛**（票 15 的验收口径，写在这里以便测试直接引用）：
+#: ★ 掌握度**阈值**（0.6）：一关判 ``mastered`` 要求掌握度达到它；
+#: 另有消费者 ``routes/profile.py`` 把它当作「已掌握、不再推荐」的分界线。
 #:
-#:     「目标 kp 掌握度 ≥ 阈值 且 当前 kp 已 quizzed」才解锁**后继**
-#:
-#: 注意主语：判定的是**当前这一关**够不够格把**它的后继**放出来，而不是后继自己的掌握度。
+#: ⚠️ 名字里的 ``UNLOCK`` 是历史残留 —— 它曾经是「解锁后继关卡」的门槛，
+#: 而 2026-09-25 起已无解锁机制，现在它就只是一个**掌握度阈值**。
+#: 名字不改是因为两个模块 import 它（改名会牵动不归本票的文件），改的只是这里的语义注释。
 MASTERY_UNLOCK_THRESHOLD = 0.6
 #: 当前关卡进入 ``quizzed`` 所需的答对题数（答错不加，答对才加）。
 QUIZZED_CORRECT_NEEDED = 1
@@ -154,7 +166,9 @@ class LevelOutcome:
     stage: str
     badge: str | None
     correct_count: int
-    #: 本次是否**新解锁**了关卡（题目所属关卡按 ``K12_QUIZ_BANK_DIR``… 不，按依赖图后继算）
+    #: ★ 字段名沿用契约（``learning_history.detail["unlocked"]`` 与前端 ``ProgressShape.unlocked``），
+    #: 但语义自 2026-09-25 起改为：**本次作答后首次出现进度的关卡 id**（通常是当前关自己）。
+    #: 已在 ``progress`` 表里的关卡不再计入 —— 因为已经不存在「被解锁」这回事。
     unlocked: tuple[str, ...] = ()
 
     @property
@@ -205,13 +219,17 @@ def advance_stage(
 ) -> str:
     """关卡状态机的**唯一实现**（纯函数，可单测）。
 
-    ``locked → learning → quizzed → mastered``，单调不回退：
+    ``learning → quizzed → mastered``，单调不回退：
 
     | 目标状态 | 条件 |
     | --- | --- |
     | ``learning`` | 学生开始做这一关的题（第一次作答即进入） |
     | ``quizzed`` | 答对 ≥ :data:`QUIZZED_CORRECT_NEEDED` 道 |
     | ``mastered`` | 答对 ≥ :data:`MASTERED_CORRECT_NEEDED` 道 **且** 掌握度 ≥ 阈值 |
+
+    ★★ **本状态机不再产生 ``locked``**（2026-09-25 起）：所有关卡一开始就可作答，
+    因而没有「先通过前一关」这种前置；这三个状态只是**进度反馈**，不拦任何操作。
+    传入 ``current_stage="locked"``（旧库里的历史行）时，第一次作答即升到 ``learning``。
 
     ★ **答错不改状态**（只让 ``correct_count`` 不增长）：状态**单调**是刻意的 ——
     如果答错能把 ``quizzed`` 打回 ``learning``，学生看到的是「我的进度条倒着走」，
@@ -227,30 +245,6 @@ def advance_stage(
     if correct_count >= QUIZZED_CORRECT_NEEDED:
         return "quizzed"
     return "learning"
-
-
-def unlocked_successor_ids(
-    *,
-    current_kp_id: str,
-    current_stage: str,
-    mastery_score: float,
-    successor_ids: Sequence[str],
-) -> list[str]:
-    """★ 解锁条件（票 15 验收口径）：**「当前 kp 已 quizzed 且 当前 kp 掌握度 ≥ 阈值」才解锁后继**。
-
-    ``successor_ids`` 由调用方从依赖图取（``from → to``，见 ``app/knowledge/deps.py``）——
-    本函数**不做图遍历**，只做规则判定（图的数据来源与本函数的职责分开，
-    这样「图拿错了」和「规则判错了」是两件可分别定位的事）。
-
-    答错时掌握度会掉、``stage`` 也不会到 ``quizzed``，因此**关卡保持锁定**。
-    """
-    if not successor_ids:
-        return []
-    if current_stage not in ("quizzed", "mastered"):
-        return []
-    if mastery_score < MASTERY_UNLOCK_THRESHOLD:
-        return []
-    return [kp for kp in successor_ids if kp and kp != current_kp_id]
 
 
 def level_order_from_graph(
@@ -269,10 +263,7 @@ def level_order_from_graph(
 
     ★★ ``limit`` 默认**不截断**（``None``），这是有意的修复，不是「忘了给默认值」：
       早年这里是 ``limit: int = 40``，而 K12KnowledgeBase 接入后**每个学段有 57 个知识点**
-      —— 每学段后缀 17 关不进路径，其中 **9 关的前置就在前 40 关里**（正常游玩就会被
-      :func:`unlocked_successor_ids` 解锁，于是它出现在 ``progress`` 表里、却不在路径上）。
-      结果：这些关被 :func:`progress_snapshot` 的 ``rank.get(kp_id, fallback)`` 兜到最后，
-      学生看到的是「下一关明明已经解锁了，却排在所有旧关后面」。
+      —— 每学段后缀 17 关不进路径，学生本该练到的内容整块从关卡列表里消失。
       40 这个数字的来历查无性能依据（路径长度按学段规模本就不同），
       因此改成「按实际规模给全」，而不是把它调成另一个魔法数字（57 也会被下一次扩容撞破）。
       给得出理由的调用方仍可显式传 ``limit``（截断语义原样保留）。
@@ -912,53 +903,31 @@ def select_questions(
 
 
 # ---------------------------------------------------------------- 闯关推进 --
-def successor_ids_for(conn, kp_id: str, *, grade_level: str | None = None) -> list[str]:
-    """依赖图里的直接后继（``from → to``，``from`` 是前置）。
-
-    **只取一跳**：解锁的语义是「这一关过了，下一关放出来」，不是「整条支线全放开」。
-    深度上限由 ``deps.py`` 的递归 CTE 保证（这里传 1，等于只取直接后继）。
-
-    ★ ``grade_level`` 给了就**只返回该学段兼容范围内（本学段 + 更低学段）的直接后继**
-      —— 判据就是 :func:`_allowed_grades`，与 :func:`_default_level_order`、
-      :func:`select_questions` 同源。这不是装饰：解锁是**关卡路径**的写路径，
-      放出一个更高学段的后继（``ai-definition-ph`` → 初中 ``ai-definition-jr``）
-      会让前端把该关渲染成可做，而 ``select_questions`` 的学段隔离注定让它取题 **404**
-      —— 一条普通游玩就能走到的死胡同。
-    """
-    from app.knowledge.deps import successors
-
-    allowed = None if grade_level is None else _allowed_grades(grade_level)
-    rows = successors(conn, kp_id, max_depth=1)
-    return [
-        row.kp_id
-        for row in rows
-        if allowed is None or row.grade_level in allowed
-    ]
-
-
 def apply_level_progress(
     store: LearningStore,
     *,
     kp_id: str,
     correct: bool,
     mastery_score: float,
-    successor_ids: Sequence[str],
 ) -> LevelOutcome:
     """把一次答题的结果推进到 ``progress`` 表（**闯关状态的唯一写路径**）。
 
     流程（与 :func:`advance_stage` 的规则一一对应）：
 
     1. 读这一关已有的 ``stage`` / 徽章（徽章里记着「答对几道」）；
-    2. 答对才 ``correct_count + 1``（答错不动计数 —— 状态单调，见 ``advance_stage``）；
-    3. 算新 ``stage`` 与新徽章（徽章**只在答对时给**，答错保留旧的）；
-    4. 写回；再按：「已 quizzed 且掌握度 ≥ 阈值」判断是否**解锁后继**。
+    2. 记下这次作答前这一关在不在 ``progress`` 里（决定 :class:`LevelOutcome` 的 ``unlocked``）；
+    3. 答对才 ``correct_count + 1``（答错不动计数 —— 状态单调，见 ``advance_stage``）；
+    4. 算新 ``stage`` 与新徽章（徽章**只在答对时给**，答错保留旧的）；
+    5. 写回。
 
-    ★ 解锁的实现是**把后继从 ``locked`` 提到 ``learning``**（插入一行）。
-      这里对每个后继都插一行是**修正一个有意的省略**：不插的话后继在 ``progress`` 表里
-      根本没有行，前端拿到的进度里就没有这一关 —— 学生会以为「后面没有内容了」。
+    ★★ **没有「解锁后继」这一步**（2026-09-25 起）：所有可用知识点一开始就可作答，
+      本函数只推进**当前这一关**自己的进度，**绝不写别的关卡的行**。
+      因此 ``unlocked`` 只在「这一关是第一次进入进度表」时给出当前关自己
+      （见 :class:`LevelOutcome` 的说明）。
     """
     rows = store.progress_map()
     existing: ProgressRecord | None = rows.get(kp_id)
+    first_touch = existing is None
     current_stage = existing.stage if existing else None
     correct_count = correct_count_from_badge(existing.badge if existing else None)
 
@@ -972,34 +941,13 @@ def apply_level_progress(
     # ★ 徽章只在**答对**时更新（答错保留旧徽章：那是「曾经通关」的事实，不该被抹掉）
     new_badge = badge_for(correct_count) if correct else (existing.badge if existing else None)
     store.upsert_progress(kp_id, stage=new_stage, badge=new_badge)
-
-    unlocked: list[str] = []
-    # ★ 解锁到 `learning` 而不是直接给 `quizzed`：解锁只表示「这一关可以开始做了」，
-    #   做了没有由学生自己的作答决定。把新关直接标成 quizzed 会凭空长出一个进度。
-    newly = unlocked_successor_ids(
-        current_kp_id=kp_id,
-        current_stage=new_stage,
-        mastery_score=float(mastery_score),
-        successor_ids=successor_ids,
-    )
-    for successor in newly:
-        previous = rows.get(successor)
-        if previous is not None and previous.stage != "locked":
-            continue  # 已经在做 / 已经通过：**不回退**（状态单调）
-        store.upsert_progress(
-            successor,
-            stage="learning",
-            badge=previous.badge if previous is not None else None,
-        )
-        unlocked.append(successor)
     return LevelOutcome(
         kp_id=kp_id,
         stage=new_stage,
         badge=new_badge,
         correct_count=correct_count,
-        unlocked=tuple(unlocked),
+        unlocked=(kp_id,) if first_touch else (),
     )
-
 
 
 def _known_kp_ids(request: Request) -> set[str] | None:
@@ -1061,7 +1009,7 @@ def progress_snapshot(
     - ★ ``order`` 是**依赖图拓扑序**（:func:`level_order_from_graph` 的产物）：
       给了就按它排序（序外的关卡按 kp_id 排到后面）。**不加它的话排序会退化成
       ``kp_id`` 字典序**，于是「变量」可能排在「循环」后面 —— 进度条会显示成
-      「下一关已经解锁、上一关还没做」的怪样子（这正是票 15 说的
+      「顺序忽前忽后」的怪样子（这正是票 15 说的
       「关卡顺序由依赖图拓扑序决定」，不是按 id 排）。
     - ★★ ``fallback_order`` 是**主序之外的补位序**（``None`` = 退回按 kp_id 排）。
       用来给「不在本学段关卡路径上、但确实有进度记录」的 kp 一个**拓扑序位置**，
@@ -1070,8 +1018,8 @@ def progress_snapshot(
       **为什么必须有它**（实测缺陷）：关卡路径 = 本学段（:func:`_default_level_order`），
       而取题允许**向上兼容**（学生能回头刷更低学段的题）—— 那些关不在主序里。
       再加上「每学段 57 个知识点、而路径曾被 ``limit=40`` 截断」，
-      于是「前置在前 40 关里、已经被正常解锁的那 9 关」全部落在主序之外 →
-      一律命中 fallback → 学生看到「下一关明明已经解锁了，却排在所有旧关之后」。
+      于是路径外的进度行（旧库里尤其多）全部落在主序之外 →
+      一律命中 fallback → 学生看到「明明练过的一关却排在所有旧关之后」。
       截断已经去掉（治本）；补位序是同一类场景的第二道保险
       （旧库里指向已改学段的进度行也走这条路）。
     - ★★ ``known_kp_ids`` 给了就**只保留教材里真的存在的那几关**
@@ -1133,24 +1081,6 @@ def student_db_path(data_dir: str | Path, student_id: str) -> Path:
     if not STUDENT_ID_RE.match(student_id):
         raise HTTPException(status_code=422, detail="studentId 不合法（只允许字母、数字、下划线、连字符）")
     return student_learning_db_path(data_dir, student_id)
-
-
-def _student_grade(store: LearningStore, student_id: str) -> str:
-    """学生的学段（**解锁判定/关卡路径的唯一依据**）。
-
-    学段来自**服务端推断**（``app.grade.rules`` 的规则引擎，D-020：自动推断、自动生效），
-    这里读到的就是学生当前**生效中**的值；学生端只读、**没有人工选择入口**，
-    所以调用方传入/读取的学段都不是「学生选的那个」。
-
-    学生行不存在时退回 :data:`COLD_START_GRADE` —— 与 :func:`read_progress`、
-    :func:`register_variants` 的冷启动兜底同一口径（「学生还没登录就先做题」不该丢数据，
-    也不该让他解锁到学段外的关卡）。不用请求体里的学段：判分请求体里**没有**学段字段，
-    而且客户端的自述不能当作隔离依据 —— 学段必须来自服务端持有的学生记录。
-    """
-    student = store.get_student(student_id)
-    if student is None:
-        return COLD_START_GRADE
-    return as_grade_level(student.grade_level)
 
 
 # ---------------------------------------------------------------- 路由 --
@@ -1248,11 +1178,11 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
     ★★ **判分幂等：首次作答决定**（``store.question_attempt(qid)`` 判首次，与主观路径同源）。
       第一次提交这道题 → 照常判分 + 计掌握度 + 推进闯关 + 计徽章；
       **之后的重复提交** → **照常判分、照常给反馈**（学生要看到这次对没对），
-      但**不再改掌握度、不重复计数、不重复推进/解锁**，反馈里附一句
+      但**不再改掌握度、不重复计数、不重复推进闯关**，反馈里附一句
       :data:`REPEAT_ATTEMPT_SUFFIX` 把「不计分」说明白（**不说谎**）。
 
       为什么「答错后再答」不改变掌握度：掌握度是**能力信号**（推荐/画像要吃它），
-      连点 4 次同一道题就能把 0.15 刷到 0.6 并解锁后继 —— 那不是能力，是点击次数。
+      连点 4 次同一道题就能把 0.15 刷到 0.6 —— 那不是能力，是点击次数。
       学习需要的是**即时反馈**，那一条一个字没少（判分与反馈照旧）。
 
     题目来源有两处，**按此顺序**查（票 15 起）：
@@ -1316,7 +1246,6 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
             after = store.apply_mastery(question.kp_id, delta, correct=correct)
             effective = round(after - before, 6)
         outcome = _record_attempt(
-            request,
             store,
             kp_id=question.kp_id,
             qid=question.qid,
@@ -1327,7 +1256,6 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
             effective_delta=effective,
             session_id=body.session_id or "",
             stem=question.stem,
-            grade_level=_student_grade(store, body.student_id),
             repeat=repeat,
         )
     finally:
@@ -1342,7 +1270,7 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
         after,
         effective,
         outcome.stage,
-        f" 解锁 {list(outcome.unlocked)}" if outcome.unlocked else "",
+        f" 首次进入进度 {list(outcome.unlocked)}" if outcome.unlocked else "",
         "（重复作答，不计分）" if repeat else "",
     )
     return QuizResult(
@@ -1522,7 +1450,11 @@ def register_variants(
             logger.info("冷启动：为 %s 建立学生行（学段 %s）", student, body.grade_level)
         store.save_generated_questions(accepted)
         # 冷启动/首次练习：把进度行补出来（**只插不覆盖**），否则前端拿到的进度里没这几关
-        store.seed_progress([item.kp_id for item in accepted if item.kp_id])
+        # ★ 显式给 `learning`：`seed_progress` 的默认值是历史遗留的 `locked`，
+        #   而后端自 2026-09-25 起不再产出 locked（可作答的最小状态就是 `learning`）。
+        store.seed_progress(
+            [item.kp_id for item in accepted if item.kp_id], stage="learning"
+        )
     finally:
         store.close()
 
@@ -1578,7 +1510,7 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
 
     ★★ **判分幂等同样成立**（与 ``/quiz/grade`` 一条口径，判据也是
       ``store.question_attempt(qid)``）：这道主观题第二次提交时**照常落一条
-      ``learning_history`` 流水**，但**不再改掌握度、不再推进闯关/解锁**，
+      ``learning_history`` 流水**，但**不再改掌握度、不再推进闯关**，
       反馈里附一句 :data:`REPEAT_ATTEMPT_SUFFIX`。
 
       ⚠️ 主观题**尤其**需要这一条：LLM 判分不是确定性的（同一份答案可能这次 0.8、
@@ -1633,7 +1565,6 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
             after = store.apply_mastery(generated.kp_id, delta, correct=correct)
             effective = round(after - before, 6)
         outcome = _record_attempt(
-            request,
             store,
             kp_id=generated.kp_id,
             qid=generated.qid,
@@ -1644,7 +1575,6 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
             effective_delta=effective,
             session_id=body.session_id or "",
             stem=generated.stem,
-            grade_level=_student_grade(store, body.student_id),
             extra={"llmScore": round(float(body.score), 4)},
             repeat=repeat,
         )
@@ -1660,7 +1590,7 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
         before,
         after,
         outcome.stage,
-        f" 解锁 {list(outcome.unlocked)}" if outcome.unlocked else "",
+        f" 首次进入进度 {list(outcome.unlocked)}" if outcome.unlocked else "",
         "（重复作答，不计分）" if repeat else "",
     )
     return QuizResult(
@@ -1685,8 +1615,9 @@ def read_progress(
     """读某学生的闯关进度。
 
     ★ **冷启动兜底**（票 15/20 的验收项）：新学生 ``progress`` 表是空的，
-      这里按**依赖图的拓扑序**自动初始化默认路径（只插不覆盖），
-      再返回 —— 前端不会拿到空数组，也不会因为没数据而报错。
+      这里按**依赖图的拓扑序**自动初始化默认路径（只插不覆盖，**每关都是 ``learning``**），
+      再返回 —— 前端不会拿到空数组，也不会因为没数据而报错，
+      并且初始化出来的每一关都可直接作答（不再有 ``locked``，见 :func:`_seed_default_path`）。
     ``kpIds`` 用于「本次答题影响到的关卡」这种小范围回读。
     """
     if not STUDENT_ID_RE.match(student_id):
@@ -1752,18 +1683,18 @@ def _seed_default_path(
     路径 = 沿后继边做 BFS（:func:`level_order_from_graph`）。
     知识库缺失/为空时**不报错**：退化成空路径，前端仍能拿到 `{"levels": []}` 而不是 500。
 
-    ★ **第一关是 ``learning`` 而不是 ``locked``**（冷启动的关键一步）：
-      全 locked 的话学生打开练习看到「一关都进不去」，而「没有前置的第一关」
-      本来就该是可以直接开始的。其余关卡保持 ``locked``，靠
-      :func:`unlocked_successor_ids` 在答对后逐个放出来。
+    ★★ **所有关卡一律 ``learning``（可直接作答）**（2026-09-25 起）：
+      不再有「第一关 ``learning``、其余 ``locked``」的分层 —— 学生想从哪一关开始都行。
+      ``stage`` 只是**进度反馈**，``learning`` 表示「还没做过，但随时可以开始」。
 
-    ★ **依赖图里没有任何知识点**时（kb 为空/未建）退回一个**种子起点**：
-      冷启动必须给出「可开始的第一关」，否则新学生的第一屏是死的（票 20 的冷启动验收）。
+    ★ **依赖图里没有任何知识点**时（kb 为空/未建）退回一个**默认关卡兜底**
+      （:data:`COLD_START_LEVEL_SEEDS`）：冷启动必须给出可作答的关卡，
+      否则新学生的第一屏是死的（票 20 的冷启动验收）。
     """
     order = _default_level_order(request, grade_level=grade_level)
     if not order:
         logger.warning(
-            "依赖图里没有可用的知识点（学段 %s），冷启动退回种子起点（练习仍可开始）",
+            "依赖图里没有可用的知识点（学段 %s），冷启动退回默认关卡兜底（练习仍可开始）",
             grade_level,
         )
         order = list(
@@ -1772,21 +1703,19 @@ def _seed_default_path(
 
     inserted = 0
     existing = store.progress_map()
-    for index, kp_id in enumerate(order):
+    for kp_id in order:
         if not kp_id or kp_id in existing:
             continue
-        # 第一关直接可做（`learning`），其余 `locked`；靠答对后逐个解锁（见 `unlocked_successor_ids`）
-        stage = "learning" if index == 0 else "locked"
-        inserted += store.seed_progress([kp_id], stage=stage)
+        # 每关都可直接作答（`learning`）—— 没有「锁定」这个概念了（见模块头）。
+        inserted += store.seed_progress([kp_id], stage="learning")
         existing[kp_id] = ProgressRecord(
-            kp_id=kp_id, stage=stage, badge=None, updated_at=None
+            kp_id=kp_id, stage="learning", badge=None, updated_at=None
         )
     if inserted:
         logger.info(
-            "冷启动：按依赖图初始化 %d 关默认路径（学段 %s，首关 %s；根 %s）",
+            "冷启动：按依赖图初始化 %d 关默认路径（学段 %s；根 %s）",
             inserted,
             grade_level,
-            order[0],
             "、".join(order[:4]),
         )
     return inserted
@@ -1826,7 +1755,7 @@ def _level_order_for_grades(request: Request, *, grades: Collection[str]) -> lis
       路径是按「本学段」建的（见上），它整份都不含更低学段的关；而学生**确实可能**
       持有更低学段的进度行（取题允许向上兼容）。拿路径补位等于没补 ——
       那些关仍然只能按 kp_id 排，而 kp_id 前缀是「概念 slug」不是顺序，
-      排在哪儿纯属巧合（这正是「解锁了却排在最后」那个缺陷的另一半）。
+      排在哪儿纯属巧合（这正是「路径外关卡排到最后」那个缺陷的另一半）。
     """
     from app.rag.retriever import default_kb_path
     from app.store.connections import connect
@@ -1868,7 +1797,7 @@ def _level_order_for_grades(request: Request, *, grades: Collection[str]) -> lis
 def _allowed_grades(grade_level: str) -> set[str]:
     """学生**可接触**的学段集合 = 本学段 + 更低学段（``compatible_grades`` 的唯一判据）。
 
-    ★ 关卡路径、解锁后继、取题（:func:`select_questions`）、检索（RAG）四处必须同源：
+    ★ 关卡路径、补位序、取题（:func:`select_questions`）、检索（RAG）四处必须同源：
       任何一处放宽成「全学段」，就会出现「路径里有关卡、但那关取不到题」的死胡同 ——
       这正是本文件要修的那个缺陷。
 
@@ -1944,7 +1873,6 @@ def _current_outcome(store: LearningStore, kp_id: str) -> LevelOutcome:
 
 
 def _record_attempt(
-    request: Request,
     store: LearningStore,
     *,
     kp_id: str,
@@ -1956,7 +1884,6 @@ def _record_attempt(
     effective_delta: float,
     session_id: str,
     stem: str,
-    grade_level: str,
     extra: dict[str, object] | None = None,
     repeat: bool = False,
 ) -> LevelOutcome:
@@ -1964,7 +1891,7 @@ def _record_attempt(
 
     写三样东西，都在同一个学生库、同一段控制流里：
       ① ``learning_history``（``activity="quiz"``，供票 20 的画像/推荐消费）；
-      ② ``progress``（闯关状态机 + 徽章 + 解锁后继）；
+      ② ``progress``（本关的闯关状态机 + 徽章）；
       ③ 返回 :class:`LevelOutcome`（供日志与断言）。
 
     ★★ **判分幂等：首次作答决定**（``repeat=True`` 时改什么、不改什么）：
@@ -1972,8 +1899,8 @@ def _record_attempt(
     | 落库项 | 重复作答时 | 为什么 |
     | --- | --- | --- |
     | ``learning_history`` | **照写** | 它是流水账：学生**确实**又答了一次，抹掉等于篡改记录；错题本/学习报告也要能看到重复的错 |
-    | ``progress``（stage / 徽章 / 解锁） | **不写** | 闯关是「走过没走过」的进度，重复提交不改变「走过」这件事 |
-    | ``mastery``（调用方负责） | **不动** | 掌握度是**能力信号**：连点 4 次同一题就把 0.15 刷到 0.6、顺手解锁后继，那不是能力 |
+    | ``progress``（stage / 徽章） | **不写** | 闯关是「走过没走过」的进度，重复提交不改变「走过」这件事 |
+    | ``mastery``（调用方负责） | **不动** | 掌握度是**能力信号**：连点 4 次同一题就把 0.15 刷到 0.6，那不是能力 |
 
     ★ 为什么「答错后可以再答」仍然成立、但掌握度只由第一次决定：这两件事服务于不同目的。
       再答是为了**看到对错**（学习需要即时反馈），而掌握度是给推荐/画像用的**稳定信号**。
@@ -1982,20 +1909,15 @@ def _record_attempt(
 
     ★ **不写对话正文**：``question`` 列只放题干**前 120 字**（题干是题目本身，
       不是学生的话）；学生原话与模型回答一律不入库（§8.1 合规红线）。
-
-    ★ ``grade_level`` 是学生的学段，**解锁后继时按它过滤**（见 :func:`_safe_successors`）：
-      路径与解锁必须同一学段口径，否则会放出取不到题的关卡。
     """
     if repeat:
         outcome = _current_outcome(store, kp_id)
     else:
-        successor_ids = _safe_successors(request, kp_id, grade_level=grade_level)
         outcome = apply_level_progress(
             store,
             kp_id=kp_id,
             correct=correct,
             mastery_score=mastery_after,
-            successor_ids=successor_ids,
         )
     detail: dict[str, object] = {
         "qid": qid,
@@ -2024,36 +1946,6 @@ def _record_attempt(
         detail=json.dumps(detail, ensure_ascii=False),
     )
     return outcome
-
-
-def _safe_successors(request: Request, kp_id: str, *, grade_level: str) -> list[str]:
-    """取**学段兼容范围内**的后继知识点（依赖图）；**任何失败都退化成空列表**，绝不让判分 500。
-
-    依赖图读不到时，判分与掌握度照常工作，只是「下一关解锁」这一步不发生 ——
-    这是可接受的降级（比「答对了却报错」好得多），且日志里明说。
-
-    ★ ``grade_level`` 是**硬过滤**（:func:`successor_ids_for`）：解锁写的是关卡路径，
-      放出更高学段的后继会立刻变成一条取题 404 的死关。与 :func:`select_questions`
-      的学段隔离同源 —— 学生在初中就不该被解锁高中关卡，哪怕掌握度已经够了。
-    """
-    from app.rag.retriever import default_kb_path
-    from app.store.connections import connect
-
-    kb_path = default_kb_path(request.app.state.config.data_dir)
-    if not kb_path.exists():
-        return []
-    try:
-        conn = connect(kb_path, readonly=True)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("解锁判定：打开知识库失败（本次不解锁后继）：%s", exc)
-        return []
-    try:
-        return successor_ids_for(conn, kp_id, grade_level=grade_level)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("解锁判定：查后继失败（本次不解锁）：%s", exc)
-        return []
-    finally:
-        conn.close()
 
 
 __all__ = [

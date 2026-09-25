@@ -4,8 +4,10 @@
  *
  * ★ 数据全部来自**后端**（`learning.db` 的 `progress` 表 → `POST /api/quiz/grade` 的
  *   payload 里带回 → 这里渲染）。**前端不自持状态机**（票 15 的 grep 验收）：
- *   本组件里没有 `locked → learning → …` 的任何推导，只有一个「stage → 中文/配色」
- *   的映射表；谁该解锁谁、什么时候解锁，全由 `routes/quiz.py` 的 `apply_level_progress` 决定。
+ *   本组件里没有 `quizzed → mastered` 的任何推导，只有一个「stage → 中文/配色」
+ *   的映射表；一关算不算走完，全由 `routes/quiz.py` 的 `apply_level_progress` 决定。
+ *   ★ 2026-09-25 去掉关卡锁定：不再有「未解锁」这一档（所有关卡都能做），
+ *     前端也不再有「哪一关什么时候解锁」的任何判断。
  *
  * ★ 载荷形状（`quiz.levels`，由 `quiz.ts` 出题/判分的结果带回）：
  *
@@ -28,7 +30,7 @@ const knowledge = useKnowledgeStore()
 /**
  * ★★ 关卡名原来直接印 `{{ level.kpId }}` —— 于是这张卡片在对话里长成
  *   `ai-definition-jr  学习中  0.00`：学生看到的是**数据库主键**，不是知识点的名字。
- *   走查把它列为「开发测试数据泄漏」的典型（「未解锁 0.00」那一屏就是它）。
+ *   走查把它列为「开发测试数据泄漏」的典型（「一个读不懂的机器串 0.00」那一屏就是它）。
  * ★ 与 `CodingCard` / `QuizCard` / 学习档案同一条口径（`study/kp-label.ts`）：
  *   取不到中文名就**不显示名字那一格**，绝不回落成 slug；
  *   原始 id 仍在 `<li>` 的 `data-kp-id` 上（排障与断言要用，但不渲染）。
@@ -51,7 +53,10 @@ onMounted(() => {
 /** 一个关卡（`progress` 表的一行 + 该知识点的掌握度）。 */
 interface LevelView {
   kpId: string
-  /** `locked | learning | quizzed | mastered`（契约 `ProgressStage`，**后端是唯一权威**）。 */
+  /**
+   * `learning | quizzed | mastered`（契约 `ProgressStage` 里仍留着旧的 `locked`，
+   * 但去掉关卡锁定后后端不再下发它，前端也不再据此做任何限制）。**后端是唯一权威**。
+   */
   stage: string
   badge: string | null
   mastery: number
@@ -64,15 +69,24 @@ const props = defineProps<{
 
 /** 状态 → 中文（只做展示映射，**不推导**下一个状态）。 */
 const STAGE_LABELS: Record<string, string> = {
-  locked: '未解锁',
   learning: '学习中',
   quizzed: '已通过',
   mastered: '已掌握'
 }
 
-/** 状态 → 徽标配色（CSS 类名，样式在下面）。 */
+/**
+ * 展示用的状态名（认不出的字面量兜一手）。
+ *
+ * ★ 契约枚举值**没有改**（`ProgressStage` 里仍留着 `locked` 这个旧字面量），
+ *   万一真收到它，这里按「可作答」显示 —— 防御性兼容：去掉关卡锁定后所有关卡都能做，
+ *   界面上不再出现任何「未解锁」的呈现。
+ */
+function stageLabel(stage: string): string {
+  return STAGE_LABELS[stage] ?? '可作答'
+}
+
+/** 状态 → 徽标配色（CSS 类名，样式在下面；认不出的状态没有专属配色）。 */
 const STAGE_CLASSES: Record<string, string> = {
-  locked: 'stage--locked',
   learning: 'stage--learning',
   quizzed: 'stage--quizzed',
   mastered: 'stage--mastered'
@@ -89,8 +103,9 @@ function projectLevel(raw: unknown): LevelView | null {
   const masteryRaw = Number(record.mastery)
   return {
     kpId,
-    // 认不出的 stage 当 `locked` 显示（**不猜**「可能已经通过了」——那是在给学生假进度）
-    stage: stage in STAGE_LABELS ? stage : 'locked',
+    // 认不出的 stage 原样带出，由 `stageLabel` 按「可作答」显示 —— 去掉关卡锁定后
+    // 不再把任何状态呈现成「未解锁」（旧写法把认不出的状态一律挡成锁态）。
+    stage,
     badge,
     mastery: Number.isFinite(masteryRaw) ? Math.max(0, Math.min(1, masteryRaw)) : 0
   }
@@ -157,7 +172,7 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
         <!-- ★ 名字取不到时这一格不渲染（见 `levelName` 的说明）；
              原始 id 在 `<li>` 的 `data-kp-id` 上，不在这里显示。 -->
         <span v-if="levelName(level.kpId)" class="level__name">{{ levelName(level.kpId) }}</span>
-        <span class="level__stage" data-testid="progress-stage">{{ STAGE_LABELS[level.stage] }}</span>
+        <span class="level__stage" data-testid="progress-stage">{{ stageLabel(level.stage) }}</span>
         <span class="level__mastery" data-testid="progress-mastery">
           {{ level.mastery.toFixed(2) }}
         </span>
@@ -166,7 +181,7 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
     </ol>
 
     <p class="levels__foot">
-      答对当前关卡后，依赖图里它的下一关会自动解锁；徽章与掌握度都记在本机的学习记录里。
+      每答对一题，这里的进度与掌握度都会跟着变一点；徽章也记在本机的学习记录里。
     </p>
   </article>
 
@@ -261,11 +276,8 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
   background: var(--k12-border-strong);
 }
 
-/* 四档配色：未解锁灰、学习中主色、已通过绿、已掌握金（都是主题色，不写死色值） */
-.stage--locked {
-  opacity: 0.62;
-}
-
+/* 三档配色：学习中主色、已通过绿、已掌握金（都是主题色，不写死色值）。
+ * ★ 2026-09-25 去掉关卡锁定后不再有「未解锁」灰档与锁态呈现。 */
 .stage--learning {
   border-color: color-mix(in srgb, var(--k12-accent) 50%, transparent);
 }

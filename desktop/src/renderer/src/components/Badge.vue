@@ -7,7 +7,8 @@
  * 把档位映射成颜色/图形，**不判对错、不算进度、不推导状态**（那些都在后端）。
  *
  * ★ 没有徽章时不渲染一个空占位 —— 父组件用 `v-if` 判断（见 ProgressCard.vue），
- *   这里拿到空串就显示「未解锁」，避免出现一个「看起来拿到了但其实是空的」徽章。
+ *   这里拿到空串就显示「还没拿到」（中性措辞，**不出现任何锁语义**，避免出现一个
+ *   「看起来拿到了但其实是空的」徽章）。
  */
 import { computed } from 'vue'
 
@@ -56,7 +57,15 @@ const tierIndex = computed(() => {
 
 const color = computed(() => TIER_COLORS[tierIndex.value] ?? TIER_COLORS[0])
 
-const label = computed(() => (props.badge ? parts.value.tier : '未解锁'))
+/**
+ * 未拿到徽章时的中性文案。
+ *
+ * ★ 2026-09-25 去掉关卡锁定：这里原来写「未解锁」，把「还没有徽章」说成了锁态 ——
+ *   学生读到的是一道门，而不是「再答对几题就有」。现在是一句中性说明，也没有锁图标。
+ */
+const EMPTY_LABEL = '还没拿到'
+
+const label = computed(() => (props.badge ? parts.value.tier : EMPTY_LABEL))
 
 const title = computed(() => {
   if (!props.badge) return '还没有拿到徽章'
@@ -68,14 +77,14 @@ const title = computed(() => {
 <template>
   <span
     class="badge"
-    :class="{ 'badge--compact': compact, 'badge--locked': !badge }"
+    :class="{ 'badge--compact': compact, 'badge--empty': !badge }"
     :style="badge ? { '--badge-color': color } : undefined"
     data-testid="level-badge"
     :data-tier="badge ? parts.tier : ''"
     :data-count="badge ? parts.count : 0"
     :title="title"
   >
-    <!-- 徽章图形：内联 SVG（无外链、断网可见）；锁定时画一把小锁 -->
+    <!-- 徽章图形：内联 SVG（无外链、断网可见）；还没拿到时画一颗空心星（不是锁） -->
     <svg class="badge__icon" viewBox="0 0 24 24" aria-hidden="true">
       <template v-if="badge">
         <path
@@ -85,8 +94,11 @@ const title = computed(() => {
       </template>
       <template v-else>
         <path
-          d="M8 10V7.5A4 4 0 0 1 16 7.5V10h.5a1.5 1.5 0 0 1 1.5 1.5v6A1.5 1.5 0 0 1 16.5 19h-9A1.5 1.5 0 0 1 6 17.5v-6A1.5 1.5 0 0 1 7.5 10H8zm2 0h4V7.5a2 2 0 0 0-4 0V10z"
-          fill="currentColor"
+          d="M12 2.5l2.9 5.9 6.5.95-4.7 4.6 1.1 6.45L12 17.35 6.2 20.4l1.1-6.45-4.7-4.6 6.5-.95z"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linejoin="round"
         />
       </template>
     </svg>
@@ -120,7 +132,8 @@ const title = computed(() => {
   font-size: var(--k12-fs-micro);
 }
 
-.badge--locked {
+/* 还没拿到：中性虚线档（**不是锁态** —— 去掉关卡锁定后这里只表示「再答对几题就有」） */
+.badge--empty {
   color: var(--k12-muted-2);
   background: transparent;
   border-color: var(--k12-border-strong);

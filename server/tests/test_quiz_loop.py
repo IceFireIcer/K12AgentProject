@@ -7,13 +7,14 @@
    `/api/quiz/variants` 与 `/api/quiz/grade` 全链路，哨兵在响应 JSON 里必须**零命中**
    （含嵌套键名 —— 逐层递归查 `answer` / `rubric` 这类键）；
 2. ★ **掌握度限幅 ±0.2**：单次答题不可能把 mastery 从 0 顶到 1（连续答对 4 次才到 0.6）；
-3. ★ **闯关状态机**：`locked → learning → quizzed → mastered` 的转移条件逐条断言，
-   且**答错不回退**、**答错不解锁后继**；
-4. ★ **解锁条件**：「目标 kp 掌握度 ≥ 阈值 **且** 当前 kp 已 quizzed」才解锁后继
-   （两个条件各自不成立时的用例都有）；
+3. ★ **闯关状态机**：`learning → quizzed → mastered` 的转移条件逐条断言，
+   且**答错不回退**；
+4. ★★ **没有任何关卡锁定**（2026-09-25 起）：`advance_stage` 永不返回 `"locked"`，
+   任意关卡都能**直接作答**（不要求先通过前一关），冷启动时所有关卡都可作答；
+   这三个状态只是**进度反馈**，不是准入限制；
 5. **混合批改**：客观题走 `rule`、带评分细则的主观题走 `llm`；
    两条路径**互相走不通**（客观题走主观端点 409、主观题走规则端点 409）；
-6. **冷启动**：全新学生 id 直接问进度 / 推荐 → 自动初始化默认路径（首关可做），
+6. **冷启动**：全新学生 id 直接问进度 / 推荐 → 自动初始化默认路径（每关都可做），
    不空指针、不 500。
 
 夹具用**真的** `server/_data/shared/kb.sqlite`（有真实依赖图）与真题库文件，
@@ -56,7 +57,6 @@ from app.routes.quiz import (  # noqa: E402
     normalize_answer,
     progress_snapshot,
     subjective_feedback,
-    unlocked_successor_ids,
 )
 from app.store.learning import GeneratedQuestionRecord, LearningStore  # noqa: E402
 
@@ -106,7 +106,7 @@ def _variant(
 
 
 class LoopCase(unittest.TestCase):
-    """带临时 userData 的基类；**真的**把 kb 拷进去，让解锁判定有图可查。"""
+    """带临时 userData 的基类；**真的**把 kb 拷进去，让关卡路径/排序有图可查。"""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -172,8 +172,8 @@ class LoopCase(unittest.TestCase):
     def set_grade(self, grade_level: str) -> str:
         """在测试夹具里**直接**把学生行的学段设成指定值（走真实的学生行，不是请求参数）。
 
-        ★ 学段必须落在 ``learning.db`` 的学生行上：关卡路径与解锁判定都
-        **只认服务端的学生记录**（客户端自述不算数 —— 请求里根本没有学段字段，D-020）。
+        ★ 学段必须落在 ``learning.db`` 的学生行上：关卡路径只认服务端的学生记录
+        （客户端自述不算数 —— 请求里根本没有学段字段，D-020）。
 
         ⚠️ 这里绕过 ``app/grade/rules.py`` 的规则引擎只是**测试取巧**（步骤更快、确定性更好）。
         真实运行下学段的唯一写路径是 ``POST /api/grade/turns`` 的自动推断
@@ -405,74 +405,53 @@ class TestStageMachine(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 3. ★ 解锁规则（纯函数）
+# 3. ★★ 没有关卡锁定（纯函数）
 # --------------------------------------------------------------------------- #
-class TestUnlockRule(unittest.TestCase):
-    """★「目标 kp 掌握度 ≥ 阈值 **且** 当前 kp 已 quizzed」才解锁后继。"""
+class TestNoLevelLocking(unittest.TestCase):
+    """★★ 状态机**永不产出** ``locked``：所有关卡一开始就可作答（2026-09-25 起）。
 
-    def test_both_conditions_must_hold(self) -> None:
-        succ = ["kp-next"]
-        # ① 没 quizzed（还在 learning）→ 不解锁（即便掌握度已经过阈值）
+    这一组替掉了原来的 ``TestUnlockRule`` —— 解锁机制整个删掉了（见 ``quiz.py`` 模块头），
+    所以「什么条件下解锁后继」不再是本仓库的行为，取而代之的是
+    「任何输入都不会把一关锁上」，以及「不需要任何前置就能作答」。
+    """
+
+    def test_advance_stage_never_returns_locked(self) -> None:
+        """★ 穷举一批输入（含当前就是 ``locked`` 的旧库行、含全错）都不得返回 ``locked``。"""
+        for stage in (None, "locked", "learning", "quizzed", "mastered"):
+            for correct_count in (0, 1, 2, 5):
+                for mastery in (0.0, 0.3, MASTERY_UNLOCK_THRESHOLD, 1.0):
+                    result = advance_stage(
+                        current_stage=stage,
+                        mastery_score=mastery,
+                        correct_count=correct_count,
+                    )
+                    self.assertNotEqual(
+                        result,
+                        "locked",
+                        f"★ stage={stage} count={correct_count} mastery={mastery} 时状态机产出了 locked",
+                    )
+                    self.assertIn(result, ("learning", "quizzed", "mastered"))
+
+    def test_legacy_locked_row_is_promoted_on_first_answer(self) -> None:
+        """★ 旧库里遗留的 ``locked`` 行：第一次作答（哪怕答错）就升到 ``learning``。"""
         self.assertEqual(
-            unlocked_successor_ids(
-                current_kp_id="kp-a",
-                current_stage="learning",
-                mastery_score=0.9,
-                successor_ids=succ,
-            ),
-            [],
-        )
-        # ② 已 quizzed 但掌握度不达标 → 不解锁（**答错后就是这种状态**）
-        self.assertEqual(
-            unlocked_successor_ids(
-                current_kp_id="kp-a",
-                current_stage="quizzed",
-                mastery_score=MASTERY_UNLOCK_THRESHOLD - 0.01,
-                successor_ids=succ,
-            ),
-            [],
-        )
-        # ③ 两条都成立 → 解锁
-        self.assertEqual(
-            unlocked_successor_ids(
-                current_kp_id="kp-a",
-                current_stage="quizzed",
-                mastery_score=MASTERY_UNLOCK_THRESHOLD,
-                successor_ids=succ,
-            ),
-            succ,
+            advance_stage(current_stage="locked", mastery_score=0.0, correct_count=0),
+            "learning",
         )
 
-    def test_mastered_also_unlocks(self) -> None:
-        self.assertEqual(
-            unlocked_successor_ids(
-                current_kp_id="kp-a",
-                current_stage="mastered",
-                mastery_score=1.0,
-                successor_ids=["kp-next"],
-            ),
-            ["kp-next"],
-        )
+    def test_answerability_does_not_depend_on_any_prerequisite(self) -> None:
+        """★ 一关能不能做，与「前置有没有通过」无关 —— 状态机只看**这一关自己**。
 
-    def test_no_successors_or_self_loop(self) -> None:
+        给一个「这一关从来没有进度、掌握度也是 0」的场景（等价于「前置一关都没做过」），
+        答对一道就应到 ``quizzed``，而不是停在某个被锁的状态。
+        """
         self.assertEqual(
-            unlocked_successor_ids(
-                current_kp_id="kp-a",
-                current_stage="mastered",
-                mastery_score=1.0,
-                successor_ids=[],
+            advance_stage(
+                current_stage=None,
+                mastery_score=MASTERY_GAIN_CORRECT,
+                correct_count=QUIZZED_CORRECT_NEEDED,
             ),
-            [],
-        )
-        self.assertEqual(
-            unlocked_successor_ids(
-                current_kp_id="kp-a",
-                current_stage="mastered",
-                mastery_score=1.0,
-                successor_ids=["kp-a"],
-            ),
-            [],
-            "自环不该被当成「新解锁了一关」",
+            "quizzed",
         )
 
 
@@ -767,51 +746,33 @@ class TestVariantRegistration(LoopCase):
 # --------------------------------------------------------------------------- #
 @unittest.skipUnless(REAL_KB.exists(), f"缺少真实知识库 {REAL_KB}（先跑 scripts/build_kb.py）")
 class TestGateD(LoopCase):
-    """★ 关卡 D 的硬线：答题 → 判分 → mastery 写入 → 下一关解锁 → 进度前进 → 徽章更新。
+    """★ 关卡 D 的硬线：答题 → 判分 → mastery 写入 → 进度前进 → 徽章更新。
 
-    用真实依赖图里的一对**同学段**前置/后继：`ai-hierarchy-jr → deep-learning-jr`
-    （「AI 技术的包含层级关系」→「深度学习」，都是初中）。
+    用真实依赖图里的一个初中知识点：`ai-hierarchy-jr`（「AI 技术的包含层级关系」），
+    它的后继是 `deep-learning-jr`（「深度学习」，同为初中）。
 
     ★ 为什么不再用跨学段的那一对（``ai-definition-ph → ai-definition-jr``）：
-      关卡路径现在**只看学生自己的学段**（见 ``_default_level_order`` 的说明 ——
+      关卡路径**只看学生自己的学段**（见 ``_default_level_order`` 的说明 ——
       新库把概念串成 ``pl→ph→jr→sr`` 的跨学段链，若路径按兼容范围取，
       初中生 40 关里只有 4 关是自己的课，高中生更是 0 关）。
       所以 `ai-definition-ph` 已不在 junior 的路径里，拿它当夹具会「关卡不存在」。
 
-    ★ 注意：`ai-hierarchy-jr` 在 junior 路径里排第 6 位（index 6），冷启动时是 `locked`。
-      所以做法是**先把路径上排在它前面的关卡逐关打过去，再在目标关做关卡 D 的观测** ——
-      这既是真实的闯关流程，也让「答对 A → 下一关是 A 的后继」被完整走一遍。
+    ★★ **不再有「先解锁再作答」**（2026-09-25 起）：`ai-hierarchy-jr` 冷启动就是
+      ``learning``（可直接作答），不需要先把排在它前面的关卡逐关打过去；
+      它的后继也一样一直可作答 —— 「解锁」这件事整个没有了。
     """
 
     CURRENT = "ai-hierarchy-jr"
     NEXT = "deep-learning-jr"
-    #: 本类学生显式学段：让 ``CURRENT`` / ``NEXT`` 落在兼容范围内（见类文档）。
+    #: 本类学生显式学段：让 ``CURRENT`` / ``NEXT`` 落在关卡路径里（见类文档）。
     GRADE = "junior"
 
     def setUp(self) -> None:
         super().setUp()
         self.set_student("student_gate_d")
-        # ★ 先设学段再冷启动：关卡路径与解锁判定都只认服务端学生行上的学段。
+        # ★ 先设学段再冷启动：关卡路径只认服务端学生行上的学段。
         self.set_grade(self.GRADE)
         self.exit_stack_ok = True
-
-    def _unlock(self, kp_id: str) -> None:
-        """把 `kp_id` 这一关**打通**（答对足够多道），从而解锁它的后继。
-
-        用与 `test_full_chain` 相同的口径：4 道题 × 0.15 = 0.6 掌握度（过阈值）。
-        """
-        questions = [
-            _variant(f"unlock-{kp_id}-{i}", kp_id, stem=f"练习 {i}", answer="2")
-            for i in range(1, 5)
-        ]
-        response = self.register(questions, grade=self.GRADE)
-        self.assertEqual(response.status_code, 200, response.text)
-        for item in response.json()["questions"]:
-            graded = self.grade(item["qid"], "2")
-            self.assertTrue(graded.json()["correct"], graded.text)
-        level = self.level(kp_id)
-        self.assertEqual(level["stage"], "mastered", f"{kp_id} 应已通关：{level}")
-        self.assertGreaterEqual(level["mastery"], MASTERY_UNLOCK_THRESHOLD)
 
     def _register_n(self, count: int, *, qid_prefix: str = "gate") -> list[str]:
         questions = [
@@ -822,55 +783,45 @@ class TestGateD(LoopCase):
         self.assertEqual(response.status_code, 200, response.text)
         return [item["qid"] for item in response.json()["questions"]]
 
-    def test_walking_the_chain_unlocks_the_next_level(self) -> None:
-        """★「答对 A → 下一关是 A 的后继」：逐关打通，后继逐关被放出来。
+    def test_any_level_can_be_answered_without_unlocking(self) -> None:
+        """★★ **任意关卡都能直接作答**：目标关冷启动就是 ``learning``，无需先过前一关。
 
-        这条用例走的是**真实的闯关流程**（不是直接把某关标成 learning），
-        因此它同时证明了：解锁确实由答题驱动、且沿依赖图方向发生。
+        旧行为是「链上的关卡一开始是 locked，要逐关打过去才放出来」；
+        现在不再有锁定，所以这里不碰任何前置关卡，直接对目标关登记题目并判分。
         """
-        # 冷启动：目标关还是锁着的
-        self.assertEqual(
-            self.level(self.CURRENT)["stage"], "locked", "链上的关卡一开始应是 locked"
+        # 冷启动：目标关与它的后继都直接可作答（进度里没有任何一关是 locked）
+        self.assertEqual(self.level(self.CURRENT)["stage"], "learning")
+        self.assertEqual(self.level(self.NEXT)["stage"], "learning")
+        self.assertNotIn(
+            "locked",
+            {item["stage"] for item in self.progress().json()["levels"]},
+            "★ 进度里不该出现 locked",
         )
-        self.assertEqual(self.level(self.NEXT)["stage"], "locked")
 
-        # 按**拓扑序**逐关打通它前面的每一关
-        order = self.progress().json()["levels"]
-        ids = [item["kpId"] for item in order]
-        for kp_id in ids[: ids.index(self.CURRENT)]:
-            self._unlock(kp_id)
-
-        # ★ 目标关被它的前置放出来了
+        # 不碰任何前置关卡，直接做目标关的题 → 这一关自己的进度前进
+        qids = self._register_n(2)
+        for qid in qids:
+            graded = self.grade(qid, "2")
+            self.assertEqual(graded.status_code, 200, graded.text)
+            self.assertTrue(graded.json()["correct"], graded.text)
         self.assertEqual(
             self.level(self.CURRENT)["stage"],
-            "learning",
-            "★ 前置通关后，目标关必须从 locked 解锁为 learning",
-        )
-        # 再打通目标关 → 它的后继（下一学段的同一个概念）被放出来
-        self._unlock(self.CURRENT)
-        self.assertEqual(
-            self.level(self.NEXT)["stage"],
-            "learning",
-            "★ 答对「人工智能的定义（小学高年级）」→ 下一关是它的后继「人工智能的定义（初中）」",
+            "quizzed",
+            "★ 直接作答就该推进这一关（答对 2 道且掌握度 0.3 < 阈值 → quizzed）",
         )
 
-    def test_full_chain_answer_grade_mastery_unlock_badge(self) -> None:
+    def test_full_chain_answer_grade_mastery_badge(self) -> None:
         """★ 完整链路（每一步都断言，失败时一眼看出断在哪）。
 
-        先把目标关的前置逐关打通（真实的闯关流程），再观测关卡 D 的五步。
+        不再有「逐关解锁前置」那一段：目标关直接可做。
         """
-        # ① 冷启动：新学生一开始就有可做的第一关（不空指针）
+        # ① 冷启动：新学生一开始所有关卡都可作答（不空指针、无锁定）
         cold = self.progress()
         self.assertEqual(cold.status_code, 200, cold.text)
         levels = cold.json()["levels"]
         self.assertGreater(len(levels), 0, "冷启动应初始化默认关卡路径")
-
-        # 把目标关之前的所有关卡按拓扑序打通（这一步本身就是「爬关卡」）
-        ids = [item["kpId"] for item in levels]
-        for kp_id in ids[: ids.index(self.CURRENT)]:
-            self._unlock(kp_id)
-        self.assertEqual(
-            self.level(self.CURRENT)["stage"], "learning", "目标关应已被前置解锁"
+        self.assertNotIn(
+            "locked", {item["stage"] for item in levels}, "★ 冷启动不该有任何 locked 关卡"
         )
 
         qids = self._register_n(4)
@@ -886,14 +837,14 @@ class TestGateD(LoopCase):
         self.assertEqual(level["stage"], "quizzed", "答对一道即 quizzed")
         self.assertIsNotNone(level["badge"], "答对一道就该有徽章")
         self.assertAlmostEqual(level["mastery"], MASTERY_GAIN_CORRECT, places=6)
-        # ★ 此时后继**仍然锁定**：掌握度 0.15 < 阈值 0.6（解锁条件缺一不可）
+        # ★ 只推进**当前这一关**：后继有自己的进度口径，不会因为本关通关而被改动
         self.assertEqual(
             self.level(self.NEXT)["stage"],
-            "locked",
-            "掌握度不足时后继不该解锁（这正是「两个条件缺一不可」的那一半）",
+            "learning",
+            "★ 后继一直是可作答的 learning（不存在「被解锁」这个状态跳变）",
         )
 
-        # ② 继续答对到掌握度过阈值 → 解锁后继
+        # ② 继续答对到掌握度过阈值 → mastered
         for qid in qids[1:]:
             self.grade(qid, "2")
         level = self.level(self.CURRENT)
@@ -901,20 +852,13 @@ class TestGateD(LoopCase):
         self.assertGreaterEqual(level["mastery"], MASTERY_UNLOCK_THRESHOLD)
         self.assertEqual(level["stage"], "mastered", "答对 ≥2 道且掌握度过阈值 → mastered")
 
-        # ③ ★ 下一关解锁（progress 行变化：locked → learning）
-        successor = self.level(self.NEXT)
-        self.assertIsNotNone(successor, f"依赖图里 {self.CURRENT} 的后继 {self.NEXT} 应出现在进度里")
-        self.assertEqual(
-            successor["stage"], "learning", f"★ 关卡 D：{self.NEXT} 应已从 locked 解锁为 learning"
-        )
-
-        # ④ 进度条前进（后端算出的 done 数增加）
+        # ③ 进度条前进（后端算出的 done 数增加）
         body = self.progress().json()
         levels = body["levels"]
         done = len([x for x in levels if x["stage"] in ("quizzed", "mastered")])
         self.assertGreaterEqual(done, 1, "至少一关已通过")
 
-        # ⑤ 徽章更新 + 掌握度真的写进 sqlite（证据留档）
+        # ④ 徽章更新 + 掌握度真的写进 sqlite（证据留档）
         mastery_row = self.query(
             "SELECT score, attempts, correct FROM mastery WHERE kp_id = ?", (self.CURRENT,)
         )
@@ -927,22 +871,20 @@ class TestGateD(LoopCase):
             for row in self.query("SELECT kp_id, stage FROM progress")
         }
         self.assertEqual(progress_rows.get(self.CURRENT), "mastered")
-        self.assertEqual(progress_rows.get(self.NEXT), "learning")
+        self.assertNotIn(
+            "locked", set(progress_rows.values()), "★ 库里的 progress 不该有任何 locked"
+        )
 
         badge_rows = self.query("SELECT badge FROM progress WHERE kp_id = ?", (self.CURRENT,))
         self.assertIsNotNone(badge_rows[0]["badge"])
 
-    def test_wrong_answers_keep_the_next_level_locked(self) -> None:
-        """★ 答错时后继保持锁定（票 15 明确要求的断言）。
+    def test_wrong_answers_do_not_advance_stage(self) -> None:
+        """★ 答错不推进状态、不给徽章、掌握度不掉到 0 以下（进度单调的另一半）。
 
-        在**已解锁的那一关**上连续答错：掌握度停在 0（限幅 + 下限 0）、stage 停在
-        `learning`（答错不推进）、没有徽章，并且**它的后继始终是 locked**。
+        不再断言「后继保持 locked」—— 已经不存在 locked（见 :class:`TestNoLevelLocking`）。
         """
-        # 用冷启动放出来的第一关（它必定是 learning）
-        level_now = next(
-            item for item in self.progress().json()["levels"] if item["stage"] == "learning"
-        )
-        current_kp = level_now["kpId"]
+        # 挑一关直接作答（不再需要先解锁任何前置）
+        current_kp = self.CURRENT
         from app.knowledge.deps import successors
         from app.store.connections import connect
 
@@ -951,7 +893,7 @@ class TestGateD(LoopCase):
             direct = [row.kp_id for row in successors(conn, current_kp, max_depth=1)]
         finally:
             conn.close()
-        self.assertTrue(direct, f"{current_kp} 应当有后继（否则这条用例没在测解锁）")
+        self.assertTrue(direct, f"{current_kp} 应当有后继（夹具前提：这条链真的存在）")
 
         self.register(
             [_variant("wrong-1", current_kp, stem="随便一道", answer="2")], grade="junior"
@@ -961,21 +903,22 @@ class TestGateD(LoopCase):
             self.assertFalse(response.json()["correct"])
 
         level = self.level(current_kp)
-        self.assertIn(level["stage"], ("learning", "locked"), "答错不该推进到 quizzed")
+        self.assertEqual(level["stage"], "learning", "答错不该推进到 quizzed")
         self.assertAlmostEqual(level["mastery"], 0.0, places=6, msg="掌握度不该掉到 0 以下")
         self.assertIsNone(level["badge"], "全答错不该有徽章")
 
+        # ★ 答错也不影响后继的**可作答性**：它本来就是 learning，答错后仍是 learning
         for successor in direct:
             target = self.level(successor)
             if target is None:
                 continue  # 不在默认路径里的后继（更高学段）不参与这条断言
             self.assertEqual(
-                target["stage"], "locked", f"★ 答错时后继 {successor} 必须保持 locked"
+                target["stage"], "learning", f"后继 {successor} 一直可作答"
             )
 
     def test_mastery_delta_is_clamped(self) -> None:
         """★ 限幅：单次答题 ``abs(mastery_delta) <= 0.2``（否则一次答对就 0→1）。"""
-        # 用冷启动放出来的第一关（未解锁的关卡做不了题）
+        # 任取一关（冷启动后所有关卡都可作答）
         current = next(
             item["kpId"]
             for item in self.progress().json()["levels"]
@@ -1069,7 +1012,7 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
     缺陷形态（修之前实测）：:func:`_default_level_order` 走**全图**（旧库 33 关，
     新库 228 个知识点），而 :func:`select_questions` 按学段隔离 —— 冷启动的 ``primary_high``
     学生拿到含初中/高中的关卡，取题全部 **404**。普通游玩就能走到：
-    小学高年级掌握 ``ai-definition-ph`` → 解锁初中后继 ``ai-definition-jr``
+    小学高年级练 ``ai-definition-ph`` → 它的初中后继 ``ai-definition-jr`` 出现在路径里
     → 该关在前端是可点的，取题却 404，闭环在**计分功能**里断掉。
 
     新库（K12KnowledgeBase）里每个概念都有 pl→ph→jr→sr 四个学段，跨学段的边（``related``
@@ -1088,7 +1031,7 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
         return {doc.kp_id: doc.grade_level for doc in load_library(KNOWLEDGE_DIR)}
 
     def _successors(self, kp_id: str) -> list[str]:
-        """依赖图里的直接后继（用真 kb，与解锁判定同一个数据来源）。"""
+        """依赖图里的直接后继（用真 kb，与关卡排序同一个数据来源）。"""
         from app.knowledge.deps import successors  # noqa: PLC0415
         from app.store.connections import connect  # noqa: PLC0415
 
@@ -1164,7 +1107,7 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
         对每个「有更高学段可走」的学生，取一条**真实存在**的跨学段边
         （路径上的 kp → 更高学段的直接后继，正是缺陷的成因），断言：
 
-        - 那个更高学段的 kp **不在**路径里（不再被解锁、不再显示为可点的死关）；
+        - 那个更高学段的 kp **不在**路径里（学段隔离把整条路径限在兼容范围内）；
         - 但**直接请求**它仍然 **404** —— 说明修的是「路径不该包含它」，
           而不是「把取题的学段隔离放宽了」。两条一起才叫收敛，只放宽隔离是把缺陷藏起来。
         """
@@ -1218,9 +1161,9 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
     def test_the_reported_dead_end_pair_is_gone_for_primary_high(self) -> None:
         """★ 复现工单里点名的那个死胡同：`primary_high` 学生走不到 `ai-definition-jr`。
 
-        缺陷场景：小学高年级学生掌握 ``ai-definition-ph``，解锁后继
-        ``ai-definition-jr``（初中）→ 取题 404。修复后：该后继**根本不进路径**
-        （解锁时就被学段过滤掉），而直接请求它仍然 404（隔离不变）。
+        缺陷场景：小学高年级学生的路径里混进了 ``ai-definition-jr``（初中）→ 取题 404。
+        修复后：该知识点**根本不进路径**（路径按学段隔离），
+        而直接请求它仍然 404（隔离不变）。
 
         ⚠️ 旧知识库（33 个 kp 的那一代）里点名的对子是一条「图片分类（小学高年级）→
         数据特征（初中）」的边；新库（K12KnowledgeBase）里那两个 kp 都不存在，
@@ -1238,7 +1181,7 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
         self.assertIn("ai-definition-jr", self._successors("ai-definition-ph"),
                       "前提：`ai-definition-jr` 确实是它的后继（否则这条用例没在测那条边）")
 
-        # 真走一遍「掌握前置」：解锁的后继里不许出现跨学段的那一个
+        # 真走一遍「练完前置」：进度里仍不许冒出跨学段的那一个
         questions = [
             _variant(f"deadend-{i}", "ai-definition-ph", stem=f"练习 {i}", answer="2")
             for i in range(1, 5)
@@ -1251,7 +1194,7 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
         self.assertEqual(
             after.get("ai-definition-jr"),
             None,
-            "★ 前置通关后也不该把初中的后继解锁出来（解锁同样要按学段过滤）",
+            "★ 练完前置也不该让初中的知识点出现在进度里（路径按学段隔离）",
         )
         direct = self.client.get(
             "/api/quiz/bank/ai-definition-jr", params={"gradeLevel": "primary_high"}
@@ -1263,11 +1206,9 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
         """★★ 关卡路径**不得被长度上限截断**：本学段有几个知识点，路径就得有几关。
 
         缺陷形态（修之前实测）：``level_order_from_graph`` 的 ``limit: int = 40`` 把每个
-        学段的后 **17 关**切掉，而其中 **9 关的前置就落在那 40 关里** —— 正常游玩就会被
-        :func:`unlocked_successor_ids` 解锁，于是它出现在 ``progress`` 表里、却不在路径上，
-        再被 :func:`progress_snapshot` 的 ``rank.get(kp_id, fallback)`` 兜到进度条**最末**。
-        学生看到的是「下一关明明已经解锁了，却排在所有旧关后面」——
-        既像排序坏了，也让「下一关该做哪一关」失去意义。
+        学段的后 **17 关**切掉，学生本该练到的内容整块从关卡列表里消失；
+        而落进 ``progress`` 表的那些关又会被 :func:`progress_snapshot` 的
+        ``rank.get(kp_id, fallback)`` 兜到进度条**最末** —— 进度条与「该练什么」对不上。
 
         判据落在**行为**上（不查源码里有没有 ``limit`` 这个字面量）：
         路径条数 == 该学段在教材里的知识点数；且路径集合 == 该学段知识点集合。
@@ -1291,23 +1232,22 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
                     f"★ {grade_level} 的路径应与该学段的知识点集合一一对应",
                 )
 
-    def test_unlocked_levels_stay_inside_the_path(self) -> None:
-        """★★ 解锁出来的关卡必须落在路径**之内**（否则它会被排到进度条最末）。
+    def test_answering_does_not_add_levels_outside_the_path(self) -> None:
+        """★★ 作答**只推进当前关**，不往进度里塞路径外的关卡。
 
-        这是上一条缺陷的**可观察症状**：关卡一旦不在路径上，``progress_snapshot``
-        就取不到它的 ``rank``，只好按 ``fallback`` 排到所有旧关之后。
-        这条用例真的把路径上靠前的一关打通、让它的后继被解锁，再检查解锁出来的关
-        确实还在路径里。**不是**把「有没有被排到最后」当成判据 ——
-        排序由 ``order`` 决定，这里验的是它的输入（路径）本身没有漏洞。
+        「解锁后继」删掉之后，作答对进度的写路径只剩「这一关自己」这一条 ——
+        所以进度集合恒等于路径集合（冷启动播下的第一批 + 作答过的那些，都在路径里）。
+        这是原 ``test_unlocked_levels_stay_inside_the_path`` 的替代：后者守的是
+        「解锁出来的关不能落在路径外」，而现在根本没有「解锁出来的关」。
         """
-        self.set_student("student_unlock_in_path")
+        self.set_student("student_answer_in_path")
         self.set_grade("primary_low")
         body = self.progress().json()
         path = [item["kpId"] for item in body["levels"]]
-        grades = self._kp_grades()
+        self.assertNotIn("locked", {item["stage"] for item in body["levels"]})
 
-        # 打通路径上的第一关（它必定是 learning），让它的后继逐个解锁
-        first = next(item["kpId"] for item in body["levels"] if item["stage"] == "learning")
+        # 任取一关作答（不再有「只有第一关能做」的限制）
+        first = body["levels"][0]["kpId"]
         questions = [
             _variant(f"inpath-{i}", first, stem=f"练习 {i}", answer="2") for i in range(1, 5)
         ]
@@ -1316,18 +1256,13 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
         for item in response.json()["questions"]:
             self.grade(item["qid"], "2")
 
-        after = self.progress().json()["levels"]
-        self.assertGreater(len(after), 0, "进度不该变空")
-        unlocked = [item["kpId"] for item in after if item["stage"] != "locked"]
-        self.assertIn(first, unlocked, "被打通的那一关应已推进")
-        for kp_id in unlocked:
-            if grades.get(kp_id) != "primary_low":
-                continue  # 更低学段的兼容记录：按设计不在本学段路径里（另有补位序兜底）
-            self.assertIn(
-                kp_id,
-                path,
-                f"★ 已解锁的 {kp_id} 不在关卡路径里 —— 它会被排到进度条最末",
-            )
+        after = {item["kpId"] for item in self.progress().json()["levels"]}
+        self.assertIn(first, after, "被打通的那一关应已推进")
+        self.assertEqual(
+            after,
+            set(path),
+            "★ 作答不该往进度里加路径外的关卡（旧行为：解锁的后继会插一行）",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1383,13 +1318,12 @@ class TestProgressSnapshotOrdering(unittest.TestCase):
 # 7. 冷启动
 # --------------------------------------------------------------------------- #
 class TestColdStart(LoopCase):
-    def test_brand_new_student_gets_a_usable_first_level(self) -> None:
-        """★ 全新学生：`progress` 表为空也能直接可用（自动初始化默认路径）。
+    def test_brand_new_student_gets_all_levels_answerable(self) -> None:
+        """★★ 全新学生：`progress` 表为空也能直接可用，且**所有关卡都可作答**。
 
-        设计口径（票 15「闯关」+「关卡顺序由依赖图拓扑序决定」）：
-        默认路径**按依赖图拓扑序全部初始化**，其中**恰好第一关可做**（`learning`），
-        其余 `locked` —— 学生一关一关往前走。所以「可用」的判据是
-        「至少有一关可开始」，而不是「所有关都解锁」。
+        设计口径（票 15「闯关」+「关卡顺序由依赖图拓扑序决定」，2026-09-25 去锁定后）：
+        默认路径**按依赖图拓扑序全部初始化**，每一关都是 `learning`（还没做过但可以开始）——
+        没有任何一关是 `locked`，学生想从哪一关开始都行。
         """
         self.set_student("student_brand_new_15")
         response = self.progress()
@@ -1399,16 +1333,9 @@ class TestColdStart(LoopCase):
         self.assertGreater(len(body["levels"]), 0, "冷启动必须给出可做的关卡")
         self.assertGreater(body["seeded"], 0, "应真的初始化了默认路径")
 
-        runnable = [x for x in body["levels"] if x["stage"] in ("learning", "quizzed", "mastered")]
-        self.assertEqual(
-            len(runnable), 1, "冷启动应恰好放出一关（其余靠答对逐关解锁）"
-        )
-        locked = [x for x in body["levels"] if x["stage"] == "locked"]
-        self.assertEqual(
-            len(locked) + len(runnable),
-            len(body["levels"]),
-            "每关都必须是四个合法状态之一（没有状态不明的关卡）",
-        )
+        stages = {x["stage"] for x in body["levels"]}
+        self.assertNotIn("locked", stages, "★ 冷启动不该产出任何 locked 关卡")
+        self.assertEqual(stages, {"learning"}, f"冷启动每一关都应可直接作答：{stages}")
 
     def test_cold_start_is_idempotent(self) -> None:
         """重复调用不再重复初始化（已存在的行一个字不动）。"""
@@ -1492,7 +1419,7 @@ class TestLearningHistory(LoopCase):
     def test_practice_route_streams_into_the_two_round_trip(self) -> None:
         """★「上一轮的变化改变下一轮的输入」：掌握度真的变了，两次读到的进度不同。
 
-        用**当前已解锁的那一关**（冷启动放出来的第一关，按依赖图拓扑序）——
+        用**冷启动放出来的第一关**（按依赖图拓扑序，现在整条路径都可作答）——
         这正是学生实际会练的那一关，避免用例依赖某条固定的知识点 id。
         """
         self.set_student("student_loop")

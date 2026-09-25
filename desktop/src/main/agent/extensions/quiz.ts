@@ -952,7 +952,9 @@ export async function fetchProgress(studentId: string): Promise<ProgressShape | 
  * 把进度响应投影成前端需要的形状（**白名单**，与题目投影同一纪律）。
  *
  * 认不出的关卡**整关丢掉**（宁可少显示一关，也不要一关状态不明的进度 ——
- * 那会让学生看到「未解锁」而其实已经通过了）。
+ * 状态是我们唯一能拿来分组呈现的依据，猜错等于给学生看错的进度）。
+ * ★ 2026-09-25 去掉关卡锁定后，这个投影**逻辑没变**（仍走白名单 + 认不出即丢）；
+ *   只是丢掉的后果从「显示成未解锁」变成「不显示这一关」。
  */
 export function projectProgress(raw: unknown): ProgressShape | null {
   if (!raw || typeof raw !== 'object') return null

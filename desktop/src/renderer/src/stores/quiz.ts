@@ -84,9 +84,6 @@ export const useQuizStore = defineStore('quiz', () => {
     () => levels.value.find((level) => level.kpId === activeKpId.value)?.stage ?? null
   )
 
-  /** 已锁的关卡不能进（服务端判的，这里只是照着禁用按钮）。 */
-  const activeLocked = computed(() => activeStage.value === 'locked')
-
   /** 本轮做对的比例（没有判过题时 `null`，界面据此隐藏小结）。 */
   const accuracy = computed(() => {
     if (gradedCount.value === 0) return null
@@ -128,17 +125,11 @@ export const useQuizStore = defineStore('quiz', () => {
   /**
    * 选一关并取题。
    *
-   * ★ 锁着的关卡**当场拒绝**（不发给后端）：后端的学段与阶段隔离是权威，
-   *   但让一个明显点不动的按钮发出请求，会在界面上留下一次无意义的失败。
-   * ★ 这句话仍带着「还没解锁」（学生面的状态词，与 `views/Quiz.vue` 的 `stageMeta` 同一个词，
-   *   守卫 `tests/renderer-data-plane.test.ts` 钉着它）；破折号在报告 C16 里被点名，已换成逗号。
+   * ★★ 2026-09-25 去掉关卡锁定：不再有「还没解锁」这一档，**任何一关都可以直接作答**。
+   *   这里不再按阶段拦请求（旧写法会为锁着的关卡当场拒绝、把「这一关还没解锁」写进
+   *   `bankError`）。学段与题量隔离仍是服务端的权威，交给它判就行。
    */
   async function selectLevel(kpId: string): Promise<void> {
-    const level = levels.value.find((item) => item.kpId === kpId)
-    if (level?.stage === 'locked') {
-      bankError.value = '这一关还没解锁，先把前面的关卡过掉。'
-      return
-    }
     activeKpId.value = kpId
     attempts.value = {}
     gradedCount.value = 0
@@ -297,7 +288,6 @@ export const useQuizStore = defineStore('quiz', () => {
     pendingCount,
     activeKpId,
     activeStage,
-    activeLocked,
     bank,
     bankLoading,
     bankError,

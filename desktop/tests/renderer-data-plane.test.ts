@@ -529,12 +529,15 @@ test('★ 同一题提交中连点只判一次（连点会判两次、写两次�
   assert.equal(quiz.gradedCount, 1, '同一题只该被计一次')
 })
 
-test('★ 锁着的关卡当场拒绝，不发无意义的请求', async () => {
+test('★★ 去掉关卡锁定：任何一关都直接作答（含历史遗留的 locked 字面量也容错放行）', async () => {
   const bridge = installFakeBridge()
   bridge.respond('readQuizProgress', {
     studentId: 'student_001',
     gradeLevel: 'junior',
     seeded: true,
+    // 契约 `ProgressStage` 里**仍留着**旧的 `locked` 字面量（契约不改）；去掉关卡锁定后
+    // 后端不再下发它，但前端必须**容错**：万一收到，也按「可作答」处理 ——
+    // 不拦取题请求、不写任何「还没解锁」的拒绝文案。
     levels: [{ kpId: 'ai-definition-sr', stage: 'locked', badge: null, mastery: 0 }]
   })
   const { useQuizStore } = await import('../src/renderer/src/stores/quiz.ts')
@@ -544,8 +547,9 @@ test('★ 锁着的关卡当场拒绝，不发无意义的请求', async () => {
   await quiz.loadProgress()
   await quiz.selectLevel('ai-definition-sr')
 
-  assert.equal(bridge.calls.readQuizBank, undefined, '锁着的关卡不该去取题')
-  assert.ok((quiz.bankError ?? '').includes('还没解锁'))
+  assert.equal(bridge.calls.readQuizBank, 1, '任何一关都该去取题（不再有锁着的关卡）')
+  assert.equal(quiz.bankError, null, '不该再出现「还没解锁」这类拒绝文案')
+  assert.equal(quiz.activeKpId, 'ai-definition-sr')
 })
 
 /* ------------------------------------------------------------------ *

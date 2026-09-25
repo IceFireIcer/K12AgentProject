@@ -152,7 +152,7 @@ const selectedMastery = computed(() => {
   return row ? Math.round(Math.max(0, Math.min(1, row.score)) * 100) : null
 })
 
-/** 关卡的阶段（`locked` 等，来自闯关进度；没有这一关时为 `null`）。 */
+/** 关卡的阶段（`learning` / `quizzed` / `mastered`，来自闯关进度；没有这一关时为 `null`）。 */
 const selectedStage = computed(() => {
   const kpId = selected.value
   if (!kpId) return null
@@ -160,16 +160,18 @@ const selectedStage = computed(() => {
 })
 
 /**
- * 这个知识点有没有可练的关卡（没有关卡 / 关卡锁着 → 不给按钮，也不给一句假承诺）。
+ * 这个知识点有没有可练的关卡（没有关卡 → 不给按钮，也不给一句假承诺）。
  *
- * ★ 判据只看闯关进度：进度读失败时 `levels` 为空 → 按钮不出现（而不是出现一个
- *   点下去什么都不发生的按钮）。「去学」那条主行动**不受它影响**，永远可用。
+ * ★ 判据只看「进度里有没有这一关」：进度读失败时 `levels` 为空 → 按钮不出现（而不是
+ *   出现一个点下去什么都不发生的按钮）。「去学」那条主行动**不受它影响**，永远可用。
+ * ★ 不再看 `locked`：闯关已不设锁定，任何一关都能直接作答（2026-09-25 用户裁决）。
+ *   契约里仍留着 `"locked"` 这个字面量，万一收到也按可作答处理。
  */
-const quizReady = computed(() => selectedStage.value !== null && selectedStage.value !== 'locked')
+const quizReady = computed(() => selectedStage.value !== null)
 
 /**
  * 主行动「去学这个知识点 →」**落在对话页**（选择理由）：
- *   · 它要能对**任何**节点都可用 —— 入口知识点可能还没解锁关卡、也可能还没有题库，
+ *   · 它要能对**任何**节点都可用 —— 入口知识点可能还没有题库，
  *     而「问一句」这条路永远通；
  *   · 「学」这件事在本项目里的主场就是对话（7×24 的 AI 教师），
  *     练习题是**检验**（次要动作用它，见 `goQuiz()`）；
@@ -360,7 +362,6 @@ function chapterNumber(title: string): number {
             <span v-if="selectedMastery !== null">· 掌握度 {{ selectedMastery }}%</span>
             <span v-else-if="selectedNode.mastered">· 已掌握</span>
             <span v-else>· 还没掌握</span>
-            <span v-if="selectedStage === 'locked'">· 这一关还没解锁</span>
           </p>
 
           <div class="detail__prereq">

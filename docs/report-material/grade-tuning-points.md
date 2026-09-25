@@ -70,7 +70,7 @@
 | 可调点 | 现值 | 位置 | 说明 |
 | --- | --- | --- | --- |
 | `REVIEW_MASTERY_CEILING` | `0.5` | `server/app/routes/profile.py` | 低于它就算「待重练」，**推荐第一位就换成它**。调大 = 更多知识点算待重练（推荐更偏复习） |
-| `MASTERY_UNLOCK_THRESHOLD` | 见源码 | 同上 | 掌握度 ≥ 它才解锁后继（依赖图推荐那一段） |
+| `MASTERY_UNLOCK_THRESHOLD` | 见源码 | 同上 | 掌握度 ≥ 它视为「已掌握」，推荐时**不再推**（D-074 起不再有依赖图后继解锁；2026-09-25 起闯关也无锁定，任何一关可直接作答） |
 | `MASTERY_GAIN_CORRECT` / `MASTERY_LOSS_WRONG` + ±0.2 限幅 | `0.15` / `0.10` / `0.2` | `server/app/routes/quiz.py` | 掌握度怎么涨落。D-064 之后**它仍是唯一权威**（模型改不了） |
 
 ## 六、改之前必须知道的三件事

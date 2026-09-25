@@ -47,10 +47,10 @@ const mistakes = computed(() => study.mistakes)
 
 onMounted(() => {
   // ★ 名字的来源是教材知识点清单（错题端点给的 `kpName` 查不到时会退化成 id）。
-  //   幂等：取到过就不发请求；失败不阻断本页（退化成中性标签，见 `nameOf`）。
+  // 幂等：取到过就不发请求；失败不阻断本页（退化成中性标签，见 `nameOf`）。
   void knowledge.ensureNames().catch(() => {})
-  // ★ 关卡阶段决定「再练这类题」该不该出现（锁着的关卡点下去只会得到一句拒绝）。
-  //   同一个幂等动作，概览页也会调。
+  // ★ 预取闯关进度：切到闯关页时关卡列表已就绪（同一个幂等动作，概览页也会调）。
+  //   2026-09-25 去掉关卡锁定后，这里不再据阶段决定「再练这类题」该不该出现 —— 每一关都能做。
   void quiz.loadProgress()
 })
 
@@ -62,19 +62,6 @@ function nameOf(item: { kpId: string; kpName?: string | null }): string {
 /** 名字是否真的取到了 —— 取不到时把原始 id 放进 `title`（排障/答辩可见，学生看不到 slug）。 */
 function nameResolved(item: { kpId: string; kpName?: string | null }): boolean {
   return kpLabelResolved(item.kpId, item.kpName, (id) => knowledge.kpNameOf(id))
-}
-
-/**
- * 这个知识点**现在能不能直接做题库里的题**。
- *
- * ★ 判据来自闯关进度（服务端权威）：锁着的关卡点下去只会得到一句「还没解锁」，
- *   那还不如一开始就别给按钮 —— 按钮出现了却什么也不发生，学生会以为坏了。
- *   进度还没读回来时（`levels` 为空）也判「不行」，此时卡片上仍留着「去练一练」
- *   （那条路永远通），所以不会出现「一条路都没有」的卡片。
- */
-function canRetry(item: { kpId: string }): boolean {
-  const stage = quiz.levels.find((level) => level.kpId === item.kpId)?.stage ?? null
-  return stage !== null && stage !== 'locked'
 }
 
 /**
@@ -98,8 +85,10 @@ function goPractice(item: { kpId: string; kpName?: string | null }): void {
  *   错题本的价值在于「错过的点还能再练一次」，两条路都不该缺。
  * ★ 落点用 `ui.go('quiz')` + `quiz.selectLevel(kpId)`：闯关页的关卡条选中态由
  *   `activeKpId` 决定，所以到了那儿标题与题目都是这个知识点（不是「首页」）。
- * ★ 锁着的关卡**不给这个按钮**（`canRetry`）：点下去只会得到一句「还没解锁」，
- *   不如一开始就别让它出现。
+ * ★ 2026-09-25 去掉关卡锁定：不再有「还没解锁」这一档，**任何一关都能直接做**
+ *   —— 所以这个按钮对每一条错题都给（旧写法用 `canRetry` 挡掉锁着的关卡）。
+ *   契约 `ProgressStage` 里仍留着旧的 `locked` 字面量，但去掉锁定后后端不再下发它；
+ *   万一真收到，也按「可作答」处理（本页已不据阶段做任何门禁）。
  * ★ 它刻意**不是**主色按钮（`.k12-cta`）：一屏上有 N 条错题就会变成 N 个主色按钮，
  *   而设计系统里「主色 = 这一屏做完这件事就算完成」**一屏只允许一个**
  *   （见 `assets/base.css` 的 `.k12-cta` 说明）。这里用强调描边的次级按钮。
@@ -204,7 +193,6 @@ function retrySameKind(item: { kpId: string }): void {
                   去练一练
                 </button>
                 <button
-                  v-if="canRetry(item)"
                   class="btn btn--strong k12-tap"
                   type="button"
                   :data-testid="`mistakes-retry-${item.kpId}`"

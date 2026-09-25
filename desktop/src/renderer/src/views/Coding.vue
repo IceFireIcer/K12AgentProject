@@ -33,7 +33,7 @@
  *
  * ── 布局（改动前先读）────────────────────────────────────────────────
  *
- *   左 268px 任务简报（要做什么 / 学习路径（分三组收起）/ 一句「卡住了怎么办」）
+ *   左 268px 任务简报（要做什么 / 学习路径（分两组收起）/ 一句「卡住了怎么办」）
  *   右侧主区：**无题时只有一块空态**（一个主行动 + 一句话，报告 1.6）；
  *             有题时（或在装配编辑器）才排满态框架：
  *             操作栏 → 身份行 → 编辑器 + 运行 + 输出 + 提示 → 页脚那句安全声明。
@@ -90,13 +90,25 @@ const selectedKpId = ref('')
 
 /**
  * 关卡阶段的中文名（措辞与 `cards/ProgressCard.vue` 里那张表一致，全站一个说法）。
- * 认不出的阶段按「未解锁」显示 —— 不猜「大概已经通过了」（那是在给学生假进度）。
+ *
+ * ★★ 2026-09-25 去掉关卡锁定：不再有「未解锁」这一档，**每一关都能点开始练习**。
+ *   阶段只剩三种进度标记 —— 学习中 / 已通过 / 已掌握。
  */
 const STAGE_LABELS: Record<string, string> = {
-  locked: '未解锁',
   learning: '学习中',
   quizzed: '已通过',
   mastered: '已掌握'
+}
+
+/**
+ * 展示用的阶段名（认不出的字面量兜一手）。
+ *
+ * ★ 契约枚举值**没有改**（`ProgressStage` 里仍留着 `locked` 这个旧字面量），所以万一真收到它，
+ *   这里按「可作答」显示、照样可点、**不做任何禁用** —— 防御性兼容：
+ *   绝不把学生挡在门外。
+ */
+function stageLabel(stage: string): string {
+  return STAGE_LABELS[stage] ?? '可作答'
 }
 
 /**
@@ -146,20 +158,17 @@ const analyzedAttempt = ref(0)
  * ★ 分组的目的只有一个：**「我做过什么 / 接下来做什么」要一眼能答**。
  *
  * 分组只按**服务端给的 stage** 切，顺序仍是服务端的拓扑序（本页不重排）。
- * 三组的默认开合不是随手定的：
+ * ★★ 2026-09-25 去掉关卡锁定：原来那第三组「还没解锁」（点不动的关卡）整组删掉 ——
+ *   所有关卡都能点开练习。剩下两组仍有信息价值，默认开合不变：
  *   · 「正在学」默认展开 —— 它就是「接下来做什么」，学生一进页面要直接看到；
- *   · 「已经走过」默认收起 —— 它回答的是过去，关数会越攒越多；
- *   · 「还没解锁」默认收起 —— 关数最多（一个新学生的路径就是几十关），
- *     全摊开会把「正在学」那几关挤到看不见的地方。
- * 前两组仍是可点的按钮（键盘可达），第三组本来就是点不动的（未解锁）。
+ *   · 「已经走过」默认收起 —— 它回答的是过去，关数会越攒越多。
+ *   两组都是可点的按钮（键盘可达）。
  */
 const openLevels = computed(() => levels.value.filter((level) => level.stage === 'learning'))
 const doneLevels = computed(() =>
   levels.value.filter((level) => level.stage === 'quizzed' || level.stage === 'mastered')
 )
-const lockedLevels = computed(() => levels.value.filter((level) => level.stage === 'locked'))
 const showDone = ref(false)
-const showLocked = ref(false)
 
 /** 编辑器区有没有「要做的事」：读到模板了，或者手里还有一份草稿。都没有才是空态。 */
 const editorHasWork = computed(() => code.template !== null || code.draft.trim() !== '')
@@ -183,22 +192,21 @@ const editorEmptyDesc = computed(() => {
   if (levels.value.length === 0) {
     return '左边还没读到学习路径。先回对话里问几句，让智团团把学段判出来，这里就会有第一关。'
   }
-  if (openLevels.value.length === 0) {
-    return '左边的关卡都还没解锁。先把正在学的那一关通过，后面会一关一关打开。'
-  }
   return '在左边的「学习路径」里点一关，这里就会出现那一题的代码骨架。标着 TODO 的地方就是你要补的地方。'
 })
 
 /**
- * 读学习路径 + 知识点名，并**默认打开第一个已解锁的关卡**。
+ * 读学习路径 + 知识点名，并**默认打开第一个该做的关卡**。
  *
- * ★ 默认值不猜：`levels` 里 `stage !== 'locked'` 的第一条就是学生现在该做的那一关；
- *   一个都没有（路径全锁 / 读不到）时**什么都不选**，界面显示诚实的空态。
+ * ★ 默认值不猜：优先 `learning`（服务端标出来的「现在该学」那一关），
+ *   否则按服务端给的顺序取第一关 —— 每一关都能作答，落位只回答「先停在哪儿」。
+ *   一关都没有（读不到）时**什么都不选**，界面显示诚实的空态。
  */
 async function loadPath(): Promise<void> {
   await Promise.all([quiz.loadProgress(), knowledge.loadPoints()])
   if (selectedKpId.value !== '') return
-  const first = levels.value.find((level) => level.stage !== 'locked') ?? null
+  const first =
+    levels.value.find((level) => level.stage === 'learning') ?? levels.value[0] ?? null
   if (first !== null) await openTask(first.kpId)
 }
 
@@ -646,7 +654,7 @@ watch(editorVisible, (visible) => {
         <!-- ★ 这一块是原型里那份写死的「完成步骤」的**真实版本**：顺序与阶段都来自
              服务端的闯关进度（按依赖图拓扑序排好），本页只显示、不重排。
              ★ 进度数字**只有一种格式**（报告 2.3）：`已掌握 N / M`。
-               下面三组的标题（正在学 / 已经走过 / 还没解锁）是**导航分组**，不是第二个指标 ——
+               下面两组的标题（正在学 / 已经走过）是**导航分组**，不是第二个指标 ——
                原来这里那句「共 N 关 · 已经走过 N 关 · 正在学 N 关 · 还有 N 关没解锁」
                把同一批数字又说了一遍，已删。
              ★ 没有关卡时整行不显示（空态下不该出现「已掌握 0 / 0」这种仪表盘读数）。 -->
@@ -659,8 +667,8 @@ watch(editorVisible, (visible) => {
         </p>
       </section>
 
-      <!-- ── 学习路径：按 stage 分三组（正在学默认展开，另外两组默认收起）──────
-           `data-testid="coding-view-path"` 落在**外层容器**上：三组共用它，
+      <!-- ── 学习路径：按 stage 分两组（正在学默认展开，「已经走过」默认收起）────
+           `data-testid="coding-view-path"` 落在**外层容器**上：两组共用它，
            于是「这一页有没有路径」这个判断与分组细节无关（分组以后还会再调）。 -->
       <div v-if="levels.length > 0" class="pathgrps" data-testid="coding-view-path">
         <!-- ① 正在学（默认展开 —— 这就是「接下来做什么」） -->
@@ -685,7 +693,7 @@ watch(editorVisible, (visible) => {
               >
                 <span class="path__dot" aria-hidden="true" />
                 <span class="path__name">{{ levelLabel(level.kpId) }}</span>
-                <span class="path__stage">{{ STAGE_LABELS[level.stage] ?? level.stage }}</span>
+                <span class="path__stage">{{ stageLabel(level.stage) }}</span>
               </button>
             </li>
           </ul>
@@ -722,41 +730,8 @@ watch(editorVisible, (visible) => {
               >
                 <span class="path__dot" aria-hidden="true" />
                 <span class="path__name">{{ levelLabel(level.kpId) }}</span>
-                <span class="path__stage">{{ STAGE_LABELS[level.stage] ?? level.stage }}</span>
+                <span class="path__stage">{{ stageLabel(level.stage) }}</span>
               </button>
-            </li>
-          </ul>
-        </section>
-
-        <!-- ③ 还没解锁（默认收起：关数最多，摊开会把「正在学」挤走） -->
-        <section v-if="lockedLevels.length > 0" class="pathgrp">
-          <button
-            type="button"
-            class="pathgrp__toggle k12-tap"
-            :aria-expanded="showLocked"
-            data-testid="coding-view-path-locked-toggle"
-            @click="showLocked = !showLocked"
-          >
-            <ChevronRight :size="13" class="pathgrp__ico" :data-open="showLocked" aria-hidden="true" />
-            还有 {{ lockedLevels.length }} 关没解锁
-          </button>
-          <ul v-show="showLocked" class="path">
-            <li
-              v-for="level in lockedLevels"
-              :key="level.kpId"
-              class="path__item"
-              :data-stage="level.stage"
-            >
-              <!-- 未解锁的关卡**不是按钮**：点了也不该有反应（那才是诚实的「还打不开」） -->
-              <div
-                class="path__btn path__btn--locked"
-                :data-testid="`coding-view-level-${level.kpId}`"
-                :title="levelNameResolved(level.kpId) ? undefined : level.kpId"
-              >
-                <span class="path__dot" aria-hidden="true" />
-                <span class="path__name">{{ levelLabel(level.kpId) }}</span>
-                <span class="path__stage">{{ STAGE_LABELS.locked }}</span>
-              </div>
             </li>
           </ul>
         </section>
@@ -1171,9 +1146,10 @@ watch(editorVisible, (visible) => {
 }
 
 /* ── 学习路径（原型的「完成步骤」的真实版本）──────────────────────────
- * ★ 分三组：正在学（默认展开）/ 已经走过 / 还没解锁（两组默认收起）。
+ * ★ 分两组：正在学（默认展开）/ 已经走过（默认收起）。
  *   原来的写法是 `levels.map` 平铺 57 关 —— 一堵墙，学生既找不到「我在哪」，
- *   也看不出「下一步是哪一关」（新学生的路径里绝大多数是 locked）。
+ *   也看不出「下一步是哪一关」。
+ *   ★ 2026-09-25 去掉关卡锁定后不再有第三组「还没解锁」：每一关都能点开练习。
  *   分组只按服务端的 `stage`，顺序仍是服务端的拓扑序（本页不重排）。 */
 .pathgrps {
   display: flex;
@@ -1265,7 +1241,7 @@ watch(editorVisible, (visible) => {
   opacity: 0.6;
 }
 /* 三态在**颜色与形状**上都不同，不只差一个图标：
- * 已通过 / 已掌握 = 实心绿点；学习中 = accent 空心环；未解锁 = 灰空心点 */
+ * 已通过 / 已掌握 = 实心绿点；学习中 = accent 空心环；认不出的阶段 = 灰空心点 */
 .path__dot {
   flex: none;
   width: 8px;
@@ -1288,10 +1264,6 @@ watch(editorVisible, (visible) => {
 .path__item[data-stage='learning'] .path__name {
   color: var(--k12-accent-ink);
   font-weight: 650;
-}
-.path__btn--locked {
-  color: var(--k12-muted);
-  cursor: default;
 }
 .path__name {
   flex: 1;

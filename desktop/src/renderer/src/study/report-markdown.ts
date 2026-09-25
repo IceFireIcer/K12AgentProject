@@ -51,9 +51,12 @@ export function masteryLabel(score: number): string {
  * 闯关四个阶段的中文名（键 = `progress.stage` 的取值，也是报告里 `stageCounts` 的键）。
  *
  * ★ 唯一出处：概览页的「逐关进度」与这里的「四、闯关进度」都读它。
+ * ★ 2026-09-25 去掉关卡锁定：不再有「未解锁」这档 —— 契约 `ProgressStage` 里**仍留着**
+ *   旧的 `locked` 字面量（契约不改），但后端不再下发它、界面也不再据此限制任何东西。
+ *   万一真收到 `locked`，按「还没做过」（可作答）显示，不出现任何锁语义或劝退措辞。
  */
 export const STAGE_LABELS: Record<string, string> = {
-  locked: '未解锁',
+  locked: '还没做过',
   learning: '学习中',
   quizzed: '已测验',
   mastered: '已掌握'

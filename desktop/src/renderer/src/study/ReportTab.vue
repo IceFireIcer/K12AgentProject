@@ -403,6 +403,9 @@ const quizSummary = computed(() => ({
 }))
 
 type TagType = 'primary' | 'success' | 'warning' | 'info'
+// ★ 2026-09-25 去掉关卡锁定：契约 `ProgressStage` 里**仍留着**旧的 `locked` 字面量（契约不改），
+//   但后端不再下发它、本页也不据它做任何限制。这里保留 `locked` 的配色映射只是**容错** ——
+//   万一真收到，中文名走 `STAGE_LABELS`（显示为「还没做过」＝可作答），不出现锁语义。
 const STAGE_TAGS: Record<string, TagType> = {
   locked: 'info',
   learning: 'warning',

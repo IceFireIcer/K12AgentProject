@@ -40,13 +40,13 @@
  *   「『连对 / 经验』在契约里没有对应模型……」「关卡徽章取服务端的 `progress.badge`」）。
  *   现在的纪律：**学生视角一个字不留，教师视角一条不删**（设计合理性那 25% 要证据）。
  *   判据不是「这句话有没有用」，而是「它在向谁解释什么」：
- *     · 向学生解释**他自己的学习** → 留在页面上（「还没解锁」「再试一次」）；
+ *     · 向学生解释**他自己的学习** → 留在页面上（「学习中」「答对了」「再试一次」）；
  *     · 向我们解释**实现** → 进 `<TeacherGate>`（kp_id、契约里没有什么模型、关卡怎么播种）。
  *   ★ 学生视角里**绝不出现内部标识**：`kp_id` / `qid` 这类 slug 要么进 `<TeacherGate>`，
  *     要么退回中性占位（`未命名知识点`）—— 界面上摆 `ai-definition-jr` 是开发期产物。
  */
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { Trophy, Lock, Circle, PlayCircle, CheckCircle2, History, X, Info, RotateCcw } from 'lucide-vue-next'
+import { Trophy, Circle, PlayCircle, CheckCircle2, History, X, Info, RotateCcw } from 'lucide-vue-next'
 import { useQuizStore, type QuizAttempt } from '../stores/quiz'
 import TeacherGate from '../components/TeacherGate.vue'
 import { useKnowledgeStore } from '../stores/knowledge'
@@ -61,19 +61,29 @@ const quiz = useQuizStore()
 const knowledge = useKnowledgeStore()
 
 /**
- * 四个阶段的中文名与图标（阶段字面量来自服务端进度，不在前端推导）。
+ * 三个进度阶段的中文名与图标（阶段字面量来自服务端进度，不在前端推导）。
  *
- * ★ `locked` 说「还没解锁」而不是「未解锁」：这两个字是**给学生的提示**，不是状态码。
- *   它现在**最多出现在一张卡上**（当前关的下一关，见 `trackLevels`）—— 未解锁的关卡
- *   不再一关一卡地铺开（报告 1.5 说的那面「锁墙」），其余压成尾部一句灰字。
- * ★ 卡片上的状态只靠**图标 + 颜色 + 状态词**区分（`.stg__ico[data-stage]` 四档），
+ * ★★ 2026-09-25 去掉关卡锁定：不再有「还没解锁」这一档，**所有关卡都能点进去做题**。
+ *   阶段只剩三种进度标记 —— 学习中 / 已闯关 / 已掌握，它们是**反馈**，不是门禁。
+ * ★ 卡片上的状态只靠**图标 + 颜色 + 状态词**区分（`.stg__ico[data-stage]` 三档），
  *   不再挂百分比（报告 2.3 / 0.2）：一排 `0%` 不携带信息，只制造焦虑。
  */
 const stageMeta: Record<string, { label: string; icon: unknown }> = {
-  locked: { label: '还没解锁', icon: Lock },
   learning: { label: '学习中', icon: Circle },
   quizzed: { label: '已闯关', icon: PlayCircle },
   mastered: { label: '已掌握', icon: CheckCircle2 }
+}
+
+/**
+ * 展示用的阶段（认不出的字面量兜一手）。
+ *
+ * ★ 契约枚举值**没有改**（`ProgressStage` 里仍留着 `locked` 这个旧字面量），所以万一真收到它，
+ *   这里按「可作答」呈现、照样可点、**不做任何禁用** —— 防御性兼容：
+ *   绝不让界面把任何一关变回一道打不开的门。
+ */
+const STAGE_FALLBACK: { label: string; icon: unknown } = { label: '可作答', icon: PlayCircle }
+function stageView(stage: string): { label: string; icon: unknown } {
+  return stageMeta[stage] ?? STAGE_FALLBACK
 }
 
 /* ---------------------------------------------------------------- 关卡 */
@@ -129,50 +139,21 @@ const activeLevel = computed(
 )
 
 /**
- * 横滚条里**真正展示**的关卡（报告 1.5：未解锁的不再摊成一片死卡）。
- *
- * ★ 只放这三类，其余未解锁的**不占卡片**：
- *   ① 可做的与走过的（`learning` / `quizzed` / `mastered`）—— 当前关在这一类里，
- *      已走过的留给学生**回看 / 重做**；
- *   ② 当前关（兜一手：万一进度里没有它，关卡条也不该与上面的标题对不上）；
- *   ③ 当前关的**下一关**（顺序就是服务端给的拓扑序）—— **哪怕它还锁着**。
- *      它是全页唯一允许出现的锁卡：学生需要知道「下一关是什么、为什么还不能进」，
- *      而一整排锁卡只会把真正能做的两三关淹掉。
- * ★ 没摆上来的未解锁关数交给 `lockedRest`，在尾部压成一句灰字。
- * ★ 服务端已按依赖图拓扑序排好，这里**不重排**（只做筛选）。
- */
-const trackLevels = computed(() => {
-  const list = levels.value
-  const current = list.findIndex((level) => level.kpId === quiz.activeKpId)
-  return list.filter((level, index) => {
-    if (level.stage !== 'locked') return true
-    if (index === current) return true
-    return current >= 0 && index === current + 1
-  })
-})
-
-/** 收纳成一句灰字的未解锁关数（已摆在横滚条上的那张锁卡不算在内）。 */
-const lockedRest = computed(
-  () =>
-    levels.value.filter((level) => level.stage === 'locked').length -
-    trackLevels.value.filter((level) => level.stage === 'locked').length
-)
-
-/**
- * 冷启动落位：进度回来后默认选中**第一关**（优先 `learning`，否则第一个非 locked）。
+ * 冷启动落位：进度回来后默认选中**第一关**（优先 `learning`，否则按服务端给的顺序取第一个）。
  *
  * ★ 只在学生**还没选过关卡**时做（`activeKpId === ''`），选过之后再不插手 ——
  *   否则刷新进度会把学生正在做的关卡切走。
- * ★ 不猜"第一关"是什么：顺序就是服务端给的拓扑序，`learning` 是服务端播种时
- *   唯一标成可开始的阶段（见 `_seed_default_path`）。
+ * ★ 不猜「第一关」是什么：顺序就是服务端给的拓扑序，`learning` 是服务端播种时
+ *   唯一标出来的「现在该学」那一关。
+ * ★ 2026-09-25 去掉关卡锁定后，落位不再看阶段能不能进（每一关都能进）——
+ *   这里只回答「先停在哪儿」，排序与可作答性都已由服务端保证。
  */
 watch(
   [() => quiz.progress, () => quiz.activeKpId],
   () => {
     if (quiz.progress === null || quiz.activeKpId !== '') return
     const first =
-      levels.value.find((level) => level.stage === 'learning') ??
-      levels.value.find((level) => level.stage !== 'locked')
+      levels.value.find((level) => level.stage === 'learning') ?? levels.value[0]
     if (first) void quiz.selectLevel(first.kpId)
   },
   { immediate: true }
@@ -451,20 +432,19 @@ onMounted(() => {
 
       <div v-if="levels.length > 0" class="stages__track" data-testid="quiz-levels">
         <button
-          v-for="level in trackLevels"
+          v-for="level in levels"
           :key="level.kpId"
           type="button"
           class="stg"
-          :class="{ 'stg--on': quiz.activeKpId === level.kpId, 'stg--locked': level.stage === 'locked' }"
-          :disabled="level.stage === 'locked'"
+          :class="{ 'stg--on': quiz.activeKpId === level.kpId }"
           :aria-current="quiz.activeKpId === level.kpId ? 'step' : undefined"
           :data-testid="`quiz-level-${level.kpId}`"
           :data-stage="level.stage"
           @click="quiz.selectLevel(level.kpId)"
         >
-          <component :is="stageMeta[level.stage]!.icon" :size="14" class="stg__ico" :data-stage="level.stage" />
+          <component :is="stageView(level.stage).icon" :size="14" class="stg__ico" :data-stage="level.stage" />
           <span class="stg__name">{{ nameOf(level.kpId) }}</span>
-          <span class="stg__stage">{{ stageMeta[level.stage]!.label }}</span>
+          <span class="stg__stage">{{ stageView(level.stage).label }}</span>
           <!-- 卡片上**没有百分比**（报告 2.3）：状态由图标 + 状态词说，
                掌握度去下面的明细面板看（那里才是点开后的细节）。 -->
           <!-- 徽章是服务端字段（`progress.badge`，文本形如「熟练-3」），没有就不渲染 -->
@@ -474,10 +454,6 @@ onMounted(() => {
       <!-- 空态：**对学生只说他的处境**（现在没有可闯的关卡），机制另说（见下） -->
       <p v-else-if="!quiz.progressLoading" class="stages__empty" data-testid="quiz-levels-empty">
         还没有可以闯的关卡，教材内容准备好之后这里会一关一关地排出来。
-      </p>
-      <!-- 未解锁的关卡**不占卡片**（报告 1.5）：一墙锁图标只会制造焦虑，一句灰字说清就够了。 -->
-      <p v-if="lockedRest > 0" class="stages__locked" data-testid="quiz-levels-locked">
-        还有 {{ lockedRest }} 关没解锁
       </p>
 
       <!-- 关卡是怎么来的（**教师 / 答辩视角**）：这是实现说明，不是给学生的解释。
@@ -499,7 +475,7 @@ onMounted(() => {
           <Info :size="13" />
           <span>
             「连对 / 经验」在契约里没有对应模型（只有掌握度与学习记录），本页不显示这两个数；
-            关卡徽章取服务端的 <code>progress.badge</code>，还没解锁的关卡为空。
+            关卡徽章取服务端的 <code>progress.badge</code>，没有时为空。
           </span>
         </p>
       </TeacherGate>
@@ -549,7 +525,7 @@ onMounted(() => {
       <EmptyState
         v-else-if="!activeLevel"
         title="先选一关"
-        desc="上面每一关是一批知识点，选一关就能开始作答。锁着的关卡要先过掉它前面的那一关。"
+        desc="上面每一关是一批知识点，选一关就能开始作答。"
       />
 
       <!-- ② 取题中 -->
@@ -893,13 +869,6 @@ onMounted(() => {
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
-/* 未解锁的关卡**收纳成一句灰字**（报告 1.5）：它不是卡片，是一句陈述 ——
- * 所以无底色、无边框、无内边距（报告 4.2：纯说明一律 caption 灰字无框）。 */
-.stages__locked {
-  font-size: var(--k12-fs-xs);
-  line-height: var(--k12-lh-ui);
-  color: var(--k12-muted-2);
-}
 .stg {
   flex: none;
   display: flex;
@@ -921,29 +890,9 @@ onMounted(() => {
   background: var(--k12-accent-soft);
   border-color: var(--k12-accent-ink);
 }
-/* ★★ 还没解锁的关卡要**整体退到背景里**：虚线边框 + 透明底 + 全灰字。
- *
- * ★ 报告 1.5 之后它**最多只有一张**（当前关的下一关，见 `trackLevels`）——
- *   原来「一屏 50 多关全铺开」的那面锁墙没了，剩下的这一张只是「下一关是什么、
- *   为什么还进不去」的预告，所以它保留卡片形状（不再需要靠视觉把它压到看不见）。
- * ⚠️ 刻意**不用 `opacity` 压暗**（旧写法是 `opacity: .6`）：那会把文字一起压到
- *   读不清（与 `.k12-cta:disabled` 那条纪律同一个道理 —— 状态不该以可读性为代价），
- *   而且 opacity 连对比度校验都测不出来。改成实打实的灰字（muted / muted-2 都是
- *   有对比度保证的令牌），尺寸与边框位置一个字不动 —— 关卡条不会因此跳一下。
- * ⚠️ 状态逻辑与服务端给的 `badge` 都不在这里改：这里只改**观感**。 */
-.stg--locked {
-  background: transparent;
-  border-style: dashed;
-  cursor: not-allowed;
-}
-.stg--locked .stg__name {
-  color: var(--k12-muted);
-}
-.stg--locked .stg__stage {
-  color: var(--k12-muted-2);
-}
-/* 四档状态：颜色 + 图标形状（`stageMeta` 的 icon）一起区分 —— 卡片上**没有数字**，
- * 这一条（连同左边的状态词）就是学生判断「这一关到哪一步了」的全部依据。 */
+/* 三档进度：颜色 + 图标形状（`stageMeta` 的 icon）一起区分 —— 卡片上**没有数字**，
+ * 这一条（连同左边的状态词）就是学生判断「这一关到哪一步了」的全部依据。
+ * ★ 2026-09-25 去掉关卡锁定后不再有锁态配色：每一关都是可点的正常卡片。 */
 .stg__ico {
   flex: none;
 }
@@ -955,9 +904,6 @@ onMounted(() => {
 }
 .stg__ico[data-stage='learning'] {
   color: var(--k12-warn);
-}
-.stg__ico[data-stage='locked'] {
-  color: var(--k12-muted-2);
 }
 .stg__name {
   font-size: var(--k12-fs-sm);
