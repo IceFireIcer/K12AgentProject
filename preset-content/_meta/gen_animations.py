@@ -826,7 +826,19 @@ function riseIn(el, dy) { return { targets: el, opacity: [0, 1], translateY: [dy
 function popIn(el) { return { targets: el, opacity: [0, 1], scale: [0.94, 1], duration: d(1), easing: M.easing }; }
 function slideIn(el, dx) { return { targets: el, opacity: [0, 1], translateX: [dx, 0], duration: d(1), easing: M.easing }; }
 function later(anim, factor) { anim.delay = d(factor); return anim; }
-function swapOut(el) { return { targets: el, opacity: [1, 0], duration: d(0.35), easing: 'linear' }; }
+/*
+ * 同位轮换的「接力棒」（第七轮实测缺陷：交叉淡化 = 文字重影）。
+ *
+ * 旧的那个淡出（swapOut）与新的那个淡入（slideIn / riseIn / fadeTo）落在同一个格位上：
+ * 时间窗一交叠，屏幕同一处就有两段文字同时可见。实测旧气泡 [0, 0.35] 与新气泡
+ * （delay 0.10~0.12）叠了约 150ms，学生看到的是糊成一片的两段字，对话、计数、对照三处都中。
+ * 所以转速在这里卡死：旧淡出 [0, HANDOFF_OUT]，新淡入最早从 HANDOFF_OUT + HANDOFF_GAP 起。
+ * 不用硬切 off()（那会看到闪断）：仍是平滑接力，只是两段永远不重叠。
+ */
+var HANDOFF_OUT = 0.25;
+var HANDOFF_GAP = 0.02;
+var HANDOFF_IN = HANDOFF_OUT + HANDOFF_GAP;
+function swapOut(el) { return { targets: el, opacity: [1, 0], duration: d(HANDOFF_OUT), easing: 'linear' }; }
 function dim(el) { return { targets: el, opacity: [1, 0.55], duration: d(0.5), easing: 'linear' }; }
 function lit(el) { return { targets: el, opacity: [0.55, 1], duration: d(0.5), easing: 'linear' }; }
 function mark(el) { return { targets: el, strokeWidth: [1.1, 3.6, 1.1], duration: d(1.1), easing: M.easing }; }
@@ -3101,13 +3113,21 @@ Sandbox.play(function () {
       h.caption(ROWS[i].caption);
       h.step(index + 1, COUNT + 2);
       var anims = [
-        bumpActor(asker),
-        later(slideIn(asks[i], -18), 0.12),
-        later(bumpActor(answerer), 0.5),
-        later(slideIn(answers[i], 18), 0.62),
-        later(mark(answers[i].body), 0.8),
+        /*
+         * ★★ 旧气泡先退场，而且必须排在这个相位的最前面（第七轮实测缺陷）。
+         *
+         * anime 时间线的 add() 是顺序追加：同一相位里先加的会整个跑完才轮到后面的，
+         * 所以把 swapOut 摆在列表末尾时，它要等新气泡淡入、标记、计数全跑完才执行，
+         * 旧气泡一直挂在那，学生看到的是同一格位上两段文字长期并存（文字重影）。
+         * 顺序即时间：先退场，再登场，天然没有交叠窗口。
+         */
         swapOut(asks[i - 1]),
         swapOut(answers[i - 1]),
+        bumpActor(asker),
+        later(slideIn(asks[i], -18), HANDOFF_IN),
+        later(bumpActor(answerer), HANDOFF_IN + 0.38),
+        later(slideIn(answers[i], 18), HANDOFF_IN + 0.5),
+        later(mark(answers[i].body), HANDOFF_IN + 0.68),
         push(meter, i + 1)
       ];
       return anims;
@@ -3178,21 +3198,21 @@ Sandbox.play(function () {
       h.caption(ROWS[i].caption);
       h.step(index + 1, COUNT + 2);
       swing = i % 2 === 0 ? -SWING : SWING;
-      var anims = [
-        later(fadeTo(leftCards[i], 1), 0.05),
-        later(bump(leftCards[i]), 0.15),
-        later(fadeTo(rightCards[i], 1), 0.28),
-        later(bump(rightCards[i]), 0.38),
-        later(mark(rightCards[i].body), 0.45),
-        later(focusStep([leftCards[i], rightCards[i]], [leftCards[i - 1], rightCards[i - 1]]), 0.45),
-        { targets: badge, translateX: [prevSwing, swing], scale: [1, 1.12, 1], duration: d(0.9), easing: M.easing },
-        push(meter, i + 1)
-      ];
-      prevSwing = swing;
+      var anims = [];
+      /* ★ 同位轮换：上一次那一组先退场（排最前，顺序即时间，见对话原型的说明）。 */
       if (i > 0) {
         anims.push(swapOut(leftCards[i - 1]));
         anims.push(swapOut(rightCards[i - 1]));
       }
+      anims.push(later(fadeTo(leftCards[i], 1), HANDOFF_IN));
+      anims.push(later(bump(leftCards[i]), HANDOFF_IN + 0.1));
+      anims.push(later(fadeTo(rightCards[i], 1), HANDOFF_IN + 0.23));
+      anims.push(later(bump(rightCards[i]), HANDOFF_IN + 0.33));
+      anims.push(later(mark(rightCards[i].body), HANDOFF_IN + 0.4));
+      anims.push(later(focusStep([leftCards[i], rightCards[i]], [leftCards[i - 1], rightCards[i - 1]]), HANDOFF_IN + 0.4));
+      anims.push({ targets: badge, translateX: [prevSwing, swing], scale: [1, 1.12, 1], duration: d(0.9), easing: M.easing });
+      anims.push(push(meter, i + 1));
+      prevSwing = swing;
       return anims;
     }
     h.caption(DATA.close + '（一共 ' + COUNT + ' 组）');
@@ -3973,17 +3993,19 @@ Sandbox.play(function () {
       running += ROWS[i].event.length;
       h.caption(ROWS[i].caption + '：这一句 ' + ROWS[i].event.length + ' 个字，合计 ' + running + ' 字');
       h.step(index + 1, COUNT + 2);
-      var anims = [
-        later(riseIn(cards[i], 20), 0.1),
-        fadeTo(pegs[i], 1),
-        mark(pegs[i].body),
-        bump(pegs[i]),
-        focusStep(pegs[i], pegs[i - 1]),
-        push(countMeter, i + 1),
-        push(sumMeter, running)
-      ];
+      var anims = [];
+      /* ★ 计数卡是同位轮换：上一张先退场（排最前，顺序即时间，见对话原型的说明）。 */
       if (i > 0) {
         anims.push(swapOut(cards[i - 1]));
+      }
+      anims.push(later(riseIn(cards[i], 20), HANDOFF_IN));
+      anims.push(fadeTo(pegs[i], 1));
+      anims.push(mark(pegs[i].body));
+      anims.push(bump(pegs[i]));
+      anims.push(focusStep(pegs[i], pegs[i - 1]));
+      anims.push(push(countMeter, i + 1));
+      anims.push(push(sumMeter, running));
+      if (i > 0) {
         anims.push(later(fadeTo(pegs[i - 1], 0.66), 0.5));
       }
       return anims;
