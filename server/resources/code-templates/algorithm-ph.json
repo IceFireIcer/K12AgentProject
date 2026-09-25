@@ -1,23 +1,23 @@
 {
   "kp_id": "algorithm-ph",
   "grade_level": "primary_high",
-  "title": "编程小练习：给「算法」列一张要点清单",
-  "expected_behavior": "打印三行要点。",
-  "scaffold": "# 目标：把「算法」的 3 个要点列出来\npoints = [\"算法是一套数学规则与计算\", \"TODO2\", \"TODO3\"]\n\n# TODO 1：把后两个要点改成真正的句子（从课本里找）\n# TODO 2：for 循环依次打印「要点 N：……」\n____\n    ____\n",
-  "expected_output": "要点 1：算法是一套数学规则与计算\n要点 2：算法\n要点 3：算法\n",
+  "title": "循环：把算法的规则逐条列出来",
+  "expected_behavior": "填好 TODO 后，程序打印 4 行，第一行是「第1项：找出规律」，最后一行是「第4项：预测结果」。",
+  "scaffold": "# 目标：把列表里的每一项逐条列出来\nparts = [\"找出规律\", \"自动筛选\", \"排序打分\", \"预测结果\"]\n\n# TODO 1：用循环依次取出每一项，编号从 1 开始\n____\n# TODO 2：打印「第N项：内容」\n    ____\n",
+  "expected_output": "第1项：找出规律\n第2项：自动筛选\n第3项：排序打分\n第4项：预测结果\n",
   "hints": [
     {
       "level": 1,
-      "hint": "enumerate 可以一边循环一边数第几个。"
+      "hint": "重复的动作交给会循环的句式，让它一项一项地从列表里取。"
     },
     {
       "level": 2,
-      "hint": "for i, p in enumerate(points, 1):"
+      "hint": "用 enumerate 一边取内容、一边给出从 1 开始的编号。"
     },
     {
       "level": 3,
-      "hint": "print(f\"要点 {i}：{p}\")。"
+      "hint": "for i, p in enumerate(parts, 1): 下一行缩进写 print(f\"第{i}项：{p}\")。"
     }
   ],
-  "solution": "points = [\"算法是一套数学规则与计算\", \"算法\", \"算法\"]\n\nfor i, p in enumerate(points, 1):\n    print(f\"要点 {i}：{p}\")\n"
+  "solution": "parts = [\"找出规律\", \"自动筛选\", \"排序打分\", \"预测结果\"]\n\nfor i, p in enumerate(parts, 1):\n    print(f\"第{i}项：{p}\")\n"
 }

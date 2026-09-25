@@ -1,23 +1,23 @@
 {
   "kp_id": "voice-assistant-pl",
   "grade_level": "primary_low",
-  "title": "编程小练习：把「语音助手」的关键句打出来",
-  "expected_behavior": "打印一行：今天学了：语音助手，记住：先听懂你说话、再开口回答你的机器",
-  "scaffold": "# 目标：把和「语音助手」有关的一句话打印出来\ntopic = \"语音助手\"\n\n# TODO 1：准备一条要点 note（用你自己的话，一句就好）\nnote = ____\n\n# TODO 2：打印「今天学了：<topic>，记住：<note>」\n____\n",
-  "expected_output": "今天学了：语音助手，记住：先听懂你说话、再开口回答你的机器\n",
+  "title": "变量：算语音助手两组问答相差多少",
+  "expected_behavior": "填好 TODO 1-2 后，程序打印「相差 3 轮问答」。",
+  "scaffold": "# 目标：算出两组数据相差多少\nbig = 5\nsmall = 2\n\n# TODO 1：用大的减去小的，存进 gap\ngap = ____\n\n# TODO 2：打印「相差 N 轮问答」\n____\n",
+  "expected_output": "相差 3 轮问答\n",
   "hints": [
     {
       "level": 1,
-      "hint": "先想好要记住的那一句，再放进变量 note。"
+      "hint": "「相差多少」要用大的数减去小的数，先看清哪个大。"
     },
     {
       "level": 2,
-      "hint": "note = \"……\"，然后用 f-string 把 topic 和 note 放进同一行。"
+      "hint": "把 big 写在减号前面、small 写在后面，结果存进 gap。"
     },
     {
       "level": 3,
-      "hint": "print(f\"今天学了：{topic}，记住：{note}\")。"
+      "hint": "gap = big - small；再打印 print(f\"相差 {gap} 轮问答\")。"
     }
   ],
-  "solution": "topic = \"语音助手\"\nnote = \"先听懂你说话、再开口回答你的机器\"\nprint(f\"今天学了：{topic}，记住：{note}\")\n"
+  "solution": "big = 5\nsmall = 2\n\ngap = big - small\n\nprint(f\"相差 {gap} 轮问答\")\n"
 }

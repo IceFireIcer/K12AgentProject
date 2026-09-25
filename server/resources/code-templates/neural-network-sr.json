@@ -1,23 +1,23 @@
 {
   "kp_id": "neural-network-sr",
   "grade_level": "senior",
-  "title": "编程小练习：把概念「神经网络」的要点的要点做成字典并输出",
-  "expected_behavior": "打印定义与要点两行。",
-  "scaffold": "# 目标：用字典整理这个概念的两栏信息\ncard = {\n    \"定义\": \"把大量人工神经元按「输入层—隐藏层—输出层」分层\",\n    \"要点\": \"____\",\n}\n\n# TODO 1：把「要点」填成一句自己的概括\n# TODO 2：按「定义」「要点」两行打印\n____\n____\n",
-  "expected_output": "定义： 把大量人工神经元按「输入层—隐藏层—输出层」分层\n要点： 连起来，前一层的结果喂给后一层，层层加工\n",
+  "title": "函数：给神经网络的层次按门槛分类",
+  "expected_behavior": "填好 TODO 后，程序打印「达标 3 项」。",
+  "scaffold": "# 目标：给每个数按门槛分类，再数一数达标的有几个\nnums = [4, 8, 6, 2]\nthreshold = 4\n\n# TODO 1：补完函数，达到门槛返回「达标」，否则返回「待改进」\ndef level_of(x):\n    ____\n\n# TODO 2：逐项分类，统计达标个数 ok\n____\n# TODO 3：打印「达标 N 项」\n____\n",
+  "expected_output": "达标 3 项\n",
   "hints": [
     {
       "level": 1,
-      "hint": "字典用 {\"键\": 值}，取值用 card[\"键\"]。"
+      "hint": "先想清楚一个数满足什么条件算达标，再逐项判断。"
     },
     {
       "level": 2,
-      "hint": "先把要点字符串放进 card。"
+      "hint": "函数里用条件判断返回两种字符串；外面数一数达标的有几个。"
     },
     {
       "level": 3,
-      "hint": "print(\"定义：\", card[\"定义\"]) 之类，两行各打一栏。"
+      "hint": "def level_of(x): 下面缩进写 if x >= 4: return \"达标\"，否则 return \"待改进\"。"
     }
   ],
-  "solution": "card = {\n    \"定义\": \"把大量人工神经元按「输入层—隐藏层—输出层」分层\",\n    \"要点\": \"连起来，前一层的结果喂给后一层，层层加工\",\n}\n\nprint(\"定义：\", card[\"定义\"])\nprint(\"要点：\", card[\"要点\"])\n"
+  "solution": "nums = [4, 8, 6, 2]\nthreshold = 4\n\ndef level_of(x):\n    if x >= threshold:\n        return \"达标\"\n    return \"待改进\"\n\nok = 0\nfor x in nums:\n    if level_of(x) == \"达标\":\n        ok = ok + 1\n\nprint(f\"达标 {ok} 项\")\n"
 }

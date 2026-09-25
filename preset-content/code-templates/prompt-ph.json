@@ -1,23 +1,23 @@
 {
   "kp_id": "prompt-ph",
   "grade_level": "primary_high",
-  "title": "编程小练习：给「Prompt 提示词」列一张要点清单",
-  "expected_behavior": "打印三行要点。",
-  "scaffold": "# 目标：把「Prompt 提示词」的 3 个要点列出来\npoints = [\"给机器下达的指令，用来说\", \"TODO2\", \"TODO3\"]\n\n# TODO 1：把后两个要点改成真正的句子（从课本里找）\n# TODO 2：for 循环依次打印「要点 N：……」\n____\n    ____\n",
-  "expected_output": "要点 1：给机器下达的指令，用来说\n要点 2：Prompt 提\n要点 3：Prompt 提\n",
+  "title": "条件判断：挑出Prompt里达标的提示词",
+  "expected_behavior": "填好 TODO 后，程序打印达到门槛的 3 项：说明你是谁、说明要做到什么、说明输出格式。",
+  "scaffold": "# 目标：挑出达到门槛的项目\nnames = [\"说明你是谁\", \"说明要做到什么\", \"说明输出格式\", \"给一个示例\"]\nvalues = [4, 3, 2, 1]\nthreshold = 2\n\n# TODO 1：准备一个空列表，用来装选中的名字\npicked = ____\n# TODO 2：逐项比较，达到门槛就放进去\n____\n# TODO 3：打印选中的结果\n____\n",
+  "expected_output": "['说明你是谁', '说明要做到什么', '说明输出格式']\n",
   "hints": [
     {
       "level": 1,
-      "hint": "enumerate 可以一边循环一边数第几个。"
+      "hint": "先确定一条门槛，再逐项看它够不够格。"
     },
     {
       "level": 2,
-      "hint": "for i, p in enumerate(points, 1):"
+      "hint": "准备一个空列表，把达到门槛的名字一个个追加进去。"
     },
     {
       "level": 3,
-      "hint": "print(f\"要点 {i}：{p}\")。"
+      "hint": "for i in range(len(names)): 下一行缩进写 if values[i] >= 2: picked.append(names[i])。"
     }
   ],
-  "solution": "points = [\"给机器下达的指令，用来说\", \"Prompt 提\", \"Prompt 提\"]\n\nfor i, p in enumerate(points, 1):\n    print(f\"要点 {i}：{p}\")\n"
+  "solution": "names = [\"说明你是谁\", \"说明要做到什么\", \"说明输出格式\", \"给一个示例\"]\nvalues = [4, 3, 2, 1]\nthreshold = 2\n\npicked = []\nfor i in range(len(names)):\n    if values[i] >= threshold:\n        picked.append(names[i])\n\nprint(picked)\n"
 }

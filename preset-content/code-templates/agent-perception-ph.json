@@ -1,23 +1,23 @@
 {
   "kp_id": "agent-perception-ph",
   "grade_level": "primary_high",
-  "title": "编程小练习：给「感知模块」列一张要点清单",
-  "expected_behavior": "打印三行要点。",
-  "scaffold": "# 目标：把「感知模块」的 3 个要点列出来\npoints = [\"智能体的「眼睛和耳朵」，\", \"TODO2\", \"TODO3\"]\n\n# TODO 1：把后两个要点改成真正的句子（从课本里找）\n# TODO 2：for 循环依次打印「要点 N：……」\n____\n    ____\n",
-  "expected_output": "要点 1：智能体的「眼睛和耳朵」，\n要点 2：感知模块\n要点 3：感知模块\n",
+  "title": "循环：累加感知模块的输入数量",
+  "expected_behavior": "填好 TODO 后，程序打印「合计 15 条输入」。",
+  "scaffold": "# 目标：把列表里的数全部加起来\nnums = [6, 4, 3, 2]\ntotal = 0\n\n# TODO 1：用循环依次取出每个数\n____\n# TODO 2：把当前数加进 total\n    ____\n\nprint(f\"合计 {total} 条输入\")\n",
+  "expected_output": "合计 15 条输入\n",
   "hints": [
     {
       "level": 1,
-      "hint": "enumerate 可以一边循环一边数第几个。"
+      "hint": "先准备一个从零开始的变量，再把每一项都加进去。"
     },
     {
       "level": 2,
-      "hint": "for i, p in enumerate(points, 1):"
+      "hint": "循环取出的每个数都加进 total，算完要重新存回 total。"
     },
     {
       "level": 3,
-      "hint": "print(f\"要点 {i}：{p}\")。"
+      "hint": "for x in nums: 下一行缩进写 total = total + x。"
     }
   ],
-  "solution": "points = [\"智能体的「眼睛和耳朵」，\", \"感知模块\", \"感知模块\"]\n\nfor i, p in enumerate(points, 1):\n    print(f\"要点 {i}：{p}\")\n"
+  "solution": "nums = [6, 4, 3, 2]\ntotal = 0\n\nfor x in nums:\n    total = total + x\n\nprint(f\"合计 {total} 条输入\")\n"
 }

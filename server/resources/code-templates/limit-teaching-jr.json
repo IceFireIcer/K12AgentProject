@@ -1,23 +1,23 @@
 {
   "kp_id": "limit-teaching-jr",
   "grade_level": "junior",
-  "title": "编程小练习：数一数概念「教学短板（难自动分层适配）」相关词出现了几次",
-  "expected_behavior": "打印关键词在句子里出现的次数。",
-  "scaffold": "# 目标：数出关键词在句子中出现了几次\nkeyword = \"教学短板\"\nsentence = \"AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真\"\n\n# TODO 1：用 count 统计出现次数，存进 n\nn = ____\n\n# TODO 2：打印「关键词出现 N 次」\n____\n",
-  "expected_output": "关键词出现 0 次\n",
+  "title": "字典：给教学短板的学生建一张对照表",
+  "expected_behavior": "填好 TODO 后，程序打印「基础薄弱 有 6 名学生」。",
+  "scaffold": "# 目标：把项目名和数量配对成字典，再按名字查数量\nnames = [\"基础薄弱\", \"基础中等\", \"学有余力\", \"明显偏科\"]\ncounts = [6, 5, 3, 2]\n\n# TODO 1：用 zip 把两个列表配成字典 table\ntable = ____\n\n# TODO 2：打印「名字 有 N 名学生」（用 names[0] 查一次）\n____\n",
+  "expected_output": "基础薄弱 有 6 名学生\n",
   "hints": [
     {
       "level": 1,
-      "hint": "字符串自带 count 方法。"
+      "hint": "两个列表一一对应，可以用一个现成的函数一次配成字典。"
     },
     {
       "level": 2,
-      "hint": "n = sentence.count(keyword)。"
+      "hint": "把两个列表交给配对的函数，外层套上 dict 就得到 table。"
     },
     {
       "level": 3,
-      "hint": "print(f\"关键词出现 {n} 次\")。"
+      "hint": "table = dict(zip(names, counts))；取数量用 table[names[0]]。"
     }
   ],
-  "solution": "keyword = \"教学短板\"\nsentence = \"AI 不能自动判断你的年级和基础，默认只给一套中等难度的话；这是教育场景调研中真\"\n\nn = sentence.count(keyword)\nprint(f\"关键词出现 {n} 次\")\n"
+  "solution": "names = [\"基础薄弱\", \"基础中等\", \"学有余力\", \"明显偏科\"]\ncounts = [6, 5, 3, 2]\n\ntable = dict(zip(names, counts))\n\nprint(f\"{names[0]} 有 {table[names[0]]} 名学生\")\n"
 }

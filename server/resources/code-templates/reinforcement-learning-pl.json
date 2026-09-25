@@ -1,23 +1,23 @@
 {
   "kp_id": "reinforcement-learning-pl",
   "grade_level": "primary_low",
-  "title": "编程小练习：把「强化学习」的关键句打出来",
-  "expected_behavior": "打印一行：今天学了：强化学习，记住：没有标准答案，靠一次次尝试，做对",
-  "scaffold": "# 目标：把和「强化学习」有关的一句话打印出来\ntopic = \"强化学习\"\n\n# TODO 1：准备一条要点 note（用你自己的话，一句就好）\nnote = ____\n\n# TODO 2：打印「今天学了：<topic>，记住：<note>」\n____\n",
-  "expected_output": "今天学了：强化学习，记住：没有标准答案，靠一次次尝试，做对\n",
+  "title": "列表：清点强化学习的尝试",
+  "expected_behavior": "填好 TODO 1-2 后，程序打印「一共有 4 次尝试」。",
+  "scaffold": "# 目标：数出列表里有几项\nparts = [\"向左走\", \"向右走\", \"原地等\", \"往回走\"]\n\n# TODO 1：用 len 数出项数，存进 count\ncount = ____\n\n# TODO 2：打印「一共有 N 次尝试」\n____\n",
+  "expected_output": "一共有 4 次尝试\n",
   "hints": [
     {
       "level": 1,
-      "hint": "先想好要记住的那一句，再放进变量 note。"
+      "hint": "「有几项」不用一个一个数，有一个现成的函数帮你算出长度。"
     },
     {
       "level": 2,
-      "hint": "note = \"……\"，然后用 f-string 把 topic 和 note 放进同一行。"
+      "hint": "把列表交给这个函数，返回值存进 count。"
     },
     {
       "level": 3,
-      "hint": "print(f\"今天学了：{topic}，记住：{note}\")。"
+      "hint": "count = len(parts)；再打印 print(f\"一共有 {count} 次尝试\")。"
     }
   ],
-  "solution": "topic = \"强化学习\"\nnote = \"没有标准答案，靠一次次尝试，做对\"\nprint(f\"今天学了：{topic}，记住：{note}\")\n"
+  "solution": "parts = [\"向左走\", \"向右走\", \"原地等\", \"往回走\"]\n\ncount = len(parts)\n\nprint(f\"一共有 {count} 次尝试\")\n"
 }

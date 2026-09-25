@@ -1,23 +1,23 @@
 {
   "kp_id": "rag-pl",
   "grade_level": "primary_low",
-  "title": "编程小练习：把「RAG 检索增强生成（外挂知识库）」的关键句打出来",
-  "expected_behavior": "打印一行：今天学了：RAG 检索增强生成（外挂知识库），记住：回答之前先去自己带的资料库里查一",
-  "scaffold": "# 目标：把和「RAG 检索增强生成（外挂知识库）」有关的一句话打印出来\ntopic = \"RAG 检索增强生成（外挂知识库）\"\n\n# TODO 1：准备一条要点 note（用你自己的话，一句就好）\nnote = ____\n\n# TODO 2：打印「今天学了：<topic>，记住：<note>」\n____\n",
-  "expected_output": "今天学了：RAG 检索增强生成（外挂知识库），记住：回答之前先去自己带的资料库里查一\n",
+  "title": "变量：把RAG 知识库的三组资料加起来",
+  "expected_behavior": "填好 TODO 1-2 后，程序打印「一共 13 条资料」。",
+  "scaffold": "# 目标：用变量存下三项数据，算出总数并打印\na = 6\nb = 4\nc = 3\n\n# TODO 1：把三项加起来，存进 total\ntotal = ____\n\n# TODO 2：打印「一共 N 条资料」\n____\n",
+  "expected_output": "一共 13 条资料\n",
   "hints": [
     {
       "level": 1,
-      "hint": "先想好要记住的那一句，再放进变量 note。"
+      "hint": "「一共」是把几个数合起来，先想好用哪个运算符号。"
     },
     {
       "level": 2,
-      "hint": "note = \"……\"，然后用 f-string 把 topic 和 note 放进同一行。"
+      "hint": "把 6、4、3 三个数用加号连起来，结果存进 total。"
     },
     {
       "level": 3,
-      "hint": "print(f\"今天学了：{topic}，记住：{note}\")。"
+      "hint": "total 那一行写成 a + b + c；再打印 print(f\"一共 {total} 条资料\")。"
     }
   ],
-  "solution": "topic = \"RAG 检索增强生成（外挂知识库）\"\nnote = \"回答之前先去自己带的资料库里查一\"\nprint(f\"今天学了：{topic}，记住：{note}\")\n"
+  "solution": "a = 6\nb = 4\nc = 3\n\ntotal = a + b + c\n\nprint(f\"一共 {total} 条资料\")\n"
 }

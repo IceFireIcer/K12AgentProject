@@ -1,23 +1,23 @@
 {
   "kp_id": "artificial-neuron-sr",
   "grade_level": "senior",
-  "title": "编程小练习：把概念「人工神经元」的要点的要点做成字典并输出",
-  "expected_behavior": "打印定义与要点两行。",
-  "scaffold": "# 目标：用字典整理这个概念的两栏信息\ncard = {\n    \"定义\": \"神经网络里最小的计算单元——把收到的多个信号加权\",\n    \"要点\": \"____\",\n}\n\n# TODO 1：把「要点」填成一句自己的概括\n# TODO 2：按「定义」「要点」两行打印\n____\n____\n",
-  "expected_output": "定义： 神经网络里最小的计算单元——把收到的多个信号加权\n要点： 求和，超过一定门槛就「兴奋」并把结果传下\n",
+  "title": "数据变换：把人工神经元的信号标准化",
+  "expected_behavior": "填好 TODO 后，程序打印 4 个保留两位小数的数，体现每个数偏离平均值的程度。",
+  "scaffold": "# 目标：把这组数据标准化（先减平均值，再除以标准差）\nimport math\nxs = [3, 5, 2, 4]\n\n# TODO 1：求平均值 mu\nmu = ____\n# TODO 2：求标准差 sigma\nsigma = ____\n# TODO 3：算出标准化后的 zs\nzs = ____\n\nprint([round(z, 2) for z in zs])\n",
+  "expected_output": "[-0.45, 1.34, -1.34, 0.45]\n",
   "hints": [
     {
       "level": 1,
-      "hint": "字典用 {\"键\": 值}，取值用 card[\"键\"]。"
+      "hint": "先把每个数减去平均值，再除以这组数据的离散程度。"
     },
     {
       "level": 2,
-      "hint": "先把要点字符串放进 card。"
+      "hint": "标准差要先算每个数与平均值差的平方，求平均后再开方。"
     },
     {
       "level": 3,
-      "hint": "print(\"定义：\", card[\"定义\"]) 之类，两行各打一栏。"
+      "hint": "sigma 用 math.sqrt 计算；zs 用列表推导 (x - mu) / sigma。"
     }
   ],
-  "solution": "card = {\n    \"定义\": \"神经网络里最小的计算单元——把收到的多个信号加权\",\n    \"要点\": \"求和，超过一定门槛就「兴奋」并把结果传下\",\n}\n\nprint(\"定义：\", card[\"定义\"])\nprint(\"要点：\", card[\"要点\"])\n"
+  "solution": "import math\nxs = [3, 5, 2, 4]\n\nmu = sum(xs) / len(xs)\nsigma = math.sqrt(sum((x - mu) ** 2 for x in xs) / len(xs))\n\nzs = [(x - mu) / sigma for x in xs]\nprint([round(z, 2) for z in zs])\n"
 }

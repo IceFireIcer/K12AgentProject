@@ -1,23 +1,23 @@
 {
   "kp_id": "limit-knowledge-cutoff-jr",
   "grade_level": "junior",
-  "title": "编程小练习：数一数概念「知识截止」相关词出现了几次",
-  "expected_behavior": "打印关键词在句子里出现的次数。",
-  "scaffold": "# 目标：数出关键词在句子中出现了几次\nkeyword = \"知识截止\"\nsentence = \"模型的知识来自训练时用过的资料，资料有固定的时间边界，边界之后的新事情它本来并不\"\n\n# TODO 1：用 count 统计出现次数，存进 n\nn = ____\n\n# TODO 2：打印「关键词出现 N 次」\n____\n",
-  "expected_output": "关键词出现 0 次\n",
+  "title": "字符串：把知识截止的要点串拆开再排版",
+  "expected_behavior": "填好 TODO 后，程序打印 4 行，第一行是「1. 去年教材」。",
+  "scaffold": "# 目标：把一整串要点拆开，重新编号排好\nline = \"去年教材，今年新规，上月新闻，本周赛事\"\n\n# TODO 1：按「，」把 line 切分成列表 parts\nparts = ____\n# TODO 2：逐条打印「N. 内容」\n____\n",
+  "expected_output": "1. 去年教材\n2. 今年新规\n3. 上月新闻\n4. 本周赛事\n",
   "hints": [
     {
       "level": 1,
-      "hint": "字符串自带 count 方法。"
+      "hint": "把一整句话按标点切开，会得到一个列表。"
     },
     {
       "level": 2,
-      "hint": "n = sentence.count(keyword)。"
+      "hint": "字符串自带切分方法，切完再用 enumerate 编号打印。"
     },
     {
       "level": 3,
-      "hint": "print(f\"关键词出现 {n} 次\")。"
+      "hint": "parts = line.split(\"，\")；再 for i, p in enumerate(parts, 1): print(f\"{i}. {p}\")。"
     }
   ],
-  "solution": "keyword = \"知识截止\"\nsentence = \"模型的知识来自训练时用过的资料，资料有固定的时间边界，边界之后的新事情它本来并不\"\n\nn = sentence.count(keyword)\nprint(f\"关键词出现 {n} 次\")\n"
+  "solution": "line = \"去年教材，今年新规，上月新闻，本周赛事\"\n\nparts = line.split(\"，\")\n\nfor i, p in enumerate(parts, 1):\n    print(f\"{i}. {p}\")\n"
 }

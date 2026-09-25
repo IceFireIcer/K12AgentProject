@@ -1,23 +1,23 @@
 {
   "kp_id": "algorithm-jr",
   "grade_level": "junior",
-  "title": "编程小练习：数一数概念「算法」相关词出现了几次",
-  "expected_behavior": "打印关键词在句子里出现的次数。",
-  "scaffold": "# 目标：数出关键词在句子中出现了几次\nkeyword = \"算法\"\nsentence = \"算法是一套数学规则与计算逻辑，它让机器能从海量数据中自动找出规律，最终学成模型。\"\n\n# TODO 1：用 count 统计出现次数，存进 n\nn = ____\n\n# TODO 2：打印「关键词出现 N 次」\n____\n",
-  "expected_output": "关键词出现 1 次\n",
+  "title": "函数：求算法的规则平均值",
+  "expected_behavior": "填好 TODO 后，程序打印「平均 2.5」。",
+  "scaffold": "# 目标：写一个求平均值的函数，再用它算一遍\nnums = [4, 3, 2, 1]\n\n# TODO 1：补完函数体，返回平均值\ndef average(data):\n    ____\n\n# TODO 2：调用函数，打印「平均 N」（保留 1 位小数）\n____\n",
+  "expected_output": "平均 2.5\n",
   "hints": [
     {
       "level": 1,
-      "hint": "字符串自带 count 方法。"
+      "hint": "先想清楚这个函数收进来什么、又交出去什么。"
     },
     {
       "level": 2,
-      "hint": "n = sentence.count(keyword)。"
+      "hint": "函数体里先求和、再除以个数，然后用 return 把结果交出去。"
     },
     {
       "level": 3,
-      "hint": "print(f\"关键词出现 {n} 次\")。"
+      "hint": "def average(data): 下面缩进写 return sum(data) / len(data)。"
     }
   ],
-  "solution": "keyword = \"算法\"\nsentence = \"算法是一套数学规则与计算逻辑，它让机器能从海量数据中自动找出规律，最终学成模型。\"\n\nn = sentence.count(keyword)\nprint(f\"关键词出现 {n} 次\")\n"
+  "solution": "nums = [4, 3, 2, 1]\n\ndef average(data):\n    return sum(data) / len(data)\n\navg = average(nums)\nprint(f\"平均 {avg:.1f}\")\n"
 }

@@ -1,23 +1,23 @@
 {
   "kp_id": "nlp-jr",
   "grade_level": "junior",
-  "title": "编程小练习：数一数概念「自然语言处理（NLP）」相关词出现了几次",
-  "expected_behavior": "打印关键词在句子里出现的次数。",
-  "scaffold": "# 目标：数出关键词在句子中出现了几次\nkeyword = \"自然语言\"\nsentence = \"让机器听懂、读懂人类语言文字的技术，能对话、翻译、总结和写作。\"\n\n# TODO 1：用 count 统计出现次数，存进 n\nn = ____\n\n# TODO 2：打印「关键词出现 N 次」\n____\n",
-  "expected_output": "关键词出现 0 次\n",
+  "title": "字典：给自然语言处理的句子建一张对照表",
+  "expected_behavior": "填好 TODO 后，程序打印「切分词语 有 4 句句子」。",
+  "scaffold": "# 目标：把项目名和数量配对成字典，再按名字查数量\nnames = [\"切分词语\", \"识别主语\", \"判断情感\", \"生成摘要\"]\ncounts = [4, 3, 2, 5]\n\n# TODO 1：用 zip 把两个列表配成字典 table\ntable = ____\n\n# TODO 2：打印「名字 有 N 句句子」（用 names[0] 查一次）\n____\n",
+  "expected_output": "切分词语 有 4 句句子\n",
   "hints": [
     {
       "level": 1,
-      "hint": "字符串自带 count 方法。"
+      "hint": "两个列表一一对应，可以用一个现成的函数一次配成字典。"
     },
     {
       "level": 2,
-      "hint": "n = sentence.count(keyword)。"
+      "hint": "把两个列表交给配对的函数，外层套上 dict 就得到 table。"
     },
     {
       "level": 3,
-      "hint": "print(f\"关键词出现 {n} 次\")。"
+      "hint": "table = dict(zip(names, counts))；取数量用 table[names[0]]。"
     }
   ],
-  "solution": "keyword = \"自然语言\"\nsentence = \"让机器听懂、读懂人类语言文字的技术，能对话、翻译、总结和写作。\"\n\nn = sentence.count(keyword)\nprint(f\"关键词出现 {n} 次\")\n"
+  "solution": "names = [\"切分词语\", \"识别主语\", \"判断情感\", \"生成摘要\"]\ncounts = [4, 3, 2, 5]\n\ntable = dict(zip(names, counts))\n\nprint(f\"{names[0]} 有 {table[names[0]]} 句句子\")\n"
 }

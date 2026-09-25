@@ -1,23 +1,23 @@
 {
   "kp_id": "agent-tool-use-pl",
   "grade_level": "primary_low",
-  "title": "编程小练习：把「工具调用模块」的关键句打出来",
-  "expected_behavior": "打印一行：今天学了：工具调用模块，记住：智能体的「会借工具的手」，自己",
-  "scaffold": "# 目标：把和「工具调用模块」有关的一句话打印出来\ntopic = \"工具调用模块\"\n\n# TODO 1：准备一条要点 note（用你自己的话，一句就好）\nnote = ____\n\n# TODO 2：打印「今天学了：<topic>，记住：<note>」\n____\n",
-  "expected_output": "今天学了：工具调用模块，记住：智能体的「会借工具的手」——自己\n",
+  "title": "列表：清点工具调用模块的调用",
+  "expected_behavior": "填好 TODO 1-2 后，程序打印「一共有 4 次调用」。",
+  "scaffold": "# 目标：数出列表里有几项\nparts = [\"查知识库\", \"调题库\", \"搜资料\", \"算表达式\"]\n\n# TODO 1：用 len 数出项数，存进 count\ncount = ____\n\n# TODO 2：打印「一共有 N 次调用」\n____\n",
+  "expected_output": "一共有 4 次调用\n",
   "hints": [
     {
       "level": 1,
-      "hint": "先想好要记住的那一句，再放进变量 note。"
+      "hint": "「有几项」不用一个一个数，有一个现成的函数帮你算出长度。"
     },
     {
       "level": 2,
-      "hint": "note = \"……\"，然后用 f-string 把 topic 和 note 放进同一行。"
+      "hint": "把列表交给这个函数，返回值存进 count。"
     },
     {
       "level": 3,
-      "hint": "print(f\"今天学了：{topic}，记住：{note}\")。"
+      "hint": "count = len(parts)；再打印 print(f\"一共有 {count} 次调用\")。"
     }
   ],
-  "solution": "topic = \"工具调用模块\"\nnote = \"智能体的「会借工具的手」——自己\"\nprint(f\"今天学了：{topic}，记住：{note}\")\n"
+  "solution": "parts = [\"查知识库\", \"调题库\", \"搜资料\", \"算表达式\"]\n\ncount = len(parts)\n\nprint(f\"一共有 {count} 次调用\")\n"
 }

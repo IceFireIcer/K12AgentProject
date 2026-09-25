@@ -1,23 +1,23 @@
 {
   "kp_id": "autonomous-driving-jr",
   "grade_level": "junior",
-  "title": "编程小练习：数一数概念「自动驾驶」相关词出现了几次",
-  "expected_behavior": "打印关键词在句子里出现的次数。",
-  "scaffold": "# 目标：数出关键词在句子中出现了几次\nkeyword = \"自动驾驶\"\nsentence = \"用摄像头和雷达感知道路，让人工智能帮汽车做行驶决策；但要区分「辅助驾驶」和「完全\"\n\n# TODO 1：用 count 统计出现次数，存进 n\nn = ____\n\n# TODO 2：打印「关键词出现 N 次」\n____\n",
-  "expected_output": "关键词出现 0 次\n",
+  "title": "字符串：把自动驾驶的要点串拆开再排版",
+  "expected_behavior": "填好 TODO 后，程序打印 4 行，第一行是「1. 车道线」。",
+  "scaffold": "# 目标：把一整串要点拆开，重新编号排好\nline = \"车道线，前车距离，行人位置，交通灯\"\n\n# TODO 1：按「，」把 line 切分成列表 parts\nparts = ____\n# TODO 2：逐条打印「N. 内容」\n____\n",
+  "expected_output": "1. 车道线\n2. 前车距离\n3. 行人位置\n4. 交通灯\n",
   "hints": [
     {
       "level": 1,
-      "hint": "字符串自带 count 方法。"
+      "hint": "把一整句话按标点切开，会得到一个列表。"
     },
     {
       "level": 2,
-      "hint": "n = sentence.count(keyword)。"
+      "hint": "字符串自带切分方法，切完再用 enumerate 编号打印。"
     },
     {
       "level": 3,
-      "hint": "print(f\"关键词出现 {n} 次\")。"
+      "hint": "parts = line.split(\"，\")；再 for i, p in enumerate(parts, 1): print(f\"{i}. {p}\")。"
     }
   ],
-  "solution": "keyword = \"自动驾驶\"\nsentence = \"用摄像头和雷达感知道路，让人工智能帮汽车做行驶决策；但要区分「辅助驾驶」和「完全\"\n\nn = sentence.count(keyword)\nprint(f\"关键词出现 {n} 次\")\n"
+  "solution": "line = \"车道线，前车距离，行人位置，交通灯\"\n\nparts = line.split(\"，\")\n\nfor i, p in enumerate(parts, 1):\n    print(f\"{i}. {p}\")\n"
 }

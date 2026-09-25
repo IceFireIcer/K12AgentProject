@@ -1,23 +1,23 @@
 {
   "kp_id": "limit-understanding-sr",
   "grade_level": "senior",
-  "title": "编程小练习：把概念「理解局限」的要点的要点做成字典并输出",
-  "expected_behavior": "打印定义与要点两行。",
-  "scaffold": "# 目标：用字典整理这个概念的两栏信息\ncard = {\n    \"定义\": \"AI 不是在真正读懂文字，而是在按统计规律预测「\",\n    \"要点\": \"____\",\n}\n\n# TODO 1：把「要点」填成一句自己的概括\n# TODO 2：按「定义」「要点」两行打印\n____\n____\n",
-  "expected_output": "定义： AI 不是在真正读懂文字，而是在按统计规律预测「\n要点： 下一个字」；语言流畅并不等于理解到位。\n",
+  "title": "嵌套循环：按行合计理解局限的二维数据",
+  "expected_behavior": "填好 TODO 后，程序打印每行的合计：[7, 7]。",
+  "scaffold": "# 目标：数据按行分组，求每一行的合计\ngrid = [[4, 3], [5, 2]]\n\ntotals = []\n# TODO 1：外层循环取出每一行\n____\n# TODO 2：内层把这一行的数加起来，追加进 totals\n    ____\n\nprint(totals)\n",
+  "expected_output": "[7, 7]\n",
   "hints": [
     {
       "level": 1,
-      "hint": "字典用 {\"键\": 值}，取值用 card[\"键\"]。"
+      "hint": "数据分成了好几行，先管每一行，再管行里的数。"
     },
     {
       "level": 2,
-      "hint": "先把要点字符串放进 card。"
+      "hint": "外层取出一行，内层把这一行的数加起来，最后把和追加进 totals。"
     },
     {
       "level": 3,
-      "hint": "print(\"定义：\", card[\"定义\"]) 之类，两行各打一栏。"
+      "hint": "for row in grid: 里面先 s = 0，再 for v in row: s = s + v，最后 totals.append(s)。"
     }
   ],
-  "solution": "card = {\n    \"定义\": \"AI 不是在真正读懂文字，而是在按统计规律预测「\",\n    \"要点\": \"下一个字」；语言流畅并不等于理解到位。\",\n}\n\nprint(\"定义：\", card[\"定义\"])\nprint(\"要点：\", card[\"要点\"])\n"
+  "solution": "grid = [[4, 3], [5, 2]]\n\ntotals = []\nfor row in grid:\n    s = 0\n    for v in row:\n        s = s + v\n    totals.append(s)\n\nprint(totals)\n"
 }
