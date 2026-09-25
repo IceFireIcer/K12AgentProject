@@ -163,6 +163,20 @@ VAGUE = {"底面", "流程", "内容", "部分", "方面", "情况", "环节", "
          "基础", "辨析", "易错点", "要点", "做法", "方式", "方法", "概念", "知识", "作用"}
 #: 标签里不许出现引号（嵌套引号把一句话切得七零八落）。
 QUOTES = "「」『』“”\"'‘’"
+#: **分句**（副标题 / 卡片里那句讲解）**不可能**以这些字收尾：它们是**连接 / 判断 / 存在**
+#: 功能词，句子以它们收尾就说明被切了一半（「它的输出形式有」「它的特点是」）。
+#: ★ 为什么另立一套而不复用 `TAIL_BAN`（2026-09-25 用户截图「动画里面有的文字是空的」）：
+#:   分句是一句完整的话 —— 以「的 / 了」收尾天经地义（「这些画不是拍出来的」
+#:   「它马上就画出来了」）；拿名词标签那套禁尾去卡，整池小学教材句会被全部毙掉，
+#:   卡片上就只剩一个光标题。
+CLAUSE_TAIL_BAN = ("和", "与", "把", "被", "为", "从", "而", "就", "会", "对", "等",
+                   "让", "给", "跟", "是", "有")
+#: 汉字：卡片上那句是给学生**读**的，至少要有一处汉字（否则「2022」这种纯编号会占掉一格）。
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+#: 方位收尾：与 ``PREP_START``（介词/动词）合起来判「这是个状语，不是一句话」。
+CLAUSE_LOC_TAIL = ("中", "里", "上", "下", "内", "外", "在")
+#: 卡片讲解取不到时**放宽**几个字（卡片会折行，高度按真实文字算；越界由 `assert_clean` 拦）。
+WIDE_EXTRA = 6
 #: 教材的小标题前缀：它是章节结构，不是句子 —— 印进盒子里就成了「辨析：……」这种半截话。
 HEADINGS = ("辨析", "易错点", "想一想", "小结", "提示", "注意", "要点", "概念", "定义",
             "举例", "说明", "拓展", "应用", "做法", "作用")
@@ -468,7 +482,47 @@ def _question_from(text: str, fallback: str) -> str:
     return fallback
 
 
-def _sub_line(text: str, label: str, budget: int) -> str:
+def _clause_ok(text: str) -> bool:
+    """**分句**（副标题 / 卡片讲解）能不能上屏：够长、说人话（有汉字）、不是孤立泛名词、
+    不带引号、不以功能词收尾（``CLAUSE_TAIL_BAN``）、不以半截「的」收尾。
+
+    ★ 与 `_accept` 的分工：`_accept` 服务**名词标签**（禁尾表很严，连「的 / 了」都禁），
+      本条服务**完整分句**。两者的判据不能混用 —— 混用的后果就是卡片上的空白。
+    """
+    value = (text or "").strip()
+    if len(value) < 4:
+        return False
+    # ★ 卡片上那句是给学生**读的**：整格只有一个年份 / 编号（实测「2022」上过屏）等于没说。
+    if not CJK_RE.search(value):
+        return False
+    if value in VAGUE:
+        return False
+    if any(mark in value for mark in QUOTES):
+        return False
+    if value[-1] in CLAUSE_TAIL_BAN:
+        return False
+    # ★ 介词开头的**方位短语**不是一句讲解（实测「在闭环中」「在流程中」上过屏）：
+    #   它是状语，缺谓语 —— 学生读到它不知道该看什么。
+    if value[0] in PREP_START and value[-1] in CLAUSE_LOC_TAIL:
+        return False
+    # ★ 括号必须**成对**（实测两头都会踩）：
+    #   「有几个）」= 「（有几个）」被标点切掉了左括号；「…设计特征（如边缘，角点」= 贪心前缀
+    #   停在了括号里。两者印在卡片上都是半截话，一律不要。
+    for open_mark, close_mark in (("（", "）"), ("(", ")"), ("「", "」"), ("《", "》")):
+        if value.count(open_mark) != value.count(close_mark):
+            return False
+    # ★ 以「的」收尾要分两种（实测踩到「把重复的」这种半截话）：
+    #   「这些画不是拍出来的」是完整的「是…的」句，可以；「把重复的」是被逗号/顿号
+    #   切了一半的并列项（后面那个名词还在下一小句里），不行。
+    #   判据取**最后一个小句**里有没有「是」—— 前面小句里的「是」不算数。
+    if value.endswith("的"):
+        last = re.split(r"[，,、；;：:]", value)[-1]
+        if "是" not in last:
+            return False
+    return True
+
+
+def _sub_line(text: str, label: str, budget: int, allow_analogy: bool = False) -> str:
     """副标题：**预算内的完整小句**（标签已经用 ``_badge`` 单独取过时的入口）。
 
     ★ 为什么单独一个函数：这几条原型的标签走 ``_badge``（自带预算与兜底名），
@@ -476,18 +530,141 @@ def _sub_line(text: str, label: str, budget: int) -> str:
       而没有标点可切的长句切出来与整句相同，于是被判成「重复」清成空串，
       盒子里就只剩一个标题（学生看不到完整那句）。
 
+    ★★ 2026-09-25（用户截图里的「文字是空的」）——这里**不再用 ``_noun_ok``**。
+      ``_noun_ok`` 是给**名词标签**定的（禁代词/介词开头、禁方位词、≥3 字），
+      而副标题是**一个分句**：「你对机器说一句话」「这些画不是拍出来的」
+      「它马上就画出来了」在小学教材里是再正常不过的讲解句，却全被
+      「代词开头」「以『的』收尾」两条毙掉 —— 一整池句子全灭，卡片上就是空白。
+      分句的完整性由 ``_phrase`` 保证（只按标点拼**完整小句**，永不切字），
+      所以这里只守「不以悬空连接词收尾」这一条（``CLAUSE_TAIL_BAN``，比 ``TAIL_BAN`` 宽）。
+
     ★ 预算仍然要守（实测踩到）：副标题一长，整条带就跟着长高，把下面的带顶出安全区
       （``scene`` 原型当场被 ``assert_clean`` 拦下）。**整句一个字都不少** ——
       它在 caption 与 ``<title>``（悬停全文）里，这正是那两处的职责。
+
+    ★ ``allow_analogy``：只给 ``scene`` 的**最后一招**用 —— 句池里剩下的句子全在打比方时，
+      「讲个比方」也比画布上一个**空框**强（小学讲法本来就爱打比方）。默认仍然禁。
     """
     value = _drop_heading(_unquote(clean_text(text)))
     # ★ 第五轮：副标题同样不打比方（比方句留给 caption，盒子上一律是概念本身的话）。
-    if not value or value == label or _has_analogy(value):
+    if not value or value == label:
         return ""
-    candidate = _trim_tail(_phrase(value, budget), budget)
-    if not candidate or candidate == label or len(candidate) > budget or not _noun_ok(candidate):
+    if not allow_analogy and _has_analogy(value):
         return ""
-    return candidate
+    for candidate in _sub_candidates(value, budget):
+        if candidate == label or len(candidate) > budget:
+            continue
+        if _clause_ok(candidate):
+            return candidate
+    return ""
+
+
+def _card_line(text: str, label: str, budget: int = 14) -> str:
+    """**卡片里那句讲解**：四步退让 —— 预算内不打比方 → 允许打比方 → 放宽 ``WIDE_EXTRA`` 字
+    （同样两种）→ 空串（由调用方**换一句**）。
+
+    ★★ 空框比一句比方更糟（2026-09-25 用户口径「动画里面有的文字是空的」）：
+      这批原型（flow / layers / checklist / contrast 两栏…）的卡片都是「编号 + 一句讲解」，
+      ``detail`` 一旦是空串，画布上就出现一个**只有编号的框** —— 学生不知道这一格在讲什么。
+
+    ★ 为什么还要「放宽几字」：卡片**会折行**，高度由基元按真实文字算（`Sandbox.measure`），
+      所以多几个字不会压到别人；而整句 15~20 字又没有标点可切时（「Transformer 是大语言
+      模型的底层骨架」），卡在 14 字上就只能整格空着 —— 那是最差的结果。
+      真的放不下（带子顶出安全区）由生成期的 ``assert_clean`` 当场拦下，不会带病写盘。
+    """
+    return (
+        _sub_line(text, label, budget)
+        or _sub_line(text, label, budget, allow_analogy=True)
+        or _sub_line(text, label, budget + WIDE_EXTRA)
+        or _sub_line(text, label, budget + WIDE_EXTRA, allow_analogy=True)
+    )
+
+
+def _whole_line(text: str, label: str) -> str:
+    """最后一步：**整句端上去**（只剥小标题与引号，一个字都不切）。
+
+    ★ 用在句池已经被别处用光、退让到这一步还取不到讲解的那**一格**上：卡片会折行、
+      高度由基元按真实文字算，所以「多两行」是可接受的代价；而**空框**不是
+      （2026-09-25 用户口径「动画里面有的文字是空的」）。真放不下由 `assert_clean` 拦。
+    ★ 仍然守内容卫生：带排版标记（`——` / `**` / 反引号）的整句不上屏。
+    """
+    value = _drop_heading(_unquote(clean_text(text)))
+    if not value or value == label or not CJK_RE.search(value):
+        return ""
+    if any(mark in value for mark in MARKS):
+        return ""
+    return value
+
+
+def _lines_with_detail(
+    item: dict, count: int, pick_budget: int, card_budget: int, backup: list[str], label_of
+) -> list[tuple[str, str]]:
+    """挑 ``count`` 条教材句，并保证**每一条都配得上一句能上屏的卡片讲解**。
+
+    ★★ 2026-09-25 用户截图「动画里面有的文字是空的」的根治办法。
+      这批原型（scene 站牌 / flow 分段 / layers 分层 / checklist 逐条）的卡片都是
+      「编号 + 一句讲解」：讲解取不到时旧版写空串，画布上就出现一个**只有编号的框**，
+      学生不知道这一格在讲什么。而现在有些句子天生取不出讲解（整句 20+ 字又没有标点、
+      或者整句在打比方）—— 所以**换一句**：从同一个句池里取一条能给出讲解的
+      （短的优先，卡片带的高度按最费的那一项算）。
+
+    ★ 三级退让，**顺序不能改**：① 这句的常规讲解 → ② 换一句（免得把 30 字整句塞进小卡片）
+      → ③ 整句端上去（`_whole_line`，句池真的被别处用光时才走到这一步）。
+      若把 ③ 提前到 ①，第 ② 级就永远轮不到，「换一句」等于失效
+      （实测：`机器学习（ML）` 的第 1 站因此顶着一条 30 字的整句，而池子里另有 15 字的短句）。
+
+    ⚠️ 返回的 ``line`` 是**换过之后的**那句：caption / 悬停全文用的也是它，
+      否则会出现「卡片讲 A、字幕讲 B」的错配。
+    """
+    pool = _sentences(item)
+    lines = _select(pool, count, pick_budget, backup)
+    used = set(lines)
+    spares = sorted((text for text in _prefer_plain(pool) if text not in used), key=len)
+    out: list[tuple[str, str]] = []
+    for index, line in enumerate(lines):
+        label = label_of(index)
+        detail = _card_line(line, label, card_budget)
+        if not detail:
+            for position, alt in enumerate(spares):
+                alt_detail = _card_line(alt, label, card_budget)
+                if alt_detail:
+                    line = spares.pop(position)
+                    detail = alt_detail
+                    break
+        if not detail:
+            detail = _whole_line(line, label)
+        out.append((line, detail))
+    return out
+
+
+def _sub_candidates(value: str, budget: int) -> list[str]:
+    """副标题候选（按「读起来最像一句讲解」排序），逐个试到能用为止。
+
+    ★★ 为什么不能只试「贪心前缀」（2026-09-25 空文字的第二层根因）：
+       ``_phrase`` 只拼**开头**那几个小句，于是「算法，就是机器做题的方法和步骤」
+       → 「算法」（2 字，太短）、「加权，每个数字乘上自己的重要程度」→「加权」——
+       **真正的讲解句在后面那一小句**，却从来没被拿到过。所以先试贪心前缀，
+       再**逐个小句**试（长的优先）：正常情况一步到位，前缀太短时由后面的小句顶上。
+
+    ★★ 候选**只来自完整小句**，不许用 `_head` 那种「句中的切片」：
+       ``_head`` 是按「的 / 在 / 和」这类虚词切的，切出来的是**修饰语**而不是句子 ——
+       实测踩到「就像给机器装了一双会认东西」（后面那个名词被切掉了）、
+       「就像有小朋友把没看过的书」，印在卡片上就是半截话。
+       没有标点可切的长句一律**取不到**，改由 `_lines_with_detail` **换一句**。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def push(text: str) -> None:
+        trimmed = _trim_tail(text, budget)
+        if trimmed and trimmed not in seen:
+            seen.add(trimmed)
+            out.append(trimmed)
+
+    push(_phrase(value, budget))
+    for part in sorted(_phrases(value), key=len, reverse=True):
+        push(part)
+    return out
 
 
 def _badge(text: str, budget: int, fallback: str) -> str:
@@ -1208,16 +1385,27 @@ def payload_scene(entry: dict, grade: str) -> dict:
     name = entry["name"]
     item = entry["by_grade"][grade]
     summary = clean_text(item.get("summary") or name)
-    lines = _select(_sentences(item), 4, 30, [summary, name])
+    # ★★ 站牌上**不许有空框**（2026-09-25 用户截图「动画里面有的文字是空的」）：
+    #   挑中的那句若给不出可上屏的副标题（整句没有标点可切、切出来超过预算、或者整句
+    #   都在打比方），旧版就写一个空串 —— 画布上出现一个**只有编号没有内容的框**。
+    #   现在统一走 `_lines_with_detail`：取不到就换一句同池的，换不到才退回一句
+    #   不指代任何东西的字幕（不写「这一站讲它讲的那件事」这种占位话）。
     rows = []
-    for index, line in enumerate(lines):
+    for index, (_line, detail) in enumerate(
+        _lines_with_detail(
+            item, 4, 30, 14, [summary, name], lambda at: "第 {0} 站".format(at + 1)
+        )
+    ):
         label = "第 {0} 站".format(index + 1)
-        detail = _sub_line(line, label, 14)
         rows.append(
             {
                 "station": label,
                 "sub": detail,
-                "caption": "小向导走到第 {0} 站，这一站讲{1}".format(index + 1, detail or _badge(line, 8, "它讲的那件事")),
+                "caption": (
+                    "小向导走到第 {0} 站，这一站讲{1}".format(index + 1, detail)
+                    if detail
+                    else "小向导走到第 {0} 站，先停一停。".format(index + 1)
+                ),
             }
         )
     return {
@@ -1296,10 +1484,10 @@ def payload_contrast_kid(entry: dict, grade: str) -> dict:
         rows.append(
             {
                 "left": left,
-                "leftMore": _sub_line(lefts[index], left, 14),
+                "leftMore": _card_line(lefts[index], left, 14),
                 "right": right,
-                "rightMore": _sub_line(rights[index], right, 14),
-                "caption": "照到第 {0} 组：{1}".format(index + 1, _badge(rights[index], 10, "这一组的说法")),
+                "rightMore": _card_line(rights[index], right, 14),
+                "caption": "照到第 {0} 组：{1}".format(index + 1, _badge(rights[index], 10, right)),
             }
         )
     return {
@@ -1391,16 +1579,18 @@ def payload_checklist_kid(entry: dict, grade: str) -> dict:
     name = entry["name"]
     item = entry["by_grade"][grade]
     summary = clean_text(item.get("summary") or name)
-    lines = _select(_sentences(item), 4, 30, [summary, name])
     rows = []
-    for index, text in enumerate(lines):
+    for index, (_text, detail) in enumerate(
+        _lines_with_detail(
+            item, 4, 30, 14, [summary, name], lambda at: "第 {0} 条".format(at + 1)
+        )
+    ):
         label = "第 {0} 条".format(index + 1)
-        detail = _sub_line(text, label, 14)
         rows.append(
             {
                 "title": label,
                 "detail": detail,
-                "caption": "核对第 {0} 条，给它打钩：{1}".format(index + 1, detail or _badge(text, 8, "要核对的那一条")),
+                "caption": "核对第 {0} 条，给它打钩：{1}".format(index + 1, detail or label),
             }
         )
     return {
@@ -1420,16 +1610,18 @@ def payload_flow(entry: dict, grade: str) -> dict:
     name = entry["name"]
     item = entry["by_grade"][grade]
     summary = clean_text(item.get("summary") or name)
-    lines = _select(_sentences(item), 4, 30, [summary, name])
     rows = []
-    for index, text in enumerate(lines):
+    for index, (_text, detail) in enumerate(
+        _lines_with_detail(
+            item, 4, 30, 14, [summary, name], lambda at: "第 {0} 段".format(at + 1)
+        )
+    ):
         label = "第 {0} 段".format(index + 1)
-        detail = _sub_line(text, label, 14)
         rows.append(
             {
                 "stage": label,
                 "detail": detail,
-                "caption": "数据流到第 {0} 段：{1}".format(index + 1, detail or _badge(text, 8, "这一段做的事")),
+                "caption": "数据流到第 {0} 段：{1}".format(index + 1, detail or label),
             }
         )
     return {
@@ -1488,16 +1680,18 @@ def payload_layers(entry: dict, grade: str) -> dict:
     name = entry["name"]
     item = entry["by_grade"][grade]
     summary = clean_text(item.get("summary") or name)
-    lines = _select(_sentences(item), 4, 30, [summary, name])
     rows = []
-    for index, text in enumerate(lines):
+    for index, (_text, detail) in enumerate(
+        _lines_with_detail(
+            item, 4, 30, 14, [summary, name], lambda at: "第 {0} 层".format(at + 1)
+        )
+    ):
         label = "第 {0} 层".format(index + 1)
-        detail = _sub_line(text, label, 14)
         rows.append(
             {
                 "layer": label,
                 "detail": detail,
-                "caption": "第 {0} 层垒上去：{1}".format(index + 1, detail or _badge(text, 8, "这一层做的事")),
+                "caption": "第 {0} 层垒上去：{1}".format(index + 1, detail or label),
             }
         )
     return {
