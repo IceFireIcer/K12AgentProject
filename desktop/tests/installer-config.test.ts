@@ -223,6 +223,19 @@ test('G21-8 打包相关改动 push 即构建（且那一轮不发 Release）', 
   ]) {
     assert.ok(nightlyYml.includes(path), `push 的 paths 白名单要包含 ${path}`)
   }
+  // ★★ 2026-09-27（D-104 / P-153）：`desktop/package.json` **不许**回到白名单。
+  //   它的日常改动（加一条 npm script）与产物无关，却会触发整条 19 分钟重活（含 90MB 模型下载）。
+  //   实测事故：`3f08586` 只是一次「加两条 ux 探针脚本」的提交，白跑了一轮。
+  //   依赖增减（会改 asar 内容）改由每日定时轮 / 手动 `workflow_dispatch` 覆盖 —— 24 小时内必有一次。
+  const pushAt = nightlyYml.indexOf('\n  push:')
+  // ⚠️ `concurrency:` 是**顶层键**（零缩进）—— 写成 `\n  concurrency:` 找不到，
+  //    会让 pushEnd = -1 → 这条守卫自己先红（实测踩到过一次）。
+  const pushEnd = nightlyYml.indexOf('\nconcurrency:', pushAt)
+  assert.ok(pushAt > 0 && pushEnd > pushAt, '找不到 push 触发块（锚点漂了就改这里）')
+  assert.ok(
+    !nightlyYml.slice(pushAt, pushEnd).includes('desktop/package.json'),
+    'push 白名单里不许再出现 desktop/package.json —— 脚本改动会白跑一轮 19 分钟的打包（P-153）'
+  )
   // ★ push 触发的那一轮是「验能不能打出来」，不该冒充当天的 nightly 抢标签、覆盖夜间产物。
   assert.match(
     nightlyYml,

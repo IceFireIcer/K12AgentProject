@@ -3459,3 +3459,27 @@ pydantic → OpenAPI → TS 契约链，且存量 `progress` 表里有这个值�
      改组件时 `npm test` 会立刻抓出漏改（`docs/agents/probe-guide.md` 有 checklist）。
 - **服务哪条评分**：设计合理性 25%（证据链自己可验证）· 长期维护。
 - **验收**：`tests/probe-structure.test.ts` 7 条；真机 `ux:pages` 的锚点自检与 axe 类规则零违规；变异 101–103 逐条变红。
+
+## D-104 nightly 的 push 白名单**收窄**；验包副本上传失败**降级为警告**（2026-09-27）
+
+- **日期**：2026-09-27（用户裁决："别让他每次提交都触发 nightly 构建"）
+- **背景**：
+  1. `3f08586` 只是一次「15 个工作包 + 演示沙箱」的提交，其中对 `desktop/package.json` 的改动
+     仅仅是加了两条探针脚本（`ux:motion` / `ux:perf`）—— 却因为白名单里有 `desktop/package.json`
+     而触发了一整轮 Nightly（90MB 模型下载 + PyInstaller + electron-builder，约 19 分钟）；
+  2. 同一轮及之前的 push 轮都**红在最后一步**：验包副本上传报
+     `Artifact storage quota has been hit`（构建与 `check:server:packaged` 全过）。
+- **决策**：
+  1. `on.push.paths` **去掉 `desktop/package.json`**，只保留"改了就一定改产物"的四项
+     （`electron-builder.yml` / `desktop/build/**` / `build-version.mjs` / `nightly.yml` 自身）；
+     **依赖增减**（会改 asar 内容）改由每日定时轮或手动 `workflow_dispatch` 覆盖 —— 24 小时内必有一次；
+  2. 「上传验包副本」加 `continue-on-error: true`：这一轮的目的是"验能不能打出包"（上面几步已验完），
+     副本只是附带的可下载件；配额是**账户级**外部约束且每 6–12 小时才重算，不该把整轮判红
+     （历史上正是这个红把 Release 步骤一起挡掉过，见 nightly.yml 里那段注释）。
+- **被否决的方案**：① 直接删掉 push 触发（那就回到"改了安装器配置要等第二天"的 D-067 问题）；
+     ② 删本仓 artifact 救配额（`gh api .../actions/artifacts` 实测 **total_count = 0**，没有可删的）；
+     ③ 把每次 push 都跑的"验包"改成只跑 `electron-builder --dir`（验不出 NSIS 打包真实问题）。
+- **代价 / 风险**：依赖变更不再即时验包（由定时轮兜底）；配额满时"验包副本"不可下载（日志里是 ⚠ 警告，
+     不会静默）。守卫：`tests/installer-config.test.ts` G21-8 的否定断言 + 变异 **104**。
+- **验收**：本地 `npm run typecheck` + `npm test` 全绿；变异 104 逐条变红；下一次 push 只触发的
+     nightly 轮应完整跑完且**不因上传失败判红**（构建与 packaged 校验仍然照跑）。

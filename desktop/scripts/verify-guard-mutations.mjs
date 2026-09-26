@@ -998,6 +998,14 @@ const MUTATIONS = [
     replace: '        localStorage.clear()',
     testFile: 'tests/probe-structure.test.ts',
     expect: '隔离与截图'
+  },
+  {
+    name: '104 工作流：把 desktop/package.json 放回 nightly 的 push 白名单（脚本改动会白跑一轮打包）',
+    file: '../.github/workflows/nightly.yml',
+    find: "      - 'desktop/scripts/build-version.mjs'",
+    replace: "      - 'desktop/package.json'\n      - 'desktop/scripts/build-version.mjs'",
+    testFile: 'tests/installer-config.test.ts',
+    expect: '打包相关改动 push 即构建'
   }
 ]
 

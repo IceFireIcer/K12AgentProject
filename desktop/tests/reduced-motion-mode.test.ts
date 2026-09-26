@@ -30,7 +30,6 @@ const repoRoot = resolve(desktopRoot, '..')
 const read = (...segments: string[]): string => readFileSync(join(desktopRoot, ...segments), 'utf8')
 const R = 'src/renderer/src'
 
-const store = read(...`${R}/stores/reducedMotion.ts`.split('/'))
 const css = read(...`${R}/assets/base.css`.split('/'))
 const settings = read(...`${R}/views/Settings.vue`.split('/'))
 const composable = read(...`${R}/composables/useReducedMotion.ts`.split('/'))

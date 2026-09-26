@@ -39,12 +39,18 @@ on:
   #      不然每次 push 都跑一趟 19 分钟的打包（含 90MB 模型下载）。
   #   ⚠️ push 触发的那一轮**不发 Release**（见「发布」一步的 if）——
   #      它是「验能不能打出来」，不该冒充当天的 nightly 去抢标签。
+  #
+  # ★★★ 2026-09-27 收窄（D-104 / P-153）：**从白名单里去掉 `desktop/package.json`**。
+  #   实测事故：`3f08586` 只是一次「加了两条 npm script（ux:motion / ux:perf）」的提交，
+  #   package.json 命中白名单 → 白跑一趟 19 分钟的重活（含 90MB 模型下载）。
+  #   判据：白名单里只留**改了就一定改变产物**的文件。
+  #   代价明说：**依赖增减**（`dependencies` 变化会改 asar 内容）不再由 push 轮验，
+  #   改由每日定时轮（UTC 18:00 = 北京 02:00）或手动 `workflow_dispatch` 覆盖 —— 24 小时内必有一次。
   push:
     branches: [master]
     paths:
       - 'desktop/electron-builder.yml'
       - 'desktop/build/**'
-      - 'desktop/package.json'
       - 'desktop/scripts/build-version.mjs'
       - '.github/workflows/nightly.yml'
 
@@ -304,6 +310,17 @@ jobs:
       #       只留 1 天 —— 它是「这一轮的可下载副本」，不是长期分发渠道。
       - name: 上传安装版与绿色版（只给不发布 Release 的 push 轮留 1 天）
         if: github.event_name == 'push'
+        # ★★ 2026-09-27（P-154）：这一条**不再是致命步骤**（`continue-on-error`）。
+        #   原因：配额是**账户级**的外部约束（Artifacts 与 Packages 共用同一池），
+        #   而本仓当前 artifact 数量是 **0** —— 消耗方不在本仓，历史 artifact 也清不出空间；
+        #   且 GitHub 的 usage 每 6–12 小时才重算一次。实测 `36259475469`：
+        #   打包全过、`check:server:packaged` 全过，只因为这一步报
+        #   `Artifact storage quota has been hit` 就把整轮判红。
+        #   这一轮的**目的**是「验这次改动能不能打出包」—— 那件事上面几步已经验完；
+        #   这里的副本只是附带的可下载验包件，配额满时降级为 ⚠ 警告即可。
+        #   ⚠️ 想恢复「验包副本必须上传成功」的严格口径：先清掉占配额的 artifact / package
+        #      （见 https://github.com/settings/billing 的 Storage），再把这一行删掉。
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: k12-agent-windows-${{ github.run_number }}

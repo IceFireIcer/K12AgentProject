@@ -3677,3 +3677,85 @@ vite 自己的默认是 `'esbuild'`，被这一层默认值盖掉了；README �
 判据链（端口 → 属主 PID → 进程是否存在 → 同批次 sidecar）三步就能定性。
 
 **相关**：`desktop/scripts/ux-*.mjs` 的 `K12_DEBUG_BASE`、`src/main/index.ts` 的 CDP 开关。
+
+## P-153 ★★ `nightly.yml` 的 push 白名单里放 `desktop/package.json`：加一条 npm script 就白跑 19 分钟（2026-09-27）
+
+**现象**：`3f08586`（内容 = 15 个工作包 + 演示沙箱，其中对 `desktop/package.json` 的改动只有
+「加两条探针脚本 `ux:motion` / `ux:perf`」）推上去之后，**CI 与 Nightly 同时被触发** ——
+Nightly 那一轮要下 90MB 嵌入模型、PyInstaller + electron-builder 全打一遍。
+
+**根因**：`nightly.yml` 的 `on.push.paths` 白名单里有 `desktop/package.json`。
+它的本意是「依赖增减会改变 asar 内容，所以要验一次构建」，但 package.json 的**日常改动**
+（npm scripts / description）与产物完全无关，一样命中。
+
+**改法**（D-104）：从白名单里**去掉 `desktop/package.json`**，只留「改了就一定改产物」的：
+`electron-builder.yml` / `desktop/build/**` / `build-version.mjs` / `nightly.yml` 自己。
+依赖增减改由**每日定时轮**（UTC 18:00）或手动 `workflow_dispatch` 覆盖 —— 24 小时内必有一次。
+守卫：`tests/installer-config.test.ts` 的 G21-8 加了一条**否定断言**（白名单里不许再出现它），
+变异 104 验它会红。
+
+**为什么值得记**：`paths` 白名单的判断单位是**文件**，而"这次改动会不会影响产物"的判断单位是**内容**。
+两者不可能完全对齐时，选择"宁可少触发、由定时轮兜底"，而不是"宁可每次都跑"——
+后者的代价（每次 push 19 分钟重活）会让人干脆想关掉整个 workflow。
+
+**相关**：`.github/workflows/nightly.yml`、`desktop/tests/installer-config.test.ts`、`scripts/verify-guard-mutations.mjs` 第 104 条。
+
+## P-154 ★★ "Artifact storage quota has been hit"：本仓 0 个 artifact，配额却被占满（2026-09-27）
+
+**现象**：push 触发的 nightly（如 `36259475469`）**打包全过**（三个目标都产出、`check:server:packaged` 过了），
+只红在最后一步「上传验包副本」：
+
+```
+##[error]Failed to CreateArtifact: Artifact storage quota has been hit.
+         Unable to upload any new artifacts. Usage is recalculated every 6-12 hours.
+```
+
+**排查（实测）**：`gh api repos/<owner>/<repo>/actions/artifacts` 返回 **total 0**（连过期的都没有）——
+也就是说**本仓没有可清理的 artifact**。配额是**账户级**的（Artifacts 与 Packages 共用同一个池，
+见 workflow 里的注释），消耗方不在本仓；而且 GitHub 的用量**每 6–12 小时才重算一次**，
+刚删完也不会立刻恢复。
+
+**改法**：把这一步降级为 `continue-on-error: true`（D-104）—— 这一轮的目的是"验能不能打出包"，
+那件事上面的步骤已经验完；验包副本只是附带的（长期分发走 Release）。
+⚠️ 想恢复严格口径：先去 https://github.com/settings/billing 看 Storage 的消耗方
+（token 没有 `read:packages` 时看不见 Packages 那一半），清掉之后再把 `continue-on-error` 删掉。
+
+**为什么值得记**：报错文案里的 "quota" 很容易被读成"本仓 artifact 太多"，于是去删本仓的 ——
+而本仓一个都没有。判据链：**先数本仓（API）→ 再想账户级（Packages 共用池）→ 最后等重算窗口**。
+
+**相关**：`.github/workflows/nightly.yml`「验包副本」一步、`gh api .../actions/artifacts`。
+
+## P-155 ★ 本地只跑 `typecheck:web` 会漏掉 `tests/` 下的类型错误 —— CI 红在 `typecheck:node`（2026-09-27）
+
+**现象**：`3f08586` 的 CI 在「类型检查」一步就红了：
+
+```
+tests/reduced-motion-mode.test.ts(33,7): error TS6133: 'store' is declared but its value is never read.
+```
+
+而本地前后跑了很多次 `npm run typecheck:web` 都是绿的。
+
+**根因**：`typecheck` = `typecheck:node` + `typecheck:web`，而 **`tsconfig.node.json` 才 include `tests/`**。
+`typecheck:web`（vue-tsc）只看 `src/renderer`。我这一轮改渲染层时习惯了只跑 web 那半边，
+于是一个测试文件里的未使用变量（`const store = read(...)` 声明了没用）一路带到 CI。
+
+**改法**：删掉那个未使用变量；**提交前一律跑完整的 `npm run typecheck`**（两道都跑）。
+
+**为什么值得记**：`typecheck:web` 绿灯会给人一种"类型都过了"的错觉，但门禁的实际判据是**两条**。
+凡是"+号 拼接的 npm script"（`a && b`），本地要跑**整条**，不要只跑其中一半。
+
+**相关**：`desktop/package.json` 的 `typecheck`、`desktop/tsconfig.node.json` 的 include、`.github/workflows/ci.yml`。
+
+## P-156 ★ `G9-8c 真 HTTP 往返` 在全套并行跑时偶发红过一次（2026-09-27）
+
+**现象**：修完 P-155 之后的一次全量 `npm test` 里，`tests/agent-trace.test.ts` 的
+`★ G9-8c 真 HTTP 往返：learning-log 经 bridge/client.ts 发出带 X-Auth-Token 的 POST…` 变红（77ms 内失败）。
+
+**排查**：单跑该文件 ✅、单跑该用例 ✅、**连跑三次全量套件也全绿**（该用例 66/70/76ms）。
+它真的起一个 `server.listen(0)` 的本地假服务端并走生产 `bridge/client.ts`
+（超时兜底是 8s，不是 77ms），所以更像**并行跑套件时的资源竞争**，不是判据错误。
+
+**处置**：本次不改代码（改不稳的一条测试比偶发更贵）；记录在此，供 CI 偶发红时对照 ——
+**遇到这条红，先重跑一次**；若开始稳定复现，再按"记录失败时的 received.length / 错误消息"定位。
+
+**相关**：`desktop/tests/agent-trace.test.ts` 的 G9-8c、`desktop/src/main/bridge/client.ts`。
