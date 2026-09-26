@@ -1006,6 +1006,23 @@ const MUTATIONS = [
     replace: "      - 'desktop/package.json'\n      - 'desktop/scripts/build-version.mjs'",
     testFile: 'tests/installer-config.test.ts',
     expect: '打包相关改动 push 即构建'
+  },
+  {
+    // ★ 2026-09-27 真机事故的原形态：把尺寸 class 挂回异步组件（编辑器塌成 5px）
+    name: '105 编辑器：把尺寸 class 挂回异步组件（父级 scoped 规则会被 chunk CSS 覆盖）',
+    file: 'src/renderer/src/views/Coding.vue',
+    find: '                data-testid="coding-view-editor"',
+    replace: '                class="code__editor"\n                data-testid="coding-view-editor"',
+    testFile: 'tests/code-editor-mount.test.ts',
+    expect: '不挂在异步组件上'
+  },
+  {
+    name: '106 编辑器：对话内编程卡把尺寸 class 挂回异步组件',
+    file: 'src/renderer/src/cards/CodingCard.vue',
+    find: '            data-testid="coding-editor"',
+    replace: '            class="coding__editor"\n            data-testid="coding-editor"',
+    testFile: 'tests/code-editor-mount.test.ts',
+    expect: '不挂在异步组件上'
   }
 ]
 

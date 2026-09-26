@@ -894,17 +894,29 @@ watch(editorVisible, (visible) => {
                   一起出现/消失。异步组件跟着这一支一起挂载，装配时机天然跟着它走 ——
                   文件末尾那个 watch 只剩「补一次 layout」这一个职责。 -->
           <div class="code__editor-wrap">
-            <!-- ★ 异步组件（报告 §5.1）：chunk 在途时由它自己的 loadingComponent 顶上；
-                 下面那层骨架覆盖的是 **Monaco 内核装配**那一段等待（同一个骨架组件）。 -->
-            <AsyncCodeEditor
-              ref="editorRef"
-              class="code__editor"
-              data-testid="coding-view-editor"
-              :value="code.draft"
-              @ready="onEditorReady"
-              @failure="onEditorFailure"
-              @change="onEditorChange"
-            />
+            <!-- ★★ 尺寸盒子必须由**本页**给（2026-09-27 真机事故的修复）。
+                 事故现象：编辑区只剩一条黑边。根因不是 Monaco，而是样式归属 ——
+                 把 `class="code__editor"`（`height: 420px`）挂在异步组件上时，它会与
+                 `CodeEditor.vue` 自己的 `.code-editor{width:100%;height:100%}` **同权重**，
+                 而那份 CSS 随 chunk **后加载** → `100%` 赢；外层 `.code__editor-wrap`
+                 高度是 auto 时，100% 就解析成内容高度（实测 5px）。
+                 修法：尺寸挂在本页自己的普通盒子上，异步组件的 100% 永远有确定的父高度。
+                 ⚠️ 不许把 `class="code__editor"` 挪回 `<AsyncCodeEditor>` 上
+                 （守卫：`tests/code-editor-mount.test.ts`）。
+                 ⚠️ 装配失败时整块收起：固定高度的盒子会把下面那句说明顶出
+                 `overflow: hidden`，学生就只剩一片空白。 -->
+            <div v-if="editorFailure === ''" class="code__editor">
+              <!-- ★ 异步组件（报告 §5.1）：chunk 在途时由它自己的 loadingComponent 顶上；
+                   下面那层骨架覆盖的是 **Monaco 内核装配**那一段等待（同一个骨架组件）。 -->
+              <AsyncCodeEditor
+                ref="editorRef"
+                data-testid="coding-view-editor"
+                :value="code.draft"
+                @ready="onEditorReady"
+                @failure="onEditorFailure"
+                @change="onEditorChange"
+              />
+            </div>
             <CodeEditorSkeleton v-if="!editorReady && editorFailure === ''" class="code__editor-skeleton" />
             <p v-if="editorFailure" class="code__brief-err" data-testid="coding-view-editor-failure">
               <AlertTriangle :size="14" />{{ editorFailure }}
@@ -1403,7 +1415,11 @@ watch(editorVisible, (visible) => {
  * ⚠️ 这个数是**容器高度**（Monaco 不带 `automaticLayout`，靠本页的 ResizeObserver 量这个盒子），
  *   改它要连同 `editorOptions()` 的 lineHeight 一起想：行高变了，同样的高度看到的行数就变了。
  * ⚠️ 页面纵向是 `.code__stage` 自己在滚（`overflow-y: auto`），所以这里长高只会让页面多滚一点，
- *   不会把内容挤出视口（`npm run ux:layout` 量的是横向裁切，与这里无关）。 */
+ *   不会把内容挤出视口（`npm run ux:layout` 量的是横向裁切，与这里无关）。
+ * ★★ 这个 `height` **必须**挂在本页自己的 `<div class="code__editor">` 上（模板里有说明）：
+ *   挂到异步组件 `<AsyncCodeEditor>` 上时，会被它自己**随 chunk 后加载**的
+ *   `.code-editor{height:100%}` 同权重覆盖 → 外层高度是 auto 时编辑器塌成几像素
+ *   （2026-09-27 真机事故：编辑区只剩一条黑边）。 */
 .code__editor {
   width: 100%;
   height: 420px;

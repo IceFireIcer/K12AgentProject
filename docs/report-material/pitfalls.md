@@ -3759,3 +3759,40 @@ tests/reduced-motion-mode.test.ts(33,7): error TS6133: 'store' is declared but i
 **遇到这条红，先重跑一次**；若开始稳定复现，再按"记录失败时的 received.length / 错误消息"定位。
 
 **相关**：`desktop/tests/agent-trace.test.ts` 的 G9-8c、`desktop/src/main/bridge/client.ts`。
+
+## P-157 ★★ 编辑器「只剩一条黑边」：异步组件根上的尺寸 class 被**自己 chunk 的 CSS** 覆盖（2026-09-27）
+
+**现象**：用户截图报「编程环境的编辑器被优化炸了」—— 编程页（`views/Coding.vue`）的代码区
+只剩一条 2px 的黑边，任务简报、Python 角标、运行/求助/重置都在，只有编辑区是空的。
+
+**先说清楚不是**什么：**不是懒加载失败、不是 Monaco 没装配、不是 worker 404**。
+CDP 实测 DOM 里 `.monaco-editor` 已经建好（`data-mode-id="python"`、有子节点），
+`data-testid="coding-view-editor"` 的宿主也在 —— 它只是**高 5px**。
+
+**实测判据（真机 CDP，两条一起看才定得了性）**：
+
+```
+hostClass : "code-editor code__editor"                 // 父级 class 确实落到了异步组件根上
+hostAttrs : ["data-v-9b321e04", "data-v-9ff63819", …]  // 父/子两个 scope 属性也都在
+getComputedStyle(host).height = "5px"
+CSSOM     : sheet 59  .code__editor[data-v-9ff63819]{height:420px}
+            sheet 78  .code-editor [data-v-9b321e04]{width:100%;height:100%}   ← 后加载
+```
+
+**根因**：`defineAsyncComponent` 的**根节点上，父级 scoped 规则与子组件自己的 scoped 规则同权重**
+（都是「class + scope 属性」），而子组件那份 CSS 是**随 chunk 后加载**的 → 后者赢。
+于是 `height: 420px` 被 `.code-editor{height:100%}` 顶掉；外层 `.code__editor-wrap` 高度是 auto，
+`100%` 只能解析成内容高度（Monaco 量到的 5px）。**对话内编程卡（`.coding__editor` 300px）同一形态，
+同时中招。**
+
+**改法**：尺寸挂在**调用方自己的普通盒子**上（编程页 420px / 卡片 300px），
+异步组件只留 `.code-editor{height:100%}`（撑满父盒）；装配失败时整块收起 ——
+否则固定高度的盒子会把失败说明顶到 `overflow:hidden` 之外（那正是"白屏且无解释"）。
+
+**为什么值得记**：`ux:pages` / `ux:layout` 都**不会**红。前者量的是"有没有内容 / 技术词"，
+后者量的是**横向**裁切 —— 而这次是「纵向塌成几像素」，两条探针的判据都够不着。
+判据链应该是：**先看 DOM 里 Monaco 在不在 → 再量宿主 computedHeight → 最后照 CSSOM 的规则顺序找覆盖者**，
+不要一上来怀疑"Monaco 装不上 / 懒加载失败 / 打包漏了 worker"。
+
+**相关**：`desktop/src/renderer/src/components/CodeEditor.vue`（只负责 100% 撑满）、
+`views/Coding.vue`、`cards/CodingCard.vue`、守卫 `tests/code-editor-mount.test.ts`（变异 105/106）、决策 D-105。

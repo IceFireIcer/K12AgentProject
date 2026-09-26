@@ -440,16 +440,25 @@ const interruptNotice = computed(() => {
 
       <!-- 编辑器宿主（Monaco 挂载点） -->
       <div class="coding__editor-wrap">
-        <!-- ★ 异步组件（报告 §5.1）：chunk 加载中由它自己的 loadingComponent 顶上；
-             下面那层骨架覆盖的是**Monaco 内核装配**那一段等待（两层同一个骨架组件）。 -->
-        <AsyncCodeEditor
-          ref="editorRef"
-          class="coding__editor"
-          data-testid="coding-editor"
-          :value="view.scaffold"
-          @ready="onEditorReady"
-          @failure="onEditorFailure"
-        />
+        <!-- ★★ 尺寸盒子必须由**本卡片**给（2026-09-27 真机事故的修复，与 views/Coding.vue 同一条）：
+             把 `class="coding__editor"`（`height: 300px`）挂在异步组件上时，它会与
+             `CodeEditor.vue` 自己的 `.code-editor{width:100%;height:100%}` **同权重**，
+             而那份 CSS 随 chunk **后加载** → `100%` 赢；外层高度是 auto 时解析成内容高度，
+             编辑器塌成几像素（编程页实测 5px，本卡片同理）。
+             修法：尺寸挂在本卡片自己的普通盒子上；装配失败时整块收起，说明文案照常可读。
+             ⚠️ 不许把 `class="coding__editor"` 挪回 `<AsyncCodeEditor>` 上
+             （守卫：`tests/code-editor-mount.test.ts`）。 -->
+        <div v-if="!editorFailure" class="coding__editor">
+          <!-- ★ 异步组件（报告 §5.1）：chunk 加载中由它自己的 loadingComponent 顶上；
+               下面那层骨架覆盖的是**Monaco 内核装配**那一段等待（两层同一个骨架组件）。 -->
+          <AsyncCodeEditor
+            ref="editorRef"
+            data-testid="coding-editor"
+            :value="view.scaffold"
+            @ready="onEditorReady"
+            @failure="onEditorFailure"
+          />
+        </div>
         <CodeEditorSkeleton v-if="!editorReady && !editorFailure" class="coding__editor-skeleton" />
         <p v-if="editorFailure" class="coding__editor-failure" data-testid="coding-editor-failure">
           {{ editorFailure }}
@@ -764,6 +773,10 @@ const interruptNotice = computed(() => {
   background: var(--k12-editor-bg);
 }
 
+/* ★★ 这个 `height` **必须**挂在卡片自己的 `<div class="coding__editor">` 上（模板里有说明）：
+ *   挂到异步组件 `<AsyncCodeEditor>` 上时，会被它自己**随 chunk 后加载**的
+ *   `.code-editor{height:100%}` 同权重覆盖 → 外层高度是 auto 时编辑器塌成几像素
+ *   （2026-09-27 真机事故，与 `views/Coding.vue` 同一条）。 */
 .coding__editor {
   width: 100%;
   height: 300px;

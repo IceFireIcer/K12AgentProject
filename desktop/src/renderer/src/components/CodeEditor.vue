@@ -93,7 +93,11 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* 尺寸由调用方给（卡片 300px / 编程页 420px）；这里只保证撑满宿主盒 */
+/* 尺寸由调用方给（卡片 300px / 编程页 420px）；这里只保证撑满宿主盒。
+ * ★★ `height: 100%` 要求父层是**确定高度**：调用方必须把尺寸挂在它自己的普通盒子上
+ *   （`views/Coding.vue` 的 `.code__editor` / `cards/CodingCard.vue` 的 `.coding__editor`），
+ *   **不能**挂在本组件（异步组件）的根节点上 —— 两份 CSS 同权重时谁生效取决于 chunk 加载顺序，
+ *   实测就是本规则把对方的 420px 覆盖掉、外层 auto 高度下塌成 5px（2026-09-27 真机事故）。 */
 .code-editor {
   width: 100%;
   height: 100%;
