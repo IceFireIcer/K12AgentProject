@@ -549,11 +549,13 @@ test('★ 入参校验：请求里携带的学段被彻底忽略（学段只能�
   assert.deepEqual(parsed.ok ? { ...parsed.request } : null, { text: '你好' })
 })
 
-test('冻结映射：8 个 Tool 在表内，rag_search / get_student_profile 不在表内', () => {
+test('冻结映射：9 个 Tool 在表内，rag_search / get_student_profile 不在表内', () => {
   assert.deepEqual([...PAYLOAD_TOOL_NAMES], [
     'generate_animation',
     'compose_animation',
     'get_code_template',
+    // ★ 2026-09-26（D-089）：按学生要求现出一道题（与 get_code_template 同为 `coding` 卡片）
+    'generate_code_exercise',
     'get_coding_hint',
     'evaluate_code',
     'generate_quiz',
@@ -566,6 +568,7 @@ test('冻结映射：8 个 Tool 在表内，rag_search / get_student_profile 不
   //   要区分是哪条路径看 `payload.tool`。守卫 G10 里也有这一条的字面量断言。
   assert.equal(kindForTool('compose_animation'), 'animation')
   assert.equal(kindForTool('get_code_template'), 'coding')
+  assert.equal(kindForTool('generate_code_exercise'), 'coding')
   assert.equal(kindForTool('get_coding_hint'), 'coding')
   assert.equal(kindForTool('evaluate_code'), 'coding')
   assert.equal(kindForTool('generate_quiz'), 'quiz')

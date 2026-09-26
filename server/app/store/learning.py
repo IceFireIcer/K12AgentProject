@@ -83,6 +83,9 @@ QUIZ_MIGRATION_SET = "quiz"
 #: 学生动画库的迁移组名（同一个并行通道；**不占 learning 组的版本号**）。
 ANIMATION_MIGRATION_SET = "animation"
 
+#: 生成编程题走**独立迁移集**（理由同 quiz / animation：不动既有验收口径）。
+CODE_MIGRATION_SET = "code"
+
 #: :meth:`LearningStore.question_attempt` 单次扫描的学习记录行数上限。
 #: ★ 为什么是「有界扫描 + 内存比对 qid」而不是加索引 / 加列：见那个方法的 docstring
 #:   （``qid`` 在 ``detail`` 的 JSON 字符串里，按它查在现有表结构下无索引可用；
@@ -126,9 +129,30 @@ def _apply_quiz_v2(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE generated_question ADD COLUMN rubric TEXT")
 
 
+def _apply_quiz_v3(conn: sqlite3.Connection) -> None:
+    """给生成题加 ``student_id``（D-088）：生成的题从此**归到具体学生名下**。
+
+    ★ 为什么需要这一列：``qid`` 里只有随机段、没有学生（`quiz.ts` 的 `variantQid`），
+      表里也就没有归属 —— 于是「学生自己的题」在数据层根本表达不出来：
+      只能靠 qid 判分，谁都列不出「这个学生做过哪些生成题」。
+    ★ 旧行留空：迁移不改历史（它们当时确实没有归属），读路径按学生过滤时自然把它们排除。
+    """
+    columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(generated_question)").fetchall()
+    }
+    if "student_id" not in columns:
+        conn.execute("ALTER TABLE generated_question ADD COLUMN student_id TEXT")
+    # 读路径一律「某学生的题，按知识点/时间」→ 这条复合索引正好盖住
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_generated_student ON generated_question(student_id, kp_id)"
+    )
+
+
 QUIZ_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="LLM 变式题仓库（含标准答案，仅 Python 侧）", apply=_apply_quiz_v1),
     Migration(version=2, name="主观题评分细则列（rubric）", apply=_apply_quiz_v2),
+    Migration(version=3, name="生成题归属学生（student_id）", apply=_apply_quiz_v3),
 )
 
 
@@ -171,6 +195,67 @@ def _apply_animation_v1(conn: sqlite3.Connection) -> None:
 ANIMATION_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="学生动画库（知识点 + 学段 + 请求指纹复用）", apply=_apply_animation_v1),
 )
+
+#: ``generated_code_template`` 表：**学生自己的**生成编程题（一题一行）。
+#:
+#: ★ 为什么不写进 `resources/code-templates/`：那是**随包只读内容资产**（打包态在安装目录里），
+#:   往里写等于改安装目录 —— 与题库同一条理由，生成的题必须有自己的落点。
+#: ★ ``hints`` / ``solution`` 都进库、都不外发：与题库的 ``answer``、随包模板的 ``solution``
+#:   同一条纪律（§6.3）。提示按级由服务端发（「一次只升一级」的落点在编排层），答案只用于对照。
+#: ★ ``prompt_hash`` 而不是原话：「SQLite 不存对话正文」这条纪律在这里的形态。
+_CODE_V1 = """
+CREATE TABLE IF NOT EXISTS generated_code_template (
+  saved_id          TEXT PRIMARY KEY,
+  student_id        TEXT NOT NULL,
+  kp_id             TEXT NOT NULL,
+  grade_level       TEXT NOT NULL,
+  title             TEXT NOT NULL,
+  expected_behavior TEXT NOT NULL,
+  scaffold          TEXT NOT NULL,
+  expected_output   TEXT NOT NULL,
+  hints             TEXT NOT NULL,
+  solution          TEXT NOT NULL DEFAULT '',
+  prompt_hash       TEXT NOT NULL,
+  created_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_generated_code_student
+  ON generated_code_template(student_id, kp_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_generated_code_key
+  ON generated_code_template(student_id, kp_id, grade_level, prompt_hash);
+"""
+
+
+def _apply_code_v1(conn: sqlite3.Connection) -> None:
+    # 与 ``_apply_quiz_v1`` / ``_apply_animation_v1`` 同一纪律：用 ``execute_script``
+    execute_script(conn, _CODE_V1)
+
+
+CODE_MIGRATIONS: tuple[Migration, ...] = (
+    Migration(version=1, name="学生的生成编程题（提示与参照实现只留后端）", apply=_apply_code_v1),
+)
+
+
+def new_saved_code_id() -> str:
+    """生成一条「生成编程题」的 id（URL 安全、形状与 ``payload_id`` 白名单一致）。"""
+    return "code-" + secrets.token_urlsafe(9).replace("-", "a").replace("_", "b")
+
+
+@dataclass(frozen=True)
+class GeneratedCodeTemplateRecord:
+    """``generated_code_template`` 表的一行（**含 hints 与 solution**，只供 Python 侧使用）。"""
+
+    saved_id: str
+    student_id: str
+    kp_id: str
+    grade_level: str
+    title: str
+    expected_behavior: str
+    scaffold: str
+    expected_output: str
+    hints: tuple[dict[str, object], ...]
+    solution: str
+    prompt_hash: str
+    created_at: int | None
 
 
 def new_saved_animation_id() -> str:
@@ -285,6 +370,9 @@ class GeneratedQuestionRecord:
     rubric: str | None
     source: str
     created_at: int | None
+    #: 这道题归哪个学生（D-088 起）。空串 = 历史遗留行（v3 迁移之前登记的），
+    #: 它们不出现在任何学生的「我的题目」里 —— 没有归属的题不该被谁认领。
+    student_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -346,6 +434,8 @@ class LearningStore:
         self.quiz_version = 0
         # 学生动画库同一条口径（**不在 __init__ 里建**）：见 :meth:`ensure_animation_tables`。
         self._animation_ready = False
+        self._code_ready = False
+        self.code_version = 0
         self.animation_version = 0
 
     # ------------------------------------------------------------ 学生 --
@@ -622,12 +712,13 @@ class LearningStore:
         for record in records:
             self.conn.execute(
                 "INSERT INTO generated_question"
-                "(qid, kp_id, grade_level, type, stem, options, reference_answer, explanation, rubric, source, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                "(qid, kp_id, grade_level, type, stem, options, reference_answer, explanation, rubric, source, created_at, student_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(qid) DO UPDATE SET kp_id=excluded.kp_id, grade_level=excluded.grade_level, "
                 "type=excluded.type, stem=excluded.stem, options=excluded.options, "
                 "reference_answer=excluded.reference_answer, explanation=excluded.explanation, "
-                "rubric=excluded.rubric, source=excluded.source, created_at=excluded.created_at",
+                "rubric=excluded.rubric, source=excluded.source, created_at=excluded.created_at, "
+                "student_id=excluded.student_id",
                 (
                     record.qid,
                     record.kp_id,
@@ -642,6 +733,7 @@ class LearningStore:
                     record.rubric,
                     record.source,
                     int(record.created_at or time.time()),
+                    record.student_id or None,
                 ),
             )
         self.conn.commit()
@@ -652,28 +744,140 @@ class LearningStore:
         self.ensure_quiz_tables()
         row = self.conn.execute(
             "SELECT qid, kp_id, grade_level, type, stem, options, reference_answer, "
-            "explanation, rubric, source, created_at FROM generated_question WHERE qid = ?",
+            "explanation, rubric, source, created_at, student_id FROM generated_question WHERE qid = ?",
             (qid,),
         ).fetchone()
         if row is None:
             return None
         return _generated_from_row(row)
 
-    def generated_questions(self, *, kp_id: str | None = None) -> list[GeneratedQuestionRecord]:
-        """列生成题（可按知识点过滤）；**含标准答案**，只供 Python 侧使用。"""
+    def generated_questions(
+        self, *, kp_id: str | None = None, student_id: str | None = None
+    ) -> list[GeneratedQuestionRecord]:
+        """列生成题（可按知识点 / **学生**过滤）；**含标准答案**，只供 Python 侧使用。
+
+        ★ ``student_id`` 是「我的题目」那条路的唯一入口（D-088）：给了它就只列**这个学生的**题
+          （历史遗留的 `student_id IS NULL` 行不会被任何人认领）。
+        ★★ 判分路径**不要**用这个过滤：`find_generated_question(qid)` 按 qid 直查 ——
+          qid 本身就带随机段、不可能撞车，多一层学生过滤只会让「换学生会话后判分 404」。
+        """
         self.ensure_quiz_tables()
         sql = (
             "SELECT qid, kp_id, grade_level, type, stem, options, reference_answer, "
-            "explanation, rubric, source, created_at FROM generated_question"
+            "explanation, rubric, source, created_at, student_id FROM generated_question"
         )
-        params: tuple[object, ...] = ()
+        where: list[str] = []
+        params: list[object] = []
         if kp_id:
-            sql += " WHERE kp_id = ?"
-            params = (kp_id,)
+            where.append("kp_id = ?")
+            params.append(kp_id)
+        if student_id:
+            where.append("student_id = ?")
+            params.append(student_id)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY created_at, qid"
-        return [_generated_from_row(row) for row in self.conn.execute(sql, params)]
+        return [_generated_from_row(row) for row in self.conn.execute(sql, tuple(params))]
 
     # ------------------------------------------------------------ 学生动画库 --
+    # ------------------------------------------------- 生成编程题（学生级） --
+    def ensure_code_tables(self) -> int:
+        """确保 ``generated_code_template`` 存在，返回该迁移组的版本号。
+
+        ★ 与 :meth:`ensure_quiz_tables` / :meth:`ensure_animation_tables` 同一条做法：
+          独立 ``set_name``（``"code"``）—— 不搅动既有验收口径。
+        """
+        if not self._code_ready:
+            self.code_version = ensure_migrated(
+                self.conn, CODE_MIGRATIONS, set_name=CODE_MIGRATION_SET
+            )
+            self._code_ready = True
+        return self.code_version
+
+    def save_generated_code_template(self, record: GeneratedCodeTemplateRecord) -> str:
+        """落库一条生成编程题（同 ``saved_id`` 覆盖），返回 ``saved_id``。
+
+        ★ 复用键（学生 + 知识点 + 学段 + 指纹）上有 UNIQUE 索引；调用方先按它查、命中就直接复用
+          （见 :meth:`find_generated_code_by_key`），所以这里只负责按 id 写入 / 覆盖。
+        """
+        self.ensure_code_tables()
+        self.conn.execute(
+            "INSERT INTO generated_code_template"
+            "(saved_id, student_id, kp_id, grade_level, title, expected_behavior, scaffold, "
+            "expected_output, hints, solution, prompt_hash, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(saved_id) DO UPDATE SET student_id=excluded.student_id, "
+            "kp_id=excluded.kp_id, grade_level=excluded.grade_level, title=excluded.title, "
+            "expected_behavior=excluded.expected_behavior, scaffold=excluded.scaffold, "
+            "expected_output=excluded.expected_output, hints=excluded.hints, "
+            "solution=excluded.solution, prompt_hash=excluded.prompt_hash, "
+            "created_at=excluded.created_at",
+            (
+                record.saved_id,
+                record.student_id,
+                record.kp_id,
+                record.grade_level,
+                record.title,
+                record.expected_behavior,
+                record.scaffold,
+                record.expected_output,
+                json.dumps(list(record.hints), ensure_ascii=False),
+                record.solution,
+                record.prompt_hash,
+                int(record.created_at or time.time()),
+            ),
+        )
+        self.conn.commit()
+        return record.saved_id
+
+    def find_generated_code_template(
+        self, saved_id: str, *, student_id: str | None = None
+    ) -> GeneratedCodeTemplateRecord | None:
+        """按 ``saved_id`` 取一条；给了 ``student_id`` 就只在这个学生名下找。**含 hints/solution**。"""
+        self.ensure_code_tables()
+        sql = (
+            "SELECT saved_id, student_id, kp_id, grade_level, title, expected_behavior, scaffold, "
+            "expected_output, hints, solution, prompt_hash, created_at "
+            "FROM generated_code_template WHERE saved_id = ?"
+        )
+        params: tuple[object, ...] = (saved_id,)
+        if student_id:
+            sql += " AND student_id = ?"
+            params = (saved_id, student_id)
+        row = self.conn.execute(sql, params).fetchone()
+        return None if row is None else _generated_code_from_row(row)
+
+    def generated_code_templates(
+        self, *, student_id: str, kp_id: str | None = None
+    ) -> list[GeneratedCodeTemplateRecord]:
+        """列某学生的生成编程题（可按知识点过滤）；**含 hints/solution**，只供 Python 侧使用。"""
+        self.ensure_code_tables()
+        sql = (
+            "SELECT saved_id, student_id, kp_id, grade_level, title, expected_behavior, scaffold, "
+            "expected_output, hints, solution, prompt_hash, created_at "
+            "FROM generated_code_template WHERE student_id = ?"
+        )
+        params: list[object] = [student_id]
+        if kp_id:
+            sql += " AND kp_id = ?"
+            params.append(kp_id)
+        sql += " ORDER BY created_at, saved_id"
+        return [_generated_code_from_row(row) for row in self.conn.execute(sql, tuple(params))]
+
+    def find_generated_code_by_key(
+        self, *, student_id: str, kp_id: str, grade_level: str, prompt_hash: str
+    ) -> GeneratedCodeTemplateRecord | None:
+        """按**复用键**取一条（同学生 + 同知识点 + 同学段 + 同指纹）—— 命中就直接复用。"""
+        self.ensure_code_tables()
+        row = self.conn.execute(
+            "SELECT saved_id, student_id, kp_id, grade_level, title, expected_behavior, scaffold, "
+            "expected_output, hints, solution, prompt_hash, created_at "
+            "FROM generated_code_template WHERE student_id = ? AND kp_id = ? AND grade_level = ? "
+            "AND prompt_hash = ? LIMIT 1",
+            (student_id, kp_id, grade_level, prompt_hash),
+        ).fetchone()
+        return None if row is None else _generated_code_from_row(row)
+
     def ensure_animation_tables(self) -> int:
         """确保 ``saved_animation`` 存在，返回该迁移组的版本号。
 
@@ -1136,6 +1340,38 @@ def _generated_from_row(row: sqlite3.Row) -> GeneratedQuestionRecord:
         explanation=str(row["explanation"] or ""),
         rubric=(str(row["rubric"]) if row["rubric"] else None),
         source=str(row["source"] or "generated"),
+        created_at=None if row["created_at"] is None else int(row["created_at"]),
+        # 这一列是 v3 迁移才加的：老行取不到就当「无归属」（不会被任何学生认领）
+        student_id=(
+            str(row["student_id"]) if "student_id" in row.keys() and row["student_id"] else ""
+        ),
+    )
+
+
+def _generated_code_from_row(row: sqlite3.Row) -> GeneratedCodeTemplateRecord:
+    """``generated_code_template`` 行 → 记录（``hints`` 是 JSON 列，**宽松解析**）。"""
+    hints: tuple[dict[str, object], ...] = ()
+    raw = row["hints"]
+    if raw:
+        try:
+            parsed = json.loads(str(raw))
+        except json.JSONDecodeError:  # pragma: no cover - 只有人工改坏库才会到这里
+            logger.warning("生成编程题的 hints 不是合法 JSON，已按「无提示」处理：%s", row["saved_id"])
+            parsed = None
+        if isinstance(parsed, list):
+            hints = tuple(item for item in parsed if isinstance(item, dict))
+    return GeneratedCodeTemplateRecord(
+        saved_id=str(row["saved_id"]),
+        student_id=str(row["student_id"]),
+        kp_id=str(row["kp_id"]),
+        grade_level=str(row["grade_level"]),
+        title=str(row["title"]),
+        expected_behavior=str(row["expected_behavior"]),
+        scaffold=str(row["scaffold"]),
+        expected_output=str(row["expected_output"]),
+        hints=hints,
+        solution=str(row["solution"] or ""),
+        prompt_hash=str(row["prompt_hash"]),
         created_at=None if row["created_at"] is None else int(row["created_at"]),
     )
 

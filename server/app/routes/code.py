@@ -41,8 +41,20 @@ from typing import Literal, Sequence
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.config import RESOURCES_DIR
-from app.contracts import CodeError, CodeEvaluation, CodeRunRequest, CodeTemplate, CodingHint
+from app.contracts import (
+    CodeError,
+    CodeEvaluation,
+    CodeRunRequest,
+    CodeTemplate,
+    CodingHint,
+    GeneratedCodeSaveRequest,
+)
 from app.knowledge.library import GRADE_LEVELS, compatible_grades, grade_index
+from app.routes.students import open_learning_store, require_data_dir
+from app.store.learning import (
+    GeneratedCodeTemplateRecord,
+    new_saved_code_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +74,10 @@ TEMPLATES_DIR_STATE_ATTR = "code_templates_dir"
 TEMPLATES_DIR_ENV = "K12_CODE_TEMPLATES_DIR"
 
 #: 分级提示的级数上限（契约 ``CodingHint.level`` 是 ``Literal[1, 2, 3]``）。
+#: 生成编程题路由用的两个字符集（与本仓其它路由模块同一口径：各自定义、逐字一致）。
+STUDENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+KP_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
 MAX_HINT_LEVEL = 3
 #: 提示起始级别（**永远从 1 开始**，level 1 只指方向，票 19 的「不许跳级」）。
 MIN_HINT_LEVEL = 1
@@ -821,3 +837,225 @@ __all__ = [
     "to_code_template",
     "translate_python_error",
 ]
+
+
+# =========================================================================== #
+# 学生的生成编程题（D-089）
+#
+# 三条规矩，与题库/动画库同源：
+#   ① 生成**不在 Python 侧**（架构硬边界：Python 不调 LLM）—— 本组路由只做**校验 + 存储 + 取回**；
+#   ② `solution` 与 `hints` **绝不外发**（与题库的 `answer`、随包模板的 `solution` 同一条纪律）；
+#   ③ 身份走路径里的 `student_id`（主进程解析后注入），一人一份。
+#
+# ⚠️ 这一组**不进 OpenAPI**（`include_in_schema=False`）：当前唯一消费者是主进程的工具路径
+#    （`coding.ts` 直接 `apiFetch`），渲染进程还没有「我的编程题」界面。等界面要接时，
+#    把 `GeneratedCodeTemplateView` 登记进 `contracts.py` 并去掉这两个开关即可 ——
+#    那时才需要 `gen:api` 与文档计数同步。
+# =========================================================================== #
+
+#: 生成题的 kp_id 前缀（与随包模板的 kp 区分开：`prog-loop-jr` vs `gen-prog-loop-jr-xxxx`）。
+GENERATED_CODE_KP_PREFIX = "gen-"
+
+
+class GeneratedCodeTemplateView(CodeTemplate):
+    """生成编程题的对外投影：随包模板那套字段 + ``savedId``（**没有 solution / hints**）。"""
+
+    saved_id: str
+    title: str = ""
+    expected_output: str = ""
+
+
+def validate_generated_code_template(body: GeneratedCodeSaveRequest) -> str | None:
+    """校验一份**生成**的编程题，返回问题描述（``None`` = 合格）。
+
+    ★ 与随包模板同一套底线（缺 ``scaffold`` / ``expected_behavior`` 一律不合格），
+      另外三条是**生成题特有的**：
+        ① ``scaffold`` 必须含 TODO 标记 —— 卡片上的「待填」按它数，没有就等于把答案给了学生；
+        ② ``hints`` 必须**恰好 3 级**（1 方向 / 2 结构 / 3 骨架）且两两不同 —— 与随包模板的
+           「逐级加深、不跳级」同一条口径，级别少一级就等于那次求助没有下一级；
+        ③ 第 1 级**不许出现代码行** —— 它是「指方向」，一上来贴代码等于跳级给骨架。
+    """
+    if not KP_ID_RE.match(body.kp_id or ""):
+        return f"kpId 不合法：{body.kp_id!r}"
+    if body.grade_level not in GRADE_LEVELS:
+        return f"gradeLevel 非法：{body.grade_level!r}"
+    if not body.expected_behavior.strip():
+        return "缺 expectedBehavior（学生无从判断「做对了没有」）"
+    if not body.scaffold.strip():
+        return "缺 scaffold（卡片上没有可动手的代码）"
+    if "TODO" not in body.scaffold:
+        return "scaffold 里没有 TODO 标记（等于把答案直接给了学生）"
+    if not body.solution.strip():
+        return "缺 solution（参照实现只留后端，但必须有 —— 否则无从核对）"
+    levels = sorted(int(item.get("level", 0)) for item in body.hints if isinstance(item, dict))
+    if levels != [1, 2, 3]:
+        return f"hints 必须是 1/2/3 三级（收到 {levels}）"
+    texts = [str(item.get("hint") or "").strip() for item in body.hints]
+    if any(not text for text in texts):
+        return "hints 里有空提示"
+    if len(set(texts)) != 3:
+        return "hints 三级两两不同（重复的提示等于少一级）"
+    first = texts[0]
+    code_ish = [line for line in first.splitlines() if re.search(r"[=()\[\]:]", line)]
+    if code_ish:
+        return "第 1 级提示不许出现代码（它只指方向）"
+    return None
+
+
+def _generated_code_view(record: GeneratedCodeTemplateRecord) -> GeneratedCodeTemplateView:
+    """内部记录 → 对外投影（**白名单**：solution 与 hints 在这里被丢掉）。"""
+    return GeneratedCodeTemplateView(
+        kp_id=record.kp_id,
+        language="python",
+        scaffold=record.scaffold,
+        expected_behavior=record.expected_behavior,
+        saved_id=record.saved_id,
+        title=record.title,
+        expected_output=record.expected_output,
+    )
+
+
+@router.post(
+    "/code/generated/{student_id}",
+    response_model=GeneratedCodeTemplateView,
+    include_in_schema=False,
+    summary="存一道生成的编程题（服务端二次校验；同复用键命中直接复用）",
+)
+def save_generated_code_template(
+    request: Request, student_id: str, body: GeneratedCodeSaveRequest
+) -> GeneratedCodeTemplateView:
+    """把 TS 侧生成的编程题**存到该学生名下**并回投影。
+
+    ★ ``promptHash`` 由编排层算（学生原话不进库，与动画库同一条合规口径）。
+    ★ 复用键 = 学生 + 知识点 + 学段 + 指纹：**命中就直接返回已经存过的那一条** ——
+      同一句要求再问一次不该重做一道题，也不该覆盖学生手里正在做的那道。
+    """
+    if not STUDENT_ID_RE.match(student_id):
+        raise HTTPException(
+            status_code=422, detail="studentId 不合法（只允许字母、数字、下划线、连字符）"
+        )
+    problem = validate_generated_code_template(body)
+    if problem is not None:
+        raise HTTPException(status_code=422, detail=f"生成的编程题不合格：{problem}")
+
+    data_dir = require_data_dir(request)
+    store = open_learning_store(data_dir, student_id)
+    try:
+        existing = store.find_generated_code_by_key(
+            student_id=student_id,
+            kp_id=body.kp_id,
+            grade_level=body.grade_level,
+            prompt_hash=body.prompt_hash,
+        )
+        if existing is not None:
+            logger.info("复用已存的生成编程题：学生=%s 知识点=%s", student_id, body.kp_id)
+            return _generated_code_view(existing)
+
+        record = GeneratedCodeTemplateRecord(
+            saved_id=new_saved_code_id(),
+            student_id=student_id,
+            kp_id=body.kp_id,
+            grade_level=body.grade_level,
+            title=(body.title or body.kp_id).strip(),
+            expected_behavior=body.expected_behavior,
+            scaffold=body.scaffold,
+            expected_output=body.expected_output,
+            hints=tuple(body.hints),
+            solution=body.solution,
+            prompt_hash=body.prompt_hash,
+            created_at=None,
+        )
+        store.save_generated_code_template(record)
+        logger.info(
+            "已存入生成编程题：学生=%s 知识点=%s id=%s（提示 3 级 / 参照实现只留后端）",
+            student_id,
+            body.kp_id,
+            record.saved_id,
+        )
+        return _generated_code_view(record)
+    finally:
+        store.close()
+
+
+@router.get(
+    "/code/generated/{student_id}",
+    response_model=list[GeneratedCodeTemplateView],
+    include_in_schema=False,
+    summary="列该学生自己的生成编程题（结构上不含 solution / hints）",
+)
+def list_generated_code_templates(
+    request: Request,
+    student_id: str,
+    kp_id: str | None = Query(None, description="只看这个知识点的（可选）"),
+) -> list[GeneratedCodeTemplateView]:
+    """「智团团给我出过的编程题」的读路径（新到旧）。"""
+    if not STUDENT_ID_RE.match(student_id):
+        raise HTTPException(
+            status_code=422, detail="studentId 不合法（只允许字母、数字、下划线、连字符）"
+        )
+    store = open_learning_store(require_data_dir(request), student_id)
+    try:
+        records = store.generated_code_templates(student_id=student_id, kp_id=kp_id or None)
+    finally:
+        store.close()
+    return [_generated_code_view(record) for record in reversed(records)]
+
+
+@router.get(
+    "/code/generated/{student_id}/{saved_id}",
+    response_model=GeneratedCodeTemplateView,
+    include_in_schema=False,
+    summary="取一条生成编程题（结构上不含 solution / hints）",
+)
+def get_generated_code_template(
+    request: Request, student_id: str, saved_id: str
+) -> GeneratedCodeTemplateView:
+    if not STUDENT_ID_RE.match(student_id):
+        raise HTTPException(
+            status_code=422, detail="studentId 不合法（只允许字母、数字、下划线、连字符）"
+        )
+    store = open_learning_store(require_data_dir(request), student_id)
+    try:
+        record = store.find_generated_code_template(saved_id, student_id=student_id)
+    finally:
+        store.close()
+    if record is None:
+        raise HTTPException(status_code=404, detail="这道题不在你的题里（或者已经被删了）。")
+    return _generated_code_view(record)
+
+
+@router.get(
+    "/code/generated/{student_id}/{saved_id}/hint",
+    response_model=CodingHint,
+    include_in_schema=False,
+    summary="取生成编程题的分级提示（1 方向 / 2 结构 / 3 骨架）",
+)
+def get_generated_code_hint(
+    request: Request,
+    student_id: str,
+    saved_id: str,
+    level: int = Query(1, ge=MIN_HINT_LEVEL, le=MAX_HINT_LEVEL),
+) -> CodingHint:
+    """生成题的分级提示（与随包模板那条路由同一口径：**封顶不越界**）。"""
+    if not STUDENT_ID_RE.match(student_id):
+        raise HTTPException(
+            status_code=422, detail="studentId 不合法（只允许字母、数字、下划线、连字符）"
+        )
+    store = open_learning_store(require_data_dir(request), student_id)
+    try:
+        record = store.find_generated_code_template(saved_id, student_id=student_id)
+    finally:
+        store.close()
+    if record is None:
+        raise HTTPException(status_code=404, detail="这道题不在你的题里（或者已经被删了）。")
+    wanted = max(MIN_HINT_LEVEL, min(int(level), MAX_HINT_LEVEL))
+    by_level = {
+        int(item.get("level", 0)): str(item.get("hint") or "")
+        for item in record.hints
+        if isinstance(item, dict)
+    }
+    text = by_level.get(wanted) or by_level.get(MAX_HINT_LEVEL) or ""
+    if not text.strip():
+        raise HTTPException(status_code=404, detail="这道题没有提示内容。")
+    # ⚠️ `CodingHint` 是 `extra="forbid"` 的两字段模型（level / hint）—— 多塞一个 kp_id 会 500
+    return CodingHint(level=wanted, hint=text)  # type: ignore[arg-type]

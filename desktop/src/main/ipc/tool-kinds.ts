@@ -21,6 +21,8 @@ export const TOOL_TO_KIND = {
   generate_animation: 'animation',
   compose_animation: 'animation',
   get_code_template: 'coding',
+  // ★ 2026-09-26（D-089）：按学生要求现出一道题 —— 它也发 `coding` 载荷（卡片同一套渲染）
+  generate_code_exercise: 'coding',
   get_coding_hint: 'coding',
   evaluate_code: 'coding',
   generate_quiz: 'quiz',
@@ -36,6 +38,7 @@ export const PAYLOAD_TOOL_NAMES = [
   'generate_animation',
   'compose_animation',
   'get_code_template',
+  'generate_code_exercise',
   'get_coding_hint',
   'evaluate_code',
   'generate_quiz',

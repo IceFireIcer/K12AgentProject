@@ -83,6 +83,12 @@ export interface DataBridge {
    * ★ 入参里没有 studentId：身份由主进程决定，渲染进程指定不了。
    */
   readSavedAnimations(payload?: { gradeLevel?: GradeLevel; kpId?: string }): Promise<DataCallResult>
+  /**
+   * 该学生**自己的**生成题（`GET /api/quiz/generated/{id}`，D-088）。
+   *
+   * ★ 身份由主进程注入；返回值与题库那条路同形（`QuizPayload`，结构上没有答案）。
+   */
+  readGeneratedQuestions(payload?: { kpId?: string; limit?: number }): Promise<DataCallResult>
   /** 取库里的一条（**带 HTML**，可交给沙箱播）。 */
   readSavedAnimation(payload: { savedId: string }): Promise<DataCallResult>
   /** 存一条进动画库（`promptHash` 是摘要 —— 学生原话不进库）。 */
@@ -153,6 +159,7 @@ export const REQUIRED_METHODS = [
   'readSavedAnimations',
   'readSavedAnimation',
   'saveAnimationToLibrary',
+  'readGeneratedQuestions',
   'deleteSavedAnimation',
   'composeAnimation',
   'readKnowledgeStats',
@@ -207,6 +214,7 @@ export function resolveDataBridge(host: unknown = globalThis.window?.api): DataB
       renderAnimation: (payload) => api.renderAnimation!(payload),
       hostAnimation: (payload) => api.hostAnimation!(payload),
       readSavedAnimations: (payload) => api.readSavedAnimations!(payload ?? {}),
+      readGeneratedQuestions: (payload) => api.readGeneratedQuestions!(payload ?? {}),
       readSavedAnimation: (payload) => api.readSavedAnimation!(payload),
       saveAnimationToLibrary: (payload) => api.saveAnimationToLibrary!(payload),
       deleteSavedAnimation: (payload) => api.deleteSavedAnimation!(payload),

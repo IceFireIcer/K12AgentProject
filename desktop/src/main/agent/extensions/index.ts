@@ -158,7 +158,9 @@ export const AGENT_EXTENSION_SPECS: readonly AgentExtensionSpec[] = [
     name: 'coding',
     ticket: '18/19',
     file: './coding.ts',
-    tools: ['get_code_template', 'get_coding_hint', 'evaluate_code'],
+    // ★ 2026-09-26（D-089）：`generate_code_exercise` 按学生要求现出一道题
+    //   （随包模板只有三份，别的情境原来没有东西可给）。
+    tools: ['get_code_template', 'get_coding_hint', 'evaluate_code', 'generate_code_exercise'],
     events: ['tool_execution_end'],
     dependsOn: ['渲染进程 Pyodide Worker（学生代码绝不在主进程执行）', 'POST /api/code/run-hint']
   },
@@ -218,6 +220,7 @@ export const AGENT_TOOL_NAMES = [
   'generate_animation',
   'compose_animation',
   'get_code_template',
+  'generate_code_exercise',
   'get_coding_hint',
   'evaluate_code',
   'generate_quiz',

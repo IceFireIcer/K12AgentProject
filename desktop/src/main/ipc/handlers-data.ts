@@ -26,6 +26,7 @@ import {
   type AnimationSavedDeleteRequest,
   type AnimationSavedGetRequest,
   type AnimationSavedListRequest,
+  type QuizGeneratedListRequest,
   type AnimationSavedSaveRequest,
   type AnimationTemplatesRequest,
   type CodeHintRequest,
@@ -393,6 +394,23 @@ export function registerDataHandlers(options: {
       query.kpId = kpId
     }
     return await req.animationSavedList(studentId(), query)
+  })
+
+  ipcMain.handle(IPC.quizGeneratedList, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    const request = (payload ?? {}) as Partial<QuizGeneratedListRequest>
+    const query: QuizGeneratedListRequest = {}
+    if (typeof request.kpId === 'string' && request.kpId.trim().length > 0) {
+      const kpId = request.kpId.trim()
+      if (!ANIMATION_KP_ID_RE.test(kpId)) return { ok: false, message: '读取失败：知识点不合法。' }
+      query.kpId = kpId
+    }
+    if (typeof request.limit === 'number' && Number.isFinite(request.limit)) {
+      const limit = Math.trunc(request.limit)
+      if (limit < 1 || limit > 200) return { ok: false, message: '读取失败：条数超出范围。' }
+      query.limit = limit
+    }
+    // ★ 身份由主进程解析（与动画库那几条同一纪律：递进来就等于允许读别人的题）
+    return await req.quizGeneratedList(studentId(), query)
   })
 
   ipcMain.handle(IPC.animationSavedGet, async (_event, payload: unknown): Promise<StudyCallResult> => {

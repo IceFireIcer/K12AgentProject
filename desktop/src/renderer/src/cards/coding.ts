@@ -84,7 +84,27 @@ export interface CodingUnknownView {
   task: string
 }
 
-export type CodingCardView = CodingTemplateView | CodingResultView | CodingUnknownView
+export type CodingCardView =
+  | CodingTemplateView
+  | CodingResultView
+  | CodingHintCardView
+  | CodingUnknownView
+
+/**
+ * 一条**分级提示**自己那张载荷（`get_coding_hint` 的 `{kpId, level, hint}`）。
+ *
+ * ★★ 它和「收进编程卡的累积提示」是**同一份数据、两种呈现**，别删任何一半：
+ *   · 累积呈现（`collectHints` → 编程卡里 1→2→3）回答「这道题我一共被提示到哪一级」；
+ *   · 这张卡回答「刚才那一下给了什么」—— 学生点完「求助」总得有个回声。
+ *   ⚠️ 之前这里落到 `unknown` 分支，学生点完求助看到的是「这张卡片这次没画出来」——
+ *      **一句假故障**（提示其实成功了，就在编程卡里）。用结构判别把它认出来即可。
+ */
+export interface CodingHintCardView {
+  kind: 'hint'
+  kpId: string
+  level: 1 | 2 | 3
+  hint: string
+}
 
 /** 编辑器里拿不到的代码时，消息里最多带多少字的预览（别把长代码灌进 prompt）。 */
 export const MAX_CODE_PREVIEW_CHARS = 400
@@ -154,6 +174,18 @@ export function readCodingCard(payload: unknown): CodingCardView {
   // ★ 但**能读到的部分要尽量留给学生**：题目要求（`expectedBehavior`）与知识点 id
   //   是契约里本来就有的字段，认得出就带上 —— 卡片据此把「这题要做什么」显示出来，
   //   而不是只留一句「没能显示出来」（残余载荷也是学习材料，见卡片模板）。
+  // 3) 分级提示（`get_coding_hint`）：**它自己也要有回声**（见 `CodingHintCardView` 的说明）。
+  //    ⚠️ 判据必须在 unknown 之前：提示载荷没有 scaffold/feedback，否则会落到「没画出来」那句假故障上。
+  const hint = projectHint(record)
+  if (hint !== null && readText(record.scaffold) === null && typeof record.feedback !== 'string') {
+    return {
+      kind: 'hint',
+      kpId: readText(record.kpId) ?? '',
+      level: hint.level,
+      hint: hint.hint
+    }
+  }
+
   return {
     kind: 'unknown',
     text: readText(record.text) ?? '',

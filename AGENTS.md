@@ -97,10 +97,14 @@ cd desktop
 K12_DEBUG_PORT=9222 npm run dev   # 另一终端
 npm run ux:reload                  # ★ 先跑：HMR 不重跑 onMounted
 npm run ux | ux:pages | ux:layout | ux:student | ux:scroll | ux:busy
+npm run ux:nonce                   # 动画资源请求计数：必须 0 次（一次性 nonce 不许被取第二次，D-084）
+npm run ux:stage                   # 动画舞台的屏幕有效字号（缩放/节点字/字幕/步骤条，三视口；D-085）
 npm run smoke:wire                 # 需 sidecar：--data-dir 必须显式且 ≠ server/_data，见脚本头
 ```
 
-坑：探针默认停在**对话页**且两栏可能默认收起（脚本会展开）；窗口须前台可见（否则几何断言假红）；改守卫后跑 `guards:mutation` 验「真的会红」。
+坑：探针默认停在**对话页**且两栏可能默认收起（脚本会展开）；窗口须前台可见（否则几何断言假红）；
+按文字点侧栏时标签要与 `PAGES.title` 一致（对话页叫**问问智团团** —— `ux:nonce` 曾因写成「对话」而静默跳过整轮）；
+改守卫后跑 `guards:mutation` 验「真的会红」。
 
 ## CI 读法
 

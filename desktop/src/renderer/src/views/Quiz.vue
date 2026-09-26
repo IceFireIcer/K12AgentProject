@@ -166,7 +166,24 @@ const drafts = reactive<Record<string, string>>({})
 /** 本地提示（空作答之类），不是 `error` 事件的形态，也不冒充判分结论。 */
 const localHint = ref('')
 
-const questions = computed(() => quiz.bank?.questions ?? [])
+/**
+ * 本页要做的题 = 教材配套题 + **智团团给这个学生出过的题**（D-088）。
+ *
+ * ★ 为什么合成一条列表：两者的作答 / 判分 / 反馈**完全是同一条链路**
+ *   （答完按 `qid` 走 `POST /api/quiz/grade`，qid 自带随机段不会撞车），
+ *   单开一块只会让学生以为自己要做两遍。
+ * ★ 去重按 `qid`：生成题的 qid 带 `gen-` 前缀，与题库真题不可能同名
+ *   （服务端登记时就整批拒过撞名的），所以去重在这里只是防「同一道生成题取回来两次」。
+ */
+const questions = computed(() => {
+  const banked = quiz.bank?.questions ?? []
+  const seen = new Set(banked.map((question) => question.qid))
+  const extra = quiz.generated.filter((question) => !seen.has(question.qid))
+  return [...banked, ...extra]
+})
+
+/** 哪些 qid 是「智团团出的」——题头那枚标签靠它。 */
+const generatedQids = computed(() => new Set(quiz.generated.map((question) => question.qid)))
 
 /**
  * 题区（`SurfacePanel.quiz__card`）要不要渲染。
@@ -189,7 +206,9 @@ const questionRows = computed(() =>
   questions.value.map((question, index) => ({
     question,
     index,
-    attempt: quiz.attempts[question.qid] ?? null
+    attempt: quiz.attempts[question.qid] ?? null,
+    /** 这道是智团团给这个学生出的（题头标出来，学生才知道它从哪来）。 */
+    fromAssistant: generatedQids.value.has(question.qid)
   }))
 )
 
@@ -570,6 +589,15 @@ onMounted(() => {
             <div class="qitem__head">
               <span class="qitem__no">第 {{ row.index + 1 }} 题</span>
               <el-tag size="small" effect="plain" round>{{ QUIZ_TYPE_LABELS[row.question.type] }}</el-tag>
+              <!-- ★ 这道题的来源（D-088）：教材配套题不标（那是默认），只标**智团团出的** -->
+              <el-tag
+                v-if="row.fromAssistant"
+                size="small"
+                effect="plain"
+                round
+                type="warning"
+                data-testid="quiz-generated-badge"
+              >智团团出的</el-tag>
               <span v-if="row.attempt?.result" class="qitem__done">已判分</span>
             </div>
 

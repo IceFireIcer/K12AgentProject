@@ -1512,7 +1512,29 @@ class ChatRequest(CamelModel):
 # 登记表（导出脚本与测试的唯一依据，**新增模型必须登记**）
 # ---------------------------------------------------------------------------
 #: 需要出现在 OpenAPI / TS 生成物里的模型。
+class GeneratedCodeSaveRequest(CamelModel):
+    """``POST /api/code/generated/{student_id}`` 的请求体（D-089）。
+
+    ★ 谁填哪个字段：`title/expectedBehavior/scaffold/expectedOutput/hints/solution` 由**模型**产出；
+      `kpId/gradeLevel` 由**主进程**按会话填（学生身份与学段不由模型说了算）；
+      `promptHash` 也由主进程算（学生原话不进库 —— 与动画库同一条合规口径）。
+    ★ 服务端会**再校验一遍**（缺 TODO / 提示不是三级 / 第 1 级带代码…一律 422），
+      校验规则在 `routes/code.py` 的 `validate_generated_code_template`。
+    """
+
+    kp_id: str
+    grade_level: str
+    title: str = ""
+    expected_behavior: str
+    scaffold: str
+    expected_output: str = ""
+    hints: list[dict] = Field(default_factory=list)
+    solution: str = ""
+    prompt_hash: str
+
+
 CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
+    GeneratedCodeSaveRequest,
     # 系统
     HealthResponse,
     # 设置

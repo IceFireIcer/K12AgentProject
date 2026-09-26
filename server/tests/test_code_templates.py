@@ -859,12 +859,29 @@ class NoCodeExecutionGuardTests(unittest.TestCase):
         ``POST /api/code/run``（在服务端跑代码）时，这条测试会当场变红，
         逼他面对 §12 的硬约束 —— 这是把安全边界写成**可执行断言**而不是口头纪律。
         """
+        # ★ 去重是按**路径**去重：同一条路径上挂两个方法（如生成题的 POST 存 / GET 列）
+        #   在这条守卫里只算一条 —— 它管的是「路径集合里有没有执行代码的入口」。
         paths = sorted(
-            route.path for route in code_router.routes if getattr(route, "path", "").startswith("/api/code")
+            {
+                route.path
+                for route in code_router.routes
+                if getattr(route, "path", "").startswith("/api/code")
+            }
         )
         self.assertEqual(
             paths,
-            ["/api/code/hint/{kp_id}", "/api/code/run-hint", "/api/code/templates/{kp_id}"],
+            # ★ 2026-09-26（D-089）新增三条：**存 / 列 / 取 / 取提示**，都不执行任何代码 ——
+            #   它们是「学生自己的生成编程题」的落点（随包模板目录是只读的，生成题要有别处可存）。
+            #   代码执行仍在渲染进程的 Pyodide Worker（§12），这一条边界一个字没动。
+            # ⚠️ 这里必须与 `sorted(...)` 同序（上面那行取的就是排序后的路径）。
+            [
+                "/api/code/generated/{student_id}",
+                "/api/code/generated/{student_id}/{saved_id}",
+                "/api/code/generated/{student_id}/{saved_id}/hint",
+                "/api/code/hint/{kp_id}",
+                "/api/code/run-hint",
+                "/api/code/templates/{kp_id}",
+            ],
             "端点是冻结的：/api/code 下不该出现任何「执行代码」的路径",
         )
         # 双保险：任何端点路径都不许长得像"执行"

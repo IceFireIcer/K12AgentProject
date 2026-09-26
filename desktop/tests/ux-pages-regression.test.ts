@@ -425,6 +425,40 @@ test('★★ 动画模板卡的项高必须是**下限**而不是定值（实测
   )
 })
 
+test('★★ 动画舞台的高度必须**跟着视口长**，不许是把可读性写死的定值（D-085）', () => {
+  const anim = read('src', 'renderer', 'src', 'views', 'Animation.vue')
+  const stage = cssRule(anim, '.anim__stage')
+  const frame = cssRule(anim, '.anim__frame')
+
+  // 缺陷现场（真机探针 `npm run ux:stage` 实测，三个视口读数完全一样）：
+  //   `.anim__frame` 只有 `min-height: 340px`、**没有 `height`** ⇒ iframe 高度就是 340px；
+  //   里面先扣掉外壳的标题 / 字幕 / 步骤条（≈124px），留给 720×420 画布的只剩 ~376px
+  //   ⇒ 缩放 0.485× ⇒ 标称 16px 的节点标签**屏上只有 7.8px**（学生读不动）。
+  //   所以这条守的不是「样式好不好看」，而是「学生实际读到几号字」——
+  //   修法是让高度由**视口**与**动画坐标系**共同决定，不是任何一个写死的数。
+  assert.match(
+    frame,
+    /aspect-ratio:\s*720\s*\/\s*\d+/,
+    'iframe 必须按动画坐标系（720×420 + 外壳那几行）声明比例：宽度够时画布就是原尺寸'
+  )
+  assert.match(
+    frame,
+    /max-height:\s*calc\(\s*100vh\s*-/,
+    '必须有**视口驱动**的上限（窗口矮时按视口收，而不是把下面的控件推出屏幕）'
+  )
+  assert.match(frame, /min-height:\s*\d+px/, '极小窗口下要有地板，不能塌成一条缝')
+  assert.doesNotMatch(
+    frame,
+    /[^-]height:\s*\d+px/,
+    '不得用固定 height 定死舞台高度 —— 那正是「字被缩到 7.8px」的成因'
+  )
+  assert.doesNotMatch(
+    stage,
+    /[^-]height:\s*\d+px/,
+    '舞台容器同样不得写死高度（它会把 iframe 的比例声明架空）'
+  )
+})
+
 /* ================================================================== * 
  * ⑧ 依赖图谱取数失败后必须能重试（学段不变就再也不会发请求）
  * ================================================================== */

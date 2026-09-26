@@ -70,7 +70,7 @@ import {
 //   `createAnimationExtension()`（**没接 `generate`**），而票 17 的补充路径要求接上自由生成器
 //   —— 见下方 `agentExtensionsFactory` 的说明。
 import { createAnimationExtension } from './extensions/animation.ts'
-import codingExtension from './extensions/coding.ts'
+import { createCodingExtension } from './extensions/coding.ts'
 import quizExtension from './extensions/quiz.ts'
 // ★ 学段**推断**扩展（票 21）：它独占 `input`（收集本轮证据）与 `before_agent_start`（按推断出的
 //   学段替换整段 prompt），并自兜异常。工厂是「可调用 + `.refresh()/.useJudge()` 诊断入口」的形态。
@@ -115,6 +115,7 @@ import {
 } from './safety/review.ts'
 // ★ 动画自由生成（票 17 的补充路径）：模板未命中时才被调用，无 Key 时干净降级。
 import { createAnimationGenerator } from './animation/generator.ts'
+import { createCodeExerciseGenerator } from './coding/generator.ts'
 import {
   assertSessionManagerIsolated,
   ensureStudentPiDirs,
@@ -841,9 +842,15 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         animation: createAnimationExtension({
           generate: createAnimationGenerator({ complete: lazyComplete })
         }),
-        // 编程（票 18/19）：模板 / 分级求助 / 报错翻译。
+        // 编程（票 18/19）：模板 / 分级求助 / 报错翻译 + **按学生要求现出一道题**（D-089）。
         // ★ 它**不执行学生代码** —— 执行经 IPC 下发到渲染进程的 Pyodide Worker。
-        coding: codingExtension,
+        // ★★ 出题那条路在这里接上（与动画的自由生成同一手法）：模型出结构化草稿 →
+        //    Python 二次校验并**存进该学生名下** → 不过则带原因重试 ≤2 → 仍不过如实失败。
+        //    **无 Key 时 `generate` 直接抛**（`complete` 是 `lazyComplete`），工具回一句
+        //    「这条能力不可用，改用对话讲」——不会产出「像题但其实是编的」东西。
+        coding: createCodingExtension({
+          generate: createCodeExerciseGenerator({ complete: lazyComplete })
+        }),
         // ★ 学段推断（票 21）：注册顺序在 `chatFactory` **之后** —— 它的 `before_agent_start`
         //   读 chatFactory 垫好的模板再整段换成推断出的学段（Pi 的返回值链式叠加）。
         grade: gradeExtension

@@ -282,6 +282,13 @@ export const IPC = {
   quizGrade: 'quiz:grade',
   /** 渲染进程 → 主进程：读闯关进度（`GET /api/quiz/progress/{id}`：每关的阶段与分数）。 */
   quizProgress: 'quiz:progress',
+  /**
+   * 渲染进程 → 主进程：该学生**自己的**生成题（`GET /api/quiz/generated/{id}`）。
+   *
+   * ★ 「智团团给我出过的题」的唯一读路径（D-088）：登记进 `generated_question` 的那些题，
+   *   按学生过滤列回来。结构上不含 `answer`/`explanation`（与题库那条路同一个投影）。
+   */
+  quizGeneratedList: 'quiz:generated-list',
 
   // ── 编程 ──────────────────────────────────────────────────────────────
   /**
@@ -729,6 +736,19 @@ export interface QuizBankRequest {
   kpId: string
   /** 要几道题（1–10，与 `GET /api/quiz/bank` 的约束一致）。 */
   count?: number
+}
+
+/**
+ * 学生**自己的**生成题清单（`GET /api/quiz/generated/{id}`）。
+ *
+ * ★ 没有 `studentId`：身份由主进程解析（与 `QuizBankRequest` 同一纪律）。
+ * ★ 两个字段都可省略 = 「把我的生成题都列出来」。
+ */
+export interface QuizGeneratedListRequest {
+  /** 只看这个知识点的题（可选）。 */
+  kpId?: string
+  /** 最多要几道（1–200，与服务端同一约束）。 */
+  limit?: number
 }
 
 /** 提交一题作答。 */

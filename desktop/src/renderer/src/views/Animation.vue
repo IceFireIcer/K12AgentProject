@@ -3,22 +3,36 @@
  * 动画讲解页 —— 对话内联动画卡的**展开视图**：同一套术语（概念 / 模板来源 / 时长 /
  * 播放条），同一份数据形状（`AnimationPayload`），只是舞台更大、多了模板库。
  *
- * ── 数据全部来自真实链路（三个端点，中间没有任何前端编造）─────────────────
+ * ── 数据全部来自真实链路（两个端点，中间没有任何前端编造）─────────────────
  *
  *   模板清单  `GET  /api/animation/templates`  → `store.matched` / `store.availableIds`
  *   渲染      `POST /api/animation/render`     → `store.payload`（自包含的沙箱 HTML）
- *   托管      `POST /api/animation/host/…`     → `store.hosted`（一次性 nonce 地址）
  *
  * 舞台是**真的在播**：`sandbox/iframe-host.ts` 的 `AnimationSandboxHost` 托管 iframe
  * （沙箱属性只有 `allow-scripts`，那个「放开同源」的开关在 `FORBIDDEN_SANDBOX_FLAG`
  * 里被显式禁掉），播放 / 暂停 / 重播经 postMessage 指令驱动，进度由沙箱的节流回调喂进来
  * ——本页**没有自己的播放时钟**（不装本地计时器、不演假进度）。
  *
- * ★ 为什么必须经「一次性 nonce 托管」而不是把 HTML 塞进 `srcdoc`：
- *   iframe 带不了自定义 header，所以资源地址没法用口令鉴权；而做成公开路由就等于
- *   让任何人都能取到学生的动画内容。nonce 绑定「学生 + 知识点 + 有效期」，用一次即失效。
- *   ⚠️ 也正因为如此：**载荷里的 `html` 只有托管过才可播**（沙箱靠注入的 payload_id
- *   认自己的消息，`srcdoc` 那份的 id 与页面手里的对不上 → 会白等 5 秒然后降级）。
+ * ★★ 舞台的数据源是**内联 `srcdoc`**，绝不把一次性托管地址放进 `<iframe src>`（2026-09-26 修复）：
+ *
+ *   托管地址是「一次性 nonce + TTL 120 秒」（`server/app/routes/resources.py`，用一次即失效），
+ *   而本页在 `App.vue` 的 `<KeepAlive>` 里 —— 切走**稍久一点**，Chromium 会把隐藏的 iframe
+ *   文档丢掉，切回来时拿**同一个 `src`** 重取 → 403 `used`，于是学生在舞台上读到一串
+ *   `{"detail":"动画资源未通过 nonce 校验（used）"}`。
+ *   真机探针实测（`scripts/ux-probe-animation-nonce.mjs`，`npm run ux:nonce`）：
+ *   同一个地址被取 **3 次**、最后一条响应 **403**（切走 3 秒 / 8 秒再回来各新增 2 次请求）。
+ *   ⚠️ 判据**不能**依赖「停多久才触发」—— 那是浏览器的实现细节；判据是「源码里还有没有
+ *   把一次性地址交给载体的地方」（见下方的源码级守卫与 P-138）。
+ *
+ *   改内联**内容一字未变**：托管的文件就是这份 HTML 原样落盘（`hostAnimation({kpId, html})`），
+ *   所以换成内联只是省掉一次网络往返 —— 不消费 nonce，文档重建也不会有第二次请求，
+ *   sidecar 挂了都照播。沙箱靠 `window.__K12_PAYLOAD_ID__` 认消息，那个 id 是渲染时
+ *   **烘焙进产物**的；本页从产物里把它取回来交给宿主（`readBakedPayloadId`）——
+ *   id 与 HTML **同源**，结构上不可能错配（D-080 那个「id 对不上 → 白等 5 秒」的防线）。
+ *
+ *   ⚠️ 规格 D10 的「资源服务（Python 托管，带 nonce）」**没有被架空**：服务照旧签发与校验
+ *      （服务端用例照跑），只是本页不再是它的消费者 —— 一句话纪律：**长期挂在 DOM 上的元素
+ *      不许拿一次性地址当数据源**（对话里的动画卡片走同一条路，见 D-079）。
  *
  * ── 布局（改动前先读）────────────────────────────────────────────────
  *
@@ -39,7 +53,7 @@
  *
  *   本页此前把**实现侧的备忘直接印给学生**：沙箱属性名（`allow-scripts`）、
  *   一次性 nonce 的绑定与失效规则、模板 id、毫秒换算的标称时长、「可调参数 N 项」、
- *   以及「模板清单 → 渲染 → 托管」的三步链路说明。那是写给我们自己的验收证据，
+ *   以及「模板清单 → 渲染 → 交给沙箱」的链路说明。那是写给我们自己的验收证据，
  *   学生读到的是一张工程便条。
  *
  *   现在的纪律（与 `views/Quiz.vue` 同一条）：**学生视角一个字不留，教师视角一条不删**。
@@ -60,7 +74,12 @@ import PageIdentity from '@/components/PageIdentity.vue'
 import TeacherGate from '@/components/TeacherGate.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../labels'
-import { useAnimationStore, type AnimationTab, type SavedAnimationPlayable } from '../stores/animation'
+import {
+  readBakedPayloadId,
+  useAnimationStore,
+  type AnimationTab,
+  type SavedAnimationPlayable
+} from '../stores/animation'
 import { useChatStore } from '../stores/chat'
 import { useConfirm } from '../stores/confirm'
 import { GRADE_AXIS_OF, GRADE_LEVEL_OF, useThemeStore } from '../stores/theme'
@@ -93,7 +112,10 @@ const confirm = useConfirm()
  *   两份内容都挂载、只切换显示，播放进度与 ready 状态都不会丢。
  * ------------------------------------------------------------------ */
 const ANIM_TABS: readonly { id: AnimationTab; label: string; hint: string }[] = [
-  { id: 'builtin', label: '内置模板', hint: '挑一段现成的动画看' },
+  // ★ 2026-09-26（D-086）：「内置模板」→「智团团准备的」。
+  //   「模板」是我们内部对这批资产的叫法（`resources/templates/`），学生没有这个概念：
+  //   他看到的只是一段能看的动画，而它是**智团团准备**的还是**自己做的**，才是他要区分的两件事。
+  { id: 'builtin', label: '智团团准备的', hint: '挑一段现成的动画看' },
   { id: 'mine', label: '我的动画', hint: '看智团团给你做过的那些动画' }
 ]
 
@@ -187,7 +209,7 @@ function fmtDuration(ms: number): string {
  * 取数：模板清单（按学段筛）
  * ------------------------------------------------------------------ */
 
-const busy = computed(() => anim.templatesLoading || anim.rendering || anim.hosting)
+const busy = computed(() => anim.templatesLoading || anim.rendering)
 
 /**
  * 学段变了（或首次进来）就重新拉一次模板清单。
@@ -213,9 +235,9 @@ async function syncTemplates(): Promise<void> {
 }
 
 /**
- * 渲染 + 托管（真实的两步后端调用）。
+ * 渲染（真实的后端调用）。
  *
- * ★ 失败原因一律直接显示后端给的那句可读中文（`renderError` / `hostError`），
+ * ★ 失败原因一律直接显示后端给的那句可读中文（`renderError`），
  *   本页**不编**失败原因、也没有「模拟失败」这类按钮。
  */
 async function renderStage(templateId?: string): Promise<void> {
@@ -223,7 +245,7 @@ async function renderStage(templateId?: string): Promise<void> {
   if (id === '' || busy.value) return
   playing.value = false
   progress.value = 0
-  await anim.renderAndHost({
+  await anim.render({
     templateId: id,
     ...(grade.value === null ? {} : { gradeLevel: grade.value })
   })
@@ -232,7 +254,7 @@ async function renderStage(templateId?: string): Promise<void> {
 /** 点模板条上的一项：换模板 → 立刻渲染到舞台（学生点它就是为了看那一个）。 */
 async function chooseTemplate(id: string): Promise<void> {
   if (id === anim.activeTemplateId) return
-  // 换模板会作废上一份渲染 / 托管结果（nonce 已经不该再用）——那是 store 的职责
+  // 换模板会作废上一份渲染结果（舞台上那段已经不属于新模板了）——那是 store 的职责
   anim.selectTemplate(id)
   await renderStage(id)
 }
@@ -241,30 +263,42 @@ async function chooseTemplate(id: string): Promise<void> {
  * 舞台：AnimationSandboxHost 托管（真沙箱、真指令、真进度）
  * ------------------------------------------------------------------ */
 
-/** 挂载条件：有托管地址就播；载荷里连 HTML 都没有 → 走文字讲解（绝不白屏）。 */
-const canMount = computed(() => anim.hosted !== null && shouldMountIframe(anim.payload?.html ?? ''))
+/**
+ * 舞台要播的那一份：`html` + **它自己烘焙在里面的那把 `payload_id`**。
+ *
+ * ★★ 两者**必须同源**（都从这一份产物里取）。沙箱回的 `ready` 只认产物里烘焙的 id，
+ *   而 store 的 `renderPayloadId` 是在请求**发出前**就写下的 —— 拿它去配上一次留下的 HTML，
+ *   就是 D-080 那个「id 对不上 → 白等 5 秒降级」的原样重演（重渲染的第一拍恰好就是这个状态）。
+ *   从 `payload` 一处派生，这一拍错配在结构上就不存在。
+ * ★ 认不出 id（产物里缺那个标记）就不进 live、直接走文字讲解：与其白等 5 秒超时，
+ *   不如当场把要点讲给学生（该标记由渲染端校验，这里是兜底）。
+ */
+const stagePayload = computed<{ payloadId: string; html: string } | null>(() => {
+  const html = anim.payload?.html ?? ''
+  if (!shouldMountIframe(html)) return null
+  const payloadId = readBakedPayloadId(html)
+  return payloadId === null ? null : { payloadId, html }
+})
 
 /** 舞台的四种呈现（其余时刻分别是空 / 加载 / 错误）。 */
 const stageState = computed<'loading' | 'error' | 'empty' | 'idle' | 'live' | 'text'>(() => {
   if (anim.bridgeError !== null) return 'error'
   if (busy.value) return 'loading'
-  if (anim.templatesError !== null || anim.renderError !== null || anim.hostError !== null) {
-    return 'error'
-  }
+  if (anim.templatesError !== null || anim.renderError !== null) return 'error'
   if (anim.matched.length === 0) return 'empty'
   if (anim.payload === null) return 'idle'
-  if (!shouldMountIframe(anim.payload.html)) return 'text'
-  return canMount.value ? 'live' : 'text'
+  // ★ 没有可播的 HTML / 认不出烘焙的 id（票 17 的降级产物）→ 文字讲解，**绝不白屏**
+  return stagePayload.value === null ? 'text' : 'live'
 })
 
 /** 后端给的真实失败原因（按「能不能接着用」的优先级取第一条）。 */
 const stageError = computed<string>(
-  () => anim.bridgeError ?? anim.templatesError ?? anim.renderError ?? anim.hostError ?? ''
+  () => anim.bridgeError ?? anim.templatesError ?? anim.renderError ?? ''
 )
 
 /**
  * ★ 从胶片条里那个「加载 xx 个模板」到舞台上一份真正能播的产物，中间每一步都可能失败 ——
- *   而失败原因全是**后端给的可读中文**（通道缺失 / 渲染不过 / 托管不过），
+ *   而失败原因全是**后端给的可读中文**（通道缺失 / 渲染不过 / 模板没匹配上），
  *   这里只负责原样显示，不加工、不美化。
  *
  * ★ 降级提示只有一句（报告 1.8 / C15）：说清「没播出来」与「先看哪」就够了。
@@ -291,6 +325,13 @@ const iframeEl = ref<HTMLIFrameElement | null>(null)
 let host: AnimationSandboxHost | null = null
 
 const sandboxPhase = ref<'loading' | 'ready' | 'degraded'>('loading')
+/**
+ * 运输控件（进度读数 / 暂停 / 重播）与进度线是否出现：只在**真在播**的时候 ——
+ * 没画面的时候摆一排按钮只会让人以为坏了。
+ * ★ 它们住在卡头那一行（不是画面下方）：放在下方会为了「留在视口内」吃掉约 60px 画面高度，
+ *   而画面高度直接决定学生的字号（见 `.anim__frame` 那段说明，D-085）。
+ */
+const stageControlsVisible = computed(() => stageState.value === 'live' && sandboxPhase.value === 'ready')
 /** 进度（0..1）：由沙箱的 `progress` 消息驱动，宿主侧已再节流一次（~10Hz）。 */
 const progress = ref(0)
 /**
@@ -311,10 +352,10 @@ function teardownHost(): void {
   host = null
 }
 
-function buildHost(payloadId: string, resourceUrl: string): AnimationSandboxHost {
+function buildHost(payloadId: string, srcdoc: string): AnimationSandboxHost {
   return new AnimationSandboxHost({
     payloadId,
-    resourceUrl,
+    srcdoc,
     onReady: () => {
       sandboxPhase.value = 'ready'
       degradeReason.value = ''
@@ -377,28 +418,26 @@ function onFrameLoad(): void {
 }
 
 /**
- * 托管结果换了（新的模板 / 新的 nonce）→ 重建沙箱。
+ * 舞台要播的产物换了（新模板 / 再放一次）→ 重建沙箱。
  *
- * ★ 一个个重建而不是复用：旧的 nonce 已经作废，`iframe` 的地址也变了；
- *   复用同一个宿主只会把两段动画的 `payload_id` 混在一起（串台）。
+ * ★ 触发条件是**这一份产物本身**（`stagePayload`：HTML + 从它里面取回的 `payload_id`），
+ *   不是任何地址 —— 内联没有地址可言，文档由 `srcdoc` 重建，永远不会产生第二次网络请求。
+ * ★ 一个个重建而不是复用：新产物里烘焙着**另一把** `payload_id`，
+ *   复用同一个宿主只会把两段动画的消息混在一起（串台）。
  */
-watch(
-  () => anim.hosted?.url ?? '',
-  async (url) => {
-    teardownHost()
-    progress.value = 0
-    playing.value = false
-    controlError.value = ''
-    degradeReason.value = ''
-    sandboxPhase.value = 'loading'
-    if (url === '') return
-    await nextTick()
-    const payloadId = anim.hosted?.payloadId ?? ''
-    if (payloadId === '' || iframeEl.value === null) return
-    host = buildHost(payloadId, url)
-    host.attach(iframeEl.value)
-  }
-)
+watch(stagePayload, async (payload) => {
+  teardownHost()
+  progress.value = 0
+  playing.value = false
+  controlError.value = ''
+  degradeReason.value = ''
+  sandboxPhase.value = 'loading'
+  if (payload === null) return
+  await nextTick()
+  if (iframeEl.value === null) return
+  host = buildHost(payload.payloadId, payload.html)
+  host.attach(iframeEl.value)
+})
 
 // iframe 元素在「loading → live」之间会被创建 / 移除：出现时补一次 attach
 // （宿主靠它起 ready 超时计时；不 attach 就会一直停在 loading）。
@@ -433,9 +472,9 @@ const stageTitle = computed(() => anim.activeTemplate?.title ?? '还没有可播
 
 /** 主按钮文案。
  *  ★ 用「播放 / 再放一次」而不是「渲染到舞台 / 重新生成」：对屏幕前的学生来说，
- *    这一步发生的事情就是**这段动画开始播**；渲染与托管是它背后怎么实现的（那句话进教师视角）。 */
+ *    这一步发生的事情就是**这段动画开始播**；渲染是它背后怎么实现的（那句话进教师视角）。 */
 const renderLabel = computed(() => {
-  if (anim.rendering || anim.hosting) return '正在准备…'
+  if (anim.rendering) return '正在准备…'
   return anim.payload === null ? '播放这段动画' : '再放一次'
 })
 
@@ -451,14 +490,16 @@ const stageDuration = computed(() =>
  * ★ 原来这里是「本机 8 个模板 · 本次匹配 3 个（初中）」——「本机共几份」是**随包资产**
  *   的统计口径（后台目录的读法），学生关心的是「这里有几段是给我的」。
  *   原始口径进 `<TeacherGate>`，一个字没删。
+ * ★ 2026-09-26（D-086）：学段**没判定**时不再报总数（那时列的是全部资产，`共 214 段`
+ *   是**库存数**，学生拿着它不知道该干嘛；「214」只该出现在教师视角那一行）。
  * ★ 未判定时的学段名引用 `labels.ts` 的 `GRADE_UNKNOWN_LABEL`（唯一字面量来源）：
  *   这里原来写死「学段还没定」，同一个状态在别的页面叫「还没认出年级」，等于两种说法。
  */
 const stripMeta = computed(() => {
   const matchedCount = anim.matched.length
   return gradeLabel.value === null
-    ? `共 ${matchedCount} 段（${GRADE_UNKNOWN_LABEL}，先都列出来）`
-    : `适合${gradeLabel.value}的共 ${matchedCount} 段`
+    ? `${GRADE_UNKNOWN_LABEL}，先把这些都列出来`
+    : `适合${gradeLabel.value}的 ${matchedCount} 段`
 })
 
 /** 胶片条上那句口径（**教师 / 答辩视角**）：本机共产出几份、本次匹配几份、按谁匹配的。
@@ -472,12 +513,15 @@ const stripMetaTeacher = computed(() => {
     : `本机 ${total} 个模板 · 本次匹配 ${matchedCount} 个（${gradeLabel.value}）`
 })
 
-/** 载荷来源徽章（内置模板 / 即时生成）。
- *  ★ 与对话里的动画卡（`cards/AnimationCard.vue`）用**同一对词**：同一个东西在
- *    两个界面上叫两个名字，学生只会以为它们是两回事。 */
+/** 载荷来源徽章（智团团准备的 / 刚给你做的）。
+ *  ★ 2026-09-26（D-086）：原来叫「内置模板 / 即时生成」——「模板 / 生成」都是我们内部的
+ *    说法（`resources/templates/`、「生成路径」），学生要区分的只有一件事：
+ *    这段动画是**智团团本来就备好的**，还是**刚刚为他做的**。
+ *  ★ 对话里的动画卡（`cards/AnimationCard.vue`）用「内置 / 我的」两个短标签切换**同一对
+ *    概念**（卡片窄，两字标签才放得下）—— 那边不是同一句话的两份实现，别顺手统一。 */
 const sourceLabel = computed(() => {
   if (anim.payload === null) return ''
-  return anim.payload.source === 'generated' ? '即时生成' : '内置模板'
+  return anim.payload.source === 'generated' ? '刚给你做的' : '智团团准备的'
 })
 
 /** 教师 / 答辩视角：模板里可调的参数（本页一律用模板默认值，不假装调过参）。 */
@@ -675,76 +719,63 @@ onDeactivated(() => {
 
 <template>
   <div class="anim" data-testid="animation-view">
-    <!-- 身份行（全页唯一的大字号）：内容区的最大字号在这里。
-         `main` 说的是「这页在讲什么」，不是重复顶栏的「动画讲解」。
+    <!-- 身份行（全页唯一的大字号）：内容区的最大字号在这里 —— 只留 `main` 一行。
+         ★ 2026-09-26（D-085）：`meta`「挑一个动画，看它一步步动起来」与 `hint`
+           「先挑一个动画，再点播放」说的是同一件事（都只讲「挑一个、再点播放」），
+           而它们各占一行、把动画往下推 —— 舞台是这一页唯一的主角，
+           首屏的纵向空间必须让给它。两句话一个字没删，只是**不再重复出现**：
+           操作提示由下面选片区的标题（「这几段也能看看」）与主按钮文案承担。
          ★ `meta` 原来是「模板优先，生成补充；舞台在沙箱里真播」—— 那是**生成侧与沙箱侧
-           的内部口径**（评委要看，学生不必）。现在学生读到的是一句邀请，
-           原文一句不删地搬进下面「舞台上的技术口径」那个 `<TeacherGate>`。 -->
-    <PageIdentity
-      main="把过程一步步画出来看"
-      meta="挑一个动画，看它一步步动起来"
-      hint="先挑一个动画，再点播放"
-    />
+           的内部口径**（评委要看，学生不必）。原文一句不删地留在下面「舞台上的技术口径」
+           那个 `<TeacherGate>` 里。 -->
+    <PageIdentity main="把过程一步步画出来看" />
 
-    <!-- ══ 分页（内置模板 / 我的动画）═════════════════════════════════════
-         与学习档案页的分页同一配方（`.tab` / `.tab--on`）：同一组导航在两处
-         必须是同一个长相。 -->
-    <nav class="study__tabs" role="tablist" aria-label="动画讲解分页">
-      <button
-        v-for="tab in ANIM_TABS"
-        :key="tab.id"
-        class="tab"
-        type="button"
-        role="tab"
-        :class="{ 'tab--on': anim.activeTab === tab.id }"
-        :aria-selected="anim.activeTab === tab.id"
-        :title="tab.hint"
-        :data-testid="`animation-tab-${tab.id}`"
-        @click="anim.setTab(tab.id)"
-      >
-        {{ tab.label }}
-      </button>
-    </nav>
-
-    <!-- ══ 跨学段预览：同一件事在别的年级怎么讲 ════════════════════════════
-         ★ 它只改**显示**（`theme` 的预览开关），不写学生的任何记录 —— 下面那句
-           说明就是对学生说的这件事。 -->
-    <div class="gradebar" data-testid="animation-gradebar">
-      <span class="gradebar__label">按哪个年级看</span>
-      <button
-        v-for="level in GRADE_CHOICES"
-        :key="level"
-        type="button"
-        class="gradebar__btn"
-        :class="{ 'gradebar__btn--on': grade === level }"
-        :aria-pressed="grade === level"
-        :data-testid="`animation-grade-${level}`"
-        @click="togglePreview(level)"
-      >{{ gradeName(level) }}</button>
-      <span class="gradebar__note" data-testid="animation-gradebar-note">{{ previewNote }}</span>
-    </div>
-
-    <!-- ══ 分页①：内置模板（本页原有的舞台 + 底部胶片条）═══════════════════
+    <!-- ══ 分页（智团团备好的 / 我的动画）与年级筛选都**在舞台下方** ═══════════
+         ★ 2026-09-26（D-085）：它们原来挡在舞台前面 —— 学生还没看到任何动画，
+           就先要做两次选择（挑哪个来源、按哪个年级看），而这两件事都是**看完想换**时才需要的。
+           更要紧的是纵向空间：舞台（720×420 的动画）是按「容器能给多大」等比缩放的，
+           上面每多一行，屏上每个字就小一圈（实测：挡在舞台前时缩放 0.485×、节点字 7.8px）。
+         ★ 分页与年级现在与选片区合成同一条带（同一组导航在档案页也是这个长相）。
          ⚠️ 两个分页都用 `v-show` 而不是 `v-if`：舞台那个沙箱宿主与本分页绑在一起，
             `v-if` 会在切分页时把它整个拆掉 —— 切回来动画从头播一遍、播放进度清零
             （档案页用 `<KeepAlive>` 避免的正是这种损失；这里两个分页在同一个文件里，
             两个都保持挂载是同一件事的更直接做法，所以不需要 KeepAlive）。 -->
     <div v-show="anim.activeTab === 'builtin'" class="pane">
-    <!-- 舞台：全宽主对象 -->
+    <!-- 舞台：全宽主对象。卡头压成**一行**（标题 + 来源徽章 + 运输控件 + 主按钮）。
+         ★★ 运输控件（暂停 / 重播 / 进度读数）从卡底搬到了**卡头这一行**：
+           放在画面下方时，为了让它留在视口内必须少给画面约 60px 高（实测差 23px 就出屏），
+           而画面高度直接等于学生的字号。搬进卡头后三个视口都能「画面最大 + 控件可见」。
+           进度条改成紧贴卡头下方的一条细线（宽度由沙箱上报的进度驱动，本页不装本地计时器）。 -->
     <SurfacePanel flush class="anim__stage-card">
       <header class="anim__head">
-        <div class="anim__head-text">
-          <!-- 18px：块标题档。不得再往上抬去与身份行争焦点 —— 本页最大字号只有一个。 -->
-          <h2 class="anim__title">{{ stageTitle }}</h2>
-          <!-- ★ 学生视角：**这是什么 + 适合谁**。模板 id、毫秒换算的标称时长、
-               「可调参数 N 项」都是实现事实，全部进下面的 `<TeacherGate>`（一个字没删）。 -->
-          <p v-if="anim.activeTemplate" class="anim__sub">
-            {{ anim.activeTemplate.concept }}
-            · {{ gradeAudienceText(anim.activeTemplate.gradeLevels) }}
-          </p>
-          <p v-else class="anim__sub">从下面的动画里挑一个，点「播放这段动画」就能看。</p>
-        </div>
+        <!-- 18px：块标题档。不得再往上抬去与身份行争焦点 —— 本页最大字号只有一个。 -->
+        <h2 class="anim__title" :title="stageTitle">{{ stageTitle }}</h2>
         <span v-if="sourceLabel" class="anim__src">{{ sourceLabel }}</span>
+        <span class="anim__head-spacer" />
+        <template v-if="stageControlsVisible">
+          <span class="k12-num anim__time" data-testid="animation-view-time">
+            {{ playing ? '播放中' : '已暂停' }} · {{ progressPercent }}
+            <template v-if="stageDuration"> / {{ stageDuration }}</template>
+          </span>
+          <button
+            type="button"
+            class="anim__play"
+            data-testid="animation-view-play"
+            :title="playing ? '暂停' : '播放'"
+            @click="togglePlay"
+          >
+            <component :is="playing ? Pause : Play" :size="16" />
+          </button>
+          <button
+            type="button"
+            class="anim__ghost anim__ghost--icon"
+            data-testid="animation-view-replay"
+            title="重新播放"
+            @click="replay"
+          >
+            <RotateCcw :size="15" />
+          </button>
+        </template>
         <button
           type="button"
           class="anim__ghost"
@@ -755,9 +786,32 @@ onDeactivated(() => {
           <Wand2 :size="14" /><span>{{ renderLabel }}</span>
         </button>
       </header>
+      <!-- 进度线：紧贴卡头，横跨整卡（6px → 4px，细到不像一根控件，但它如实反映沙箱上报的进度）
+           ★ 带 `role="progressbar"` + `aria-valuenow/valuetext`：它是这个页面上唯一的进度锚点，
+             屏幕阅读器用户也要能读到「讲到哪了」（D-086）。 -->
+      <div
+        v-if="stageControlsVisible"
+        class="anim__progress anim__progress--line"
+        data-testid="animation-view-progress"
+        role="progressbar"
+        aria-label="这段动画的播放进度"
+        :aria-valuenow="Math.round(progress * 100)"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        :aria-valuetext="`${progressPercent}`"
+      >
+        <span class="anim__fill" :style="{ width: progressPercent }" />
+      </div>
+      <p v-if="controlError" class="anim__control-err" data-testid="animation-view-control-error">
+        {{ controlError }}
+      </p>
 
       <!-- 舞台：由 AnimationSandboxHost 托管，iframe 属性只有 allow-scripts
            （那个「放开同源」的开关在 FORBIDDEN_SANDBOX_FLAG 里被显式禁掉）。
+           ★★ 数据源是**内联 srcdoc**（与对话里的动画卡同一配方，见文件头那段）：
+              `:src` 那份一次性托管地址会让 KeepAlive 回来的 iframe 重取一次 → 403 used。
+              `srcdoc` 与交给宿主的那份**是同一个值**（`stagePayload`，HTML 与 payload_id 同源），
+              挂载与否由 `stageState` 决定（没有可播的 HTML 就走文字讲解）。
            进度 / 播放状态全部来自沙箱消息，本页不自带时钟。 -->
       <div class="anim__stage" data-testid="animation-view-stage" :data-state="stageState">
         <!-- ① 真沙箱：载入 → ready → 播放 -->
@@ -767,9 +821,10 @@ onDeactivated(() => {
             class="anim__frame"
             :sandbox="iframeAttrs.sandbox"
             :referrerpolicy="iframeAttrs.referrerpolicy"
-            :src="anim.hosted?.url"
+            :srcdoc="stagePayload?.html"
             :title="stageTitle"
             data-testid="animation-view-frame"
+            data-resource="inline"
             :data-sandbox="SANDBOX_ATTRIBUTE"
             @load="onFrameLoad"
           />
@@ -839,49 +894,69 @@ onDeactivated(() => {
         />
       </div>
 
-      <!-- 播放控制：只在真播的时候出现（没画面的时候摆一排按钮只会让人以为坏了）。
-           进度条由沙箱的节流回调驱动，**本页不装本地计时器**。 -->
-      <footer v-if="stageState === 'live' && sandboxPhase === 'ready'" class="anim__foot">
-        <button
-          type="button"
-          class="anim__play"
-          data-testid="animation-view-play"
-          :title="playing ? '暂停' : '播放'"
-          @click="togglePlay"
-        >
-          <component :is="playing ? Pause : Play" :size="15" />
-        </button>
-        <button
-          type="button"
-          class="anim__ghost anim__ghost--icon"
-          data-testid="animation-view-replay"
-          title="重新播放"
-          @click="replay"
-        >
-          <RotateCcw :size="14" />
-        </button>
-        <div class="anim__progress" data-testid="animation-view-progress">
-          <span class="anim__fill" :style="{ width: progressPercent }" />
-        </div>
-        <span class="k12-num anim__time">
-          {{ playing ? '播放中' : '已暂停' }} · {{ progressPercent }}
-          <template v-if="stageDuration"> / {{ stageDuration }}</template>
-        </span>
-      </footer>
-      <p v-if="controlError" class="anim__control-err" data-testid="animation-view-control-error">
-        {{ controlError }}
-      </p>
     </SurfacePanel>
+
+    <!-- ══ 换一段：舞台下方的控件带（现在放的是什么 · 换来源 · 换年级 · 挑别的）═════
+         ★ 2026-09-26（D-085）：这几件事都是「看完想换」时才需要的，所以整体下沉到舞台之后。
+           它们原在舞台之前，直接后果是动画被挤矮（舞台高度写死 340px 时，
+           上面每多一行都不改变高度、只把下面的东西推到折线以下；而舞台一旦按视口长高，
+           上面的每一行都实打实吃掉动画的像素）。 -->
+    <div class="anim__chooser" data-testid="animation-view-chooser">
+      <!-- 「现在放的是什么 · 给谁看」：从卡头搬下来的一行（学生视角；模板 id /
+           标称时长 / 可调参数是实现事实，仍在下面的 `<TeacherGate>` 里）。 -->
+      <p v-if="anim.activeTemplate" class="anim__sub" data-testid="animation-view-sub">
+        {{ anim.activeTemplate.concept }} · {{ gradeAudienceText(anim.activeTemplate.gradeLevels) }}
+      </p>
+      <p v-else class="anim__sub">从下面的动画里挑一个，点「播放这段动画」就能看。</p>
+
+      <div class="anim__chooser-row">
+        <nav class="study__tabs" role="tablist" aria-label="动画讲解分页">
+          <button
+            v-for="tab in ANIM_TABS"
+            :key="tab.id"
+            class="tab"
+            type="button"
+            role="tab"
+            :class="{ 'tab--on': anim.activeTab === tab.id }"
+            :aria-selected="anim.activeTab === tab.id"
+            :title="tab.hint"
+            :data-testid="`animation-tab-${tab.id}`"
+            @click="anim.setTab(tab.id)"
+          >
+            {{ tab.label }}
+          </button>
+        </nav>
+
+        <!-- 跨学段预览：同一件事在别的年级怎么讲。
+             ★ 它只改**显示**（`theme` 的预览开关），不写学生的任何记录。 -->
+        <div class="gradebar" data-testid="animation-gradebar">
+          <span class="gradebar__label">按哪个年级看</span>
+          <button
+            v-for="level in GRADE_CHOICES"
+            :key="level"
+            type="button"
+            class="gradebar__btn"
+            :class="{ 'gradebar__btn--on': grade === level }"
+            :aria-pressed="grade === level"
+            :data-testid="`animation-grade-${level}`"
+            @click="togglePreview(level)"
+          >{{ gradeName(level) }}</button>
+          <span class="gradebar__note" data-testid="animation-gradebar-note">{{ previewNote }}</span>
+        </div>
+      </div>
+    </div>
 
     <!-- ★ 2026-09-22（报告 C7 / C8）：这里原来还有一句学生面脚注
          「动画就在这台电脑上播放，画面不会跳到别的地方去；断网也能看」。
          它与编程页页脚的常驻声明讲的是**同一件事**（全应用的安全 / 隐私声明），
          按报告口径全应用只保留那一处，本页整句删掉 —— 技术证据一个字没少，
-         全在下面这个 `<TeacherGate>` 里（沙箱属性 / 内联无外链 / 一次性 nonce）。 -->
+         全在下面这个 `<TeacherGate>` 里（沙箱属性 / 内联无外链 / 载荷里那份自包含 HTML）。 -->
     <TeacherGate label="动画是怎么安全播放的">
       <p class="anim__note anim__note--gate">
         舞台是 <strong>sandboxed iframe</strong>（沙箱属性只有 <code>allow-scripts</code>），
-        动画库内联进 HTML，断网也能演示；资源地址是一次性 nonce（绑定学生 + 知识点 + 有效期，用一次即失效）。
+        动画库内联进 HTML，断网也能演示；舞台喂给它的就是渲染产物本身（<code>srcdoc</code> 内联），
+        没有网络往返。服务端另有一次性的托管资源地址（绑定学生 + 知识点 + 有效期，用一次即失效），
+        本页不消费它：一次性凭据不该挂在长期存在的 DOM 上。
       </p>
     </TeacherGate>
 
@@ -914,14 +989,14 @@ onDeactivated(() => {
     </TeacherGate>
 
     <!-- ══ 底部横向动画条：舞台在上、其它动画在下 ═════════════════════════────
-         项宽固定 220px、项高**下限** 108px（随内容长高），横向滚动不换行 ——
+         项宽固定 200px、项高**下限** 108px（随内容长高），横向滚动不换行 ——
          条的高度不随动画数量长高，也不会反过来挤压舞台。
-         ★ 标题是**学生读的一行**（「还能看这几段动画」），不是后台目录名
+         ★ 标题是**学生读的一行**（「这几段也能看看」），不是后台目录名
            （原来是「动画模板」：那是我们内部对这批资产的叫法）。 -->
     <section class="anim__strip" aria-label="还能看的动画">
       <header class="strip__head">
         <Library :size="14" class="strip__ico" />
-        <span class="strip__title">还能看这几段动画</span>
+        <span class="strip__title">这几段也能看看</span>
         <span class="strip__meta" data-testid="animation-view-strip-meta">{{ stripMeta }}</span>
       </header>
 
@@ -942,10 +1017,12 @@ onDeactivated(() => {
           </span>
           <!-- ★ 学生视角：**它讲的是什么 + 给谁看**。
                「时长 4.8s」（毫秒换算的标称值）与「可调参数 N 项」是模板的**后台口径**，
-               一张选片卡上摆这些，学生读到的是目录条目而不是「我能不能看懂它」。
-               学段仍然保留（学生按它判断「这档是给我的吗」），只是换成自然说法。 -->
+               一张选片卡上摆这些，学生读到的是目录条目而不是「我能不能看懂它」。 -->
           <span class="tpl__concept">{{ t.concept }}</span>
-          <span class="tpl__grades">
+          <!-- ★ 2026-09-26（D-086）：学段标签**只在学段没判定时**出现 —— 已经按学段筛过一遍，
+               再给每张卡逐个标注就是噪声（214 张卡刷屏的正是这些小标签）；没判定时它才有用
+               （学生靠它判断「这档是给我的吗」）。 -->
+          <span v-if="gradeLabel === null" class="tpl__grades">
             <span v-for="g in t.gradeLevels" :key="g" class="tpl__grade">{{ gradeName(g) }}</span>
           </span>
         </button>
@@ -966,7 +1043,9 @@ onDeactivated(() => {
         </p>
         <p class="anim__strip-note">
           <span class="k12-label">链路</span>
-          模板清单 → 按模板渲染 → 一次性地址托管给沙箱：本页走的就是这三步（每一步都是后端端点）。
+          模板清单 → 按模板渲染 → 产物内联进沙箱：本页走的就是这两步（每一步都是后端端点）。
+          服务端另有一次性的托管资源地址（<code>POST /api/animation/host</code>），本页不消费它 ——
+          它是一次性凭据，绑在长期存在的 iframe 上必然被重取（真机探针可复现）。
           自由生成（校验 → 失败重试 ≤3 次 → 降级为文字或静态图）在对话里由 <code>generate_animation</code> 完成。
           模板内不得内联 CDN（沙箱断网会白屏）。
         </p>
@@ -1099,7 +1178,16 @@ onDeactivated(() => {
           >
             <RotateCcw :size="14" />
           </button>
-          <div class="anim__progress">
+          <div
+            class="anim__progress"
+            data-testid="animation-mine-progress"
+            role="progressbar"
+            aria-label="这段动画的播放进度"
+            :aria-valuenow="Math.round(mineProgress * 100)"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-valuetext="`${Math.round(mineProgress * 100)}%`"
+          >
             <span class="anim__fill" :style="{ width: `${Math.round(mineProgress * 100)}%` }" />
           </div>
           <span class="k12-num anim__time">
@@ -1279,29 +1367,46 @@ onDeactivated(() => {
 }
 
 /* ── 舞台卡（全宽主对象）──────────────────────────────────────────────── */
+/* 卡头压成**一行**：标题 + 来源徽章 + 弹性空隙 + 主按钮。
+   ★ 一行大约省下 40px 纵向空间 —— 这些像素会原样变成动画画布的高度（D-085）。 */
 .anim__head {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 16px 18px 12px;
+  gap: 10px;
+  padding: 12px 18px 10px;
 }
-.anim__head-text {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-/* 块标题档（lg = 18px）：身份行之下第一档，不得与它同权争焦点 */
+/* 标题长了就自己截断（悬停看全文）：卡头是一行，不许被长标题顶成两行 */
 .anim__title {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: var(--k12-fs-lg);
   font-weight: 650;
   line-height: var(--k12-lh-tight);
   color: var(--k12-fg);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
+.anim__head-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* 「现在放的是什么 · 给谁看」：从卡头搬到舞台下方的控件带里 */
 .anim__sub {
   font-size: var(--k12-fs-xs);
   color: var(--k12-fg-2);
+}
+/* ── 换一段：舞台下方的控件带（现在是什么 · 换来源 · 换年级；胶片条紧跟其后）── */
+.anim__chooser {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.anim__chooser-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
 }
 /* 代码片是说明文字，不是角标 → 12px */
 .anim__sub code,
@@ -1364,10 +1469,34 @@ onDeactivated(() => {
   align-items: center;
   justify-content: center;
 }
+/**
+ * ★★ iframe 的高度必须**跟着视口长**，不能是死值（2026-09-26，D-085）。
+ *
+ * 动画模板在 **720×420 坐标系**里画（`server/resources/templates/_shared/runtime.js`），
+ * 到屏幕上按「容器能给多大」等比缩放 —— 于是**容器高度直接决定学生读到的字号**：
+ *   有效字号 = 标称字号 × min(容器宽/720, 容器高/420)
+ *
+ * 旧实现是 `min-height: 340px` 且**没有 `height`**（iframe 是替换元素，高度就停在 340）：
+ * iframe 内部还要先放模板标题 / 字幕 / 步骤条（≈105px），留给画布的只有 ~204px
+ * ⇒ 缩放 0.485× ⇒ 标称 16px 的节点标签**屏上只有 7.8px**（真机探针实测，见
+ * `scripts/ux-probe-stage-size.mjs`：`npm run ux:stage`）。学生读到的是「挤成一团的字」。
+ *
+ * 现在：高度 = min(宽 ÷ 1.54, 视口高 − 260px)，地板 500px。
+ *   · `aspect-ratio: 720 / 468` —— 468 = 420 画布 + 外壳那几行的等效高，
+ *     所以只要宽度够，画布就正好是**原尺寸或更大**（比例对齐，不留大黑边）；
+ *   · `max-height: calc(100vh - 260px)` —— 260px 是顶栏 + 身份行 + 卡头 + 页面留白
+ *     **再加播放控制条**（实测：只扣 200px 时控制条会被顶到折线以下 —— 截图一眼就看出来了）。
+ *     运输控件属于「看的时候随时要用」，宁可少 40px 画布也不把它藏起来；
+ *   · `min-height: 500px` —— 窗口再矮也不塌（700px 高的窗口下控制条确实放不下，
+ *     此时优先保画面：那 700px 里能挤出 ~380px 画布已是几何上限，见 D-085）。
+ * ⚠️ 改这三个值前先跑 `npm run ux:stage`：它把「屏幕有效字号」量出来当判据。
+ */
 .anim__frame {
   display: block;
   width: 100%;
-  min-height: 340px;
+  aspect-ratio: 720 / 468;
+  max-height: calc(100vh - 260px);
+  min-height: 500px;
   border: 1px solid var(--k12-border);
   border-radius: var(--k12-r-inset);
   background: var(--k12-surface);
@@ -1419,8 +1548,8 @@ onDeactivated(() => {
   padding: 14px 18px 16px;
 }
 .anim__play {
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   flex: none;
   border: none;
   border-radius: var(--k12-r-control);
@@ -1444,6 +1573,14 @@ onDeactivated(() => {
   border-radius: var(--k12-r-pill);
   background: var(--k12-surface-2);
   overflow: hidden;
+}
+/* 卡头下方那条细进度线：横跨整卡、4px、不留白（它取代了原来卡底那一整行控制条，
+   省下的是画面高度 —— 见文件头 `.anim__frame` 那段，D-085）。 */
+.anim__progress--line {
+  flex: none;
+  height: 4px;
+  margin: 0 0 0;
+  border-radius: 0;
 }
 .anim__fill {
   display: block;
@@ -1542,7 +1679,9 @@ onDeactivated(() => {
  *    `hidden` 就只剩「把下一次溢出变成看不见」这一个作用。 */
 .tpl {
   flex: none;
-  width: 220px;
+  /* ★ 2026-09-26（D-086）：220 → 200px。同屏能多露出一张卡，而每张卡的内容
+     （标题 + 一句是什么 + 学段）在 200px 里仍然放得下 —— 密度是「一眼能比较几张」的问题。 */
+  width: 200px;
   min-height: 108px;
 
   display: flex;
@@ -1566,10 +1705,14 @@ onDeactivated(() => {
   cursor: not-allowed;
 }
 /* 选中：accent-soft 底 + accent-ink 文字 + accent-border 描边。
- * accent-ink on accent-soft 是机器校验过的达标组合（见 check-contrast.mjs）。 */
+ * accent-ink on accent-soft 是机器校验过的达标组合（见 check-contrast.mjs）。
+ * ★ 2026-09-26（D-086）：**再加一条不靠颜色的线索**（左边 3px 色条）——
+ *   「哪一段正在播」是这个页面上最要紧的状态，色弱学生不能只靠底色深浅判断；
+ *   `aria-current` 只解决屏幕阅读器，视觉上得有一个形状差异。 */
 .tpl--on {
   background: var(--k12-accent-soft);
   border-color: var(--k12-accent-border);
+  box-shadow: inset 3px 0 0 0 var(--k12-accent-ink), var(--k12-shadow-card);
 }
 .tpl--on .tpl__name,
 .tpl--on .tpl__concept,

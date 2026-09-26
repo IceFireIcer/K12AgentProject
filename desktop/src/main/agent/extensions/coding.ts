@@ -59,8 +59,14 @@
  *   失败一律返回可读中文 + `details.ok=false`（事件层据此发 `error` 事件，见 `agent/events.ts`）。
  */
 
+import { createHash } from 'node:crypto'
+
 import { Type, type Static } from '@sinclair/typebox'
 import { apiFetch } from '../../bridge/client.ts'
+import type {
+  CodeExerciseDraft,
+  CodeExerciseRequest
+} from '../coding/generator.ts'
 import {
   currentAgentSession,
   SIDECAR_UNAVAILABLE_TEXT,
@@ -194,12 +200,44 @@ export const GetCodeTemplateParams = Type.Object({
   )
 })
 
+/**
+ * `generate_code_exercise` 的参数（D-089）。
+ *
+ * ★ 两个都必填：`kpId` 决定这道题挂在哪个知识点上；`request` 是**学生的那句要求**——
+ *   它是「个性化」唯一的来源（原话只进提示词，库里只留指纹，见 `codeRequestHash`）。
+ */
+export const GenerateCodeExerciseParams = Type.Object({
+  // ★ 边界不在这里声明：契约（`GeneratedCodeSaveRequest.kp_id`）是唯一来源，
+  //   `check:tool-schema` 逐字段比边界 —— Tool 侧多写一个 minLength 就是一处漂移。
+  kpId: Type.String({
+    description: '要出题的知识点 id（例如 prog-loop-jr / agent-action-jr）'
+  }),
+  request: Type.String({
+    minLength: 1,
+    maxLength: 200,
+    description: '学生的那句个性化要求（例如「用外星人送快递来写循环」）'
+  })
+})
+export type GenerateCodeExerciseParamsType = Static<typeof GenerateCodeExerciseParams>
+
 export const GetCodingHintParams = Type.Object({
   kpId: Type.String({
     minLength: 1,
     maxLength: 64,
     description: '学生卡住的知识点 id（决定用哪一套分级提示，也决定失败计数按谁隔离）'
   }),
+  /**
+   * ★ 生成题专用（D-089）：这道题存在学生库里的 id（`generate_code_exercise` 的回执里给过）。
+   *
+   * 随包模板按 `kpId` 就能取到提示；**生成题取不到**（它不是随包资产，一题一份存在学生名下），
+   * 所以出题时把 `savedId` 一并交给模型，学生点「求助」时带回来 —— 提示才落得到那道题上。
+   */
+  savedId: Type.Optional(
+    Type.String({
+      maxLength: 64,
+      description: '生成题的 savedId（出题时回执里给过；随包模板的题不要带）'
+    })
+  ),
   reason: Type.Optional(
     Type.String({
       maxLength: 200,
@@ -246,6 +284,14 @@ export interface CodingExtensionOptions {
   log?: (line: string) => void
   /** 连续失败阈值（默认 {@link MAX_CONSECUTIVE_FAILURES}）——测试用来压缩到 2 次。 */
   maxConsecutiveFailures?: number
+  /**
+   * ★ 出题接缝（D-089）：**按学生要求现出一题**的实现。
+   *
+   * 默认不接（`undefined`）= 这条能力不可用 —— 那时 `generate_code_exercise` 会**如实报错**
+   * 并让模型改用对话讲，绝不产出「看起来像题、其实是编的」的东西。
+   * 生产由 `runtime.ts` 注入 `createCodeExerciseGenerator({ complete })`。
+   */
+  generate?: (request: CodeExerciseRequest) => Promise<CodeExerciseDraft>
 }
 
 /* ------------------------------------------------------------------ *
@@ -540,6 +586,32 @@ export function createRendererCodeRunner(options: {
  * 传 `null` 可以解绑（测试与热重载用）。
  */
 let boundRunner: CodeRunner | null = null
+
+/** 出题重试上限（含首次共 3 次）：与动画自由生成同一条口径 —— 两次还不够就说明不适合硬塞。 */
+const MAX_CODE_EXERCISE_ATTEMPTS = 2
+
+/**
+ * 出题请求的**指纹**（十六进制摘要）：学生原话不进库（与动画库同一条合规口径）。
+ *
+ * 键里带 `kpId`：同一个要求在不同知识点上就是两道不同的题，不该互相复用。
+ */
+export function codeRequestHash(kpId: string, request: string): string {
+  const normalised = `${kpId}\n${request}`.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase()
+  return createHash('sha1').update(normalised, 'utf8').digest('hex')
+}
+
+/** 出题回执 → 给模型的一句话（说清下一步，不要让它把脚手架念一遍）。 */
+export function renderExerciseText(template: CodeTemplateShape, savedId: string): string {
+  const todoCount = (template.scaffold.match(/TODO/g) ?? []).length
+  return (
+    `已经按学生的要求现出了一道「${template.kpId}」的 Python 练习题（${todoCount} 处 TODO），` +
+    '会以**编程卡片**的形式显示在对话里 —— 学生可以直接在卡片上改代码、点运行。' +
+    '**不要**把脚手架念一遍；用一两句话说明这次要做什么、以及完成的标准：' +
+    `「${template.expectedBehavior}」` +
+    `。这道题已经存进他自己的题里（savedId=${savedId}）：他点「求助」时，` +
+    `调 \`get_coding_hint\` 要带上这个 savedId。`
+  )
+}
 
 export function bindCodeRunner(runner: CodeRunner | null): void {
   boundRunner = runner
@@ -849,11 +921,17 @@ export function createCodingExtension(
         if (kpId === null) {
           return failed('给提示需要知识点 id（决定用哪一套分级提示）。')
         }
+        // ★ 生成题按 `savedId` 取（它不在随包目录里）；随包模板仍按 `kpId` 取（见 D-089）
+        const savedId = readNonEmptyString(params?.savedId)
 
         // ★ 「不跳级」在这里强制执行：级别由**已给过的最高级 +1** 决定，
         //   而不是让模型填一个 level —— 模型一旦能填，就会出现"直接要 3 级"绕开引导。
         const nextLevel = state.nextHintLevel(session.studentId, kpId)
-        const path = `/api/code/hint/${encodeURIComponent(kpId)}?level=${nextLevel}`
+        const path = savedId
+          ? `/api/code/generated/${encodeURIComponent(session.studentId)}/${encodeURIComponent(
+              savedId
+            )}/hint?level=${nextLevel}`
+          : `/api/code/hint/${encodeURIComponent(kpId)}?level=${nextLevel}`
 
         try {
           const response = await call(path, { method: 'GET' })
@@ -885,6 +963,147 @@ export function createCodingExtension(
         } catch (error) {
           return failed('取提示失败（本地服务不可用）。', error)
         }
+      }
+    })
+
+    /* ---------------------------------------------------------- *
+     * 2.5 generate_code_exercise —— 按学生要求**现出一道题**（D-089）
+     *
+     * 为什么需要它：随包模板只有三份（`prog-variable-jr` / `prog-loop-jr` / `prog-list-jr`），
+     * 学生说「想用外星人送快递来练循环」时那条路没有东西可给。这条路把「学生的要求」变成
+     * 一道**真的能做的题**：模型出结构化草稿 → Python 二次校验（缺 TODO / 提示不是三级 /
+     * 第 1 级带代码…一律 422）→ 存进**该学生名下** → 以编程卡片显示。
+     *
+     * ★★ 三条边界：
+     *   ① `solution` 只进库、绝不进卡片载荷（与题库的 `answer` 同一条纪律）；
+     *   ② 校验不过**不硬塞**：带原因重试 ≤2，仍不过就如实失败（让模型改用对话讲）；
+     *   ③ 学生原话（`request`）只进提示词与指纹，库里不存原话。
+     * ---------------------------------------------------------- */
+    pi.registerTool({
+      name: 'generate_code_exercise',
+      label: '出一道写代码的题',
+      description:
+        '★★ 出一道**让学生自己动手写代码**的编程练习题（Python，含 TODO 脚手架、能在编程卡片上' +
+        '直接改代码并点运行），并存在他自己的题里。' +
+        '**与 `generate_quiz` 的分工（选错就出成另一张卡片）**：' +
+        '`generate_quiz` 出的是**选择题/填空题**（口头作答）；本工具出的是**写代码的题**' +
+        '（有代码区、要点运行）。学生说「出几道题/练习一下/考考我」→ 用 `generate_quiz`；' +
+        '学生说「**写代码**的题 / 动手写的题 / 上机题 / 用代码实现的题」→ 用本工具。' +
+        '★ 随包模板只有三份（prog-variable-jr / prog-loop-jr / prog-list-jr）：想要别的情境、' +
+        '或想练的知识点本来没有模板时用本工具；已经用 `get_code_template` 取到模板就不要重复出题。',
+      promptSnippet: 'generate_code_exercise：出一道**写代码**的练习题（有 TODO 脚手架与运行按钮）',
+      promptGuidelines: [
+        '`request` 用学生自己的说法（他要的那个情境），不要改写成技术描述。',
+        '它出的是**写代码**的题，不是选择题 —— 学生要的是「练选择题」时改用 `generate_quiz`。',
+        '出好后用一两句话说明「这次要做什么」与「做对了会怎样」，**不要**把脚手架念一遍、更不要给答案。',
+        '学生点「求助」时，调 `get_coding_hint` 要带上这道题的 `savedId`（回执里给过）。'
+      ],
+      parameters: GenerateCodeExerciseParams,
+      execute: async (_toolCallId: string, params: GenerateCodeExerciseParamsType) => {
+        const session = currentAgentSession()
+        noteStudentBoundary(session?.studentId)
+        if (!session?.studentId) {
+          return failed(
+            '还没有绑定当前学生，没法把这道题存进他的题里。请先用对话把这件事讲清楚。'
+          )
+        }
+        const kpId = readNonEmptyString(params?.kpId)
+        const request = readNonEmptyString(params?.request)
+        if (kpId === null || request === null) {
+          return failed('出题需要知识点 id 与学生的那句要求（两个都要）。')
+        }
+        const generate = options.generate
+        if (!generate) {
+          return failed(
+            '按学生要求出题这条能力在这台电脑上不可用（没有可用的模型）。' +
+              '请改用对话把这件事讲清楚，或先给他取一份随包模板。'
+          )
+        }
+
+        const gradeLevel = readNonEmptyString(session.gradeLevel) ?? 'primary_high'
+        const promptHash = codeRequestHash(kpId, request)
+        let previousReason: string | undefined
+
+        // 校验不过就带原因重试（≤2 次），与动画那条自由生成同一条口径
+        for (let attempt = 0; attempt <= MAX_CODE_EXERCISE_ATTEMPTS; attempt += 1) {
+          let draft: CodeExerciseDraft
+          try {
+            draft = await generate({ kpId, gradeLevel, request, attempt, previousReason })
+          } catch (error) {
+            // ★ 模型那条路的失败也**要重试**（实测：它偶尔会把多行脚手架写成字符串里的真实换行
+            //   —— 那不是合法 JSON，重来一次基本就好了）。只有「无 Key」这种硬失败才立刻返回。
+            const reason = error instanceof Error ? error.message : String(error)
+            if (attempt < MAX_CODE_EXERCISE_ATTEMPTS && !reason.includes('没有配置 API Key')) {
+              previousReason = `上一次的返回不是可用的题目 JSON（${reason.slice(0, 80)}）`
+              log(`[coding] 出题失败（第 ${attempt + 1} 次）：${reason.slice(0, 120)}`)
+              continue
+            }
+            return failed('这次没能出成题（模型那条路不通）。请改用对话讲清楚这个知识点。', error)
+          }
+
+          try {
+            const response = await call(
+              `/api/code/generated/${encodeURIComponent(session.studentId)}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  kpId,
+                  gradeLevel,
+                  title: draft.title,
+                  expectedBehavior: draft.expectedBehavior,
+                  scaffold: draft.scaffold,
+                  expectedOutput: draft.expectedOutput,
+                  hints: draft.hints,
+                  solution: draft.solution,
+                  promptHash
+                })
+              }
+            )
+            if (response.ok) {
+              const saved = (await response.json()) as Record<string, unknown>
+              const savedId = readNonEmptyString(saved.savedId)
+              if (savedId === null) {
+                return failed('这道题存是存下了，但回执里没有 id（卡片没法找回提示）。')
+              }
+              const template = normalizeTemplate(saved)
+              if (template === null) {
+                return failed('出题回执不符合契约（缺 kpId/scaffold/expectedBehavior）。')
+              }
+              log(
+                `[coding] 已出题并存进学生库：知识点=${kpId} id=${savedId}（第 ${attempt + 1} 次尝试）`
+              )
+              return ok(
+                renderExerciseText(template, savedId),
+                asCodingPayload({
+                  ...template,
+                  savedId,
+                  title: typeof saved.title === 'string' ? saved.title : draft.title,
+                  expectedOutput: draft.expectedOutput
+                })
+              )
+            }
+
+            const snippet = await readSnippet(response)
+            if (response.status === 422) {
+              // ★ 服务端说清「哪里不合格」——把它带进下一次尝试，而不是原样重试
+              previousReason = snippet || '不合题意'
+              log(`[coding] 出题被拒（第 ${attempt + 1} 次）：${previousReason}`)
+              continue
+            }
+            return failed(
+              `出题失败：本地服务返回 HTTP ${response.status}${snippet ? `（${snippet}）` : ''}。`,
+              SIDECAR_UNAVAILABLE_TEXT
+            )
+          } catch (error) {
+            return failed('出题失败（本地服务不可用）。', error)
+          }
+        }
+
+        return failed(
+          `这道题试了几次都没法用${previousReason ? `（${previousReason}）` : ''}。` +
+            '请改用对话把知识点讲清楚，别硬塞一道不合格的题给学生。'
+        )
       }
     })
 

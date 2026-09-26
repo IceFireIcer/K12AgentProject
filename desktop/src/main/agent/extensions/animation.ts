@@ -1345,6 +1345,25 @@ export function createAnimationExtension(
             )
           }
 
+          /**
+           * ★★ 存入学生动画库（2026-09-26，D-088）：与 `compose_animation` 同一条纪律 —— **做出来就存**。
+           *
+           * 在此之前只有 compose 那条路存库，于是「同一件事走哪条 Tool」决定了它能不能留下：
+           * 学生用 `generate_animation` 看到一段动画，回头在「我的动画」里却找不到，
+           * 卡片上那个「我的」按钮也永远是灰的（它靠库里有匹配项才可点）。
+           * 复用键里的「请求」一维用**概念** —— 这条路是按模板渲染的，概念就是它的身份。
+           * 尽力而为（失败只影响「下次还得现做」），与 compose 那条路完全一致。
+           */
+          if (session?.studentId) {
+            await saveGeneratedAnimation({
+              studentId: session.studentId,
+              kpId,
+              gradeLevel,
+              request: concept,
+              payload: outcome.payload
+            })
+          }
+
           // 把「试了几次 / 为什么降级 / 托管地址 / payload_id」放进 details：
           // 事件层会把 details 展开成 payload（`agent/events.ts` 的 readPayload），
           // 轨迹图（`agent/trace.ts`）也会读其中的 `degraded` 标记。

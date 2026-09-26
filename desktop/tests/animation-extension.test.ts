@@ -191,6 +191,31 @@ function listFiles(root: string, extensions: string[]): string[] {
   return found
 }
 
+/**
+ * 读一份**渲染层源码**，同时给出「剥注释后的代码」。
+ *
+ * ★ 剥注释那一步不是洁癖：本文件与源码里都用**自然语言**记录了这段历史
+ *   （「为什么删掉托管开关」「`:src` 会让 KeepAlive 回来的 iframe 重取一次」），
+ *   注释里必然出现 `useHosted` / `hosted` / `resourceUrl` 这些标识符。扫整份源码会把
+ *   **说明**当成**实现**（实测：第一版 `doesNotMatch(/useHosted/)` 就是被自己的注释判红），
+ *   那等于禁止后人在代码里记录历史，判据与意图背道而驰。
+ * `//` 前加 `[^:]` 看着：别吃掉 `http://` 这种 URL 里的双斜线。
+ *
+ * ★ 同时把 CRLF 归一成 `\n`：本仓库文件在 Windows 工作区里可能是 CRLF，
+ *   按 `\n` 写的切片锚点在 CRLF 文本里匹配不到（实测踩过：切片一路跑到文件尾，
+ *   断言去扫了整份源码，测试**假红**）。
+ *
+ * @param relativePath 相对 `src/renderer/src` 的路径（如 `views/Animation.vue`）
+ */
+function readRendererSource(relativePath: string): { source: string; code: string } {
+  const source = readFileSync(join(RENDERER_ROOT, relativePath), 'utf8').replace(/\r\n/g, '\n')
+  const code = source
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+  return { source, code }
+}
+
 /* ================================================================== *
  * 1. ★★ 沙箱纪律：只有 allow-scripts，绝无放开同源
  * ================================================================== */
@@ -813,33 +838,16 @@ test('★★ 对话卡片只从内联 HTML 挂 iframe —— 一次性 nonce 的
   // 走内联 = nonce 没被消费，也就没有「第二次」可言（used 与 expired 同时失效）。
   // 附带收益：卡片不再依赖 sidecar 存活（它挂了动画照样能播）。
   //
-  // ⚠️ 规格 D10 的托管服务**没有被架空**：动画讲解页的舞台是它的正常消费者
-  //   （每次 `renderAndHost` 现签新地址、不会复用旧地址；实测切页回来不发第二次请求）。
+  // ⚠️ 规格 D10 的托管服务**没有被架空**：服务照旧签发与校验（服务端用例照跑），
+  //   但**界面里已经没有消费者** —— 当时把动画讲解页当作「正当消费者」，理由写着
+  //   「每次现签新地址、切页回来不发第二次请求」；2026-09-26 的真机探针把这句话推翻了
+  //   （同一个地址被取 3 次、最后一条 403；切走 3 秒 / 8 秒各新增 2 次），讲解页也改成了内联。
+  //   一句话纪律：一次性凭据不许挂在长期存在的 DOM 上。
   //
   // ★ 为什么写成源码级断言：卡片是 `.vue`，`node --test` 里没有 Vue 运行时；
   //   而这条纪律的要害恰恰是「源码里还有没有把 URL 绑到 iframe 上的分支」——
   //   源码断言能直接钉住它，且**删掉/加回那条分支都必须显式改本测试**（这正是想要的摩擦）。
-  // ★ 先归一化换行：本仓库 `.vue` 在 Windows 工作区里可能是 CRLF，
-  //   按 `\n` 写的切片锚点在 CRLF 文本里匹配不到（实测踩过：切片一路跑到文件尾，
-  //   断言去扫了整份源码，测试**假红**）。
-  const source = readFileSync(
-    join(DESKTOP_ROOT, 'src', 'renderer', 'src', 'cards', 'AnimationCard.vue'),
-    'utf8'
-  ).replace(/\r\n/g, '\n')
-
-  /**
-   * 剥注释后只看**代码**。
-   *
-   * ⚠️ 必须有这一步：本文件用**自然语言**解释了「为什么删掉托管开关」，
-   *   注释里难免出现那个标识符。扫整份源码会把**说明**当成**实现**（实测：
-   *   第一版直接 `doesNotMatch(/useHosted/)` 就是被自己写的注释判红）——
-   *   那等于禁止后人在代码里记录历史，判据与意图背道而驰。
-   * `//` 前加 `[^:]` 看着：别吃掉 `http://` 这种 URL 里的双斜线。
-   */
-  const code = source
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+  const { source, code } = readRendererSource('cards/AnimationCard.vue')
 
   // ① iframe 只吃内联 HTML：**不许**出现把 URL 绑上去的写法
   assert.match(source, /:srcdoc="view\.html"/, 'iframe 必须直接吃内联 HTML')
@@ -883,6 +891,113 @@ test('★★ 对话卡片只从内联 HTML 挂 iframe —— 一次性 nonce 的
 
   // ⑤ 探针口径：`data-resource` 如实写死 inline（CDP 据此确认走了哪条路）
   assert.match(source, /data-resource="inline"/, 'data-resource 必须如实标注当前数据源')
+})
+
+test('★★ 动画讲解页的舞台也只从内联 HTML 挂 iframe —— 一次性地址不再被任何界面绑定', () => {
+  // ── 这条断言挡的是**同一个缺陷的第二个出口**（用户 2026-09-26 再次报同一串报错） ──
+  // 卡片改内联之后，托管地址的消费者只剩动画讲解页的舞台（`:src="anim.hosted?.url"`）。
+  // 真机探针（`scripts/ux-probe-animation-nonce.mjs`，`npm run ux:nonce`）实测：
+  // 同一个一次性地址被取 **3 次**、最后一条响应 **403**；切走 3 秒 / 8 秒再回来各新增 2 次请求。
+  // 所以 D-079 ③ 那句「切页回来不会二次请求」是一次测量留下的印象，不是一条性质 ——
+  // 而且那次测量本身不可靠：更短停留那一轮探针的侧栏标签写错、**根本没切页**（见 P-138）。
+  // 根因与卡片完全相同：`<KeepAlive>` 保住的是组件树，iframe 文档是另一套生命周期 ——
+  // 隐藏久了会被丢弃，回来时用**同一个 `src`** 重取。
+  //
+  // 现在的口径：本页也走内联 `srcdoc`（与卡片同一配方）。托管的文件就是渲染产物本身
+  // （`hostAnimation({kpId, html})` 原样落盘），所以内容一字未变 —— 只是不消费 nonce、
+  // 不再有任何网络往返，也就没有「第二次」可言。
+  const { source, code } = readRendererSource('views/Animation.vue')
+
+  // ① 舞台 iframe 吃内联 HTML；整页不许再出现把地址绑上去的写法
+  assert.match(source, /:srcdoc="stagePayload\?\.html"/, '舞台 iframe 必须直接吃渲染产物')
+  assert.doesNotMatch(
+    code,
+    /:src="/,
+    '本页不许再出现 :src= —— 绑了就等于把一次性地址交给浏览器去取第二次'
+  )
+  assert.doesNotMatch(
+    code,
+    /hosted|renderAndHost/,
+    '一次性托管地址的消费链要从本页删干净：留着就有人会把那条路径加回来'
+  )
+
+  // ② 挂载条件只看**这一份产物**：没有可播的 HTML / 认不出烘焙的 id → 文字讲解，绝不白屏
+  assert.match(
+    source,
+    /return stagePayload\.value === null \? 'text' : 'live'/,
+    '舞台进 live 的条件必须只是「stagePayload 能用」（HTML + 产物里烘焙的 payload_id）'
+  )
+  assert.match(
+    source,
+    /const payloadId = readBakedPayloadId\(html\)/,
+    'payload_id 必须从产物 HTML 里取回来 —— 与 HTML 同源，结构上不可能错配（D-080 / D-084）'
+  )
+
+  // ③ 宿主拿到的是内联 HTML，不是地址
+  // ★ 切片锚点先各判一次存在性：锚点漂了还硬切，切片会一路跑到文件尾 ——
+  //   那时下面两条断言扫的是**别的区间**，会给出看起来正常的假绿（本仓库踩过）。
+  const buildHostAt = source.indexOf('function buildHost(')
+  const goDegradedAt = source.indexOf('function goDegraded(')
+  assert.ok(
+    buildHostAt > 0 && goDegradedAt > buildHostAt,
+    'buildHost / goDegraded 的切片锚点必须都在'
+  )
+  const buildHostBody = source.slice(buildHostAt, goDegradedAt)
+  assert.match(buildHostBody, /srcdoc,/, 'buildHost 必须把内联 HTML 交给宿主')
+  assert.doesNotMatch(buildHostBody, /resourceUrl/, 'buildHost 不得再传一次性地址')
+
+  // ④ 重建宿主的触发条件是**这一份产物**，不是任何 URL
+  const watchAt = source.indexOf('watch(stagePayload')
+  const watchEndAt = source.indexOf('// iframe 元素在')
+  assert.ok(watchAt > 0 && watchEndAt > watchAt, '重建宿主那段 watch 的切片锚点必须都在')
+  const watchBody = source.slice(watchAt, watchEndAt)
+  assert.match(
+    watchBody,
+    /buildHost\(payload\.payloadId, payload\.html\)/,
+    '宿主必须拿同一份产物的 id 与 HTML（两者同源，不得各取一处）'
+  )
+  assert.doesNotMatch(watchBody, /\.url/, '触发条件不得再是地址：内联没有地址可言')
+
+  // ⑤ 探针口径：`data-resource` 如实写死 inline（CDP 据此确认走了哪条路）
+  assert.match(source, /data-resource="inline"/, 'data-resource 必须如实标注当前数据源')
+})
+
+test('★★ 渲染层里只有能力层能碰到一次性托管链 —— 任何界面文件都不得引用它', () => {
+  // ── 这一条是**类别守卫**，不是某一页的守卫 ──────────────────────────────
+  // 上面两条钉的是「这两页怎么绑 iframe」。但如果有人换个写法把一次性地址接回界面，
+  // 它们抓不到：`iframeEl.value.src = url`、`v-bind="{ src: url }"`、`window.open(url)`、
+  // `<img :src>`、`fetch(url)`，甚至写进**别的** `.vue`……逐个穷举写法既写不完也读不懂。
+  //
+  // 换一条与写法无关的判据：**界面文件根本不许出现托管链的标识符**。
+  // 一次性地址只可能来自这几个 token（`hosted` / `hostAnimation` / `renderAndHost` /
+  // `resourceUrl`），谁要把地址绑进 DOM，第一步必然是引用其中之一 ——
+  // 于是「引用了就红」比「绑了才红」覆盖面更宽，也更容易解释。
+  //
+  // 允许出现的**只有能力层三个文件**（它们不渲染任何东西，且都有各自的安全边界测试）：
+  //   · `stores/animation.ts`      —— 托管能力的调用方（`host()` / `renderAndHost()`）
+  //   · `api/data.ts`              —— 桥的接口声明（`hostAnimation` 白名单方法）
+  //   · `sandbox/iframe-host.ts`   —— 载荷投影与「只认回环」的安全边界（`readLoopbackUrl`）
+  const ALLOWED = new Set([
+    'stores/animation.ts',
+    'api/data.ts',
+    'sandbox/iframe-host.ts'
+  ])
+  const TOKENS = /\b(hosted|hostAnimation|renderAndHost|resourceUrl)\b/
+  const rendererRoot = join(DESKTOP_ROOT, 'src', 'renderer', 'src')
+
+  const offenders: string[] = []
+  for (const file of listFiles(rendererRoot, ['.vue', '.ts'])) {
+    const relativePath = relative(rendererRoot, file).replace(/\\/g, '/')
+    if (ALLOWED.has(relativePath)) continue
+    const { code } = readRendererSource(relativePath)
+    const hit = TOKENS.exec(code)
+    if (hit) offenders.push(`${relativePath} → 「${hit[0]}」`)
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    '界面文件不得引用一次性托管链的标识符（要消费它，先想清楚「这个载体会不会取第二次」——见 D-084）'
+  )
 })
 
 /* ================================================================== *

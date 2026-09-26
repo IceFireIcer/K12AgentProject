@@ -1017,3 +1017,25 @@ test('★★ 编程卡片：`codeOk` 是「学生代码跑通没有」的判据�
   const both = readCodingCard({ kpId: 'x', codeOk: true, ok: false, feedback: 'f' })
   assert.equal(both.kind === 'result' ? both.ok : null, true, '读的是 codeOk，不是 ok')
 })
+
+test('★★ 编程卡片：分级提示有自己的回声，不再落到「这张卡片这次没画出来」（D-089）', async () => {
+  const { readCodingCard, projectHint } = await import('../src/renderer/src/cards/coding.ts')
+
+  // `get_coding_hint` 的载荷形状：`{kpId, level, hint}`（没有 scaffold / feedback）
+  const hint = readCodingCard({ kpId: 'prog-loop-jr', level: 2, hint: '先想每一轮要比到哪儿。' })
+  assert.equal(
+    hint.kind,
+    'hint',
+    '★ 提示载荷必须认出来：落到 unknown 的话，学生点完「求助」会看到一句假故障'
+  )
+  assert.equal(hint.kind === 'hint' ? hint.level : null, 2)
+  assert.equal(hint.kind === 'hint' ? hint.hint : '', '先想每一轮要比到哪儿。', '提示原文照后端给，不许改写')
+
+  // 累积呈现的那条路不受影响（同一份数据两种用法）
+  assert.deepEqual(projectHint({ kpId: 'x', level: 1, hint: 'a' }), { level: 1, hint: 'a' })
+  assert.equal(projectHint({ kpId: 'x', level: 4, hint: 'a' }), null, '级别只认 1/2/3')
+
+  // 有 scaffold 的载荷仍然是模板卡（判据不能被提示分支抢走）
+  const template = readCodingCard({ kpId: 'prog-loop-jr', scaffold: 'for i in range(TODO):' , expectedBehavior: 'b' })
+  assert.equal(template.kind, 'template')
+})

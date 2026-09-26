@@ -530,6 +530,25 @@ const interruptNotice = computed(() => {
          ② 一句学生话说明「卡片这次没画出来」，配上能自己走的路（再出一遍 / 用话讲）；
          ③ 主进程给的排障原文只进 `data-*` 属性（与动画卡片的 `data-degrade-reason` 同一手法），
             脚本与排障能读到，学生不用看。 -->
+  <!-- ★ 分级提示自己那张卡（D-089）：学生点完「求助」总得有个回声。
+       提示正文**照后端原文**显示（卡片不生成任何提示文本），并说明它在编程卡里会累积。 -->
+  <article
+    v-else-if="view.kind === 'hint'"
+    class="coding coding--hint"
+    data-testid="coding-card-hint"
+    :data-level="view.level"
+    :data-kp-id="view.kpId"
+  >
+    <header class="coding__head">
+      <span class="title">编程提示</span>
+      <span class="chip">第 {{ view.level }} 级 / 共 3 级</span>
+    </header>
+    <p class="coding__goal" data-testid="coding-hint-text">{{ view.hint }}</p>
+    <p class="coding__fallback">
+      这条提示也会累加到上面那张编程卡里（{{ view.level }} 级为止），照着改一版再点运行。
+    </p>
+  </article>
+
   <article
     v-else-if="view.kind === 'unknown'"
     class="coding coding--unknown"

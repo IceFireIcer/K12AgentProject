@@ -124,6 +124,10 @@ RAW_COLOUR_RE = r"#[0-9a-fA-F]{3,8}\b|rgba?\("
 #: 学生面文案的禁忌标记（内容卫生守卫同款，本文件在**动画这一半**再盯一遍）。
 FORBIDDEN_MARKS = ("…", "...", "——", "**", "`")
 
+#: 步骤条允许用的位置量词（D-087）：步骤条是**运行时元素**，它必须说内容已经在用的词。
+#: 出现新词时这条守卫会红 —— 那是提醒你把它加进来（而不是让步骤条自己造一个说法）。
+STEP_UNIT_WORDS = ("站", "轮", "组", "件", "条", "段", "行", "层", "圈", "次", "个问题", "步")
+
 
 def _generated_templates() -> list:
     """发货目录里**由生成器产出**的那 206 份（带 `K12-ARCHETYPE` 标记）。"""
@@ -837,6 +841,82 @@ class TestGeneratedAnimationQuality(unittest.TestCase):
                             text,
                             f"{template.id}.{field} 出现省略号「{mark}」（文案被截断了？）",
                         )
+
+    def test_步骤条只数位置_且说该动画自己的量词(self) -> None:
+        """★★ 坐标不变量（D-087）：一份动画只有**一套**位置坐标。
+
+        缺陷现场（实测）：步骤条原来数的是**相位**（`共 COUNT + 2 步`，含布景与收尾两拍），
+        而节点徽标与字幕数的是**位置**（「第 1…4 段」）——
+        于是同一段收尾里字幕写着「一共 4 段」、步骤条写着「共 6 步」：
+        学生在同一时刻读到三个数（段 / 步 / 百分比），建立不起「讲到哪了」。
+        另一处真缺陷：`counter` 原型的相位数声明是 `TIMES + 2`，步骤条却按 `COUNT + 2` 算，
+        `times > 行数` 时两者必然对不上 —— 根因是「步骤条在数相位」，这一条断言把它钉死。
+
+        四条判据（都在发货产物上静态可查）：
+          ① 一份模板里所有步骤条调用的**总数**只有一个表达式；
+          ② 那个表达式**不带 `+ N`**（带的就是把布景/收尾两拍算进去了）；
+          ③ **量词只有一个**（一份动画一套说法）；
+          ④ 量词必须是内容自己在用的词 —— 正文里出现过「第 N <量词>」；
+             若这份动画正文里**没有任何**位置编号（如 `network` 的八拍），量词只许用中性的「步」。
+        """
+        # ★★ 必须匹配**所有**步骤条调用（含参数个数不对的）：上一版正则只认「三参且带引号量词」
+        #    的调用，于是 `h.step(2, STEPS + 3)` 这种漏了量词的调用整条被跳过 —— 守卫是绿的，
+        #    运行时的步骤条却在说另一个词（D-087 的第二层缺陷就是这么漏过去的）。
+        call_re = re.compile(r"(?:h|Sandbox)\.step\(([^)]*)\)")
+        step_re = re.compile(r"(?:h|Sandbox)\.step\(([^,)]+), ([^,)]+), '([^']+)'\)")
+        units_re = "|".join(
+            re.escape(word) for word in sorted(STEP_UNIT_WORDS, key=len, reverse=True)
+        )
+        # 内容在用的位置量词，三个来源取并集：
+        #   ① 字面量编号「第 N 站」；② 读数清单里的单位（`"unit": "圈"`）；
+        #   ③ 拼接式字幕（`'第 ' + round + ' 圈：…'`）。
+        ordinal_re = re.compile(r"第\s*\d+\s*(" + units_re + ")")
+        concat_re = re.compile(r"第 '\s*\+\s*[\w.]+\s*\+\s*'(" + units_re + ")")
+        readout_re = re.compile(r'"unit"\s*:\s*"([^"]{1,4})"')
+        for template in self.generated:
+            with self.subTest(template=template.id):
+                raw_calls = call_re.findall(template.script)
+                self.assertTrue(raw_calls, f"{template.id} 没有任何步骤条调用（生成器契约变了？）")
+                for args in raw_calls:
+                    parts = [part.strip() for part in args.split(",")]
+                    self.assertEqual(
+                        len(parts),
+                        3,
+                        f"{template.id} 步骤条调用必须是（序号, 总数, 量词）：step({args})",
+                    )
+                    # 允许两种：原型里写死的字面量（`'段'`），以及公共透传那一行的变量
+                    # （`Sandbox.step(at, total, word)` —— 它把量词原样交给 runtime）。
+                    self.assertRegex(
+                        parts[2],
+                        r"^(?:'[^']+'|word|unit)$",
+                        f"{template.id} 步骤条的量词只该是引号里的字面量或透传变量：{parts[2]!r}",
+                    )
+                calls = step_re.findall(template.script)
+                totals = {total.strip() for _, total, _ in calls}
+                units = {unit for _, _, unit in calls}
+                self.assertEqual(len(totals), 1, f"{template.id} 步骤条总数不唯一：{sorted(totals)}")
+                self.assertEqual(len(units), 1, f"{template.id} 步骤条量词不唯一：{sorted(units)}")
+                total, unit = totals.pop(), units.pop()
+                self.assertNotRegex(
+                    total,
+                    r"\+\s*\d",
+                    f"{template.id} 步骤条总数带相位偏移（只该数位置）：{total}",
+                )
+                self.assertIn(unit, STEP_UNIT_WORDS, f"{template.id} 步骤条量词不在词表里：{unit!r}")
+                used = set(ordinal_re.findall(template.script + template.body))
+                used |= set(readout_re.findall(template.script))
+                used |= set(concat_re.findall(template.script))
+                self.assertTrue(
+                    unit in used or unit == "步",
+                    f"{template.id} 步骤条说「{unit}」，而这份动画用过的位置量词是 {sorted(used)}"
+                    "（没有位置量词时才允许用中性的「步」）",
+                )
+                if total.isdigit():
+                    indexes = [int(m) for m in re.findall(r"\.step\((\d+),", template.script)]
+                    self.assertTrue(indexes, f"{template.id} 步骤条序号全是表达式，无法核对上限")
+                    self.assertLessEqual(
+                        max(indexes), int(total), f"{template.id} 步骤条序号超过总数"
+                    )
 
     def test_时长按原型与皮肤分档_不是全库一个数(self) -> None:
         """★ 每份的 duration_ms 落在（原型 × 皮肤）的区间里，且**不是所有模板都一样**。"""

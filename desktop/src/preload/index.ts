@@ -20,6 +20,7 @@ import {
   type AnimationSavedDeleteRequest,
   type AnimationSavedGetRequest,
   type AnimationSavedListRequest,
+  type QuizGeneratedListRequest,
   type AnimationSavedSaveRequest,
   type AnimationTemplatesRequest,
   type ChapterCallResult,
@@ -282,6 +283,14 @@ export interface K12Api {
   readSavedAnimations(payload?: AnimationSavedListRequest): Promise<StudyCallResult>
   /** ★ 取库里的一条（**带 HTML**，可以交给沙箱播）。 */
   readSavedAnimation(payload: AnimationSavedGetRequest): Promise<StudyCallResult>
+  /**
+   * ★★ 读**当前学生自己的生成题**（`GET /api/quiz/generated/{id}`，D-088）。
+   *
+   * ★ 入参里**没有 studentId**：身份由主进程决定（能指定 id 就等于能读别人的题）。
+   * ★ 返回值与题库那条路同形（`QuizPayload`，结构上没有答案），所以「我的题目」
+   *   与闯关页的题共用同一套解析与判分链路（答题仍按 qid 走 `quizGrade`）。
+   */
+  readGeneratedQuestions(payload?: QuizGeneratedListRequest): Promise<StudyCallResult>
   /**
    * ★ 把一份已经生成好的动画存进库里。
    * ★ `promptHash` 是**十六进制摘要**：学生原话一个字都不进库。
@@ -596,6 +605,11 @@ const api: K12Api = {
   readSavedAnimations: (payload): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.animationSavedList, payload) as Promise<StudyCallResult>,
 
+  // ── 学生自己的生成题（D-088）：「智团团给我出过的题」的读路径 ────────────────
+  // ★ 同样不带 studentId：身份由主进程决定（递进去就等于允许读别人的题）。
+  readGeneratedQuestions: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.quizGeneratedList, payload) as Promise<StudyCallResult>,
+
   readSavedAnimation: (payload): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.animationSavedGet, payload) as Promise<StudyCallResult>,
 
@@ -791,6 +805,8 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   // 学生动画库 + 按需现做（invoke；**身份由主进程决定**，请求类型里没有 studentId）
   IPC.animationSavedList,
   IPC.animationSavedGet,
+  // 学生自己的生成题（读；身份由主进程决定）
+  IPC.quizGeneratedList,
   IPC.animationSavedSave,
   IPC.animationSavedDelete,
   IPC.animationCompose,

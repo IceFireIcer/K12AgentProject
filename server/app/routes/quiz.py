@@ -1400,6 +1400,9 @@ def register_variants(
                 rubric=(item.rubric or "").strip() or None,
                 source="generated",
                 created_at=None,
+                # ★ 归属（D-088）：登记时就记下「这是谁的题」—— 否则「我的题目」列不出来
+                #   （qid 里只有随机段，没有学生）。这条也是「生成题归学生个人」的唯一写入点。
+                student_id=student,
             )
         )
 
@@ -1971,3 +1974,71 @@ __all__ = [
     "select_questions",
     "student_db_path",
 ]
+
+
+# --------------------------------------------- 学生自己的生成题（D-088） -----
+@router.get(
+    "/quiz/generated/{student_id}",
+    response_model=QuizPayload,
+    summary="列出该学生自己的生成题（结构上不含标准答案）",
+)
+def list_generated_questions(
+    request: Request,
+    student_id: str,
+    kp_id: str | None = Query(None, description="只看这个知识点的题（可选）"),
+    kpId: str | None = Query(None, include_in_schema=False),
+    limit: int = Query(60, ge=1, le=200, description="最多回几道（最近登记的在前）"),
+) -> QuizPayload:
+    """把「智团团给这个学生出过的题」列出来（``generated_question`` 里归属他的那些）。
+
+    ★ 这是 D-088 补的**唯一读路径**：在此之前生成题只能按 qid 判分
+      （``POST /api/quiz/grade``），谁都列不出「这个学生有过哪些生成题」——
+      学生做完一轮就再也见不到那些题了（存了，但拿不回来）。
+    ★★ 出参仍是 :class:`QuizPayload`（``source="generated"``），``questions`` 全是
+      :class:`QuizQuestionOut` —— **结构上没有 ``answer``/``explanation``**，
+      与题库那条路共用同一个投影（``QuizPayload.from_internal``），所以前端与 Extension
+      不需要为「生成题」写第二套解析。
+    ★ 判分不依赖这条：答题仍按 ``qid`` 走 ``POST /api/quiz/grade``（qid 自带随机段，
+      不可能与真题撞车；见 :data:`GENERATED_QID_PREFIX`）。
+    ★ 没有归属的旧行（v3 迁移之前登记的）不会被任何学生认领 —— 这是有意的：
+      没有归属的题不该出现在谁的名下。
+    """
+    if not STUDENT_ID_RE.match(student_id):
+        raise HTTPException(
+            status_code=422,
+            detail="studentId 不合法（只允许字母、数字、下划线、连字符）",
+        )
+
+    wanted_kp = (kp_id or kpId or "").strip()
+    # ★ D4：与画像/学段/动画路由同源 —— 只认显式 `--data-dir`，拿不到就 503
+    store = open_learning_store(require_data_dir(request), student_id)
+    try:
+        records = store.generated_questions(kp_id=wanted_kp or None, student_id=student_id)
+        # 最近登记的在前（列表的用法是「我出过的题」，新的更相关）；取最后 limit 道再倒过来
+        recent = list(reversed(records[-limit:]))
+
+        questions = [
+            QuizQuestion(
+                qid=record.qid,
+                kp_id=record.kp_id,
+                type=record.type,  # type: ignore[arg-type]  # 落库前已过 `QuizQuestionType` 校验
+                stem=record.stem,
+                options=list(record.options) if record.options else None,
+                answer=record.reference_answer,
+                explanation=record.explanation,
+            )
+            for record in recent
+        ]
+    finally:
+        # ★ 与其它数据轨路由同一条纪律：连接一定要关（Windows 上不关会锁住 db 文件，
+        #   临时目录清理与「换数据目录」都会失败 —— 实测就是这么红的）
+        store.close()
+
+    logger.info(
+        "列出学生的生成题：学生=%s 知识点=%s 命中=%d（最近 %d 道）",
+        student_id,
+        wanted_kp or "（全部）",
+        len(records),
+        len(questions),
+    )
+    return QuizPayload.from_internal(kp_id=wanted_kp, source="generated", questions=questions)

@@ -1494,3 +1494,65 @@ class TestLearningHistory(LoopCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------- #
+# D-088：生成题**归学生**，并有一条读路径把它列回来（「我的题目」的数据面）
+# --------------------------------------------------------------------------- #
+class TestGeneratedQuestionLibrary(LoopCase):
+    """生成的题不是一次性的：登记时就归到这个学生名下，之后能列回来、能再判分。
+
+    ★ 为什么单独一组：在此之前生成题只有**写**路径（`/api/quiz/variants`）与按 qid 判分，
+      没有任何读路径 —— 学生做完一轮就再也见不到那些题（存了，拿不回来）。
+    """
+
+    def test_owner_can_list_them_back(self) -> None:
+        self.set_student("gen_lib_a")
+        self.register([_variant("lib-1", "prog-variable-jr", answer="2")])
+
+        response = self.client.get("/api/quiz/generated/gen_lib_a")
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["source"], "generated")
+        self.assertIn(_gq("lib-1"), [item["qid"] for item in body["questions"]])
+
+    def test_projection_has_no_answer_field(self) -> None:
+        """★ 与题库那条路同一个投影：结构上没有 answer / explanation / rubric。"""
+        self.set_student("gen_lib_b")
+        self.register([_variant("lib-2", "prog-variable-jr", answer=SENTINEL_ANSWER)])
+        text = self.client.get("/api/quiz/generated/gen_lib_b").text
+        self.assertNotIn(SENTINEL_ANSWER, text, "★ 读路径把标准答案带出去了")
+        for item in json.loads(text)["questions"]:
+            self.assertEqual(
+                set(item.keys()) & {"answer", "explanation", "rubric"},
+                set(),
+                f"生成题的对外结构多了字段：{sorted(item.keys())}",
+            )
+
+    def test_another_student_does_not_see_it(self) -> None:
+        self.set_student("gen_lib_c")
+        self.register([_variant("lib-3", "prog-variable-jr", answer="2")])
+        other = self.client.get("/api/quiz/generated/gen_lib_other").json()
+        self.assertEqual(other["questions"], [], "★ 学生的题串到别人名下了")
+
+    def test_kp_filter_and_order(self) -> None:
+        self.set_student("gen_lib_d")
+        self.register([_variant("lib-4", "prog-variable-jr", answer="2")])
+        self.register([_variant("lib-5", "prog-loop-jr", answer="3")])
+        only_loop = self.client.get("/api/quiz/generated/gen_lib_d?kpId=prog-loop-jr").json()
+        self.assertEqual([item["kpId"] for item in only_loop["questions"]], ["prog-loop-jr"])
+        both = self.client.get("/api/quiz/generated/gen_lib_d").json()
+        self.assertEqual(len(both["questions"]), 2)
+
+    def test_questions_stay_answerable_after_reload(self) -> None:
+        """★ 「能再使用」的判据：列回来的 qid **仍然可判分**（答案还在后端）。"""
+        self.set_student("gen_lib_e")
+        self.register([_variant("lib-6", "prog-variable-jr", answer="2")])
+        listed = self.client.get("/api/quiz/generated/gen_lib_e").json()["questions"][0]
+        again = self.grade(listed["qid"], "2")
+        self.assertEqual(again.status_code, 200, again.text)
+        self.assertTrue(again.json()["correct"], "列回来的题判分失败 —— 读路径把 qid 弄丢了？")
+
+    def test_bad_student_id_is_422(self) -> None:
+        response = self.client.get("/api/quiz/generated/有中文的id")
+        self.assertEqual(response.status_code, 422, response.text)

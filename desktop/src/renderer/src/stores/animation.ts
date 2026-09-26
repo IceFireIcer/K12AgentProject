@@ -51,6 +51,8 @@ export type AnimationTab = 'builtin' | 'mine'
  * 卡片按**自己手里那个 id** 校验每条 postMessage。如果播库里那份时另造一个 id，
  * 沙箱回的每条消息都会被当成别人的 → 永远等不到 ready → 5 秒后必然降级
  * （学生看到的是「加载不出来」，而库里那份明明是好的）。
+ * 同一条判据有两个调用方：这里（「我的动画」回放）与动画讲解页的舞台 —— 后者的
+ * `renderPayloadId` 是**请求发出前**就写下的，拿它配上一次的 HTML 会错配（见 D-080 / D-084）。
  * 主进程 `agent/extensions/animation.ts` 的 `readSavedPayloadId` 是同一判据的另一份实现
  * （那边给 Tool 用）；渲染进程这一份是必要重复 —— 缺了它，页面上的「我的动画」全播不出来。
  */
@@ -65,8 +67,8 @@ export interface SavedAnimationPlayable {
   payload: Record<string, unknown>
 }
 
-/** 从沙箱 HTML 里取回 `payload_id`（认不出返回 `null`）。 */
-export function readSavedPayloadId(html: string): string | null {
+/** 从沙箱 HTML 里取回**烘焙在产物里**的 `payload_id`（认不出返回 `null`）。 */
+export function readBakedPayloadId(html: string): string | null {
   const matched = /window\.__K12_PAYLOAD_ID__\s*=\s*"([^"]*)"/.exec(html)
   const candidate = matched?.[1] ?? ''
   return /^[A-Za-z0-9_-]{1,64}$/.test(candidate) ? candidate : null
@@ -534,7 +536,7 @@ export const useAnimationStore = defineStore('animation', () => {
       }
       const view = result.data as AnimationSavedView
       const html = typeof view.html === 'string' ? view.html : ''
-      const payloadId = readSavedPayloadId(html)
+      const payloadId = readBakedPayloadId(html)
       if (html.trim().length === 0 || payloadId === null) {
         // 记录在、文件没了（后端 404 之外的可能）或 id 取不回来：都不给一张播不出来的卡片
         savedError.value = '这条动画这次打不开，换一条试试。'

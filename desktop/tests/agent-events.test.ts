@@ -147,7 +147,7 @@ test('G1e citation：rag_search 无结果 / 结构不认时不发空 citation �
   }
 })
 
-test('G1f payload：表内 8 个 Tool 各映射到正确 kind（表只有一份，漂移即失败）', () => {
+test('G1f payload：表内 9 个 Tool 各映射到正确 kind（表只有一份，漂移即失败）', () => {
   /**
    * ★★ **期望表硬编码在这里**（以前是 `Object.entries(TOOL_TO_KIND)`，那是**自引用**：
    *    从实现里取一份再逐条断言同一对象的值，等于拿实现证明实现 —— 表整体改错它也绿，
@@ -166,11 +166,14 @@ test('G1f payload：表内 8 个 Tool 各映射到正确 kind（表只有一份�
     ['get_code_template', 'coding'],
     ['get_coding_hint', 'coding'],
     ['evaluate_code', 'coding'],
+    // ★ 2026-09-26（D-089）：按学生要求现出一道题 —— 与其它 coding Tool 同为 `coding` kind
+    //   （`kind` 的语义是「前端画哪种卡片」，不是「模型调了哪个 Tool」）。
+    ['generate_code_exercise', 'coding'],
     ['generate_quiz', 'quiz'],
     ['submit_quiz', 'quiz'],
     ['generate_variants', 'quiz']
   ]
-  assert.equal(expected.length, 8, '冻结表必须是 8 个 Tool')
+  assert.equal(expected.length, 9, '冻结表必须是 9 个 Tool')
   assert.deepEqual(
     [...expected].sort(),
     [...(Object.entries(TOOL_TO_KIND) as Array<[string, string]>)].sort(),

@@ -1000,6 +1000,64 @@
         "title": "EmbeddingMode",
         "type": "string"
       },
+      "GeneratedCodeSaveRequest": {
+        "additionalProperties": false,
+        "description": "``POST /api/code/generated/{student_id}`` 的请求体（D-089）。\n\n★ 谁填哪个字段：`title/expectedBehavior/scaffold/expectedOutput/hints/solution` 由**模型**产出；\n  `kpId/gradeLevel` 由**主进程**按会话填（学生身份与学段不由模型说了算）；\n  `promptHash` 也由主进程算（学生原话不进库 —— 与动画库同一条合规口径）。\n★ 服务端会**再校验一遍**（缺 TODO / 提示不是三级 / 第 1 级带代码…一律 422），\n  校验规则在 `routes/code.py` 的 `validate_generated_code_template`。",
+        "properties": {
+          "expectedBehavior": {
+            "title": "Expectedbehavior",
+            "type": "string"
+          },
+          "expectedOutput": {
+            "default": "",
+            "title": "Expectedoutput",
+            "type": "string"
+          },
+          "gradeLevel": {
+            "title": "Gradelevel",
+            "type": "string"
+          },
+          "hints": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Hints",
+            "type": "array"
+          },
+          "kpId": {
+            "title": "Kpid",
+            "type": "string"
+          },
+          "promptHash": {
+            "title": "Prompthash",
+            "type": "string"
+          },
+          "scaffold": {
+            "title": "Scaffold",
+            "type": "string"
+          },
+          "solution": {
+            "default": "",
+            "title": "Solution",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kpId",
+          "gradeLevel",
+          "expectedBehavior",
+          "scaffold",
+          "promptHash"
+        ],
+        "title": "GeneratedCodeSaveRequest",
+        "type": "object"
+      },
       "GradeEvaluationOut": {
         "additionalProperties": false,
         "description": "一轮的判定结论（演示脚本与报告直接用它叙述「第 N 轮为什么没改」）。",
@@ -5141,6 +5199,81 @@
           }
         },
         "summary": "按知识点 + 学段取题（剔除 answer）",
+        "tags": [
+          "quiz"
+        ]
+      }
+    },
+    "/api/quiz/generated/{student_id}": {
+      "get": {
+        "description": "把「智团团给这个学生出过的题」列出来（``generated_question`` 里归属他的那些）。\n\n★ 这是 D-088 补的**唯一读路径**：在此之前生成题只能按 qid 判分\n  （``POST /api/quiz/grade``），谁都列不出「这个学生有过哪些生成题」——\n  学生做完一轮就再也见不到那些题了（存了，但拿不回来）。\n★★ 出参仍是 :class:`QuizPayload`（``source=\"generated\"``），``questions`` 全是\n  :class:`QuizQuestionOut` —— **结构上没有 ``answer``/``explanation``**，\n  与题库那条路共用同一个投影（``QuizPayload.from_internal``），所以前端与 Extension\n  不需要为「生成题」写第二套解析。\n★ 判分不依赖这条：答题仍按 ``qid`` 走 ``POST /api/quiz/grade``（qid 自带随机段，\n  不可能与真题撞车；见 :data:`GENERATED_QID_PREFIX`）。\n★ 没有归属的旧行（v3 迁移之前登记的）不会被任何学生认领 —— 这是有意的：\n  没有归属的题不该出现在谁的名下。",
+        "operationId": "list_generated_questions_api_quiz_generated__student_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "只看这个知识点的题（可选）",
+            "in": "query",
+            "name": "kp_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "只看这个知识点的题（可选）",
+              "title": "Kp Id"
+            }
+          },
+          {
+            "description": "最多回几道（最近登记的在前）",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 60,
+              "description": "最多回几道（最近登记的在前）",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuizPayload"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "列出该学生自己的生成题（结构上不含标准答案）",
         "tags": [
           "quiz"
         ]

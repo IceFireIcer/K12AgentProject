@@ -599,6 +599,46 @@ const MUTATIONS = [
       "export const SETTINGS_BRIDGE_MISSING_HINT =\n" +
       "  '设置暂时打不开。先回对话页就好 —— 云端 embedding 端点也没配上，需要时请老师帮忙看看。'",
     expect: '豁免必须名副其实'
+  },
+  {
+    name: '59 动画讲解页：把一次性托管地址绑回舞台 iframe（P-131 的第二个出口）',
+    file: 'src/renderer/src/views/Animation.vue',
+    // 用户 2026-09-26 第二次撞到的那条路径：卡片改内联后，托管地址的消费者只剩这一页。
+    // 锚点是**当前实现**那一行（`:srcdoc="anim.payload?.html"`），改了实现要同步这里 ——
+    // 锚点漂了脚本会打印「找不到锚点」并把这条算作未验证，不会静默放过。
+    find: '            :srcdoc="stagePayload?.html"',
+    replace: '            :src="anim.hosted?.url"',
+    testFile: 'tests/animation-extension.test.ts',
+    expect: '动画讲解页的舞台也只从内联 HTML 挂 iframe'
+  },
+  {
+    name: '60 托管链的类别守卫：在**卡片**里取回 resourceUrl（准备绑 DOM 的第一步）',
+    file: 'src/renderer/src/cards/AnimationCard.vue',
+    // 第 59 条验的是「讲解页把 `:srcdoc` 改回 `:src`」——那种改法会被本页自己的守卫抓到。
+    // 这一条验的是**类别守卫**：换个文件、换个写法（先取回地址，再随便怎么用）也必须红。
+    // 之所以选「取回 resourceUrl」而不是「直接绑 DOM」：绑法穷举不完（`v-bind="{src}"`、
+    // `iframeEl.value.src=`、`window.open`…），而「引用标识符」是所有绑法的必经第一步。
+    // ⚠️ 锚点必须落在**卡片自己那条守卫看不见**的行上：mountIframe 那行原样保留，
+    //    否则这条变异会由卡片守卫变红，验不到类别守卫。
+    find: 'const mountIframe = ref<boolean>(shouldMountIframe(view.html))',
+    replace:
+      'const hostedUrl = view.resourceUrl\n' +
+      'const mountIframe = ref<boolean>(shouldMountIframe(view.html))',
+    testFile: 'tests/animation-extension.test.ts',
+    expect: '渲染层里只有能力层能碰到一次性托管链'
+  },
+  {
+    name: '61 动画舞台：去掉比例声明，高度退回写死的 340px（字又被缩到 7.8px）',
+    file: 'src/renderer/src/views/Animation.vue',
+    // 这一条守的是**学生实际读到几号字**：真机探针 `npm run ux:stage` 量到修前缩放 0.485×、
+    // 节点字 7.8px。探针要跑起整个应用，而变异验证跑的是单测，所以同一条不变量在
+    // `tests/ux-pages-regression.test.ts` 里另有一条**离线可跑**的 CSS 守卫 —— 变异打它。
+    // ⚠️⚠️ 锚点必须落在**单行**以内：本仓工作区是 CRLF（`.gitattributes` 只在提交时归一成 LF），
+    //   `find` 里写 `\n` 永远匹配不到 —— 本条第一版就是多行锚点，脚本打印「找不到锚点」才发现。
+    find: '  aspect-ratio: 720 / 468;',
+    replace: '  /* 变异：去掉比例声明 ⇒ iframe 高度退回 min-height 的 340px */',
+    testFile: 'tests/ux-pages-regression.test.ts',
+    expect: '动画舞台的高度必须'
   }
 ]
 

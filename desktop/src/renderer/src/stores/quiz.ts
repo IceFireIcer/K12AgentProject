@@ -46,6 +46,18 @@ export const useQuizStore = defineStore('quiz', () => {
   const bankLoading = ref(false)
   const bankError = ref<string | null>(null)
 
+  /**
+   * **智团团给这个学生出过的题**（`GET /api/quiz/generated/{id}`，D-088）。
+   *
+   * ★ 与 `bank` 是**两处来源、一条做题链路**：作答/判分/反馈完全同一条
+   *   （答完按 `qid` 走 `POST /api/quiz/grade`），所以页面把它们合并进同一个题列表，
+   *   只在题头标出「这道是智团团出的」。
+   * ★ 失败**不影响题库那批题**：这条读路径是加分项，挂了就当没有（不摆错误卡）。
+   */
+  // ★ `NonNullable<…>`：契约里 `questions` 有默认值 ⇒ 生成的 TS 标成可选；
+  //   而这里的状态**永远是一个数组**（没有就是空数组），别把可选性传染给下游
+  const generated = ref<NonNullable<QuizBankView['questions']>>([])
+  const generatedLoading = ref(false)
   /** 按 `qid` 存作答状态（翻回上一题时状态还在）。 */
   const attempts = ref<Record<string, QuizAttempt>>({})
   /** 本页判分过的题目数（用于「本轮小结」；**不编造历史记录**）。 */
@@ -134,7 +146,35 @@ export const useQuizStore = defineStore('quiz', () => {
     attempts.value = {}
     gradedCount.value = 0
     correctCount.value = 0
-    await loadBank(kpId)
+    // ★ 两处来源一起取：教材配套题（题库）+ 智团团给这个学生出过的题（D-088）
+    await Promise.all([loadBank(kpId), loadGenerated(kpId)])
+  }
+
+  /**
+   * 取「智团团给这个学生出过的题」（D-088）。
+   *
+   * ★ 静默失败：这条是**加分来源**（题库那条路才是主路径），拿不到就当没有 ——
+   *   给它摆一张错误卡只会让学生在「做题」这件事上读到两次失败。
+   * ★ 身份由主进程注入（请求里没有 studentId，见 `IPC.quizGeneratedList`）。
+   */
+  async function loadGenerated(kpId: string): Promise<void> {
+    const lookup = resolveDataBridge()
+    if (!lookup.ready) {
+      generated.value = []
+      return
+    }
+    generatedLoading.value = true
+    try {
+      const result = await lookup.bridge.readGeneratedQuestions({ kpId })
+      generated.value = result.ok
+        ? ((result.data as QuizBankView).questions ?? [])
+        : []
+    } catch {
+      // 同上：静默（这条读路径不是主路径）
+      generated.value = []
+    } finally {
+      generatedLoading.value = false
+    }
   }
 
   /** 取某知识点的题目（默认 3 道；数量由主进程校验上限）。 */
@@ -291,6 +331,8 @@ export const useQuizStore = defineStore('quiz', () => {
     bank,
     bankLoading,
     bankError,
+    generated,
+    generatedLoading,
     attempts,
     gradedCount,
     correctCount,
@@ -299,6 +341,7 @@ export const useQuizStore = defineStore('quiz', () => {
     loadProgress,
     selectLevel,
     loadBank,
+    loadGenerated,
     submit,
     restart
   }

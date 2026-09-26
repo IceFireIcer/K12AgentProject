@@ -752,7 +752,7 @@ test('C8 扩展注册两个 Tool，且 generate_animation 的参数面**一个�
   assert.equal('params' in props, false)
 })
 
-test('C8b generate_animation 仍然是「模板优先」：模板命中时既不生成也不查动画库', async () => {
+test('C8b generate_animation 仍然是「模板优先」：模板命中时不生成、不查库，但**会存库**（D-088）', async () => {
   const generator = countingGenerator()
   const fake = fakeRequester({
     compose: { status: 200, body: goodGeneratedPayload() },
@@ -768,10 +768,23 @@ test('C8b generate_animation 仍然是「模板优先」：模板命中时既不
 
   assert.equal(detailsOf(result).source, 'template', '模板命中就该是 template（既有行为不变）')
   assert.equal(generator.calls.length, 0, '模板命中不调自由生成')
+  // ★★ 2026-09-26（D-088）改写这条：**存库不再是 compose 的专属**。
+  //   原来是「查/存动画库只属于 compose_animation」—— 后果是同一件事**走哪条 Tool 决定了它
+  //   能不能留下**：学生用 `generate_animation` 看到一段动画，回头在「我的动画」里找不到，
+  //   卡片上那个「我的」按钮也永远是灰的（它靠库里有匹配项才可点）。
+  //   现在的口径（三条一起钉）：
+  //     ① 模板命中**仍然不生成**（自由生成那条路一个字不动）；
+  //     ② 模板命中**仍然不查复用**（这条路的产物是模板的确定性渲染，查库没有意义）；
+  //     ③ 但**要存**：做出来就进该学生的动画库，与 compose 那条路一致。
+  assert.equal(
+    fake.pathsOf('/api/animation/saved/lookup').length,
+    0,
+    '★ 模板路径不查复用（产物是模板的确定性渲染，查库只会多一次往返）'
+  )
   assert.equal(
     fake.pathsOf('/api/animation/saved').length,
-    0,
-    '★ 查/存动画库只属于 compose_animation —— generate_animation 的行为一个字都不改'
+    1,
+    '★ 模板路径**要存库**（D-088）：学生看到的动画必须能在「我的动画」里找回来'
   )
   // 渲染侧附加上也带学段了（这次要求的唯一一处改动）
   assert.equal(detailsOf(result).gradeLevel, 'junior')

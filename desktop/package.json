@@ -43,7 +43,9 @@
     "build:unpack": "npm run build && electron-builder --dir && npm run check:server:packaged",
     "build:portable": "npm run build && electron-builder --win portable && npm run check:server:packaged",
     "build:win": "npm run build && electron-builder --win && npm run check:server:packaged",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "ux:nonce": "node scripts/ux-probe-animation-nonce.mjs",
+    "ux:stage": "node scripts/ux-probe-stage-size.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.85.1",

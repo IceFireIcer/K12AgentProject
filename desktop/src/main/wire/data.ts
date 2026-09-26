@@ -21,6 +21,7 @@ import {
   type AnimationSavedDeleteRequest,
   type AnimationSavedGetRequest,
   type AnimationSavedListRequest,
+  type QuizGeneratedListRequest,
   type AnimationSavedSaveRequest,
   type AnimationTemplatesRequest,
   type CodeHintRequest,
@@ -178,6 +179,21 @@ export function animationSavedListPath(studentId: string, request: AnimationSave
   // ⚠️ 参数名用服务端声明过的那个（`gradeLevel` / `kpId`，`routes/animation_library.py` 的 Query 主名）
   if (request.gradeLevel) query.set('gradeLevel', request.gradeLevel)
   if (request.kpId) query.set('kpId', request.kpId)
+  const qs = query.toString()
+  return qs ? `${base}?${qs}` : base
+}
+
+/**
+ * 该学生自己的生成题（`GET /api/quiz/generated/{id}`）。
+ *
+ * ⚠️ 参数名用服务端声明过的那个（`kpId` / `limit`，`routes/quiz.py` 的 Query 主名）。
+ * ★ 与动画库那几条同一纪律：`studentId` 由这里**内部注入**，不进跨 IPC 的请求类型。
+ */
+export function quizGeneratedPath(studentId: string, request: QuizGeneratedListRequest = {}): string {
+  const base = `/api/quiz/generated/${encodeURIComponent(studentId)}`
+  const query = new URLSearchParams()
+  if (request.kpId) query.set('kpId', request.kpId)
+  if (typeof request.limit === 'number') query.set('limit', String(request.limit))
   const qs = query.toString()
   return qs ? `${base}?${qs}` : base
 }
@@ -363,6 +379,9 @@ export const dataRequests = {
 
   animationSavedList: (studentId: string, request: AnimationSavedListRequest = {}) =>
     requestJson(animationSavedListPath(studentId, request)),
+
+  quizGeneratedList: (studentId: string, request: QuizGeneratedListRequest = {}) =>
+    requestJson(quizGeneratedPath(studentId, request)),
 
   animationSavedGet: (studentId: string, request: AnimationSavedGetRequest) =>
     requestJson(animationSavedItemPath(studentId, request.savedId)),

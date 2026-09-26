@@ -36,7 +36,8 @@ if str(ROOT) not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import build_runtime_config  # noqa: E402
-from app.main import create_app  # noqa: E402
+from app.main import create_app
+from app.routes.students import open_learning_store  # noqa: E402
 from app.routes.profile import (  # noqa: E402
     RECOMMEND_LIMIT,
     REVIEW_MASTERY_CEILING,
@@ -666,6 +667,13 @@ class TestProfileBehaviour(PersonalizationCase):
         self.set_student("student_compliance")
         self.register([_variant("cmp-1", "ai-definition-pl")])
         self.answer("cmp-1", "2")
+        # ★ 生成编程题那张表走**独立迁移集**，只有真用到时才建 —— 这里显式建一次，
+        #   让下面的字段清单把它一起过一遍（不然它永远不在盘点范围内）。
+        _store = open_learning_store(self.tmp, "student_compliance")
+        try:
+            _store.ensure_code_tables()
+        finally:
+            _store.close()
 
         expected = {
             # ★ ``current_chapter`` 是「学生在学哪一章教材」的标题（= kb 的 chapter_title），
@@ -686,9 +694,18 @@ class TestProfileBehaviour(PersonalizationCase):
             "grade_history": {"id", "ts", "turn", "from_level", "to_level", "source", "confidence",
                               "signal_mark", "decided_by"},
             "grade_signals": {"id", "ts", "session_id", "signal_type", "value", "raw"},
+            # ★ ``student_id`` 是「这道题归哪个学生」（2026-09-26，D-088）：生成的题从此有归属，
+            #   否则「我的题目」在数据层根本表达不出来（qid 里只有随机段、没有学生）。
+            #   它不是新的个人信息：与 ``student.student_id`` 同一个值（主进程解析出来的那个）。
             "generated_question": {"qid", "kp_id", "grade_level", "type", "stem", "options",
                                    "reference_answer", "explanation", "rubric", "source",
-                                   "created_at"},
+                                   "created_at", "student_id"},
+            # ★ 学生的生成编程题（2026-09-26，D-089）：随包模板目录是只读的，生成题要有别处可存。
+            #   列里没有任何新采集项 —— `student_id` / `kp_id` / `grade_level` 都来自既有维度，
+            #   `prompt_hash` 是**请求指纹**（学生原话不进库，与 `saved_animation` 同一条合规口径）。
+            "generated_code_template": {"saved_id", "student_id", "kp_id", "grade_level", "title",
+                                       "expected_behavior", "scaffold", "expected_output", "hints",
+                                       "solution", "prompt_hash", "created_at"},
         }
         for table, columns in expected.items():
             actual = {

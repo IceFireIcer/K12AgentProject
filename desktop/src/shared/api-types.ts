@@ -765,6 +765,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/quiz/generated/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 列出该学生自己的生成题（结构上不含标准答案）
+         * @description 把「智团团给这个学生出过的题」列出来（``generated_question`` 里归属他的那些）。
+         *
+         *     ★ 这是 D-088 补的**唯一读路径**：在此之前生成题只能按 qid 判分
+         *       （``POST /api/quiz/grade``），谁都列不出「这个学生有过哪些生成题」——
+         *       学生做完一轮就再也见不到那些题了（存了，但拿不回来）。
+         *     ★★ 出参仍是 :class:`QuizPayload`（``source="generated"``），``questions`` 全是
+         *       :class:`QuizQuestionOut` —— **结构上没有 ``answer``/``explanation``**，
+         *       与题库那条路共用同一个投影（``QuizPayload.from_internal``），所以前端与 Extension
+         *       不需要为「生成题」写第二套解析。
+         *     ★ 判分不依赖这条：答题仍按 ``qid`` 走 ``POST /api/quiz/grade``（qid 自带随机段，
+         *       不可能与真题撞车；见 :data:`GENERATED_QID_PREFIX`）。
+         *     ★ 没有归属的旧行（v3 迁移之前登记的）不会被任何学生认领 —— 这是有意的：
+         *       没有归属的题不该出现在谁的名下。
+         */
+        get: operations["list_generated_questions_api_quiz_generated__student_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/quiz/grade": {
         parameters: {
             query?: never;
@@ -1722,6 +1754,47 @@ export interface components {
          * @enum {string}
          */
         EmbeddingMode: "local_fastembed" | "cloud_api" | "none";
+        /**
+         * GeneratedCodeSaveRequest
+         * @description ``POST /api/code/generated/{student_id}`` 的请求体（D-089）。
+         *
+         *     ★ 谁填哪个字段：`title/expectedBehavior/scaffold/expectedOutput/hints/solution` 由**模型**产出；
+         *       `kpId/gradeLevel` 由**主进程**按会话填（学生身份与学段不由模型说了算）；
+         *       `promptHash` 也由主进程算（学生原话不进库 —— 与动画库同一条合规口径）。
+         *     ★ 服务端会**再校验一遍**（缺 TODO / 提示不是三级 / 第 1 级带代码…一律 422），
+         *       校验规则在 `routes/code.py` 的 `validate_generated_code_template`。
+         */
+        GeneratedCodeSaveRequest: {
+            /** Expectedbehavior */
+            expectedBehavior: string;
+            /**
+             * Expectedoutput
+             * @default
+             */
+            expectedOutput: string;
+            /** Gradelevel */
+            gradeLevel: string;
+            /** Hints */
+            hints?: {
+                [key: string]: unknown;
+            }[];
+            /** Kpid */
+            kpId: string;
+            /** Prompthash */
+            promptHash: string;
+            /** Scaffold */
+            scaffold: string;
+            /**
+             * Solution
+             * @default
+             */
+            solution: string;
+            /**
+             * Title
+             * @default
+             */
+            title: string;
+        };
         /**
          * GradeEvaluationOut
          * @description 一轮的判定结论（演示脚本与报告直接用它叙述「第 N 轮为什么没改」）。
@@ -4163,6 +4236,42 @@ export interface operations {
             header?: never;
             path: {
                 kp_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuizPayload"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_generated_questions_api_quiz_generated__student_id__get: {
+        parameters: {
+            query?: {
+                /** @description 只看这个知识点的题（可选） */
+                kp_id?: string | null;
+                /** @description 最多回几道（最近登记的在前） */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                student_id: string;
             };
             cookie?: never;
         };

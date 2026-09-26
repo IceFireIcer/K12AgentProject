@@ -66,6 +66,7 @@ import {
   CODING_PAYLOAD_KIND,
   createCodingExtension,
   createCodingSessionState,
+  codeRequestHash,
   createRendererCodeRunner,
   EvaluateCodeParams,
   GetCodeTemplateParams,
@@ -605,11 +606,14 @@ test('G18-1i: pending 有上限 —— 渲染进程整体崩掉时不会无限�
 // 三把 Tool 的注册与参数 schema
 // ====================================================================== *
 
-test('coding-1: 恰好注册三个冻结 Tool（多一个少一个都不行）', () => {
+test('coding-1: 恰好注册四个冻结 Tool（多一个少一个都不行）', () => {
+  // ★ 2026-09-26（D-089）第四个：`generate_code_exercise` —— 按学生要求**现出一道题**
+  //   （随包模板只有三份，学生要别的情境时原来没有东西可给）。
+  //   它同样**不执行代码**：出题只走「模型出草稿 → 服务端校验并入库 → 卡片显示」。
   const { tools } = setup({ outcomes: [OK_OUTCOME] })
   assert.deepEqual(
     [...tools.keys()].sort(),
-    ['evaluate_code', 'get_code_template', 'get_coding_hint'],
+    ['evaluate_code', 'generate_code_exercise', 'get_code_template', 'get_coding_hint'],
     '编程扩展注册的 Tool 必须与 §9.2/9.3 的冻结清单逐字一致'
   )
 })
@@ -1479,4 +1483,110 @@ test('card-10: 状态条文案区分"被中断"与"普通失败"（票 18 的头
   const interrupted = formatRunMeta(1014, true)
   assert.match(interrupted, /已中断/, '中断必须能一眼看出来')
   assert.match(interrupted, /1014/, '同时要保留耗时（说明它是被超时停下的）')
+})
+
+// ====================================================================== *
+// D-089：按学生要求**现出一道题**（generate_code_exercise）
+// ====================================================================== *
+
+const EXERCISE_DRAFT = {
+  title: '外星人送快递',
+  expectedBehavior: '屏幕上依次出现 3 件快递的编号。',
+  scaffold: 'for i in range(TODO):\n    print("快递", i)\n',
+  expectedOutput: '快递 0\n快递 1\n快递 2',
+  hints: [
+    { level: 1, hint: '想让同一件事重复三次。' },
+    { level: 2, hint: '用循环，把次数写进括号。' },
+    { level: 3, hint: 'range(3) 会给出 0、1、2。' }
+  ],
+  solution: 'for i in range(3):\n    print("快递", i)'
+}
+
+test('coding-9: 出题 → 服务端校验入库 → 卡片载荷带 savedId（答案与提示都不进载荷）', async () => {
+  bindStudent()
+  const requested = '用外星人送快递来写循环'
+  const posted: Array<Record<string, unknown>> = []
+  const asked: Array<Record<string, unknown>> = []
+  const factory = createCodingExtension({
+    request: async (path, init) => {
+      if (path.startsWith('/api/code/generated/')) {
+        posted.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        return Response.json({
+          kpId: 'prog-loop-jr',
+          language: 'python',
+          scaffold: EXERCISE_DRAFT.scaffold,
+          expectedBehavior: EXERCISE_DRAFT.expectedBehavior,
+          savedId: 'code-abc123',
+          title: EXERCISE_DRAFT.title,
+          expectedOutput: EXERCISE_DRAFT.expectedOutput
+        })
+      }
+      return new Response(JSON.stringify({ detail: '不该走这条路' }), { status: 500 })
+    },
+    generate: async (request) => {
+      asked.push(request as unknown as Record<string, unknown>)
+      return EXERCISE_DRAFT
+    },
+    log: () => {}
+  })
+  const { tools, pi } = collectTools()
+  factory(pi)
+  const { details, text } = await callTool(tools, 'generate_code_exercise', {
+    kpId: 'prog-loop-jr',
+    request: requested
+  })
+
+  assert.equal(posted.length, 1, '出题必须真的发给服务端（存进学生名下）')
+  assert.equal(posted[0].solution, EXERCISE_DRAFT.solution, '★ 参照实现必须交给服务端（只进库）')
+  assert.deepEqual(posted[0].hints, EXERCISE_DRAFT.hints, '三级提示也要进库（按级从服务端发）')
+  assert.equal(
+    posted[0].promptHash,
+    codeRequestHash('prog-loop-jr', requested),
+    '指纹由主进程算（学生原话只进提示词）'
+  )
+  // ★ 判据是**学生那句话**（整句）不进请求体：题名里出现同一个词（「外星人送快递」）
+  //   是内容本身，不是原话 —— 断言过严会把「题名贴题」判成泄漏。
+  assert.equal(
+    JSON.stringify(posted[0]).includes(requested),
+    false,
+    '★ 学生原话（整句）不许出现在请求体里（只留指纹）'
+  )
+  assert.equal(asked[0]?.gradeLevel, 'junior', '学段以会话为准（模型说了不算）')
+
+  assert.equal(details.savedId, 'code-abc123', '卡片载荷要带上 savedId（提示要用它定位）')
+  assert.equal(details.kind, 'coding')
+  assert.equal('solution' in details, false, '★ 卡片载荷里不许有参照实现')
+  assert.equal('hints' in details, false, '★ 卡片载荷里不许有提示（提示按级从服务端发）')
+  assert.ok(text.includes('code-abc123'), '要给模型 savedId：学生点「求助」时要带上它')
+})
+
+test('coding-10: 出题被服务端拒（422）→ 带原因重试；仍不过就如实失败，不硬塞', async () => {
+  bindStudent()
+  let calls = 0
+  const reasons: Array<string | undefined> = []
+  const factory = createCodingExtension({
+    request: async () => {
+      calls += 1
+      return new Response(
+        JSON.stringify({ detail: '生成的编程题不合格：scaffold 里没有 TODO 标记' }),
+        { status: 422, headers: { 'Content-Type': 'application/json' } }
+      )
+    },
+    generate: async (request) => {
+      reasons.push((request as { previousReason?: string }).previousReason)
+      return EXERCISE_DRAFT
+    },
+    log: () => {}
+  })
+  const { tools, pi } = collectTools()
+  factory(pi)
+  const { text } = await callTool(tools, 'generate_code_exercise', {
+    kpId: 'prog-loop-jr',
+    request: '随便来一道'
+  })
+
+  assert.equal(calls, 3, '首次 + 重试 2 次 = 3 次（再不过就不适合硬塞）')
+  assert.equal(reasons[0], undefined, '第一次没有「上一次原因」')
+  assert.match(String(reasons[1]), /没有 TODO/, '★ 重试必须带服务端给的原因（否则等于原样重来）')
+  assert.match(text, /没法用|不合格/, '最终要如实说清「这道题没能用上」')
 })

@@ -88,6 +88,66 @@ function scriptError(message) {
  *   `params-contract-only` ★ 参数名集合模式：端点接受这个参数，Tool 不暴露（由主进程注入）
  */
 const ALLOWED_DIFFS = [
+  /* ── generate_code_exercise（D-089）：Tool 只让模型填「要哪个知识点 + 学生那句要求」，
+        其余字段由主进程按会话/产出填充（身份、学段、指纹与学生原话的落点都在主进程）── */
+  {
+    tool: 'generate_code_exercise',
+    field: 'request',
+    kind: 'tool-only',
+    reason:
+      '学生那句话只用于**提示词**与请求指纹（`prompt_hash` 由主进程算好再发）—— ' +
+      '它本身不进请求体，更不进库（与动画库同一条合规口径：SQLite 不存对话正文）。'
+  },
+  {
+    tool: 'generate_code_exercise',
+    field: 'gradeLevel',
+    kind: 'contract-only',
+    reason:
+      '学段以**会话**为准（`session.gradeLevel`，服务端推断出来的那个值）—— ' +
+      '模型填了也不算（与 `get_code_template` / quiz 同一口径）。'
+  },
+  {
+    tool: 'generate_code_exercise',
+    field: 'promptHash',
+    kind: 'contract-only',
+    reason: '请求指纹由主进程算（`codeRequestHash`）—— 学生原话一个字都不进库。'
+  },
+  {
+    tool: 'generate_code_exercise',
+    field: 'title',
+    kind: 'contract-only',
+    reason: '题名由模型在**结构化草稿**里产出（`hints` / `scaffold` 同理），不是 Tool 的入参。'
+  },
+  {
+    tool: 'generate_code_exercise',
+    field: 'expectedBehavior',
+    kind: 'contract-only',
+    reason: '同上：由模型产出的草稿字段，服务端会再校验（422 时带原因重试）。'
+  },
+  {
+    tool: 'generate_code_exercise',
+    field: 'scaffold',
+    kind: 'contract-only',
+    reason: '同上（且服务端强制要求含 TODO 标记）。'
+  },
+  {
+    tool: 'generate_code_exercise',
+    field: 'expectedOutput',
+    kind: 'contract-only',
+    reason: '同上。'
+  },
+  {
+    tool: 'generate_code_exercise',
+    field: 'hints',
+    kind: 'contract-only',
+    reason: '三级提示由模型产出、服务端校验（必须恰好 1/2/3 且第 1 级无代码）—— 不是 Tool 入参。'
+  },
+  {
+    tool: 'generate_code_exercise',
+    field: 'solution',
+    kind: 'contract-only',
+    reason: '参照实现只进库、绝不进卡片载荷（与题库的 answer 同一条纪律）—— 更不该是 Tool 入参。'
+  },
   {
     tool: 'rag_search',
     field: 'gradeLevel',
@@ -252,6 +312,15 @@ const ALLOWED_DIFFS = [
   },
 
   /* ── GET 端点：参数名集合模式（contracts 里没有请求体模型，对照操作参数面）──── */
+  {
+    tool: 'get_coding_hint',
+    field: 'saved_id',
+    kind: 'params-tool-only',
+    reason:
+      '★ 生成题的提示**不在随包端点里**（D-089）：带了 `savedId` 时主进程改发 ' +
+      '`GET /api/code/generated/{student_id}/{saved_id}/hint`（那条路由已登记且服务端有测试）——' +
+      '它是「这道题存在学生名下」的定位符，不是 `/api/code/hint/{kp_id}` 的参数。'
+  },
   {
     tool: 'get_coding_hint',
     field: 'reason',
@@ -444,6 +513,17 @@ const TOOLS = [
       functionName: 'render_animation_route',
       note: 'POST /api/animation/render 接受的请求体键（从 Python 路由源码抽出，该端点不进 OpenAPI）'
     }
+  },
+  {
+    tool: 'generate_code_exercise',
+    exportName: 'GenerateCodeExerciseParams',
+    module: 'src/main/agent/extensions/coding.ts',
+    /**
+     * ★ 端点 `include_in_schema=False`（当前唯一消费者是主进程工具路径），但它的**请求体模型
+     *   是登记过的**（`contracts.py` 的 `GeneratedCodeSaveRequest`）⇒ 走第一种模式（最严）：
+     *   逐字段比类型 / 必填 / 边界。模型里哪些字段不由模型填，逐条登记在 ALLOWED_DIFFS。
+     */
+    contract: 'GeneratedCodeSaveRequest'
   },
   {
     tool: 'get_student_profile',
