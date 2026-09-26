@@ -131,7 +131,7 @@ STEP_JS = r"""
 () => {
   const chips = document.querySelectorAll('#stage .chip, .anim-caption .chip');
   for (const chip of chips) {
-    const m = /第\s*(\d+)\s*步\s*\/\s*共\s*(\d+)\s*步/.exec(chip.textContent || '');
+    const m = /第\s*(\d+)\s*[^\s\/]+\s*\/\s*共\s*(\d+)\s*[^\s\/]+/.exec(chip.textContent || '');
     if (m) return { at: Number(m[1]), total: Number(m[2]) };
   }
   return null;

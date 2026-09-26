@@ -34,9 +34,12 @@
 
   /* 皮肤刻度（字号 / 圆角 / 线宽 / 内边距）：skins.css 按 data-skin 覆写，
      这里是它缺席时的兜底（「_shared/skins.css」丢了也不该把舞台画糊）。
-     标题与字幕单列一组：外壳的层级感由它们撑起来，别退回脚注大小。 */
+     标题与字幕单列一组：外壳的层级感由它们撑起来，别退回脚注大小。
+     ★ 2026-09-26（D-085）：字幕与步骤条**不随舞台缩放**（它们是外壳里的 HTML，
+       不像 SVG 内的节点字会被 viewBox 放大），所以它们的磅值就是学生实际读到的磅值 ——
+       抬高它们只能靠这里，不能指望舞台变大。字幕 13.5→15、步骤条 12→13.5。 */
   --k12-fs-title: 20px;
-  --k12-fs-caption: 13.5px;
+  --k12-fs-caption: 15px;
   --k12-fs-node: 16px;
   --k12-fs-node-sub: 12px;
   --k12-fs-link: 12.5px;
@@ -73,11 +76,14 @@ body {
   position: relative;
   width: 100%;
   height: 100vh;
-  padding: 16px 18px;
+  /* ★ 2026-09-26（D-085）：外壳的每一像素都是**从画面里扣的** —— iframe 高度固定时，
+     这里的 padding 与 gap 直接决定 SVG 画布还剩多少（实测旧值 16/18 + gap 12 一共吃掉 ~105px，
+     画布只剩 204px ⇒ 缩放 0.485×）。收紧到 12/16 + gap 9，把约 21px 还给画面。 */
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
   /* 标题与舞台之间的呼吸：不给够，标题就只是「贴在上面的一行小字」 */
-  gap: 12px;
+  gap: 9px;
 }
 
 /* 外壳：标题锁版醒目（字重 700 + var(--ink)），字幕给足对比与行高，不做脚注。 */
@@ -122,7 +128,8 @@ body {
      直接用主色当文字色时，橙色一档只有 2.9:1，学生读不清。 */
   background: var(--chip-bg);
   color: var(--chip-fg);
-  font-size: 12px;
+  /* ★ 步骤条是学生判断「讲到哪了」的唯一锚点，13.5px 起（不随舞台缩放，见文件头那段） */
+  font-size: 13.5px;
   font-weight: 600;
   line-height: 1.4;
   letter-spacing: 0.02em;

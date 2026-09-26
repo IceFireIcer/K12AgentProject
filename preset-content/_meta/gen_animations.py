@@ -229,6 +229,58 @@ def check_lines(name: str, data: object) -> None:
             )
 
 
+STEP_CALL_RE = re.compile(r"h\.step\(([^,]+), ([^,)]+), '([^']+)'\)")
+
+#: 步骤条允许用的位置量词（与 `server/tests/test_animation_templates.py` 同一张表）：
+#: 步骤条是运行时元素，必须说内容已经在用的那个词，一个动画才只有一套说法（D-087）。
+STEP_UNIT_WORDS = ("站", "轮", "组", "件", "条", "段", "行", "层", "圈", "次", "个问题", "步")
+
+
+def check_step_coordinate(name: str, script: str) -> None:
+    """步骤条的**坐标不变量**（D-087）：只数位置、一套量词、不带相位偏移。
+
+    背景（真缺陷，实测）：步骤条原来数的是**相位**（`共 COUNT+2 步`），
+    而节点徽标与字幕数的是**位置**（「第 1…4 段」）——
+    同一段收尾里字幕写着「一共 4 段」、步骤条写着「共 6 步」，两个数对不上。
+
+    三条断言：
+      ① 一份模板里所有 `h.step` 的**总数**必须是同一个表达式；
+      ② 那个表达式**不许带 `+ N`**（`+2`/`+3` 正是「布景 + 收尾」两拍，它们不是位置）；
+      ③ **量词**只能有一个，且必须是内容自己在用的那个词（`段 / 站 / 层 / 条 / 件 / 行 / 组 / 轮 / 圈 / 次 / 个问题 / 步`）——
+        步骤条是运行时元素，让它说内容已经说过的话，一个动画才只有一套说法。
+    """
+    calls = STEP_CALL_RE.findall(script)
+    if not calls:
+        return  # 手作模板（8 份）没有步骤条调用，不在本检查范围
+    totals = {total.strip() for _, total, _ in calls}
+    units = {unit for _, _, unit in calls}
+    assert len(totals) == 1, "{0}: 步骤条总数不唯一 {1}".format(name, sorted(totals))
+    assert len(units) == 1, "{0}: 步骤条量词不唯一 {1}".format(name, sorted(units))
+    total = totals.pop()
+    assert not re.search(r"\+\s*\d", total), (
+        "{0}: 步骤条总数带相位偏移（只该数位置，不该加布景/收尾两拍）：{1}".format(name, total)
+    )
+    unit = units.pop()
+    assert 1 <= len(unit) <= 4, "{0}: 步骤条量词长度不合理：{1!r}".format(name, unit)
+    # 量词必须是**内容自己在用的词**（三个来源取并集：字面量编号 / 读数单位 / 拼接式字幕）；
+    # 正文里根本没有位置编号时才允许用中性的「步」（network 的八拍就是这种）。
+    units_re = "|".join(re.escape(w) for w in sorted(STEP_UNIT_WORDS, key=len, reverse=True))
+    used = set(re.findall(r"第\s*\d+\s*(" + units_re + ")", script))
+    used |= set(re.findall(r'"unit"\s*:\s*"([^"]{1,4})"', script))
+    used |= set(re.findall(r"第 '\s*\+\s*[\w.]+\s*\+\s*'(" + units_re + ")", script))
+    assert unit in used or unit == "步", "{0}: 步骤条说「{1}」，用过的量词是 {2}".format(
+        name, unit, sorted(used)
+    )
+    # 字面量总数时，最大的字面量序号不许超过它（network 的 1..8）
+    literal = re.fullmatch(r"\d+", total)
+    if literal:
+        limit = int(literal.group(0))
+        indexes = [int(m) for m in re.findall(r"h\.step\((\d+),", script)]
+        assert indexes and max(indexes) <= limit, (
+            "{0}: 步骤条序号 {1} 超过总数 {2}".format(name, max(indexes), limit)
+        )
+
+
 def _drop_heading(text: str) -> str:
     """去掉教材的小标题前缀（「辨析：X」到「X」）。"""
     value = text or ""
@@ -1055,25 +1107,25 @@ function hideActor(el) { return off(actorOf(el)); }
  */
 function defer(build) {
   return function (tl, index, h) {
-    var shim = {}, key, text = null, at = 0, total = 0;
+    var shim = {}, key, text = null, at = 0, total = 0, word = '';
     for (key in h) { if (Object.prototype.hasOwnProperty.call(h, key)) shim[key] = h[key]; }
     shim.caption = function (value) { text = value; return shim; };
-    shim.step = function (value, count) { at = value; total = count; return shim; };
+    shim.step = function (value, count, unit) { at = value; total = count; word = unit; return shim; };
     var made = build(tl, index, shim);
     var list = made == null ? [] : (Object.prototype.toString.call(made) === '[object Array]' ? made.slice() : [made]);
     // step 先加、caption 后加 → 两者都在该相位的第一个 tick 触发（顺序只影响同一帧内谁后写）
-    if (total) list.unshift({ targets: { t: 0 }, t: [0, 1], duration: 1, easing: 'linear', begin: function () { Sandbox.step(at, total); } });
+    if (total) list.unshift({ targets: { t: 0 }, t: [0, 1], duration: 1, easing: 'linear', begin: function () { Sandbox.step(at, total, word); } });
     if (text != null) list.unshift({ targets: { t: 0 }, t: [0, 1], duration: 1, easing: 'linear', begin: function () { Sandbox.caption(text); } });
     return list;
   };
 }
-function say(text, at, total) {
+function say(text, at, total, unit) {
   return {
     targets: { t: 0 },
     t: [0, 1],
     duration: 1,
     easing: 'linear',
-    begin: function () { Sandbox.caption(text); Sandbox.step(at, total); }
+    begin: function () { Sandbox.caption(text); Sandbox.step(at, total, unit); }
   };
 }
 function label(x, y, text, cls) {
@@ -3236,7 +3288,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, COUNT + 2);
       var open = [riseIn(road, 10), popIn(guide.k12Pivot), push(meter, 0)];
       for (i = 0; i < COUNT; i += 1) open.push(later(asleep(stops[i]), 0.12 + h.stagger * i / 1000));
       return open;
@@ -3244,7 +3295,7 @@ Sandbox.play(function () {
     if (index <= COUNT) {
       i = index - 1;
       h.caption(ROWS[i].caption);
-      h.step(index + 1, COUNT + 2);
+      h.step(index, COUNT, '站');
       var walk = L.center('stop-' + i).x - startX + dx;
       return [
         { targets: guide.k12Pivot, translateX: [prev, walk], scale: [1, 1.05, 1], duration: d(1.5), easing: M.easing },
@@ -3256,7 +3307,7 @@ Sandbox.play(function () {
       ];
     }
     h.caption(DATA.close + '（一共 ' + COUNT + ' 站）');
-    h.step(COUNT + 2, COUNT + 2);
+    h.step(COUNT, COUNT, '站');
     var all = [focusClear(stops), push(meter, COUNT)];
     for (i = 0; i < COUNT; i += 1) {
       all.push(later(bump(stops[i]), h.stagger * i / 1000));
@@ -3290,7 +3341,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(ROWS[0].caption);
-      h.step(1, COUNT + 2);
       /* ★ 第一轮问答就在〔第一相位〕里出现：学生不会先盯着两个空人物等两秒。 */
       return [
         popActor(asker),
@@ -3305,7 +3355,7 @@ Sandbox.play(function () {
     if (index < COUNT) {
       i = index;
       h.caption(ROWS[i].caption);
-      h.step(index + 1, COUNT + 2);
+      h.step(index + 1, COUNT, '轮');
       var anims = [
         /*
          * ★★ 旧气泡先退场，而且必须排在这个相位的最前面（第七轮实测缺陷）。
@@ -3328,7 +3378,7 @@ Sandbox.play(function () {
     }
     if (index === COUNT) {
       h.caption('看完了这几轮问答，可以把它们连起来读。');
-      h.step(COUNT + 1, COUNT + 2);
+      h.step(COUNT, COUNT, '轮');
       return [
         bump(asks[COUNT - 1]),
         bump(answers[COUNT - 1]),
@@ -3337,7 +3387,7 @@ Sandbox.play(function () {
       ];
     }
     h.caption(DATA.close + '（一共 ' + COUNT + ' 轮）');
-    h.step(COUNT + 2, COUNT + 2);
+    h.step(COUNT, COUNT, '轮');
     return [bump(answers[COUNT - 1]), mark(answers[COUNT - 1].body), push(meter, COUNT)];
   }));
 });
@@ -3376,7 +3426,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, COUNT + 2);
       /* 布景 + 第一组的骨架先出（两栏各自暗着），后面几组再逐组点亮。 */
       return [
         slideIn(leftHead, -26),
@@ -3390,7 +3439,7 @@ Sandbox.play(function () {
     if (index <= COUNT) {
       i = index - 1;
       h.caption(ROWS[i].caption);
-      h.step(index + 1, COUNT + 2);
+      h.step(index, COUNT, '组');
       swing = i % 2 === 0 ? -SWING : SWING;
       var anims = [];
       /* ★ 同位轮换：上一次那一组先退场（排最前，顺序即时间，见对话原型的说明）。 */
@@ -3410,7 +3459,7 @@ Sandbox.play(function () {
       return anims;
     }
     h.caption(DATA.close + '（一共 ' + COUNT + ' 组）');
-    h.step(COUNT + 2, COUNT + 2);
+    h.step(COUNT, COUNT, '组');
     return [
       focusClear([leftCards[COUNT - 1], rightCards[COUNT - 1]]),
       bump(rightCards[COUNT - 1]),
@@ -3438,7 +3487,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, COUNT + 2);
       /* 布景先出：容器骨架（每一层的位置先暗着摆好），然后一件件从上面落进去。 */
       var open = [push(meter, 0)];
       for (i = 0; i < COUNT; i += 1) open.push(later(asleep(blocks[i]), 0.15 + h.stagger * i / 2000));
@@ -3447,7 +3495,7 @@ Sandbox.play(function () {
     if (index <= COUNT) {
       i = index - 1;
       h.caption(ROWS[i].caption);
-      h.step(index + 1, COUNT + 2);
+      h.step(index, COUNT, '件');
       var anims = [
         /* ★★ 落下位移收敛到 <= 层间距（gap=21）：原来 -52 会在途中压住上面那层。 */
         { targets: blocks[i], opacity: [0.42, 1], translateY: [-20, 0], duration: d(1), easing: M.easing },
@@ -3460,7 +3508,7 @@ Sandbox.play(function () {
       return anims;
     }
     h.caption(DATA.close + '（一共 ' + COUNT + ' 件）');
-    h.step(COUNT + 2, COUNT + 2);
+    h.step(COUNT, COUNT, '件');
     var all = [focusClear(blocks), push(meter, COUNT)];
     for (i = 0; i < COUNT; i += 1) all.push(later(bump(blocks[i]), h.stagger * i / 1000));
     return all;
@@ -3492,7 +3540,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, COUNT + 2);
       var open = [push(meter, 0)];
       for (i = 0; i < COUNT; i += 1) {
         open.push(later({ targets: items[i], opacity: [0, 0.72], translateX: [-18, 0], duration: d(1), easing: M.easing }, h.stagger * i / 1000));
@@ -3503,7 +3550,7 @@ Sandbox.play(function () {
     if (index <= COUNT) {
       i = index - 1;
       h.caption(ROWS[i].caption);
-      h.step(index + 1, COUNT + 2);
+      h.step(index, COUNT, '条');
       var anims = [
         fadeTo(items[i], 1),
         mark(items[i].body),
@@ -3516,7 +3563,7 @@ Sandbox.play(function () {
       return anims;
     }
     h.caption(DATA.close + '（一共 ' + COUNT + ' 条）');
-    h.step(COUNT + 2, COUNT + 2);
+    h.step(COUNT, COUNT, '条');
     var all = [focusClear(items), push(meter, COUNT)];
     for (i = 0; i < COUNT; i += 1) {
       all.push(later(fadeTo(items[i], 1), h.stagger * i / 1000));
@@ -3557,7 +3604,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, COUNT + 2);
       /* 布景先出：主管道画出来、四张工位卡暗着排在道上、数据包停在第一张卡下面。 */
       var open = [popIn(dot), push(meter, 0), wipe(railLine(pipeline))];
       for (i = 0; i < COUNT; i += 1) open.push(later(asleep(boxes[i]), 0.1 + h.stagger * i / 2000));
@@ -3569,7 +3615,7 @@ Sandbox.play(function () {
     if (index <= COUNT) {
       i = index - 1;
       h.caption(ROWS[i].caption);
-      h.step(index + 1, COUNT + 2);
+      h.step(index, COUNT, '段');
       var target = L.center('stage-' + i).x - (first.x + first.w / 2);
       return [
         { targets: dot, translateX: [prev, target], scale: [1, 1.2, 1], duration: d(1.2), easing: M.easing },
@@ -3580,7 +3626,7 @@ Sandbox.play(function () {
       ];
     }
     h.caption(DATA.close + '（一共 ' + COUNT + ' 段）');
-    h.step(COUNT + 2, COUNT + 2);
+    h.step(COUNT, COUNT, '段');
     var all = [focusClear(boxes), push(meter, COUNT)];
     for (i = 0; i < COUNT; i += 1) all.push(later(bump(boxes[i]), h.stagger * i / 1000));
     return all;
@@ -3618,7 +3664,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, COUNT + 2);
       /* 布景先出：两条泳道 + 游标 + 〔四行卡片骨架〕（暗着），一屏没有三分之一是空的。 */
       var open = [slideIn(leftHead, -24), slideIn(rightHead, 24), mark(rightHead.body), popIn(markLeft), later(popIn(markRight), 0.15), push(meter, 0)];
       for (i = 0; i < COUNT; i += 1) {
@@ -3630,7 +3675,7 @@ Sandbox.play(function () {
     if (index <= COUNT) {
       i = index - 1;
       h.caption(ROWS[i].caption);
-      h.step(index + 1, COUNT + 2);
+      h.step(index, COUNT, '行');
       laneY = leftBars[i].k12Box.y + leftBars[i].k12Box.h / 2 - (firstLeft.y + firstLeft.h / 2);
       var anims = [
         later(fadeTo(leftBars[i], 1), 0.05),
@@ -3648,7 +3693,7 @@ Sandbox.play(function () {
       return anims;
     }
     h.caption(DATA.close + '（一共比了 ' + COUNT + ' 行）');
-    h.step(COUNT + 2, COUNT + 2);
+    h.step(COUNT, COUNT, '行');
     var all = [focusClear(leftBars.concat(rightBars)), push(meter, COUNT)], k;
     for (k = 0; k < COUNT; k += 1) {
       all.push(later(bump(rightBars[k]), h.stagger * k / 1000));
@@ -3674,7 +3719,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, COUNT + 2);
       /* 布景先出：五层骨架先立起来（暗着），后面逐层点亮垒上去。 */
       var open = [push(meter, 0)];
       for (i = 0; i < COUNT; i += 1) open.push(later(asleep(slabs[i]), 0.15 + h.stagger * i / 2000));
@@ -3683,7 +3727,7 @@ Sandbox.play(function () {
     if (index <= COUNT) {
       i = index - 1;
       h.caption(ROWS[i].caption);
-      h.step(index + 1, COUNT + 2);
+      h.step(index, COUNT, '层');
       var anims = [
         /* ★★ 滑入位移必须 <= 层间距（gap=10）：原来飞 40px，途中会停在原位下方压住
            已就位的那一层（实测重叠 27~29px，学生大部分时间看到的是歪塔）。
@@ -3698,7 +3742,7 @@ Sandbox.play(function () {
       return anims;
     }
     h.caption((COUNT > 1 ? DATA.close : DATA.hold) + '（一共 ' + COUNT + ' 层）');
-    h.step(COUNT + 2, COUNT + 2);
+    h.step(COUNT, COUNT, '层');
     var all = [focusClear(slabs), mark(slabs[0].body), push(meter, COUNT)];
     for (i = 0; i < COUNT; i += 1) {
       all.push(later(fadeTo(slabs[i], 1), h.stagger * i / 1000));
@@ -3738,7 +3782,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, TIMES + 2);
       var open = [popIn(runner), push(rounds, 0), push(totalMeter, 0)];
       for (i = 0; i < stops.length; i += 1) open.push(later(popIn(stops[i]), h.stagger * i / 1000));
       return open;
@@ -3748,7 +3791,7 @@ Sandbox.play(function () {
       var row = ROWS[(round - 1) % N];
       var stop = stops[(round - 1) % stops.length];
       h.caption('第 ' + round + ' 圈：绕一圈，停在「' + row.stop + '」这一站');
-      h.step(index + 1, TIMES + 2);
+      h.step(index, TIMES, '圈');
       return [
         {
           targets: trace,
@@ -3765,7 +3808,7 @@ Sandbox.play(function () {
       ];
     }
     h.caption('跑了 ' + TIMES + ' 圈，每圈做的事一模一样：' + DATA.summary);
-    h.step(TIMES + 2, TIMES + 2);
+    h.step(TIMES, TIMES, '圈');
     return [focusClear(stops), bump(spin), push(rounds, TIMES), push(totalMeter, TIMES)];
   }));
 });
@@ -3800,7 +3843,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, ROUNDS + 3);
       var open = [riseIn(root, 10), focusStep(root, null), push(meter, 0)];
       for (i = 0; i < ROUNDS; i += 1) {
         open.push(later(asleep(chain[i]), 0.15 + h.stagger * i / 2000));
@@ -3812,7 +3854,7 @@ Sandbox.play(function () {
     if (index <= ROUNDS) {
       i = index - 1;
       h.caption(ROWS[i].caption);
-      h.step(index + 1, ROUNDS + 3);
+      h.step(index, ROUNDS, '个问题');
       var anims = [
         wipe(railLine(links[i])),
         later({ targets: links[i], opacity: [0.4, 1], duration: d(0.8), easing: M.easing }, 0),
@@ -3830,7 +3872,7 @@ Sandbox.play(function () {
     }
     if (index === ROUNDS + 1) {
       h.caption('一路都走「是」这条，最后落到「' + ROWS[taken].pass + '」');
-      h.step(ROUNDS + 2, ROUNDS + 3);
+      h.step(ROUNDS, ROUNDS, '个问题');
       return [
         focusStep(exits[taken], chain[taken]),
         later({ targets: exits[taken], opacity: [0, 1], duration: d(0.7), easing: M.easing }, 0),
@@ -3843,7 +3885,7 @@ Sandbox.play(function () {
       ];
     }
     h.caption(DATA.close + '（一共问了 ' + ROUNDS + ' 个问题）');
-    h.step(ROUNDS + 3, ROUNDS + 3);
+    h.step(ROUNDS, ROUNDS, '个问题');
     var all = [focusClear(exits.concat(chain)), mark(exits[taken].body)];
     for (i = 0; i <= taken; i += 1) all.push(later(mark(chain[i].body), h.stagger * i / 1000));
     return all;
@@ -3894,7 +3936,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, 8);
       var open = [push(hidMeter, 0), push(outMeter, 0)];
       /* ★ 三列节点全部在第一帧画出（暗着）+ 上方三列列标题：
          否则「输出列整列缺失、箭头射向空白」（截图实测）。 */
@@ -3906,7 +3947,7 @@ Sandbox.play(function () {
     }
     if (index === 1) {
       h.caption('每根线的粗细就是权重的大小：线越粗，它说话越算数。');
-      h.step(2, 8);
+      h.step(2, 8, '步');
       var wide = [focusClear(inNodes)];
       for (i = 0; i < COL; i += 1) {
         for (j = 0; j < UNITS; j += 1) {
@@ -3920,14 +3961,14 @@ Sandbox.play(function () {
     }
     if (index === 2) {
       h.caption('三个输入分别乘上权重再加起来，就是隐层每个单元收到的数：' + join(hid.map(String)) + '。');
-      h.step(3, 8);
+      h.step(3, 8, '步');
       var calc = [push(hidMeter, join(hid.map(String))), focusStep(hidNodes.slice(0, UNITS), null)];
       for (j = 0; j < UNITS; j += 1) calc.push(later(mark(hidNodes[j].body), h.stagger * j / 1000));
       return calc;
     }
     if (index === 3) {
       h.caption('隐层把这些数记下来，接着往下一层送。');
-      h.step(4, 8);
+      h.step(4, 8, '步');
       var up = [];
       for (j = 0; j < UNITS; j += 1) {
         up.push(later(wake(hidNodes[j]), h.stagger * j / 1000));
@@ -3938,7 +3979,7 @@ Sandbox.play(function () {
     }
     if (index === 4) {
       h.caption('第二层的权重同样有正有负：负的权重要把信号压下去。');
-      h.step(5, 8);
+      h.step(5, 8, '步');
       var second = [focusClear(hidNodes)];
       for (j = 0; j < UNITS; j += 1) {
         for (k = 0; k < OUT; k += 1) {
@@ -3952,7 +3993,7 @@ Sandbox.play(function () {
     }
     if (index === 5) {
       h.caption('输出层的两个数就是这么算出来的，数值大的那个是这次的答案：' + join(out.map(String)) + '。');
-      h.step(6, 8);
+      h.step(6, 8, '步');
       var show = [push(outMeter, join(out.map(String))), focusStep(outNodes.slice(0, OUT), null)];
       for (k = 0; k < OUT; k += 1) show.push(later(wake(outNodes[k]), h.stagger * k / 1000));
       show.push(later(bump(outNodes[0]), 0.3));
@@ -3960,11 +4001,11 @@ Sandbox.play(function () {
     }
     if (index === 6) {
       h.caption('数值大的那个就是这次的答案：' + join(out.map(String)) + '。');
-      h.step(7, 8);
+      h.step(7, 8, '步');
       return [mark(outNodes[0].body), bump(outNodes[0]), push(outMeter, join(out.map(String)))];
     }
     h.caption(DATA.close + '（一共算了 ' + UNITS + ' 个中间单元）');
-    h.step(8, 8);
+    h.step(8, 8, '步');
     return [focusClear(outNodes), mark(outNodes[0].body), bump(hidNodes[0]), later(bump(outNodes[0]), 0.3), push(hidMeter, join(hid.map(String)))];
   }));
 });
@@ -4004,7 +4045,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, ROW_COUNT + 3);
       var open = [once(function () { rowMeter.set('待扫'); allMeter.set('待扫'); scanMeter.set('还没开始'); })];
       for (r = 0; r < ROW_COUNT; r += 1) {
         centerRow(cells[r], SIZE);
@@ -4017,7 +4057,7 @@ Sandbox.play(function () {
     if (index <= ROW_COUNT) {
       r = index - 1;
       h.caption(ROWS[r].caption);
-      h.step(index + 1, ROW_COUNT + 3);
+      h.step(index, ROW_COUNT, '行');
       var row = cells[r];
       var sweep = [push(rowMeter, rowAverage(values[r]))];
       for (c = 0; c < SIZE; c += 1) {
@@ -4031,7 +4071,7 @@ Sandbox.play(function () {
     }
     if (index === ROW_COUNT + 1) {
       h.caption('整张表加起来再平均是 ' + overall + '，最亮的那一格就是最大值。');
-      h.step(ROW_COUNT + 2, ROW_COUNT + 3);
+      h.step(ROW_COUNT, ROW_COUNT, '行');
       return [
         push(allMeter, overall),
         focusStep(cells[best.r][best.c], cells[best.r][SIZE - 1]),
@@ -4042,7 +4082,7 @@ Sandbox.play(function () {
       ];
     }
     h.caption(DATA.close + '（一共扫了 ' + (ROW_COUNT * SIZE) + ' 格）');
-    h.step(ROW_COUNT + 3, ROW_COUNT + 3);
+    h.step(ROW_COUNT, ROW_COUNT, '行');
     var finish = [focusClear([cells[best.r][best.c]])];
     for (c = 0; c < SIZE; c += 1) finish.push(later(bump(cells[best.r][c]), h.stagger * c / 1000));
     finish.push(push(allMeter, overall));
@@ -4100,7 +4140,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, STEPS + 3);
       var draw = [push(wMeter, weights[0]), push(lMeter, losses[0]), riseIn(marker, -16)];
       for (i = 0; i < segments.length; i += 1) {
         draw.push(later({ targets: segments[i], opacity: [0, 0.42], duration: d(0.6), easing: M.easing }, h.stagger * i / 2500));
@@ -4109,13 +4148,12 @@ Sandbox.play(function () {
     }
     if (index === 1) {
       h.caption('先挑一个起点：参数 ' + weights[0] + '，要压小的数是 ' + losses[0] + '。');
-      h.step(2, STEPS + 3);
       return [bump(marker), push(wMeter, weights[0]), push(lMeter, losses[0])];
     }
     if (index <= STEPS + 1) {
       var step = index - 1;
       h.caption(ROWS[(step - 1) % N].caption + '：参数 ' + weights[step] + '，要压小的数 ' + losses[step]);
-      h.step(index + 1, STEPS + 3);
+      h.step(index - 1, STEPS, '步');
       var trail = [], upto = Math.min(segments.length, Math.round(segments.length * step / STEPS)), k;
       for (k = litUp; k < upto; k += 1) {
         trail.push({ targets: segments[k], opacity: [0.32, 1], duration: d(0.7), easing: M.easing });
@@ -4135,7 +4173,7 @@ Sandbox.play(function () {
       return trail;
     }
     h.caption(DATA.stopLine + '：' + DATA.summary + '（走了 ' + STEPS + ' 步）');
-    h.step(STEPS + 3, STEPS + 3);
+    h.step(STEPS, STEPS, '步');
     var end = [];
     for (i = litUp; i < segments.length; i += 1) {
       end.push({ targets: segments[i], opacity: [0.32, 1], duration: d(0.7), easing: M.easing });
@@ -4175,7 +4213,6 @@ Sandbox.play(function () {
   return Sandbox.timeline(__PHASES__, defer(function (tl, index, h) {
     if (index === 0) {
       h.caption(DATA.open);
-      h.step(1, COUNT + 2);
       var open = [push(countMeter, 0), push(sumMeter, 0)];
       for (i = 0; i < COUNT; i += 1) {
         open.push(later({ targets: pegs[i], opacity: [0, 0.45], translateY: [10, 0], duration: d(0.9), easing: M.easing }, h.stagger * i / 2000));
@@ -4186,7 +4223,7 @@ Sandbox.play(function () {
       i = index - 1;
       running += ROWS[i].event.length;
       h.caption(ROWS[i].caption + '：这一句 ' + ROWS[i].event.length + ' 个字，合计 ' + running + ' 字');
-      h.step(index + 1, COUNT + 2);
+      h.step(index, COUNT, '次');
       var anims = [];
       /* ★ 计数卡是同位轮换：上一张先退场（排最前，顺序即时间，见对话原型的说明）。 */
       if (i > 0) {
@@ -4205,7 +4242,7 @@ Sandbox.play(function () {
       return anims;
     }
     h.caption(DATA.close + '（数了 ' + COUNT + ' 次，合计 ' + total + ' 字）');
-    h.step(COUNT + 2, COUNT + 2);
+    h.step(COUNT, COUNT, '次');
     var all = [focusClear(pegs)];
     for (i = 0; i < COUNT; i += 1) {
       all.push(later(mark(pegs[i].body), h.stagger * i / 1000));
@@ -4618,6 +4655,7 @@ def build_template(entry: dict, grade: str, archetype: str) -> dict:
     check_text(template["id"], template["body"] + template["script"] + template["title"])
     check_lines(template["id"], template["script"])
     assert len(template["fallback_text"]) >= 30, template["id"] + " 降级文案太短"
+    check_step_coordinate(template["id"], template["script"])
     return template
 
 
@@ -4650,6 +4688,7 @@ def build_by_kp(entry: dict, grade: str, archetype: str, template_id: str) -> di
     check_placeholders(item["kp_id"], by["body"], by["script"], by["params"])
     check_text(item["kp_id"], by["body"] + by["script"] + by["title"] + by["fallback_text"])
     check_lines(item["kp_id"], by["script"])
+    check_step_coordinate(item["kp_id"], by["script"])
     assert len(by["fallback_text"]) >= 30, item["kp_id"] + " 降级文案太短"
     return by
 

@@ -132,7 +132,7 @@
 /* ---- 皮肤级刻度：字号 / 圆角 / 线宽 / 内边距（runtime.js 会读它们做折行与测量） ---- */
 :root[data-skin="illustrated"] {
   --k12-fs-title: 22px;
-  --k12-fs-caption: 14.5px;
+  --k12-fs-caption: 15.5px;  /* 外壳字幕：不随舞台缩放，13.5→15.5 的抬高只能在这里做（D-085） */
   --k12-fs-node: 20px;
   --k12-fs-node-sub: 14.5px;
   --k12-fs-link: 13.5px;
@@ -151,7 +151,7 @@
 
 :root[data-skin="technical"] {
   --k12-fs-title: 17px;
-  --k12-fs-caption: 13.5px;
+  --k12-fs-caption: 15px;  /* 同上：13.5→15 */
   --k12-fs-node: 16px;
   --k12-fs-node-sub: 12.5px;
   --k12-fs-link: 13px;

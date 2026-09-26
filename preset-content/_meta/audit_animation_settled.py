@@ -10,7 +10,7 @@
 动画在途中都会让元素偏离最终位置（layers 的未点亮层带 translateY 40px，正好压在
 已就位的层上，中途量出来是「两层重叠 29px」，末态却是整齐的塔）。
 所以这里**不看 duration_ms**（它是生成器的估算值，实测偏小），而是轮询步骤条
-（runtime 的 `Sandbox.step()` 写的那颗 chip），等它到「第 N 步 / 共 N 步」再动手。
+（runtime 的 `Sandbox.step()` 写的那颗 chip），等它到「第 N <量词> / 共 N <量词>」再动手。
 """
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ STEP_JS = r"""
 () => {
   const chips = document.querySelectorAll('#stage .chip, .anim-caption .chip');
   for (const chip of chips) {
-    const m = /第\s*(\d+)\s*步\s*\/\s*共\s*(\d+)\s*步/.exec(chip.textContent || '');
+    const m = /第\s*(\d+)\s*[^\s\/]+\s*\/\s*共\s*(\d+)\s*[^\s\/]+/.exec(chip.textContent || '');
     if (m) return { at: Number(m[1]), total: Number(m[2]) };
   }
   return null;
@@ -84,7 +84,7 @@ STEP_JS = r"""
 
 
 def wait_until_done(page, timeout_s: float = 30.0) -> bool:
-    """轮询步骤条到「第 N 步 / 共 N 步」，再多给一秒让末相位的动画落定。"""
+    """轮询步骤条到「第 N <量词> / 共 N <量词>」，再多给一秒让末相位的动画落定。"""
     deadline = timeout_s * 1000
     elapsed = 0
     while elapsed < deadline:

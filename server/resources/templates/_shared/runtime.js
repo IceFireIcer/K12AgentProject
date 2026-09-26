@@ -1970,8 +1970,20 @@
     return element
   }
 
-  /** 更新步骤条（找不到 .chip 就在 #stage 末尾补一个）。 */
-  function step(index, total) {
+  /**
+   * 更新步骤条（找不到 .chip 就在 #stage 末尾补一个）。
+   *
+   * ★★ `total` 与 `index` 数的是**位置**，不是相位（2026-09-26，D-087）。
+   *   相位里含「布景 / 收尾」两拍，它们不是位置 —— 旧实现让步骤条去数相位
+   *   （`共 COUNT+2 步`），于是**同一段收尾里字幕说「一共 4 段」而步骤条说「共 6 步」**，
+   *   节点徽标又写着「第 1…4 段」：同一时刻三个坐标系，学生读不出「讲到哪了」。
+   *   现在：序言/收尾**不调用本函数**（chip 保留模板自己的初始文案，如「准备出发」），
+   *   每个位置调一次、序号与该动画字幕里的编号**同值**。
+   * ★ `unit` 是这套动画自己的量词（段 / 站 / 层 / 条 / 件 / 行 / 组 / 轮 / 圈 / 次 / 个问题 / 步）：
+   *   步骤条是**运行时元素不是内容文案**，让它说内容已经在用的那个词，
+   *   一个动画就只有一套说法 —— 而内容里的句子一个字都不用改。
+   */
+  function step(index, total, unit) {
     var chip = document.querySelector('#stage .chip') || document.querySelector('.chip')
     if (!chip) {
       var master = document.getElementById('stage') || document.body
@@ -1981,9 +1993,11 @@
       chip.setAttribute('id', 'k12-step-chip')
       master.appendChild(chip)
     }
+    var word = typeof unit === 'string' && unit ? unit : '步'
     var value = Math.max(0, Math.round(numberOf(index, 0)))
     var count = Math.round(numberOf(total, 0))
-    chip.textContent = count > 0 ? '第 ' + value + ' 步 / 共 ' + count + ' 步' : '第 ' + value + ' 步'
+    chip.textContent =
+      count > 0 ? '第 ' + value + ' ' + word + ' / 共 ' + count + ' ' + word : '第 ' + value + ' ' + word
     chip.setAttribute('data-step', String(value))
     if (count > 0) chip.setAttribute('data-step-total', String(count))
     return chip
