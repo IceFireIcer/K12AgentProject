@@ -21,6 +21,8 @@ import { computed, ref } from 'vue'
 import { useStudyStore, type SessionTranscriptShape } from '../stores/study'
 import { useChatStore } from '../stores/chat'
 import { formatMs } from '../study/report-markdown'
+import { displaySessionTitle } from '../study/session-title'
+import MarkdownProse from '../components/MarkdownProse.vue'
 
 defineOptions({ name: 'StudySessionsTab' })
 
@@ -127,7 +129,10 @@ function close(): void {
           :data-testid="`session-open-${item.id}`"
           @click="open(item.id)"
         >
-          <span class="item__title">{{ item.title }}</span>
+          <!-- ★ P1-3：标题走**共享**兜底（`session-title.ts`）。此前这里直接渲染
+               `item.title`，于是英文占位 `(no messages)` 在学习记录页露了出来
+               （对话页左栏一直有兜底，两处判据分叉的结果）。 -->
+          <span class="item__title">{{ displaySessionTitle(item.title) }}</span>
           <span v-if="item.messageCount !== null" class="item__meta">{{ item.messageCount }} 条消息</span>
           <span class="item__meta">{{ formatMs(item.modifiedAt) }}</span>
         </button>
@@ -151,7 +156,11 @@ function close(): void {
                 :class="message.role === 'user' ? 'message--user' : 'message--assistant'"
               >
                 <span class="message__role">{{ message.role === 'user' ? '我' : '助手' }}</span>
-                <span class="message__text">{{ message.text }}</span>
+                <!-- ★★ P1-4：正文按与对话页**同一套** Markdown 渲染（共享组件）。
+                     此前这里是 `{{ message.text }}`，于是学生展开历史会话时看到的是
+                     `**贴着标签的盒子**` 与 ``` ```python ``` 围栏 —— 同一段话在对话页
+                     是排版好的、在档案页是带星号的原文。 -->
+                <MarkdownProse :text="message.text" class="message__text" />
               </li>
             </ul>
             <button class="btn btn--mini" type="button" @click="close()">收起</button>
@@ -301,11 +310,17 @@ function close(): void {
   color: var(--k12-muted-2);
 }
 
+/* 正文渲染器（`MarkdownProse`）按 `inherit` 取字号与字色，这里只给两处配色差
+ * （学生原话用前景色、助手回答用次级色）—— 与对话页的 `.message--user/assistant` 同口径。 */
 .message--user .message__text {
+  flex: 1;
+  min-width: 0;
   color: var(--k12-fg);
 }
 
 .message--assistant .message__text {
+  flex: 1;
+  min-width: 0;
   color: var(--k12-fg-2);
 }
 

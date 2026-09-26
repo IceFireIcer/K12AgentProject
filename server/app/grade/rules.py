@@ -820,6 +820,14 @@ class GradeEngine:
           上会冒出「词汇复杂度 · 本轮无证据」这种卡片，还会把真正的证据挤出这个 20 条的列表
           —— 而「每轮都可能是无证据轮」正是 D2 的常态（课堂用语不许产生信号），
           连续几轮「继续吧」就能把证据列表刷空。**所以过滤只发生在这里，判定侧照常读全表。**
+
+        ★★ **脏行容错**（P1-2，实测）：``signal_type`` 列是宽松 ``TEXT``，而
+          :class:`GradeSignal` 的 ``signal_type`` 是**收窄联合**。历史库 / 人工改过的库里
+          可能出现认不出的取值（空串、``NULL``、升级前写入的旧字面量），
+          构造 ``GradeSignal`` 会抛 pydantic ``ValidationError`` —— 那**不是**
+          ``sqlite3.Error``，路由层的兜底拦不住，``GET /api/grade/signals`` 于是整个
+          500（现象：同栏「当前学段」正常、信号列表报 500，非常迷惑）。
+          这里跳过认不出的行并记日志：一行脏数据不该打掉整个读接口。
         """
         rows = self.store.conn.execute(
             "SELECT ts, signal_type, value, raw FROM grade_signals "
@@ -827,15 +835,24 @@ class GradeEngine:
             "ORDER BY id DESC LIMIT ?",
             (_NO_EVIDENCE_LIKE, int(limit)),
         ).fetchall()
-        return [
-            GradeSignal(
-                signal_type=str(row["signal_type"]),  # type: ignore[arg-type]
-                value=float(row["value"] or 0.0),
-                raw=row["raw"],
-                ts=int(row["ts"] or 0),
-            )
-            for row in reversed(rows)
-        ]
+        out: list[GradeSignal] = []
+        for row in reversed(rows):
+            try:
+                out.append(
+                    GradeSignal(
+                        signal_type=str(row["signal_type"]),  # type: ignore[arg-type]
+                        value=float(row["value"] or 0.0),
+                        raw=row["raw"],
+                        ts=int(row["ts"] or 0),
+                    )
+                )
+            except Exception:  # noqa: BLE001 - pydantic ValidationError 不在 sqlite3.Error 里
+                logger.warning(
+                    "跳过一条无法归类的学段信号（signal_type=%r，value=%r）",
+                    row["signal_type"],
+                    row["value"],
+                )
+        return out
 
     def history(self, limit: int = HISTORY_LIMIT) -> list[dict]:
         """``grade_history`` 轨迹（报告/汇报的叙事素材：「第 3 轮调为小学低年级（0.75）」）。

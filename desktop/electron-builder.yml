@@ -109,8 +109,11 @@ win:
   artifactName: ${name}-${version}-win-${arch}.${ext}
   target:
     - nsis
-    # ★ 便携（绿色）版：单个 exe，解压到临时目录运行，数据落 exe 同级 data/。
-    #   与 nsis 的区别是「不安装、可放 U 盘」—— 演示现场最省事的一种形态。
+    # ★ 便携（绿色）版：单个 exe，**自解压到 %TEMP% 再运行**，退出时删掉那份解压。
+    #   ★★ 单文件形态**不保存数据**（P0-1）：exe 落在临时目录，数据写那儿每次重启即清空，
+    #      所以 `src/main/index.ts` 的 `decidePortableDataDir()` 在这种形态下
+    #      **不改道**，数据落回默认的 `%APPDATA%\<slug>`（持久）。
+    #      要「数据跟着程序走」请用 zip 形态（解压到真实目录），或用 `K12_DATA_DIR` 显式指定。
     - portable
 nsis:
   artifactName: ${name}-${version}-setup.${ext}

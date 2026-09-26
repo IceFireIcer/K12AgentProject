@@ -37,11 +37,11 @@ import type { ChatTurn } from '../api/events'
 import type { CitationDetail } from '@shared/ipc-events'
 import { GRADE_LABELS, TURN_STATUS_LABELS, showsStatusChip } from '../labels'
 import { DEFAULT_LOGO_URL } from '../brand-logo'
-import { parseMarkdown } from '../markdown'
 import { useDismissable } from '../composables/useDismissable'
 import { useEscape } from '../composables/useEscape'
 import { useFocusReturn } from '../composables/useFocusReturn'
 import InlineCard from '../cards/InlineCard.vue'
+import MarkdownProse from './MarkdownProse.vue'
 import BlockedNotice from './BlockedNotice.vue'
 import DegradedNotice from './DegradedNotice.vue'
 import SourceChips from './SourceChips.vue'
@@ -99,14 +99,14 @@ const showStatus = computed(() => showsStatusChip(props.turn.status))
 const gradeLabel = computed(() => (props.turn.gradeLevel ? GRADE_LABELS[props.turn.gradeLevel] : null))
 
 /**
- * 正文按**极简 Markdown** 渲染（`../markdown.ts` 的纯函数，输出结构化数据、不用 v-html）。
+ * 正文按**极简 Markdown** 渲染（`components/MarkdownProse.vue` → `../markdown.ts` 的纯函数，
+ * 输出结构化数据、不用 `v-html`）。
  *
  * ★ 不这么做的实测后果：模型输出 `**循环**，就是……`，而模板此前是 `{{ turn.text }}`，
  *   于是小学生读到的是**带星号的句子**。星号不是格式问题，是「把解析负担推给学生」。
- * ★ 流式期间也照常解析：模型是逐字吐的，`**` 可能只到一半 ——
- *   `parseInline` 对未闭合的星号**原样保留**，所以不会出现「字忽然消失再出现」的闪动。
+ * ★ 渲染实现已**归口**到 `MarkdownProse`（P1-4）：历史会话只读回看曾经自己插值，
+ *   同一段话在两处长不一样。本文件只负责「哪一段要渲染、生成中要不要光标」。
  */
-const blocks = computed(() => parseMarkdown(props.turn.text))
 
 /** 回答还没吐出任何字时的占位说明（不是空白气泡）。 */
 const awaiting = computed(() => streaming.value && props.turn.text.trim().length === 0)
@@ -272,47 +272,10 @@ function pickBranch(): void {
             正在查教材、组织讲法…
           </p>
           <div v-else class="text" data-testid="assistant-text">
-            <template v-for="(block, blockIndex) in blocks" :key="blockIndex">
-              <pre v-if="block.kind === 'code'" class="md-code"><code>{{ block.runs[0]?.text ?? '' }}</code></pre>
-              <hr v-else-if="block.kind === 'divider'" class="md-hr" />
-              <p
-                v-else-if="block.kind === 'heading'"
-                class="md-heading"
-                :class="`md-heading--${block.level ?? 3}`"
-              >
-                <template v-for="(run, runIndex) in block.runs" :key="runIndex">
-                  <strong v-if="run.kind === 'strong'">{{ run.text }}</strong>
-                  <code v-else-if="run.kind === 'code'">{{ run.text }}</code>
-                  <template v-else>{{ run.text }}</template>
-                </template>
-              </p>
-              <ul v-else-if="block.kind === 'list' && block.ordinal === undefined" class="md-list">
-                <li>
-                  <template v-for="(run, runIndex) in block.runs" :key="runIndex">
-                    <strong v-if="run.kind === 'strong'">{{ run.text }}</strong>
-                    <code v-else-if="run.kind === 'code'">{{ run.text }}</code>
-                    <template v-else>{{ run.text }}</template>
-                  </template>
-                </li>
-              </ul>
-              <ol v-else-if="block.kind === 'list'" class="md-list" :start="block.ordinal">
-                <li>
-                  <template v-for="(run, runIndex) in block.runs" :key="runIndex">
-                    <strong v-if="run.kind === 'strong'">{{ run.text }}</strong>
-                    <code v-else-if="run.kind === 'code'">{{ run.text }}</code>
-                    <template v-else>{{ run.text }}</template>
-                  </template>
-                </li>
-              </ol>
-              <p v-else class="md-p">
-                <template v-for="(run, runIndex) in block.runs" :key="runIndex">
-                  <strong v-if="run.kind === 'strong'">{{ run.text }}</strong>
-                  <code v-else-if="run.kind === 'code'">{{ run.text }}</code>
-                  <template v-else>{{ run.text }}</template>
-                </template>
-              </p>
-            </template>
-            <span v-if="streaming" class="caret" aria-hidden="true" />
+            <!-- ★★ 正文渲染归口 `MarkdownProse`（唯一实现，P1-4）：历史会话只读回看曾经
+                 各自插值 `{{ text }}`，于是同一段话在档案页露出 `**粗体**` 与代码围栏。
+                 模板与样式都搬去了那个组件，两处再也不会漂移。 -->
+            <MarkdownProse :text="turn.text" :streaming="streaming" />
           </div>
 
           <!-- 引用：既有 chips（沿用既有契约），也可点开原文。
@@ -570,69 +533,14 @@ function pickBranch(): void {
   border: 1px solid var(--k12-border);
   box-shadow: var(--k12-shadow-card);
 }
+/* ★★ 正文的排版（标题 / 列表 / 代码块 / 光标）已随渲染实现一起搬到
+ * `MarkdownProse.vue`（P1-4：实现与样式必须同组件，否则又会分叉）。
+ * 本文件只给**对话气泡自己的**那几条：字号档与字色（共享组件按 `inherit` 取）。 */
 .text {
   font-size: var(--k12-fs-md);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
-  /* ★ 不再用 `white-space: pre-wrap` 承载换行 —— 换行现在由 Markdown 的**
-     分段**表达（`parseMarkdown` 按空行切块）。留着 pre-wrap 会让「每行一个
-     `<p>`」与「源文本里的换行」叠成双倍行距。 */
   word-break: break-word;
-}
-.text > * + * {
-  margin-top: 0.7em;
-}
-.text strong {
-  color: var(--k12-fg);
-  font-weight: 650;
-}
-.text code {
-  padding: 1px 5px;
-  border-radius: 5px;
-  background: var(--k12-surface-2);
-  border: 1px solid var(--k12-border);
-  font-family: var(--k12-font-mono);
-  font-size: 0.92em;
-}
-.md-heading {
-  color: var(--k12-fg);
-  font-weight: 650;
-  line-height: 1.4;
-}
-.md-heading--1 {
-  font-size: var(--k12-fs-lg);
-}
-.md-heading--2 {
-  font-size: var(--k12-fs-title);
-}
-.md-heading--3 {
-  font-size: var(--k12-fs-md);
-}
-.md-list {
-  margin: 0;
-  padding-left: 1.35em;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35em;
-}
-.md-list li::marker {
-  color: var(--k12-muted);
-}
-.md-code {
-  margin: 0;
-  padding: 12px 14px;
-  border-radius: var(--k12-r-inset);
-  background: var(--k12-surface-2);
-  border: 1px solid var(--k12-border);
-  overflow-x: auto;
-  font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-sm);
-  line-height: 1.6;
-}
-.md-hr {
-  margin: 0;
-  border: 0;
-  border-top: 1px solid var(--k12-border);
 }
 /* 检索中：一句话说明当前在做什么（刻意不用三点脉冲 —— 那是 AI 味最重的 loader） */
 .awaiting {

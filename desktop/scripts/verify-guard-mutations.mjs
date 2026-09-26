@@ -639,11 +639,63 @@ const MUTATIONS = [
     replace: '  /* 变异：去掉比例声明 ⇒ iframe 高度退回 min-height 的 340px */',
     testFile: 'tests/ux-pages-regression.test.ts',
     expect: '动画舞台的高度必须'
+  },
+
+  /* ── 2026-09-26 便携版修复轮（P0-1 / P0-2 / P2-3）─────────────────────
+   * 这三条分别是「数据丢失」「页面死胡同」「字小到读不了」——都属于
+   * **改错了不会让任何逻辑断言变红**的类型，所以各配一条变异。 */
+  {
+    name: '62 便携数据目录：把「exe 同级」当成一定持久（P0-1 数据丢失的原始写法）',
+    file: 'src/main/portable.ts',
+    // 变异：短路掉「临时目录」这一档判定 ⇒ 单文件形态又会把数据写进 %TEMP% 解压目录。
+    // ⚠️ 锚点单行（工作区 CRLF）。
+    find: '  if (isThrowawayDir(candidate, input.tempDir, unpackDirName)) {',
+    replace: '  if (false && isThrowawayDir(candidate, input.tempDir, unpackDirName)) {',
+    testFile: 'tests/portable-data-dir.test.ts',
+    expect: 'G-P0-1a'
+  },
+  {
+    name: '63 动画页导航：分页 tab 被关进 v-show 的 pane（P0-2 死胡同的原始结构）',
+    file: 'src/renderer/src/views/Animation.vue',
+    // 变异：把「智团团准备的」那个 pane 的起点整体上移，让导航落在它内部 ——
+    // 等价于「切到我的动画时导航跟着消失」。这里用最小改动模拟：把导航那段整体
+    // 移进 pane（脚本只做文本替换，所以改成把 pane 的 div 变成**包住导航**的写法）。
+    find: '    <!-- ══ 分页导航（智团团准备的 / 我的动画）+ 换年级：**两个页签都常驻** ═════════',
+    replace:
+      '    <div v-show="anim.activeTab === \'builtin\'"><!-- 变异：导航被关进 pane --><!-- ══ 分页导航（智团团准备的 / 我的动画）+ 换年级═════════',
+    testFile: 'tests/animation-dead-end.test.ts',
+    expect: '分页导航不在'
+  },
+  {
+    name: '64 卡片舞台：下限缩回 300px（P2-3「肉眼 7–8px」的原始几何）',
+    file: 'src/renderer/src/cards/AnimationCard.vue',
+    find: '  --k12-anim-min: 480px;',
+    replace: '  --k12-anim-min: 300px;',
+    testFile: 'tests/animation-card-stage.test.ts',
+    expect: 'G-P2-3a'
   }
 ]
 
 let failures = 0
-for (const mutation of MUTATIONS) {
+/**
+ * ★ 可选筛选：`node scripts/verify-guard-mutations.mjs 62 63` 只跑编号匹配的那几条。
+ *
+ * 为什么需要它（实测）：整份清单跑一轮要在 Windows 上反复改写 60+ 个文件，
+ * 偶发 `UNKNOWN: open …`（杀软/索引器持有句柄）会让脚本**在循环中途崩掉**，
+ * 而那时正在变异的文件**留在变异状态**（本轮实测：三个文件被留成变异内容，
+ * 其中 `decision-tree.json` 连备份都已经是变异后的值 —— 只能靠 git 恢复）。
+ * 分片跑既避开这个坑，也让「只验本轮新增的那几条」变成一次调用。
+ */
+const only = process.argv.slice(2).filter((arg) => /^\d+$/.test(arg))
+const selected =
+  only.length === 0
+    ? MUTATIONS
+    : MUTATIONS.filter((mutation) => only.some((id) => mutation.name.startsWith(id)))
+if (only.length > 0) {
+  console.log(`（只跑匹配 ${only.join(' / ')} 的 ${selected.length} 条变异）`)
+}
+
+for (const mutation of selected) {
   const path = join(desktopRoot, mutation.file)
   const backupPath = `${path}.mutation-backup`
   let restored = false
@@ -671,12 +723,22 @@ for (const mutation of MUTATIONS) {
       failures += 1
     }
   } finally {
+    // ★ 恢复用**内容回写**（而不是 copyFileSync）：Windows 上 copyFileSync 会因为
+    //   目标文件句柄被占而偶发失败，而 readFileSync 已经拿到了原文，回写最稳。
     try {
-      copyFileSync(`${path}.mutation-backup`, path)
-      unlinkSync(`${path}.mutation-backup`)
+      const original = readFileSync(backupPath, 'utf8')
+      writeFileSync(path, original, 'utf8')
+      unlinkSync(backupPath)
       restored = true
     } catch {
       // 恢复失败要在下面报出来（比静默留着变异更危险）
+      try {
+        copyFileSync(`${path}.mutation-backup`, path)
+        unlinkSync(`${path}.mutation-backup`)
+        restored = true
+      } catch {
+        // 两条路都失败才认输
+      }
     }
     if (!restored) {
       console.log(`‼️  ${mutation.name}：原文件恢复失败，请手查 ${path}`)
@@ -687,7 +749,7 @@ for (const mutation of MUTATIONS) {
 
 console.log(
   failures === 0
-    ? `\n全部 ${MUTATIONS.length} 条变异都被守卫抓到 ✅（并已逐条恢复原文件）`
+    ? `\n全部 ${selected.length} 条变异都被守卫抓到 ✅（并已逐条恢复原文件）`
     : `\n有 ${failures} 条变异**没被抓到**或未生效 —— 那些断言等于没有 ⚠️`
 )
 process.exit(failures === 0 ? 0 : 1)

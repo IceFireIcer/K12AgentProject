@@ -16,12 +16,14 @@
  */
 
 import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { app, BrowserWindow, shell } from 'electron'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { runPiSmoke } from './agent/pi-bootstrap.ts'
 import { IPC } from './ipc/channels.ts'
 import { disposeChatRuntime, registerIpcHandlers } from './ipc/handlers.ts'
+import { decidePortableDataDir } from './portable.ts'
 import { SidecarManager } from './sidecar/manager.ts'
 import { BRAND_NAME } from '@shared/brand'
 
@@ -180,7 +182,7 @@ function pushSidecarState(): void {
 }
 
 /**
- * ★ 便携（绿色）版：把 Electron 的 `userData` 挪到 **exe 同级的 `data/`**，
+ * ★ 便携（绿色）版：把 Electron 的 `userData` 挪到**程序旁边的 `data/`**，
  * 使全部本地数据（config.json / learning.db / Pi JSONL / 日志）随程序目录走。
  *
  * 为什么必须显式改道：Electron 默认把 `userData` 放在
@@ -195,46 +197,52 @@ function pushSidecarState(): void {
  *    读过 userData，再改就来不及了（那时目录已经被创建/写入）。
  * ⚠️ 只在打包态生效：开发态若也改道，`npm run dev` 会把数据写进 `desktop/`，
  *    污染源码目录。
+ *
+ * ★★ **「哪个目录」这件事在 `portable.ts` 里判**（纯函数、可单测）——
+ *    这里只负责「问它 + 应用结果」。为什么必须把判定分出去：那个函数里
+ *    写着 P0-1 那个**数据丢失**事故的原因（单文件便携解压到 `%TEMP%` 再运行，
+ *   数据写那儿每次重启即清空），而这段逻辑此前混在导入 Electron 的模块里没法单测，
+ *    只能靠真机复现 —— 而那正是它漏了两轮测试的原因。
  */
 function applyPortableDataDir(): boolean {
-  if (!app.isPackaged) return false
-
-  // ★★ 关键：electron-builder 的 `portable` 目标**先把应用解压到临时目录再运行**，
-  //    所以 `app.getPath('exe')` 指向的是临时目录 —— 数据写那里会被清理掉，
-  //    用户会看到「关掉再开，东西全没了」。真正的「用户把 exe 放在哪」
-  //    只有 electron-builder 注入的 `PORTABLE_EXECUTABLE_DIR` 知道。
-  //    （同理，`portable.marker` 也在临时目录里 —— 它只用来表示「这是便携版」，
-  //     不能用来推断数据该放哪。）
-  // ★ 实测教训：**不要依赖 `PORTABLE_EXECUTABLE_DIR`**。
-  //   electron-builder 的 portable 启动器是用 NSIS 的
-  //   `Kernel32::SetEnvironmentVariable` **在启动器进程里**设这个变量的，
-  //   而 Electron 子进程并未继承到它（实测：便携单文件形态下该变量为 undefined，
-  //   数据静默写回了 `%APPDATA%` —— 正是「便携版不便携」这个最典型的坏味道）。
-  //
-  //   所以判定只用一条**不依赖环境变量**的事实：**exe 同级存在 `portable.marker`**。
-  //   - 便携单文件形态：启动器把应用解压到临时目录并运行，marker 在**临时目录**里，
-  //     数据也落临时目录 → 这恰好可以当「一次性试跑」，但**不能当长期绿色版**；
-  //   - 绿色（zip）形态：解压目录里 `exe` 与 `marker` 同级且**目录是真实持久的**，
-  //     数据就落在用户解压的位置 —— 这才是可长期使用的便携形态。
-  //   两种形态共用同一套代码，不需要为它们分别加开关。
   const exeDir = dirname(app.getPath('exe'))
-  const marker = join(exeDir, 'portable.marker')
-
-  let forced = process.env.K12_PORTABLE === '1'
-  if (!forced) {
-    try {
-      forced = existsSync(marker)
-    } catch {
-      forced = false
-    }
-  }
-  if (!forced) return false
-
-  const dataDir = join(exeDir, 'data')
+  let markerExists = false
   try {
-    app.setPath('userData', dataDir)
-    app.setPath('sessionData', join(dataDir, 'session'))
-    console.warn(`[main] 便携模式：数据目录 = ${dataDir}`)
+    markerExists = existsSync(join(exeDir, 'portable.marker'))
+  } catch {
+    markerExists = false
+  }
+
+  const decision = decidePortableDataDir({
+    isPackaged: app.isPackaged,
+    exeDir,
+    tempDir: tmpdir(),
+    // ★ 这条环境变量**可能拿不到**（NSIS 启动器未把子进程继承链接全）——
+    //   拿不到就靠 exeDir 兜底，而不是像旧实现那样据此放弃改道。
+    portableExecutableDir: process.env.PORTABLE_EXECUTABLE_DIR ?? null,
+    markerExists,
+    forced: process.env.K12_PORTABLE === '1',
+    // ★ 显式逃生舱（`K12_DATA_DIR`）：与是否便携无关，优先级最高。
+    explicitDataDir: process.env.K12_DATA_DIR ?? null
+  })
+
+  if (!decision.redirect || decision.dataDir === null) {
+    if (decision.reason === 'temp-unpack-dir') {
+      // ★★ 这里是 P0-1 的修复点：单文件便携形态跑在 `%TEMP%\<unpackDirName>` 里，
+      //    那个目录退出即被 `RMDir /r`。**不往那儿写数据**，退回默认的固定 slug
+      //    目录（`%APPDATA%\<slug>`，跨重启存活）。想把数据放 exe 旁边请用 zip 形态。
+      console.warn(
+        '[main] 便携单文件形态：数据目录在临时解压目录里，已改用默认的持久目录（%APPDATA%\\k12-agent-desktop）。' +
+          '若想让数据跟着程序走，请用 zip（绿色）形态解压到固定目录再运行，或用 K12_DATA_DIR 显式指定。'
+      )
+    }
+    return false
+  }
+
+  try {
+    app.setPath('userData', decision.dataDir)
+    app.setPath('sessionData', join(decision.dataDir, 'session'))
+    console.warn(`[main] 便携模式：数据目录 = ${decision.dataDir}`)
     return true
   } catch (error) {
     // 改道失败（例如装在只读目录）：退回默认 userData，**不让应用起不来**

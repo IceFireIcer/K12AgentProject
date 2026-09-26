@@ -53,6 +53,7 @@ import {
 import { useChatStore } from '../stores/chat'
 import { useConfirm } from '../stores/confirm'
 import { useStudyStore, type SessionSummaryShape } from '../stores/study'
+import { displaySessionTitle } from '../study/session-title'
 import { useViewModeStore } from '../stores/viewMode'
 import { useDismissable } from '../composables/useDismissable'
 
@@ -248,18 +249,14 @@ function isCurrent(session: { id: string }): boolean {
 /**
  * ★ 标题的**防御性**兜底：界面不显示「看着像占位符」的裸字符串。
  *
- * ★ 为什么要有：没有消息的会话，主进程拿到的名字可能是 Pi 那边的英文占位
- *   （`(no messages)` 一类）。它在列表里与中文标题并排出现，读起来像界面坏了。
- * ★ 归一只做**最小**一件事：把认得出的英文占位换成中文说法，其余一字不改
- *   （不改标题、不截断、不生成标题 —— 标题的来源仍是主进程那一处）。
- * ⚠️ 主进程 `study/sessions.ts` 那边的根因由另一条流处理，这里只是显示层兜底。
+ * ★ 实现已归口到 `study/session-title.ts`（唯一一份）—— 这里只 re-export 一个同名函数，
+ *   好处是历史调用点（本文件多处 + 档案页）不必改，而判据不会再分叉。
+ *   ⚠️ 曾经本文件自己持有一份 `PLACEHOLDER_TITLES` + `displayTitle`，而
+ *   `study/SessionsTab.vue` 直接渲染 `item.title` —— 于是 `(no messages)` 在
+ *   学习记录页的历史会话里露了出来（P1-3）。两处各写一份必然再次漂移。
  */
-const PLACEHOLDER_TITLES = ['(no messages)', '(empty)', '(untitled)']
-
 function displayTitle(title: string): string {
-  const trimmed = title.trim()
-  if (trimmed.length === 0) return '新的对话'
-  return PLACEHOLDER_TITLES.includes(trimmed.toLowerCase()) ? '新的对话' : trimmed
+  return displaySessionTitle(title)
 }
 
 /**

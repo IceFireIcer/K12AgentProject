@@ -1624,6 +1624,44 @@ class TestGradeRoutes(unittest.TestCase):
         self.assertEqual(response.status_code, 503, response.text)
         self.assertIn("本地数据库异常", response.json()["detail"])
 
+    def test_signals_endpoint_skips_unclassifiable_rows_instead_of_500(self) -> None:
+        """★ P1-2：一行脏 ``signal_type`` 只让**那一行**被跳过，不能把整个读接口打成 500。
+
+        实测现场就是这个形态：右栏「当前学段」正常（走 `/grade/state`，不读信号列表），
+        而「学段」页签里的信号读取报 `读取失败（HTTP 500）：Internal Server Error` ——
+        因为 `grade_signals.signal_type` 是宽松 TEXT，而契约 `GradeSignalType` 是收窄联合，
+        构造 `GradeSignal` 时 pydantic 抛 `ValidationError`，它不是 `sqlite3.Error`，
+        路由层的兜底拦不住。
+        """
+        path = student_learning_db_path(self.tmp, self.student_id)
+        self.client.get(f"/api/grade/state/{self.student_id}")  # 先建库（冷启动）
+        conn = sqlite3.connect(path)
+        # ① 空串 ② NULL ③ 升级前写入的旧字面量 —— 三种都出现过
+        conn.execute(
+            "INSERT INTO grade_signals(ts, session_id, signal_type, value, raw) "
+            "VALUES(1, 's', '', 0.2, 't1|术语=梯度(min_grade=senior)')"
+        )
+        conn.execute(
+            "INSERT INTO grade_signals(ts, session_id, signal_type, value, raw) "
+            "VALUES(2, 's', NULL, 0.2, 't2|x=1')"
+        )
+        conn.execute(
+            "INSERT INTO grade_signals(ts, session_id, signal_type, value, raw) "
+            "VALUES(3, 's', 'legacy_unknown', 0.2, 't3|y=1')"
+        )
+        # ④ 一行**正常**的证据：它必须照样回给前端（容错不能把好数据一起吃掉）
+        conn.execute(
+            "INSERT INTO grade_signals(ts, session_id, signal_type, value, raw) "
+            "VALUES(4, 's', 'vocab', 0.5, 't4|术语=梯度下降(min_grade=senior)')"
+        )
+        conn.commit()
+        conn.close()
+
+        response = self.client.get(f"/api/grade/signals/{self.student_id}")
+        self.assertEqual(response.status_code, 200, response.text)
+        signals = response.json()["signals"]
+        self.assertEqual([item["signalType"] for item in signals], ["vocab"], signals)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main(verbosity=2)

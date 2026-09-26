@@ -39,7 +39,7 @@ import {
   type QuizProgressRequest,
   type StudyCallResult
 } from './channels.ts'
-import { dataRequests, requestJson } from '../wire/data.ts'
+import { dataRequests } from '../wire/data.ts'
 import type { TraceRecordForUi } from '../agent/trace.ts'
 import type { TraceEntry, TraceSnapshot } from '../../shared/ipc-events.ts'
 // ★★ 动画的两条实现复用（**不重写第二套**）：
@@ -173,26 +173,50 @@ export function registerDataHandlers(options: {
   const animationCompleter = options.animationCompleter ?? ((): TextCompleter | null => null)
 
   /* ---------------------------------------------------------------- *
-   * 学生身份：读当前学生；**库里没有就建一个**
+   * 学生身份：读当前学生；**库里没有就把它建出来**
    *
    * 新装的机器首跑时 `learning.db` 是空的，没有这一条，界面上的昵称、
    * 档案页、推荐都无从谈起。建的学生是「本机唯一的学生」——
    * 与 `resolveActiveStudentId()` 的取值一致（同一台机器一个学生）。
-   * ---------------------------------------------------------------- */
+   *
+   * ★★ **必须按已知 id 建，不能用 `POST /api/students`**（P3-4 实测缺陷）：
+   *   `POST /api/students` 的 id 是**服务端扫描目录分配的下一个空号**，
+   *   于是这条「列一遍 → 没有就建」就成了一个**读-改-写竞态**：
+   *   启动时两个调用（本通道 + 学段/推荐那条自动建学生的路）都可能先看到「一个都没有」，
+   *   接着各建一个 —— 服务端顺序处理，第二个看到 `student_001` 已占，于是建出 `student_002`。
+   *   现场表现就是「同一秒出现 `students/student_001` 与 `students/student_002`」，
+   *   而学生的数据会分裂在两个目录里（谁被读到取决于哪条路先跑完）。
+   *
+   *   所以改成**幂等**的两步：先读该 id 的画像；404 说明这一位还不存在，
+   *   就调那几条**会按这个 id 自动建行**的端点（`/recommendation` 的冷启动分支
+   *   走 `upsert_student(student_id)`，主键固定），再读一次画像。
+   *   两个并发调用做的是**同一件幂等的事**，不可能再冒出第二个 id。
+   */
   ipcMain.handle(IPC.studentGet, async (): Promise<StudyCallResult> => {
     const wanted = studentId()
-    const listed = await requestJson('/api/students')
-    if (!listed.ok) return listed
-    const students = Array.isArray(listed.data) ? (listed.data as Array<Record<string, unknown>>) : []
-    const existing = students.find((item) => item?.studentId === wanted)
-    if (existing) return { ok: true, data: existing }
 
-    // 没有就建：昵称用中性默认值（**不采集真实姓名**，§12 数据最小化），
-    // 学段给冷启动默认值 —— 它只是起点，之后由服务端推断接管。
-    return await requestJson('/api/students', {
-      method: 'POST',
-      body: { nickname: '同学', gradeLevel: DEFAULT_GRADE_LEVEL }
-    })
+    /** 读该学生的 Student 行（不存在时服务端回 404）。 */
+    const readWanted = async (): Promise<StudyCallResult> => {
+      const profile = await req.profile(wanted)
+      if (!profile.ok) return profile
+      const data = profile.data as { student?: Record<string, unknown> } | null
+      const student = data?.student
+      if (student === undefined || student === null) {
+        return { ok: false, message: '读取学生信息失败：本地数据服务返回的数据不完整。' }
+      }
+      return { ok: true, data: student }
+    }
+
+    const first = await readWanted()
+    if (first.ok) return first
+    // 不是「还没有」就不能乱建：权限 / 服务不可用这类失败要如实回给界面。
+    if (!/HTTP\s*404/.test(first.message)) return first
+
+    // 「还没有这一位」→ 调一个会按 **这个 id** 建行的端点（冷启动分支），
+    // 昵称与学段都用服务端的中性默认值（**不采集真实姓名**，§12 数据最小化）。
+    const ensured = await req.recommendation(wanted)
+    if (!ensured.ok) return ensured
+    return await readWanted()
   })
 
   /* ---------------------------------------------------------------- *

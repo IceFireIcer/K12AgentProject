@@ -441,7 +441,7 @@ watch(tab, () => {
             <TrendingUp :size="14" />
             <h3 class="sec__title">掌握度</h3>
           </div>
-          <p v-if="insight.errors.profile" class="warn" data-testid="rail-profile-error">
+          <p v-if="insight.errors.profile" class="sec__hint" data-testid="rail-profile-error">
             {{ insight.errors.profile }}
           </p>
           <p v-else-if="masteryRows.length === 0" class="sec__hint">还没有练习记录。</p>
@@ -563,7 +563,7 @@ watch(tab, () => {
             <span v-else class="grade__origin">还没判出来</span>
           </p>
 
-          <p v-if="insight.errors.gradeSignals" class="warn" data-testid="rail-signals-error">
+          <p v-if="insight.errors.gradeSignals" class="sec__hint" data-testid="rail-signals-error">
             {{ insight.errors.gradeSignals }}
           </p>
           <!-- 四类信号的分值条：学生看得懂（「用词水平 / 追问深度」），保留 -->

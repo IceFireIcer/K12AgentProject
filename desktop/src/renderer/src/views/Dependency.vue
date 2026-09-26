@@ -25,6 +25,7 @@ import { useInsightStore } from '../stores/insight'
 import { useChatStore } from '../stores/chat'
 import { useUiStore } from '../stores/ui'
 import { UNKNOWN_KP_LABEL, kpLabel, kpLabelResolved } from '../study/kp-label'
+import { todayStamp } from '../study/export-naming'
 import ProgressBar from '../components/ProgressBar.vue'
 import TeacherGate from '../components/TeacherGate.vue'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../labels'
@@ -540,13 +541,8 @@ function csvFileName(): string {
   return `${BRAND_NAME}-${gradeLabel.value}学习地图-${todayStamp()}.csv`
 }
 
-/** 本地时区的 `YYYYMMDD`。 */
-function todayStamp(): string {
-  const now = new Date()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  return `${now.getFullYear()}${month}${day}`
-}
+/* 本地时区的 `YYYYMMDD` 已归口到 `study/export-naming.ts`（学习报告 / 错题本 / 本页
+ * 三处导出共用同一份实现 —— 各写一份会在时区口径上分叉，见那个文件的说明）。 */
 
 /**
  * 导出当前学段的**全部依赖边**为 CSV —— 走**主进程的原生保存对话框**。
@@ -1015,20 +1011,30 @@ async function exportCsv(): Promise<void> {
                 <span class="insp__meta">{{ focusedEdges.length }} 条</span>
               </header>
               <div class="edges">
-                <!-- 显示中文名而不是 kp_id：id 对使用者没有意义，
-                     需要精确 id 时看 title（也方便核对数据）。整行可点，沿边走到另一端。 -->
+                <!-- 显示中文名而不是 kp_id：id 对使用者没有意义。整行可点，沿边走到另一端。
+                     ★★ P3-5：`title` 是**可访问名**（读屏与悬停都会念出来），此前它是裸的
+                       `${fromKpId} → ${toKpId}` 两个内部 slug（`ai-definition-jr → ai-hierarchy-jr`）
+                       —— 学生的鼠标停在边上就会看到一手机器码。现在学生侧给中文名（就是按钮上
+                       那两个），内部 id 一字不删地挪进下面的 `<TeacherGate>`（排障仍要看它）。 -->
                 <button
                   v-for="edge in focusedEdges"
                   :key="`${edge.fromKpId}>${edge.toKpId}`"
                   type="button"
                   class="edge k12-tap"
-                  :title="`${edge.fromKpId} → ${edge.toKpId}`"
+                  :title="`${nameOf(edge.fromKpId)} → ${nameOf(edge.toKpId)}`"
                   @click="walkTo(edge)"
                 >
                   <span class="edge__name">{{ nameOf(edge.fromKpId) }}</span>
                   <span class="edge__arrow">→</span>
                   <span class="edge__name">{{ nameOf(edge.toKpId) }}</span>
                   <span class="edge__rel">{{ edge.relation === 'prerequisite' ? '前置边' : '相关边' }}</span>
+                  <!-- 内部 id（教师 / 答辩视角）：这条边到底是哪两个知识点，
+                       用可核对的 slug 写出来 —— 报告与排障要按它对齐数据。 -->
+                  <TeacherGate>
+                    <span class="edge__ids" :data-from="edge.fromKpId" :data-to="edge.toKpId">
+                      {{ edge.fromKpId }} → {{ edge.toKpId }}
+                    </span>
+                  </TeacherGate>
                 </button>
                 <p v-if="focusedEdges.length === 0" class="edges__none">
                   这个方向上没有依赖边。
@@ -1613,6 +1619,13 @@ async function exportCsv(): Promise<void> {
   margin-left: auto;
   font-size: var(--k12-fs-xs);
   color: var(--k12-muted);
+}
+/* 内部 slug（教师视角）：等宽 + 折行，它是要被**核对**的值，不截断。 */
+.edge__ids {
+  font-family: var(--k12-font-mono);
+  font-size: var(--k12-fs-micro);
+  color: var(--k12-muted);
+  word-break: break-all;
 }
 
 /* ── 附录：科普说明（默认折叠）────────────────────────────────────────────

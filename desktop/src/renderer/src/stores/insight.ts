@@ -18,6 +18,7 @@
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+import { describeClientError } from '../api/student-facing'
 import {
   resolveDataBridge,
   type DataBridge,
@@ -33,6 +34,58 @@ export interface InsightSections {
   recommendation: boolean
   gradeSignals: boolean
   gradeHistory: boolean
+}
+
+/**
+ * 主进程失败文案里的 HTTP 状态码（`读取失败（HTTP 404）：…`）。
+ *
+ * ★ 只在**归类**时读一次：渲染层不自己发 HTTP，但主进程的回执里带着状态码，
+ *   而「404 = 还没有 / 500 = 服务端出错」这两种处境给学生的下一步完全不同。
+ */
+function statusOf(message: string): number | null {
+  const match = /HTTP\s*(\d{3})/.exec(message)
+  return match ? Number(match[1]) : null
+}
+
+/**
+ * 一个分区的失败 → **学生看得懂的一句话**（P1-1 / P1-2）。
+ *
+ * 三种归类比原样直出更准，也各自对应一个真实处境：
+ *   - **404**：这个学生**还没有**这份记录（冷启动最常见）。它不是「界面坏了」，
+ *     所以给一句处境说明 + 下一步，而不是报错腔（P1-1：右栏曾直出
+ *     `读取失败（HTTP 404）：还没有 student_001 的画像…`）。
+ *   - **503**：本地数据服务（sidecar）不可用 —— 学生能做的只有等一会儿重试。
+ *   - **其它（含 500）**：说「这次没读上来，稍后再试」，**绝不**把状态码摆上屏
+ *     （P1-2：右栏曾直出 `读取失败（HTTP 500）：Internal Server Error`）。
+ *
+ * 认不出的文案仍过一遍 `toStudentFacingMessage` 的判据（含 HTTP 状态码 /
+ * 服务器路径 / 内部 id 的一律换成中文），保证**任何一条**都不会原样印给学生。
+ */
+export function classifySectionError(
+  section: keyof InsightSections,
+  message: string
+): string {
+  const status = statusOf(message)
+  if (status === 404) {
+    // 「还没有」是空态语义，不是错误 —— 每个分区说自己的下一步。
+    switch (section) {
+      case 'profile':
+        return '还没有练习记录。去闯关里做几道题，这里就会显示你的掌握度。'
+      case 'recommendation':
+        return '暂时还推不出下一步，先去对话里聊两句或做几道题。'
+      case 'gradeSignals':
+        return '还没攒到足够的判定依据，多聊几轮就会出现。'
+      case 'gradeHistory':
+        return '还没有发生过学段变化。'
+    }
+  }
+  if (status === 503) {
+    return '本地数据服务暂时不可用，请等几秒后重试。'
+  }
+  // ★ 500 与其它状态码走同一句：学生不需要知道「服务端哪里错了」，
+  //   也不该看到任何 HTTP 状态码（原文进控制台，排查仍要看）。
+  console.warn(`[insight] ${section} 读取失败（原始文案，仅排查用）：`, message)
+  return '这次没能读上来，稍后再试一次。'
 }
 
 export const useInsightStore = defineStore('insight', () => {
@@ -145,6 +198,11 @@ export const useInsightStore = defineStore('insight', () => {
    *
    * ★ 三个「不」：不抛异常、不覆盖旧数据（取失败时保留上一次的，界面不停在空白）、
    *   不并发重复发（同一分区的在途请求只发一次 —— 右栏与档案页会同时挂载）。
+   * ★★ 失败文案**在这一层就归类成学生话**（P1-1 / P1-2）：主进程回的是
+   *   `读取失败（HTTP 404）：还没有 student_001 的画像…` 这种排查口径，
+   *   里面有 HTTP 状态码与内部学生 id —— 它此前被右栏原样直出（学生面直接看到
+   *   `student_001`）。归类放在 store（而不是各消费点）是刻意的：右栏与档案页
+   *   读的是同一个 `errors`，两处各写一份判据必然漂移。
    */
   async function loadSection(
     section: keyof InsightSections,
@@ -169,11 +227,14 @@ export const useInsightStore = defineStore('insight', () => {
     const task = (async () => {
       try {
         const result = await run(lookup.bridge)
-        if (!result.ok) errors.value = { ...errors.value, [section]: result.message }
+        if (!result.ok) {
+          errors.value = { ...errors.value, [section]: classifySectionError(section, result.message) }
+        }
       } catch (thrown) {
+        // ★ 异常也走同一套归类（连接失败 / 超时 → 可读中文），不留英文原文。
         errors.value = {
           ...errors.value,
-          [section]: thrown instanceof Error ? thrown.message : String(thrown)
+          [section]: describeClientError(thrown)
         }
       } finally {
         loading.value = { ...loading.value, [section]: false }

@@ -73,6 +73,7 @@ import SurfacePanel from '@/components/SurfacePanel.vue'
 import PageIdentity from '@/components/PageIdentity.vue'
 import TeacherGate from '@/components/TeacherGate.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import { templateCardSubtitle } from '../study/animation-caption'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../labels'
 import {
   readBakedPayloadId,
@@ -730,16 +731,18 @@ onDeactivated(() => {
            那个 `<TeacherGate>` 里。 -->
     <PageIdentity main="把过程一步步画出来看" />
 
-    <!-- ══ 分页（智团团备好的 / 我的动画）与年级筛选都**在舞台下方** ═══════════
-         ★ 2026-09-26（D-085）：它们原来挡在舞台前面 —— 学生还没看到任何动画，
+    <!-- ══ 舞台（分页①的左半边）═══════════════════════════════════════════
+         ★ 2026-09-26（D-085）：分页与年级筛选原来**挡在舞台前面** —— 学生还没看到任何动画，
            就先要做两次选择（挑哪个来源、按哪个年级看），而这两件事都是**看完想换**时才需要的。
            更要紧的是纵向空间：舞台（720×420 的动画）是按「容器能给多大」等比缩放的，
            上面每多一行，屏上每个字就小一圈（实测：挡在舞台前时缩放 0.485×、节点字 7.8px）。
-         ★ 分页与年级现在与选片区合成同一条带（同一组导航在档案页也是这个长相）。
-         ⚠️ 两个分页都用 `v-show` 而不是 `v-if`：舞台那个沙箱宿主与本分页绑在一起，
+           所以它们现在都在舞台**之后**（见下面那段常驻导航）。
+         ⚠️ 舞台用 `v-show` 而不是 `v-if`：沙箱宿主与它绑在一起，
             `v-if` 会在切分页时把它整个拆掉 —— 切回来动画从头播一遍、播放进度清零
             （档案页用 `<KeepAlive>` 避免的正是这种损失；这里两个分页在同一个文件里，
-            两个都保持挂载是同一件事的更直接做法，所以不需要 KeepAlive）。 -->
+            两个都保持挂载是同一件事的更直接做法，所以不需要 KeepAlive）。
+         ★★ 本 wrapper **只装舞台**，分页导航在它之外（P0-2）：导航曾是 pane 的一部分，
+            切到「我的动画」后整块消失，学生再也回不到动画库，只能重启应用。 -->
     <div v-show="anim.activeTab === 'builtin'" class="pane">
     <!-- 舞台：全宽主对象。卡头压成**一行**（标题 + 来源徽章 + 运输控件 + 主按钮）。
          ★★ 运输控件（暂停 / 重播 / 进度读数）从卡底搬到了**卡头这一行**：
@@ -895,20 +898,17 @@ onDeactivated(() => {
       </div>
 
     </SurfacePanel>
+    </div>
 
-    <!-- ══ 换一段：舞台下方的控件带（现在放的是什么 · 换来源 · 换年级 · 挑别的）═════
-         ★ 2026-09-26（D-085）：这几件事都是「看完想换」时才需要的，所以整体下沉到舞台之后。
-           它们原在舞台之前，直接后果是动画被挤矮（舞台高度写死 340px 时，
-           上面每多一行都不改变高度、只把下面的东西推到折线以下；而舞台一旦按视口长高，
-           上面的每一行都实打实吃掉动画的像素）。 -->
+    <!-- ══ 分页导航（智团团准备的 / 我的动画）+ 换年级：**两个页签都常驻** ═════════
+         ★★ 2026-09-26（P0-2）：这一段原来在 `v-show="activeTab === 'builtin'"` 的 pane **里面**，
+           于是切到「我的动画」后它跟着整块消失 —— 学生再也点不回动画库，只能重启应用。
+           导航属于**两个页签共有**的东西，必须在两个页签下都渲染（这是「死胡同」不可达的根因）。
+         ★ 位置仍在舞台之后（D-085）：它是「看完想换」时才需要的，挡在舞台前会吃掉画面高度。
+
+         ★ 换年级这一组**也留在导航里**（而不是并进「我的动画」区）：它对两个来源都成立
+           —— 同一个知识点在不同年级是两份不同的产物，换档就是换一批可看的东西。 -->
     <div class="anim__chooser" data-testid="animation-view-chooser">
-      <!-- 「现在放的是什么 · 给谁看」：从卡头搬下来的一行（学生视角；模板 id /
-           标称时长 / 可调参数是实现事实，仍在下面的 `<TeacherGate>` 里）。 -->
-      <p v-if="anim.activeTemplate" class="anim__sub" data-testid="animation-view-sub">
-        {{ anim.activeTemplate.concept }} · {{ gradeAudienceText(anim.activeTemplate.gradeLevels) }}
-      </p>
-      <p v-else class="anim__sub">从下面的动画里挑一个，点「播放这段动画」就能看。</p>
-
       <div class="anim__chooser-row">
         <nav class="study__tabs" role="tablist" aria-label="动画讲解分页">
           <button
@@ -945,6 +945,16 @@ onDeactivated(() => {
         </div>
       </div>
     </div>
+
+    <!-- ══ 分页①：智团团准备的（舞台已在上面，下面这一带是选片与口径）══════════ -->
+    <div v-show="anim.activeTab === 'builtin'" class="pane">
+      <!-- 「现在放的是什么 · 给谁看」（学生视角；模板 id / 标称时长 / 可调参数是实现事实，
+           仍在下面的 `<TeacherGate>` 里）。它只对「智团团准备的」这一页成立，
+           所以留在本 pane 内。 -->
+      <p v-if="anim.activeTemplate" class="anim__sub" data-testid="animation-view-sub">
+        {{ anim.activeTemplate.concept }} · {{ gradeAudienceText(anim.activeTemplate.gradeLevels) }}
+      </p>
+      <p v-else class="anim__sub">从下面的动画里挑一个，点「播放这段动画」就能看。</p>
 
     <!-- ★ 2026-09-22（报告 C7 / C8）：这里原来还有一句学生面脚注
          「动画就在这台电脑上播放，画面不会跳到别的地方去；断网也能看」。
@@ -1017,8 +1027,13 @@ onDeactivated(() => {
           </span>
           <!-- ★ 学生视角：**它讲的是什么 + 给谁看**。
                「时长 4.8s」（毫秒换算的标称值）与「可调参数 N 项」是模板的**后台口径**，
-               一张选片卡上摆这些，学生读到的是目录条目而不是「我能不能看懂它」。 -->
-          <span class="tpl__concept">{{ t.concept }}</span>
+               一张选片卡上摆这些，学生读到的是目录条目而不是「我能不能看懂它」。
+               ★★ P3-2：主行已经以概念名开头（全库 228/228 都是 `{concept}：<钩子>` 这个形态），
+                 再显示一次概念就是**同一句话读两遍**（屏幕阅读器尤其明显）。
+                 去重判据在 `study/animation-caption.ts`，两个列表共用。 -->
+          <span v-if="templateCardSubtitle(t.title, t.concept)" class="tpl__concept">
+            {{ templateCardSubtitle(t.title, t.concept) }}
+          </span>
           <!-- ★ 2026-09-26（D-086）：学段标签**只在学段没判定时**出现 —— 已经按学段筛过一遍，
                再给每张卡逐个标注就是噪声（214 张卡刷屏的正是这些小标签）；没判定时它才有用
                （学生靠它判断「这档是给我的吗」）。 -->
@@ -1083,7 +1098,7 @@ onDeactivated(() => {
         data-testid="animation-mine-empty"
         title="这里还没有你的动画"
         :desc="
-          `${gradeLabel ?? GRADE_UNKNOWN_LABEL}这一档还做过动画。回对话里说一句「用动画再讲一遍」，或者换一档学段看看。`
+          `${gradeLabel ?? GRADE_UNKNOWN_LABEL}这一档还没做过动画。回对话里说一句「用动画再讲一遍」，或者换一档学段看看。`
         "
       />
 
@@ -1107,7 +1122,10 @@ onDeactivated(() => {
               <span class="tpl__top">
                 <span class="tpl__name">{{ item.title || item.concept }}</span>
               </span>
-              <span class="tpl__concept">{{ item.concept }}</span>
+              <!-- ★ P3-2 同上：主行已含概念名时不再重复（判据只此一处）。 -->
+              <span v-if="templateCardSubtitle(item.title, item.concept)" class="tpl__concept">
+                {{ templateCardSubtitle(item.title, item.concept) }}
+              </span>
               <span class="tpl__grades">
                 <span class="tpl__grade">{{ gradeName(item.gradeLevel) }}</span>
               </span>

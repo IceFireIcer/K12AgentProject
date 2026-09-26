@@ -210,17 +210,36 @@ def _open_engine(request: Request, student_id: str) -> GradeEngine:
 
 
 def _read_signals(engine: GradeEngine, limit: int = SIGNAL_LIST_LIMIT) -> list[GradeSignal]:
-    """读最近若干条信号并**把秒转成毫秒**（契约口径）。"""
+    """读最近若干条信号并**把秒转成毫秒**（契约口径）。
+
+    ★★ **逐行容错**（P1-2，实测）：``grade_signals.signal_type`` 是宽松的 ``TEXT`` 列，
+    而契约 :data:`GradeSignalType` 是**收窄的联合类型**。历史库（或人工改过的库）里可能有
+    非四类取值的行 —— 直接构造 `GradeSignal` 会让 pydantic 校验抛错，而它**不是**
+    ``sqlite3.Error``，于是路由层那个 ``except sqlite3.Error`` 兜不住，整个
+    ``GET /api/grade/signals`` 变成 **500 Internal Server Error**（学生看到原始 500）。
+    症状很迷惑：同一个右栏里「当前学段」（走 ``/grade/state``，不读信号列表）一切正常。
+
+    这里对**认不出的行**跳过并记日志，而不是让一行脏数据打掉整个接口 —— 与
+    ``app.routes.students.as_grade_level`` 对脏学段「退回默认值而非崩溃」是同一条纪律。
+    """
     signals = engine.recent_signals(limit)
-    return [
-        GradeSignal(
-            signal_type=signal.signal_type,
-            value=signal.value,
-            raw=signal.raw,
-            ts=to_contract_ms(signal.ts) or None,
-        )
-        for signal in signals
-    ]
+    out: list[GradeSignal] = []
+    for signal in signals:
+        try:
+            out.append(
+                GradeSignal(
+                    signal_type=signal.signal_type,
+                    value=signal.value,
+                    raw=signal.raw,
+                    ts=to_contract_ms(signal.ts) or None,
+                )
+            )
+        except Exception:  # noqa: BLE001 - pydantic ValidationError 也在内（它不是 sqlite3.Error）
+            logger.warning(
+                "跳过一条无法归类的学段信号（signal_type=%r）—— 一行脏数据不该打掉整个读接口",
+                signal.signal_type,
+            )
+    return out
 
 
 # --------------------------------------------------------------------------- #

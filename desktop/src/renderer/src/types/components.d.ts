@@ -43,6 +43,7 @@ declare module 'vue' {
     FloatPanel: typeof import('./../components/FloatPanel.vue')['default']
     GradeIndicator: typeof import('./../components/GradeIndicator.vue')['default']
     InlineCard: typeof import('./../cards/InlineCard.vue')['default']
+    MarkdownProse: typeof import('./../components/MarkdownProse.vue')['default']
     MascotMark: typeof import('./../components/MascotMark.vue')['default']
     MessageComposer: typeof import('./../components/MessageComposer.vue')['default']
     ModelPicker: typeof import('./../components/ModelPicker.vue')['default']

@@ -642,6 +642,14 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
                 <div class="chat__opening-actions">
                   <!-- ★ 动作按钮只在**有知识点可去**时渲染：没有目标却给一个「去吧」，
                        学生点下去会什么都不发生。 -->
+                  <!-- ★★ P2-4：按钮上**写明它要去哪个知识点**。
+                       走查时开场白是「先从语音助手开始怎么样？」，而按钮只写「就从这里开始」——
+                       学生把它读成「有个语音助手功能」的邀请，点麦克风却被告知「语音输入未接入」，
+                       于是看起来像「说好的功能没了」。
+                       而那个「语音助手」其实是**教材里的知识点**（第五章 5.2.2，语音识别 + 语音合成的
+                       组合应用）—— 把它从推荐池里剔掉会削掉正经的教材覆盖面，**歧义的解法是把去哪写出来**：
+                       按钮变成「就从「语音助手」开始」，「语音助手」在这里就只可能是一个要学的内容。
+                       ⚠️ 名字取不到（`openingKpName` 为空）时保留原来的含糊说法 —— 好过一个空格。 -->
                   <button
                     v-if="chat.openingKpId"
                     type="button"
@@ -649,7 +657,8 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
                     data-testid="chat-opening-accept"
                     @click="acceptOpening"
                   >
-                    好啊，就从这里开始
+                    <template v-if="chat.openingKpName">就从「{{ chat.openingKpName }}」开始</template>
+                    <template v-else>好啊，就从这里开始</template>
                   </button>
                   <!-- 出口：学生有权跳过引导（不是「拒绝」，只是换话题 —— 所以不做成否定按钮） -->
                   <button

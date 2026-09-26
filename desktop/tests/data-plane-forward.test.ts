@@ -75,6 +75,15 @@ const BRIDGE_STUB =
   'data:text/javascript;base64,' +
   Buffer.from(`
 const calls = []
+/**
+ * 按路径定制的回执表（P3-4 的用例要用它模拟「还没有这个学生 → 404」）。
+ *
+ * ★ 匹配口径是「**同一条路径**，可带查询串」而不是「任意前缀」：
+ *   前缀匹配会让 profile 的规则把 profile/.../recommendation 也吞掉
+ *   （实测踩到：那条子路径本该 200，却被判成 404，于是链路的第三步根本没发生）。
+ * ⚠️ 本段在 template literal 里，注释里**不能出现反引号**（会提前闭合字符串）。
+ */
+const replies = []
 const defaultReply = async () =>
   new Response(JSON.stringify({ qid: 'probe', correct: true }), {
     status: 200,
@@ -83,10 +92,21 @@ const defaultReply = async () =>
 export const DEFAULT_API_TIMEOUT_MS = 8000
 export const testTransport = {
   calls,
-  reset() { calls.length = 0 }
+  reset() { calls.length = 0 },
+  /** 注册一条「同路径」回执（带查询串也算命中；后注册的优先）。 */
+  reply(path, status, body) { replies.unshift({ path, status, body }) },
+  clearReplies() { replies.length = 0 }
 }
 export async function apiFetch(path, init = {}) {
   calls.push({ path, init })
+  for (const rule of replies) {
+    if (path === rule.path || path.startsWith(rule.path + '?')) {
+      return new Response(JSON.stringify(rule.body), {
+        status: rule.status,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+  }
   return await defaultReply()
 }
 export async function probeHealth() { return null }
@@ -304,6 +324,70 @@ test('身份-6 两条塞 body 的通道确实注册上了（注册表里有它�
   for (const channel of [IPC.studentGet, IPC.quizGrade, IPC.codeRunHint, IPC.animationHost]) {
     assert.ok(registered.includes(channel), `这条通道没有注册处理器：${channel}`)
   }
+})
+
+/**
+ * ★★ P3-4：「没有就建一个」必须是**幂等**的，不能靠服务端分配新号。
+ *
+ * 真机事故：启动后 `students/` 里同秒冒出 `student_001` 与 `student_002`。
+ * 根因是这条通道原来走「列一遍全部学生 → 没有就 `POST /api/students`」——
+ * 而那个端点的 id 由**服务端扫描目录**分配，于是启动时两个并发的自动建号
+ * （本通道 + 学段/推荐那条冷启动路径）会各建一个：第二个扫描时 001 已占 ⇒ 建出 002。
+ * 学生的数据从此分裂在两个目录里。
+ *
+ * 修法是按**已知 id** 走幂等的建行路径（`/recommendation` 的冷启动分支
+ * `upsert_student(student_id)`），两个并发调用做的是同一件幂等的事。
+ */
+test('身份-7 ★ studentGet 不靠 POST /api/students 分配新号，而是按已知 id 幂等建行（P3-4）', async () => {
+  bridge.testTransport.reset()
+  bridge.testTransport.clearReplies()
+  // 第一次读画像：服务端说「还没有这一位」（真实形态：404 + detail）
+  bridge.testTransport.reply(
+    '/api/profile/student_main',
+    404,
+    { detail: '还没有 student_main 的画像：该学生尚未建立学习记录' }
+  )
+  install({ studentId: 'student_main', gradeLevel: 'junior' })
+
+  const result = (await ipc.invoke(IPC.studentGet)) as {
+    ok: boolean
+    message?: string
+    data?: { studentId?: string }
+  }
+  const paths = calls.map((call) => call.path)
+
+  assert.equal(
+    paths.includes('/api/students'),
+    false,
+    '不得再调 POST/GET /api/students —— 那条路的 id 是服务端扫描目录分配的，' +
+      '两个并发调用会各建一个（student_001 与 student_002 同秒出现，就是 P3-4）'
+  )
+  assert.deepEqual(
+    paths,
+    ['/api/profile/student_main', '/api/profile/student_main/recommendation', '/api/profile/student_main'],
+    '顺序应当是「读 → 幂等建（recommendation 的冷启动分支）→ 再读」'
+  )
+  assert.equal(
+    calls[1].init.method,
+    'GET',
+    '第二步是 GET /recommendation（它的冷启动分支会按这个 id 建行）—— 不是 POST /api/students'
+  )
+  assert.equal(result.ok, false, '回执仍受替身控制（这里第二次读还是 404，如实返回失败）')
+})
+
+test('身份-7b ★ 非 404 的失败不得触发建号（权限 / 服务不可用不许乱建）', async () => {
+  bridge.testTransport.reset()
+  bridge.testTransport.clearReplies()
+  bridge.testTransport.reply('/api/profile/student_main', 503, { detail: '本地数据库异常' })
+  install({ studentId: 'student_main', gradeLevel: 'junior' })
+
+  await ipc.invoke(IPC.studentGet)
+
+  assert.deepEqual(
+    calls.map((call) => call.path),
+    ['/api/profile/student_main'],
+    '503 时只读一次就如实失败 —— 只有「还没有」（404）才该触发建号'
+  )
 })
 
 /* ================================================================== *

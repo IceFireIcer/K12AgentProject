@@ -26,7 +26,9 @@ import { computed, ref } from 'vue'
 import type { components } from '@shared/api-types'
 import { resolveStudyBridge, type StudyBridge } from '../api/study'
 import { composeMistakesMarkdown, composeReportMarkdown } from '../study/report-markdown'
+import { todayStamp } from '../study/export-naming'
 import { useKnowledgeStore } from './knowledge'
+import { BRAND_NAME } from '@shared/brand'
 import type { GradeLevel } from '@shared/ipc-events'
 
 /** 四个档案端点的契约类型（**全部来自生成物**，不在这里手写一份，见 `api/study.ts`）。 */
@@ -463,6 +465,10 @@ export const useStudyStore = defineStore('study', () => {
    *   而这份文件是给家长看的 —— `prog-loop-jr` 对他们和乱码没有区别。
    *   名字取不到时不阻拦导出（退回「id（知识点编号）」，与既有口径一致）：
    *   一次取名失败不该让「导出」整个失效。
+   * ★★ **文件名不带内部学生 id**（P2-2）：此前是 `学习报告-student_001-14天.md`，
+   *   而 `student_001` 是**内部主键** —— 学生面不该出现它（D-063 双视角纪律）。
+   *   改成与依赖边导出同一套口径（品牌 + 对象 + 日期）：`智团团-学习报告-20260926.md`。
+   *   天窗（7/14/30 天）仍在**文件名里**，因为它是这份文件唯一区分彼此的信息。
    */
   async function exportReport(): Promise<void> {
     if (!report.value) return
@@ -472,14 +478,19 @@ export const useStudyStore = defineStore('study', () => {
       // 取名字失败只影响表格那一列的可读性，不影响导出本身
     }
     await runExport(
-      `学习报告-${report.value.studentId}-${reportDays.value}天.md`,
+      `${BRAND_NAME}-学习报告-${reportDays.value}天-${todayStamp()}.md`,
       () => composeReportMarkdown(report.value!, reportDays.value, undefined, knowledge.kpIndex)
     )
   }
 
+  /**
+   * 导出错题本。
+   *
+   * ★ 同 P2-2：文件名去掉内部学生 id（`错题本-student_001.md` → `智团团-错题本-20260926.md`）。
+   */
   async function exportMistakes(): Promise<void> {
     if (!mistakes.value) return
-    await runExport(`错题本-${mistakes.value.studentId}.md`, () =>
+    await runExport(`${BRAND_NAME}-错题本-${todayStamp()}.md`, () =>
       composeMistakesMarkdown(mistakes.value!)
     )
   }

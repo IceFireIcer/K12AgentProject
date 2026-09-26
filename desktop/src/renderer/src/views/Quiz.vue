@@ -167,6 +167,23 @@ const drafts = reactive<Record<string, string>>({})
 const localHint = ref('')
 
 /**
+ * 重做本关：**清掉 store 的本轮小结 + 本页的作答草稿**（P3-3）。
+ *
+ * ★★ 为什么本页也要清（实测缺陷）：`quiz.restart()` 只清 store（`attempts` / 小结计数），
+ *   而学生的**选中项与填入的答案**住在本页的 `drafts` 里 —— 于是「重做本关」之后
+ *   界面看起来什么都没变：选项仍高亮着上次的选择，学生很容易直接点「提交这题」，
+ *   等于把上一轮的答案又交了一遍（而他以为自己在重新做）。
+ *   「重做」的语义就是**回到未作答的状态**，两处必须一起清。
+ * ★ 不清 `localHint` 之外的东西：题目本身、关卡进度、已落库的判分结果都不动
+ *   （那些是服务端的事实，restart 从来不动它们）。
+ */
+function restartLevel(): void {
+  quiz.restart()
+  for (const key of Object.keys(drafts)) delete drafts[key]
+  localHint.value = ''
+}
+
+/**
  * 本页要做的题 = 教材配套题 + **智团团给这个学生出过的题**（D-088）。
  *
  * ★ 为什么合成一条列表：两者的作答 / 判分 / 反馈**完全是同一条链路**
@@ -412,8 +429,10 @@ onMounted(() => {
         <span v-if="summary.total > 0">已掌握 {{ summary.mastered }} / {{ summary.total }}</span>
       </template>
       <!-- 重做本关：清空本页的作答与小结（**不**清除已落库的判分结果）。
-           有东西可清时才出现，避免摆一个按了没反应的按钮。 -->
-      <el-button v-if="quiz.gradedCount > 0" @click="quiz.restart()">
+           有东西可清时才出现，避免摆一个按了没反应的按钮。
+           ★ P3-3：清的是「store 的小结 + 本页的作答草稿」两处（见 `restartLevel` 的说明）——
+             只清 store 会让上次的选项一直高亮，学生以为没重做、把旧答案又交一遍。 -->
+      <el-button v-if="quiz.gradedCount > 0" @click="restartLevel()">
         <RotateCcw :size="14" />
         <span class="btn__label">重做本关</span>
       </el-button>
