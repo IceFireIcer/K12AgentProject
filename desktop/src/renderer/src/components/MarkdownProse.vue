@@ -94,7 +94,8 @@ const blocks = computed<MarkdownBlock[]>(() => parseMarkdown(props.text))
 }
 .md code {
   padding: 1px 5px;
-  border-radius: 5px;
+  /* 代码块内联片：走 r-sm（6px，报告 §1.3 的 chip/小元素档）。 */
+  border-radius: var(--k12-r-sm);
   background: var(--k12-surface-2);
   border: 1px solid var(--k12-border);
   font-family: var(--k12-font-mono);
@@ -106,13 +107,14 @@ const blocks = computed<MarkdownBlock[]>(() => parseMarkdown(props.text))
   line-height: 1.4;
 }
 .md-heading--1 {
-  font-size: var(--k12-fs-lg);
+  /* 正文里的一级小标题：比正文重一档（h3 20px）。 */
+  font-size: var(--k12-fs-h3);
 }
 .md-heading--2 {
-  font-size: var(--k12-fs-title);
+  font-size: var(--k12-fs-body-lg);
 }
 .md-heading--3 {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
 }
 .md-list {
   margin: 0;
@@ -132,7 +134,7 @@ const blocks = computed<MarkdownBlock[]>(() => parseMarkdown(props.text))
   border: 1px solid var(--k12-border);
   overflow-x: auto;
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: 1.6;
 }
 .md-hr {

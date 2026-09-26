@@ -661,6 +661,12 @@ const EXPECTED_API_METHODS = [
   'onTurnEntries',
   // 导出：回执**只有文件名**（完整路径不进渲染进程）
   'exportMarkdown',
+  // ★ 演示模式：轮次诊断信封（两条 invoke + 一条推送）。
+  //   它**不是** 6 事件之一：信封是「这一轮背后发生了什么」的旁路证据，
+  //   与对话状态机不是一回事（与 `onTraceChanged` 同一判断）。
+  'readDiagnostics',
+  'clearDiagnostics',
+  'onDiagnosticsChanged',
   // 工具调用轨迹（**推送**；快照语义）。★ 它不是 6 事件之一：
   //   轨迹是工程证据（哪次调了什么 Tool、多快、有没有降级），与对话状态机不是一回事。
   'onTraceChanged',

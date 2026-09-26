@@ -270,7 +270,7 @@ async function choose(title: string): Promise<void> {
   background: var(--k12-accent-soft);
   border: 1px solid var(--k12-accent-border);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -285,7 +285,7 @@ async function choose(title: string): Promise<void> {
   background: var(--k12-surface);
   color: var(--k12-fg-2);
   font: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 
@@ -329,7 +329,7 @@ async function choose(title: string): Promise<void> {
   background: transparent;
   color: var(--k12-fg-2);
   font: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   text-align: left;
   cursor: pointer;
 }
@@ -349,7 +349,7 @@ async function choose(title: string): Promise<void> {
 .chapter__num {
   flex: none;
   width: 48px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-muted);
   font-variant-numeric: tabular-nums;
@@ -368,7 +368,7 @@ async function choose(title: string): Promise<void> {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
 }
 
 /* 一行说明：只用契约里真有的计数（知识点数 / 已掌握数），不编简介。
@@ -376,7 +376,7 @@ async function choose(title: string): Promise<void> {
  *    micro 那一档只给 ≤4 字的角标，而“3 个知识点”是要被读的说明文字。 */
 .chapter__meta {
   flex: none;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   white-space: nowrap;
 }
@@ -424,19 +424,19 @@ async function choose(title: string): Promise<void> {
 }
 
 .chapter__note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
 .chapter__notice {
   margin-top: 5px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-good);
 }
 
 .chapter__warn {
   margin-top: 5px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-warn);
 }

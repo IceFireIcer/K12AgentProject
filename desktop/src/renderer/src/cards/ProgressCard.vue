@@ -21,6 +21,9 @@
 import { computed, onMounted } from 'vue'
 import Badge from '../components/Badge.vue'
 import ProgressBar from '../components/ProgressBar.vue'
+import CardHeader from '../components/card/CardHeader.vue'
+import CardBody from '../components/card/CardBody.vue'
+import CardFoot from '../components/card/CardFoot.vue'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { kpLabel } from '../study/kp-label'
 
@@ -139,87 +142,92 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
 <template>
   <article
     v-if="view.kind === 'ok'"
-    class="levels"
+    class="k12-card levels"
     data-testid="progress-card"
+    data-probe-id="progress-card"
+    :data-probe-count="view.levels.length"
     :data-done="view.done"
     :data-total="view.total"
   >
-    <header class="levels__head">
-      <span class="title">闯关进度</span>
-      <Badge
-        v-if="earnedBadges.length > 0"
-        :badge="earnedBadges[earnedBadges.length - 1].badge"
-        :name="badgeName(earnedBadges[earnedBadges.length - 1].kpId)"
-        compact
-      />
-      <span v-else class="chip" data-testid="progress-no-badge">还没有徽章</span>
-    </header>
+    <CardHeader>
+      <template #title>
+        <span class="title">闯关进度</span>
+      </template>
+      <template #meta>
+        <Badge
+          v-if="earnedBadges.length > 0"
+          :badge="earnedBadges[earnedBadges.length - 1].badge"
+          :name="badgeName(earnedBadges[earnedBadges.length - 1].kpId)"
+          compact
+        />
+        <span v-else class="chip" data-testid="progress-no-badge">还没有徽章</span>
+      </template>
+    </CardHeader>
 
-    <ProgressBar :value="ratio" :total="view.total" :done="view.done" />
+    <CardBody>
+      <ProgressBar :value="ratio" :total="view.total" :done="view.done" />
 
-    <ol class="levels__list" data-testid="progress-levels">
-      <li
-        v-for="level in view.levels"
-        :key="level.kpId"
-        class="level"
-        :class="STAGE_CLASSES[level.stage]"
-        data-testid="progress-level"
-        :data-kp-id="level.kpId"
-        :data-stage="level.stage"
-        :data-badge="level.badge ?? ''"
-      >
-        <span class="level__dot" aria-hidden="true"></span>
-        <!-- ★ 名字取不到时这一格不渲染（见 `levelName` 的说明）；
-             原始 id 在 `<li>` 的 `data-kp-id` 上，不在这里显示。 -->
-        <span v-if="levelName(level.kpId)" class="level__name">{{ levelName(level.kpId) }}</span>
-        <span class="level__stage" data-testid="progress-stage">{{ stageLabel(level.stage) }}</span>
-        <span class="level__mastery" data-testid="progress-mastery">
-          {{ level.mastery.toFixed(2) }}
-        </span>
-        <Badge v-if="level.badge" :badge="level.badge" :name="levelName(level.kpId)" compact />
-      </li>
-    </ol>
+      <ol class="levels__list" data-testid="progress-levels">
+        <li
+          v-for="level in view.levels"
+          :key="level.kpId"
+          class="level"
+          :class="STAGE_CLASSES[level.stage]"
+          data-testid="progress-level"
+          :data-kp-id="level.kpId"
+          :data-stage="level.stage"
+          :data-badge="level.badge ?? ''"
+        >
+          <span class="level__dot" aria-hidden="true"></span>
+          <!-- ★ 名字取不到时这一格不渲染（见 `levelName` 的说明）；
+               原始 id 在 `<li>` 的 `data-kp-id` 上，不在这里显示。 -->
+          <span v-if="levelName(level.kpId)" class="level__name">{{ levelName(level.kpId) }}</span>
+          <span class="level__stage" data-testid="progress-stage">{{ stageLabel(level.stage) }}</span>
+          <span class="level__mastery" data-testid="progress-mastery">
+            {{ level.mastery.toFixed(2) }}
+          </span>
+          <Badge v-if="level.badge" :badge="level.badge" :name="levelName(level.kpId)" compact />
+        </li>
+      </ol>
+    </CardBody>
 
-    <p class="levels__foot">
-      每答对一题，这里的进度与掌握度都会跟着变一点；徽章也记在本机的学习记录里。
-    </p>
+    <CardFoot>
+      <p class="levels__foot">
+        每答对一题，这里的进度与掌握度都会跟着变一点；徽章也记在本机的学习记录里。
+      </p>
+    </CardFoot>
   </article>
 
   <!-- 认不出的载荷：一句说明，绝不猜（与练习卡片同一口径） -->
-  <article v-else class="levels levels--unknown" data-testid="progress-card-unknown">
-    <header class="levels__head">
-      <span class="title">闯关进度</span>
-      <span class="chip chip--warn">暂时读不到进度</span>
-    </header>
-    <p class="levels__foot">进度数据还没准备好，做一道题之后就会显示出来。</p>
+  <article v-else class="k12-card levels levels--unknown" data-testid="progress-card-unknown">
+    <CardHeader>
+      <template #title>
+        <span class="title">闯关进度</span>
+      </template>
+      <template #meta>
+        <span class="chip chip--warn">暂时读不到进度</span>
+      </template>
+    </CardHeader>
+    <CardBody>
+      <p class="levels__foot">进度数据还没准备好，做一道题之后就会显示出来。</p>
+    </CardBody>
   </article>
 </template>
 
 <style scoped>
-/* E2 卡片：白面 + 可见边框 + 浅投影（与 base.css 的 .k12-card 同一配方）。
+/* 卡片皮肤（白面 / 边框 / 圆角 / 投影）唯一来源 = base.css 的 `.k12-card`；
+ * 三段结构的内边距与底色 = `.k12-card-head/-body/-foot`。
  * ⚠️ 不在这里写 color-mix 造第五种表面 —— 层次只有 page / surface / surface-2 / float 四层。 */
 .levels {
-  padding: 14px 16px;
-  border-radius: var(--k12-r-card);
-  background: var(--k12-surface);
-  border: 1px solid var(--k12-border);
-  box-shadow: var(--k12-shadow-card);
+  min-width: 0;
 }
 
 .levels--unknown {
   border-style: dashed;
 }
 
-.levels__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
 .title {
-  font-size: var(--k12-fs-lg);
+  /* 档位由 `.k12-card-head` 给（h3 20px）；这里只补字重 */
   font-weight: 650;
   color: var(--k12-fg);
 }
@@ -234,7 +242,7 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
   border: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-ui);
 }
@@ -262,7 +270,7 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
   border-radius: var(--k12-r-inset);
   background: var(--k12-surface-2);
   border: 1px solid var(--k12-border);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   transition:
     border-color var(--k12-dur-state) var(--k12-ease-state),
     background var(--k12-dur-state) var(--k12-ease-state);
@@ -308,7 +316,7 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
   flex: 1;
   min-width: 0;
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
   word-break: break-all;
 }
@@ -323,12 +331,11 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
   flex: none;
   font-variant-numeric: tabular-nums;
   color: var(--k12-muted-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
 }
 
 .levels__foot {
-  margin-top: 12px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted-2);
 }

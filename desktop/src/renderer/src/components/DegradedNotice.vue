@@ -50,7 +50,7 @@ defineProps<{ notice: ErrorNotice }>()
   border: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-ui);
 }
@@ -69,7 +69,7 @@ defineProps<{ notice: ErrorNotice }>()
 
 .text {
   flex: 1 1 240px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
   word-break: break-word;

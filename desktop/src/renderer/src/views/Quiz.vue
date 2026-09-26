@@ -48,6 +48,7 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { Trophy, Circle, PlayCircle, CheckCircle2, History, X, Info, RotateCcw } from 'lucide-vue-next'
 import { useQuizStore, type QuizAttempt } from '../stores/quiz'
+import { useQuizLayoutStore, type QuizLayout } from '../stores/quizLayout'
 import TeacherGate from '../components/TeacherGate.vue'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { QUIZ_TYPE_LABELS, SCORED_BY_LABELS, formatMasteryDelta } from '../labels'
@@ -55,10 +56,11 @@ import { isBlankAnswer, optionLetter, type QuizQuestionType } from '../cards/qui
 import type { QuizResultView } from '../api/data'
 import { useEscape } from '../composables/useEscape'
 import { useFocusReturn } from '../composables/useFocusReturn'
-import { useReducedMotion } from '../composables/useReducedMotion'
+import { scrollIntoViewRespectingMotion } from '../composables/useReducedMotion'
 
 const quiz = useQuizStore()
 const knowledge = useKnowledgeStore()
+const layoutStore = useQuizLayoutStore()
 
 /**
  * 三个进度阶段的中文名与图标（阶段字面量来自服务端进度，不在前端推导）。
@@ -181,6 +183,9 @@ function restartLevel(): void {
   quiz.restart()
   for (const key of Object.keys(drafts)) delete drafts[key]
   localHint.value = ''
+  // 单卡模式也要回到第一题：作答全清了，卡片还停在第三题上会让学生以为「重做」没生效。
+  cursorQid.value = ''
+  finished.value = false
 }
 
 /**
@@ -228,6 +233,92 @@ const questionRows = computed(() =>
     fromAssistant: generatedQids.value.has(question.qid)
   }))
 )
+
+/* ---------------------------------------------------------------- 答题排版 */
+
+/**
+ * 排版模式（**一次一张** / 全部铺开）—— 唯一来源是 `stores/quizLayout.ts`（localStorage 持久化）。
+ *
+ * ★ 页面**不另存一份 ref**：两份状态里必然有一份会过期（与学段 / 章节那两个入口同一条纪律）。
+ *   写接口只走 store 的 `set()`，它顺手落盘 —— 学生下次打开还是自己选的那样。
+ */
+const layout = computed<QuizLayout>({
+  get: () => layoutStore.mode,
+  set: (next) => layoutStore.set(next)
+})
+
+/** 两档排版的文案（学生的话，不带任何机制说明）。 */
+const LAYOUT_OPTIONS = [
+  { label: '一次一张', value: 'single' },
+  { label: '全部铺开', value: 'list' }
+]
+
+/**
+ * 单卡模式停在哪一题：记 **qid**，不记下标。
+ *
+ * ★ 为什么不记下标：题集不是常量 —— 智团团给这个学生出的题是**另一次请求**取回来的
+ *   （`loadGenerated`），晚到就会把下标整体挤一位，学生面前的题会莫名其妙换成别的。
+ *   qid 是题库 / 生成题各自的稳定标识，题集怎么变都对得上；对不上（换关卡、重取题库）
+ *   就落回第一题，见 `currentIndex`。
+ */
+const cursorQid = ref('')
+
+/** 单卡模式：最后一题也答对、并且点了「下一题」→ 卡片换成收尾卡。 */
+const finished = ref(false)
+
+/** 当前停在第几题（0 基）。找不到 `cursorQid`（换关卡 / 题集变了）就落到第一题。 */
+const currentIndex = computed(() => {
+  const rows = questionRows.value
+  if (rows.length === 0) return 0
+  const index = rows.findIndex((row) => row.question.qid === cursorQid.value)
+  return index >= 0 ? index : 0
+})
+
+/** 单卡模式当前那一行（题集为空时为 `null`）。 */
+const currentRow = computed(() => questionRows.value[currentIndex.value] ?? null)
+
+/** 单卡模式且已经走完最后一题：题体与卡脚都不渲染，换成收尾卡。 */
+const showFinish = computed(
+  () => layout.value === 'single' && questions.value.length > 0 && finished.value
+)
+
+/**
+ * 这一次要**渲染出来**的题。
+ *
+ * ★★ 两种排版的差别只有这一处：列表模式 = 全部 `questionRows`，单卡模式 = 当前那一行。
+ *   模板、题体、作答链路、判分状态**一份都没有第二份** —— 同一条规则写两遍，
+ *   缺陷只会出现在没改的那一份上（P-143）。
+ */
+const visibleRows = computed(() => {
+  if (layout.value === 'list') return questionRows.value
+  if (showFinish.value) return []
+  return currentRow.value === null ? [] : [currentRow.value]
+})
+
+/**
+ * 当前这道题是不是已经有**终态**（答对了）。
+ *
+ * ★ 判据只读后端判分结果里的 `correct`（与 `submitDisabled` 同一口径，前端不比对答案）：
+ *   「下一题」邀请的是「做完这一题」，而不是「点过提交」。答错留在原地重试是正当的。
+ */
+const currentSettled = computed(() => currentRow.value?.attempt?.result?.correct === true)
+
+/** 题号步骤的状态：只读后端判分结论（前端不推断对错）。 */
+function stepState(attempt: QuizAttempt | null): 'correct' | 'wrong' | 'todo' {
+  const result = attempt?.result
+  if (result?.correct === true) return 'correct'
+  if (result) return 'wrong'
+  return 'todo'
+}
+
+/** 题号步骤的读屏文案（含题号与状态，读屏用户不必去猜颜色）。 */
+function stepLabel(index: number, attempt: QuizAttempt | null): string {
+  const name = `第 ${index + 1} 题`
+  const state = stepState(attempt)
+  if (state === 'correct') return `${name}，答对了`
+  if (state === 'wrong') return `${name}，还没做对`
+  return `${name}，还没做过`
+}
 
 /**
  * 题目来源的**中文说法**（`bank` / `generated` 是契约里的枚举）。
@@ -287,8 +378,6 @@ function submitDisabled(attempt: QuizAttempt | null): boolean {
 
 /** 题目列表的根元素（答对后用它把视线送到下一题，见 `advanceAfterCorrect`）。 */
 const listRef = ref<HTMLElement | null>(null)
-/** 减动效偏好：滚动是 JS 发起的移动，CSS 的 `@media` 收不掉它。 */
-const reducedMotion = useReducedMotion()
 
 /**
  * 答对之后把注意力送到**下一道还没答对的题**上。
@@ -301,8 +390,8 @@ const reducedMotion = useReducedMotion()
  * ★ 查找用模板里已经有的 `data-testid="quiz-question-N"`（题号即序号），
  *   不另外维护一份 DOM ref 数组：两份状态里必然有一份会过期。
  * ★ 减动效偏好（`useReducedMotion`，全站同一口径）：它是一次**移动**，所以
- *   `prefers-reduced-motion` 下改成瞬移 —— 内容照样送到眼前，只是不再滑过去。
- *   （CSS 的 `@media` 收不掉 JS 发起的滚动，这一条只能在 JS 侧读。）
+ *   减动效下走**瞬移**（`scrollIntoViewRespectingMotion` 是唯一实现）——
+ *   内容照样送到眼前，只是不再滑过去（CSS 的 `@media` 收不掉 JS 发起的滚动）。
  */
 async function advanceAfterCorrect(index: number): Promise<void> {
   const next = questionRows.value.find(
@@ -310,10 +399,84 @@ async function advanceAfterCorrect(index: number): Promise<void> {
   )
   if (!next) return
   await nextTick()
-  listRef.value
-    ?.querySelector<HTMLElement>(`[data-testid="quiz-question-${next.index + 1}"]`)
-    ?.scrollIntoView({ block: 'center', behavior: reducedMotion.value ? 'auto' : 'smooth' })
+  scrollIntoViewRespectingMotion(
+    listRef.value?.querySelector<HTMLElement>(`[data-testid="quiz-question-${next.index + 1}"]`),
+    { block: 'center' }
+  )
 }
+
+/* ── 单卡模式的推进（步骤条 / 上一题 / 下一题）──────────────────────────── */
+
+/**
+ * 跳到第 index 题 —— 步骤条、上一题、下一题**共用的唯一入口**。
+ *
+ * ★ 跳题是自由的：想回看重看、想先做会做的，都不拦（「做完一题换下一题」是**默认节奏**，
+ *   不是一道门）。所以这里不做「必须答对才能往后」这类校验，校验只在「下一题」那个按钮上
+ *   （它邀请的是往下走这一步，就得有个明确条件）。
+ */
+function goTo(index: number): void {
+  const rows = questionRows.value
+  if (rows.length === 0) return
+  const target = rows[Math.min(Math.max(index, 0), rows.length - 1)]
+  if (target === undefined) return
+  finished.value = false
+  cursorQid.value = target.question.qid
+  void focusCurrentQuestion()
+}
+
+function prevQuestion(): void {
+  if (currentIndex.value <= 0) return
+  goTo(currentIndex.value - 1)
+}
+
+/** 「下一题」：只有当前题答对才可点（答错留在原地接着想）；最后一题 → 收尾卡。 */
+function nextQuestion(): void {
+  if (!currentSettled.value) return
+  if (currentIndex.value >= questionRows.value.length - 1) {
+    finished.value = true
+    void focusFinish()
+    return
+  }
+  goTo(currentIndex.value + 1)
+}
+
+/**
+ * 切卡后的**焦点与视线**（无障碍：换卡是内容替换，不接管的话焦点会掉回 `body`，
+ * 键盘用户要从头 Tab 一遍才知道新题在哪）。
+ *
+ * ★ 落点是新题的题干（`.qitem__stem`，模板里带 `tabindex="-1"`）而不是某个输入框：
+ *   读屏会先把题干念出来 —— 学生从「这是什么题」开始，而不是从「光标在哪个选项上」开始。
+ * ★ 滚动用 `block: 'nearest'`：只把题挪进视野，不把整页甩到顶部；
+ *   减动效下不滑（统一走 `scrollIntoViewRespectingMotion`）。
+ */
+async function focusCurrentQuestion(): Promise<void> {
+  await nextTick()
+  const stem = listRef.value?.querySelector<HTMLElement>('.qitem__stem') ?? null
+  if (stem === null) return
+  stem.focus({ preventScroll: true })
+  scrollIntoViewRespectingMotion(stem, { block: 'nearest' })
+}
+
+/** 收尾卡根元素（走完最后一题后焦点交给它，理由同 `focusCurrentQuestion`）。 */
+const finishRef = ref<HTMLElement | null>(null)
+async function focusFinish(): Promise<void> {
+  await nextTick()
+  finishRef.value?.focus({ preventScroll: true })
+}
+
+/**
+ * 换关卡 → 单卡回到第一题。
+ *
+ * ★ 判据是「哪一关」这个**身份**：切走再切回来要停在第一题，而不是停在上次离开的那一题
+ *   （那一题的作答已随 `selectLevel` 清掉，停在它上面等于给学生看一道空题）。
+ */
+watch(
+  () => quiz.activeKpId,
+  () => {
+    cursorQid.value = ''
+    finished.value = false
+  }
+)
 
 /** 提交一题：非空校验 + 交给 store（判分只在后端）。防连点在 store 里。 */
 async function submit(qid: string, index: number) {
@@ -324,8 +487,12 @@ async function submit(qid: string, index: number) {
   }
   localHint.value = ''
   await quiz.submit(qid, answer)
-  // 只有这一提交**真的被判定为对**才往下送；答错要留在原地接着想（retry 是正当的）
-  if (quiz.attempts[qid]?.result?.correct === true) await advanceAfterCorrect(index)
+  // 只有这一提交**真的被判定为对**才往下送；答错要留在原地接着想（retry 是正当的）。
+  // ★ 列表模式才自动滚到下一道没做对的题；单卡模式的推进由学生点「下一题」触发
+  //   （那正是这一版新增的节奏：一题做完，再由他决定什么时候换卡）。
+  if (quiz.attempts[qid]?.result?.correct === true && layout.value === 'list') {
+    await advanceAfterCorrect(index)
+  }
 }
 
 /* ---------------------------------------------------------------- 本轮小结 */
@@ -365,6 +532,49 @@ const summaryRows = computed<SummaryRow[]>(() => {
 const accuracyPercent = computed(() =>
   quiz.accuracy === null ? null : Math.round(quiz.accuracy * 100)
 )
+
+/* ---------------------------------------------------------------- 收尾卡 */
+
+/**
+ * 收尾卡（单卡模式走完最后一题时的最后一张卡）。
+ *
+ * ★ 它只回答两个问题：**这一关做得怎么样**（答对几题）与**接下来去哪**
+ *   （还有没做对的就回去接着做，全做对了就「看本轮小结 / 去下一关」）。
+ * ★ 所有数字都来自**后端判分结论**（`correct`）与题库本身，不新增任何统计口径。
+ */
+
+/** 本关**答对**的题（只数后端判成 correct 的，前端不推断对错）。 */
+const correctRows = computed(() =>
+  questionRows.value.filter((row) => row.attempt?.result?.correct === true)
+)
+
+/** 第一道**还没答对**的题（收尾卡的「回去接着做」跳它；全答对了就是 -1）。 */
+const firstUnsettledIndex = computed(() =>
+  questionRows.value.findIndex((row) => row.attempt?.result?.correct !== true)
+)
+
+/**
+ * 拓扑序里的下一关。
+ *
+ * ★ 顺序就是服务端给的 `levels` 顺序（它已按依赖图拓扑序排好），前端**一行排序都不做**。
+ * ★ 已经是最后一关 → `null`：收尾卡不渲染「去下一关」——不摆一个点了没反应的入口。
+ */
+const nextLevel = computed(() => {
+  const list = levels.value
+  const index = list.findIndex((level) => level.kpId === quiz.activeKpId)
+  if (index < 0) return null
+  return list[index + 1] ?? null
+})
+
+function backToUnsettled(): void {
+  const index = firstUnsettledIndex.value
+  if (index >= 0) goTo(index)
+}
+
+function goNextLevel(): void {
+  const target = nextLevel.value
+  if (target !== null) void quiz.selectLevel(target.kpId)
+}
 
 /* ---------------------------------------------------------------- 掌握度 */
 
@@ -594,11 +804,48 @@ onMounted(() => {
         desc="可以先在对话里让老师现场出几道，或者换一关试试。"
       />
 
-      <!-- ⑤ 题目列表 -->
+      <!-- ⑤ 题目：默认「一次一张」，也可切回「全部铺开」——
+           两种排版**共用这一段模板**，差别只有「一次渲染几行」（`visibleRows`）。 -->
       <template v-else>
-        <ol ref="listRef" class="qlist" data-testid="quiz-questions">
+        <!-- 卡头：左侧是单卡模式的进度与题号步骤条，右侧是排版开关。
+             ★ 开关是**对象级操作**（它作用的对象就是这张题卡），按 `docs/ui/版式契约.md` §7
+               放卡头，不进页面顶部那排（那里只放导出 / 刷新这类页面级动作）。 -->
+        <div class="qcard__head">
+          <div v-if="layout === 'single'" class="qcard__progress">
+            <span class="qcard__at k12-num" data-testid="quiz-position">
+              第 {{ currentIndex + 1 }} / {{ questions.length }} 题
+            </span>
+            <!-- 题号步骤条：状态只读**后端判分结论**，而且**可点** ——
+                 想回看哪一题、想重做哪一题，点哪一颗就到哪一题（不必按顺序翻）。 -->
+            <ol class="steps" data-testid="quiz-steps">
+              <li v-for="row in questionRows" :key="row.question.qid">
+                <button
+                  type="button"
+                  class="step k12-tap"
+                  :class="{ 'step--on': !showFinish && row.index === currentIndex }"
+                  :data-state="stepState(row.attempt)"
+                  :aria-current="!showFinish && row.index === currentIndex ? 'step' : undefined"
+                  :aria-label="stepLabel(row.index, row.attempt)"
+                  :data-testid="`quiz-step-${row.index + 1}`"
+                  @click="goTo(row.index)"
+                >
+                  <span class="k12-num">{{ row.index + 1 }}</span>
+                </button>
+              </li>
+            </ol>
+          </div>
+          <el-segmented
+            v-model="layout"
+            class="qcard__switch"
+            :options="LAYOUT_OPTIONS"
+            aria-label="题目显示方式"
+            data-testid="quiz-layout-toggle"
+          />
+        </div>
+
+        <ol v-if="!showFinish" ref="listRef" class="qlist" data-testid="quiz-questions">
           <li
-            v-for="row in questionRows"
+            v-for="row in visibleRows"
             :key="row.question.qid"
             class="qitem"
             :data-testid="`quiz-question-${row.index + 1}`"
@@ -620,7 +867,9 @@ onMounted(() => {
               <span v-if="row.attempt?.result" class="qitem__done">已判分</span>
             </div>
 
-            <p class="qitem__stem">{{ row.question.stem }}</p>
+            <!-- `tabindex="-1"`：切卡后焦点落在这里（换卡是内容替换，不接管的话焦点会掉回 body，
+                 键盘用户要从头 Tab 一遍才知道新题在哪）。它不进 Tab 顺序（-1），只作落点。 -->
+            <p class="qitem__stem" tabindex="-1">{{ row.question.stem }}</p>
 
             <!-- 选择题：点选项即选中（提交的是选项文本；字母与原文后端都认） -->
             <div v-if="row.question.type === 'choice'" class="opts">
@@ -691,6 +940,63 @@ onMounted(() => {
         </ol>
 
         <p v-if="localHint" class="qlist__hint" data-testid="quiz-hint">{{ localHint }}</p>
+
+        <!-- 卡脚：单卡模式的「上一题 / 下一题」。
+             ★ 它们**不用** `.k12-cta`：一屏只允许一个主色填充（这一屏的主行动是「提交这题」），
+               而且 `scripts/verify-guard-mutations.mjs` 的 ⑤ 只替换第一处 `.k12-cta` ——
+               多一处会让那条变异验证静默失效。 -->
+        <div v-if="layout === 'single' && !showFinish" class="qcard__foot" data-testid="quiz-nav">
+          <el-button :disabled="currentIndex === 0" data-testid="quiz-prev" @click="prevQuestion()">
+            上一题
+          </el-button>
+          <el-button
+            :disabled="!currentSettled"
+            :title="currentSettled ? '换到下一题' : '答对这一题，就能往下走'"
+            data-testid="quiz-next"
+            @click="nextQuestion()"
+          >
+            下一题
+          </el-button>
+        </div>
+
+        <!-- 收尾卡：一关走完（最后一题答对 + 点了「下一题」）。
+             题目与卡脚这时都不渲染，所以这里那个 `.k12-cta` 是**这一屏唯一的**主色按钮。 -->
+        <div
+          v-if="showFinish"
+          ref="finishRef"
+          class="qcard__finish"
+          data-testid="quiz-finish"
+          tabindex="-1"
+        >
+          <p class="qcard__finish-title">这一关做完了</p>
+          <p class="qcard__finish-score k12-num" data-testid="quiz-finish-score">
+            答对 {{ correctRows.length }} / 共 {{ questions.length }} 题
+          </p>
+          <p v-if="firstUnsettledIndex >= 0" class="qcard__finish-left">
+            还有 {{ questions.length - correctRows.length }} 题没做对
+          </p>
+          <div class="qcard__finish-actions">
+            <el-button
+              v-if="firstUnsettledIndex >= 0"
+              data-testid="quiz-finish-back"
+              @click="backToUnsettled()"
+            >
+              回去接着做
+            </el-button>
+            <el-button data-testid="quiz-finish-summary" @click="historyOpen = true">看本轮小结</el-button>
+            <!-- 关卡顺序是**服务端给的拓扑序**（前端不排序）；已经是最后一关就不渲染这个按钮 ——
+                 不摆一个点了没反应的入口。 -->
+            <button
+              v-if="nextLevel"
+              type="button"
+              class="k12-cta"
+              data-testid="quiz-finish-next-level"
+              @click="goNextLevel()"
+            >
+              去下一关：{{ nameOf(nextLevel.kpId) }}
+            </button>
+          </div>
+        </div>
       </template>
     </SurfacePanel>
 
@@ -840,7 +1146,7 @@ onMounted(() => {
 }
 .btn__count {
   margin-left: 6px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -864,12 +1170,12 @@ onMounted(() => {
   gap: 3px;
 }
 .quiz__fail-title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .quiz__fail-msg {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -891,12 +1197,12 @@ onMounted(() => {
   flex: none;
 }
 .stages__label {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
 .stages__state {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 /* 横向排开：窄屏靠横向滚动兜住，不换行挤压（卡片是「图标 + 关卡名 + 状态词」三件套，
@@ -912,7 +1218,7 @@ onMounted(() => {
   padding: 8px 11px;
   border-radius: var(--k12-r-inset);
   background: var(--k12-surface-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -953,14 +1259,14 @@ onMounted(() => {
   color: var(--k12-warn);
 }
 .stg__name {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   color: var(--k12-fg);
   white-space: nowrap;
 }
 /* 状态词是 meta —— 12px，不是 11px（11px 只许给角标） */
 .stg__stage {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   white-space: nowrap;
 }
@@ -970,7 +1276,7 @@ onMounted(() => {
   border-radius: var(--k12-r-flat);
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 650;
   white-space: nowrap;
 }
@@ -985,7 +1291,7 @@ onMounted(() => {
  *   文字样式与页面其它 meta 一致（12px / muted），尺寸不靠 `padding` 撑。 */
 .stages__gate,
 .stages__note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -1001,7 +1307,7 @@ onMounted(() => {
 }
 .stages__note code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-accent-ink);
 }
 
@@ -1019,11 +1325,12 @@ onMounted(() => {
   gap: 2px;
 }
 .quiz__kicker {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .quiz__title {
-  font-size: var(--k12-fs-lg);
+  /* 当前关卡标题 = 区块标题档（h2 24px，优化报告 §2.1）。 */
+  font-size: var(--k12-fs-h2);
   font-weight: 650;
   line-height: var(--k12-lh-tight);
   color: var(--k12-fg);
@@ -1037,7 +1344,7 @@ onMounted(() => {
 /* kp_id 是长标识（meta）→ 12px + 等宽 */
 .quiz__kp {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   padding: 2px 7px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
@@ -1050,6 +1357,73 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* ── 卡头：单卡进度 + 题号步骤条 + 排版开关 ────────────────────────────────
+ * 排版开关是**对象级操作**（作用对象就是这张题卡），按 `docs/ui/版式契约.md` §7 放这里，
+ * 不进页面顶部那排（那里只放导出 / 刷新这类页面级动作）。 */
+.qcard__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.qcard__progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.qcard__at {
+  font-size: var(--k12-fs-caption);
+  font-weight: 650;
+  color: var(--k12-muted);
+}
+/* 题号步骤条：一颗 = 一题；**可点**（想回看哪一题就点哪一题）。
+ * 高度由 `.k12-tap` 给（28px 触控下限），这里只定宽度与形状，不写死高度。 */
+.steps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.step {
+  width: 28px;
+  border-radius: var(--k12-r-flat);
+  border: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  color: var(--k12-muted);
+  font-size: var(--k12-fs-caption);
+  font-weight: 650;
+  cursor: pointer;
+}
+/* 状态色（只读后端判分结论）：答对 = good、还没做对 = warn、还没做 = 中性。
+ * 「我在哪一题」是另一个问题 —— 用 `.step--on` 的 accent 描边表达，两者不互相顶掉。 */
+.step[data-state='correct'] {
+  border-color: var(--k12-good);
+  background: color-mix(in srgb, var(--k12-good) 14%, var(--k12-surface));
+  color: var(--k12-fg);
+}
+.step[data-state='wrong'] {
+  border-color: var(--k12-warn-border);
+  background: var(--k12-warn-soft);
+  color: var(--k12-warn);
+}
+.step--on {
+  border-color: var(--k12-accent-ink);
+  box-shadow: 0 0 0 2px var(--k12-accent-soft);
+}
+.step:focus-visible {
+  outline: 2px solid var(--k12-accent);
+  outline-offset: 2px;
+}
+/* 开关推到卡头右端（列表模式下卡头里只有它一个，也仍然靠右）。 */
+.qcard__switch {
+  margin-left: auto;
 }
 
 /* ── 题目列表 ────────────────────────────────────────────────────────── */
@@ -1082,22 +1456,28 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .qitem__no {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-muted);
 }
 .qitem__done {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-good);
 }
 /* 题干 = 这一块的主对象：14px 正文，行高放宽（题干常带代码与换行） */
 .qitem__stem {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg);
   white-space: pre-wrap;
   word-break: break-word;
+}
+/* 题干同时是切卡后的**焦点落点**（模板上的 `tabindex="-1"`）：只在键盘路径上露一圈环。
+ * outline 不参与布局，所以这一圈不会把题干挤动一个像素。 */
+.qitem__stem:focus-visible {
+  outline: 2px solid var(--k12-accent);
+  outline-offset: 2px;
 }
 .opts {
   display: flex;
@@ -1116,7 +1496,7 @@ onMounted(() => {
   border: 1px solid transparent;
   background: var(--k12-surface);
   cursor: pointer;
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-body);
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1134,7 +1514,7 @@ onMounted(() => {
 }
 /* 选项字母 A/B/C 是角标语义（只有一个字母）→ 11px 允许 */
 .opt__letter {
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 650;
   color: var(--k12-muted);
 }
@@ -1150,7 +1530,7 @@ onMounted(() => {
   border: 1px solid var(--k12-border-strong);
   background: var(--k12-surface);
   font: inherit;
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   color: var(--k12-fg);
 }
 .ans--code {
@@ -1168,13 +1548,60 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .qitem__err {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-bad);
 }
 .qlist__hint {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-warn);
+}
+
+/* ── 卡脚：单卡模式的上一题 / 下一题 ──────────────────────────────────────
+ * 它们是**次要动作**（这一屏的主色填充是「提交这题」）：走 `el-button`，
+ * 不用 `.k12-cta`（一屏只允许一个主色填充，且变异脚本 ⑤ 只替换第一处 `.k12-cta`）。 */
+.qcard__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── 收尾卡：一关走完的最后一张卡（题体与卡脚这时都不渲染）──────────────── */
+.qcard__finish {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
+}
+.qcard__finish:focus-visible {
+  outline: 2px solid var(--k12-accent);
+  outline-offset: 2px;
+}
+/* 18px = 卡片 / 区块标题档（`docs/ui/版式契约.md` §1），仍远低于 24px 的身份行。 */
+.qcard__finish-title {
+  font-size: var(--k12-fs-body-lg);
+  font-weight: 650;
+  color: var(--k12-fg);
+}
+.qcard__finish-score {
+  font-size: var(--k12-fs-body);
+  font-weight: 650;
+  color: var(--k12-fg);
+}
+.qcard__finish-left {
+  font-size: var(--k12-fs-body-sm);
+  color: var(--k12-muted);
+}
+.qcard__finish-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 /* 逐题反馈：结论来自后端判分，前端只摆出来 */
@@ -1189,7 +1616,7 @@ onMounted(() => {
   border: 1px solid var(--k12-border);
 }
 .fb__verdict {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-warn);
 }
@@ -1197,13 +1624,13 @@ onMounted(() => {
   color: var(--k12-good);
 }
 .fb__chip {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   font-variant-numeric: tabular-nums;
 }
 .fb__text {
   flex: 1 1 100%;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
   word-break: break-word;
@@ -1221,12 +1648,12 @@ onMounted(() => {
   gap: 10px;
 }
 .mastery__title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
 .mastery__meta {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .mastery__rows {
@@ -1252,14 +1679,14 @@ onMounted(() => {
   padding: 1px 6px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 650;
   color: var(--k12-muted);
 }
 .mrow__name {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   color: var(--k12-fg-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1267,7 +1694,7 @@ onMounted(() => {
 }
 .mrow__pct {
   flex: none;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg-2);
   font-variant-numeric: tabular-nums;
@@ -1284,13 +1711,13 @@ onMounted(() => {
   border: none;
 }
 .howto__p {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
 .howto__p code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   padding: 1px 5px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
@@ -1331,12 +1758,12 @@ onMounted(() => {
   gap: 3px;
 }
 .hw__title {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .hw__sub {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .hw__close {
@@ -1368,7 +1795,7 @@ onMounted(() => {
   gap: 10px;
 }
 .hw__empty {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -1388,18 +1815,18 @@ onMounted(() => {
 .hw__kp {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 /* 题号 / qid / 判分方 / 掌握度增减 / 脚注：都是 meta → 12px */
 .hw__qid {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .hw__stem {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
   word-break: break-word;
@@ -1411,7 +1838,7 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 .hw__score {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-warn);
 }
@@ -1419,12 +1846,12 @@ onMounted(() => {
   color: var(--k12-good);
 }
 .hw__by {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .hw__delta {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-bad);
 }
@@ -1432,14 +1859,14 @@ onMounted(() => {
   color: var(--k12-good);
 }
 .hw__fb {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
   word-break: break-word;
 }
 .hw__note {
   margin-top: 4px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }

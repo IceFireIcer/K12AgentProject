@@ -258,6 +258,30 @@ def _escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def grade_filter_sql(grade_levels: Sequence[str], column: str = "grade_level") -> str:
+    """把学段白名单渲染成**可展示的 WHERE 片段**（``grade_level IN ('junior','primary_high')``）。
+
+    ★★ 它为什么要存在（而不仅是「拼一句话给人看」）：
+    演示模式要证明「学段隔离是在 SQL 层强制的」，屏幕上必须出现**那条真实的过滤条件**。
+    如果这里手写一句与真正下发的 SQL 无关的文案，那句展示就变成了装饰 ——
+    所以本函数收的是**同一份** ``allowed`` 白名单（``RagService.search()`` 把同一个列表
+    交给 ``_try_vector`` / ``_try_cloud`` / ``_try_fts`` / ``_try_outline``，
+    那四条路径各自把 ``grade_level IN (?, …)`` 拼进自己的 SQL）。
+
+    它与真正执行的 SQL 的**同源性**由 `server/tests/test_rag.py` 的
+    `TestGradeFilterTrace` 钉着：那条用例用 ``sqlite3.set_trace_callback`` 抓出**实际执行**的
+    SQL，断言占位符个数与顺序都与本函数的输出一致（改一处不改另一处立刻红）。
+
+    ★ 只用于**展示与日志**：判定与过滤仍然只发生在各 ``_try_*`` 的 SQL 里，
+      本函数不参与任何查询。
+    """
+    levels = [str(level) for level in grade_levels]
+    if not levels:
+        return f"{column} IN (∅)"
+    rendered = ",".join(f"'{level}'" for level in levels)
+    return f"{column} IN ({rendered})"
+
+
 def _rows_to_hits(
     rows: Sequence[sqlite3.Row],
     *,

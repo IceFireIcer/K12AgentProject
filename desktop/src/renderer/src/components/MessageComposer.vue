@@ -238,7 +238,7 @@ defineExpose({ fill, focus })
   resize: none;
   background: transparent;
   font-family: inherit;
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg);
   max-height: 180px;
@@ -258,7 +258,7 @@ defineExpose({ fill, focus })
   padding: 8px 10px;
   border-radius: var(--k12-r-inset);
   background: var(--k12-surface-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -268,6 +268,11 @@ defineExpose({ fill, focus })
   justify-content: center;
   /* 28px（原 26）：与 `.cp__send` 同一档触控目标。
    * 它俩在输入条上并排 —— 一个大一个小会让整行看着是歪的。 */
+  /* ★★ 2026-09-27（ux:layout 1024 真机体检抓到）：必须 `flex: none` ——
+   *   输入条在 1024 宽时是**过约束**的，宽度写死 28px 的按钮会被 flex 压到 15px
+   *   （实测 `cp__att 15x28`，触控目标低于 28px 下限）。`width` 只是"建议值"，
+   *   不写 `flex: none` 就等于把"点得准"交给剩余空间。 */
+  flex: none;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -299,7 +304,7 @@ defineExpose({ fill, focus })
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-tight);
   color: var(--k12-fg-2);
@@ -318,7 +323,7 @@ defineExpose({ fill, focus })
 /* 键位提示（「Enter 发送 · Shift+Enter 换行」）：主路径提示，是 meta 档（12px） */
 .cp__hint {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   white-space: nowrap;
 }

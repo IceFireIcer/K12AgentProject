@@ -22,7 +22,7 @@
  *   · 「回不到自己的进度」—— **成立**，已修：`定位到我最近的进度` 把容器滚到
  *     「下一个该学的知识点」（规则见 `focusTarget()`），并顺手选中它。
  */
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useStudyStore, type GraphView } from '../../stores/study'
 import { useInsightStore } from '../../stores/insight'
 import { useChatStore } from '../../stores/chat'
@@ -32,7 +32,10 @@ import { useReducedMotion } from '../../composables/useReducedMotion'
 import { UNKNOWN_KP_LABEL, kpLabel } from '../kp-label'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../../labels'
 import GraphMap from './GraphMap.vue'
+import GraphCanvas from './GraphCanvas.vue'
 import { layoutGraph } from './layout'
+import { fitZoom, shouldUseCanvas } from './lod'
+import type { MapViewport } from './culling'
 
 defineOptions({ name: 'StudyMapTab' })
 
@@ -58,6 +61,46 @@ const gradeLabel = computed(() => {
 
 /** 画布容器（**唯一**的滚动者 —— 定位只改它的 scrollLeft / scrollTop，不动 SVG）。 */
 const canvas = ref<HTMLElement | null>(null)
+
+/* ------------------------------------------------------------------ *
+ * 视口裁剪 / Canvas 模式 / 缩放（报告 §5.2）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 当前视口（画布坐标）—— 图谱只渲染可见节点 ±100px（`culling.ts`）。
+ *
+ * ★ 视口由**滚动容器的四个数**算出来，事件源只有 scroll + resize 两处；
+ *   不监听 SVG 内部任何东西（渲染层不该反向依赖渲染结果）。
+ */
+const viewport = ref<MapViewport | null>(null)
+
+function syncViewport(): void {
+  const box = canvas.value
+  if (!box) return
+  viewport.value = {
+    x: box.scrollLeft,
+    y: box.scrollTop,
+    width: box.clientWidth,
+    height: box.clientHeight
+  }
+}
+
+/** 节点数超过报告阈值（>100）时切 Canvas 渲染。 */
+const useCanvas = computed(() => shouldUseCanvas(layout.value.nodes.length))
+
+/**
+ * 缩放（只在 Canvas 模式暴露：`1` = 1:1，`fit` = 适应宽度）。
+ * ★ SVG 那条路**不缩放**（13px 标签必须原样可读，见 `GraphMap.vue` 的样式说明）。
+ */
+const zoom = ref(1)
+function fitToWidth(): void {
+  const box = canvas.value
+  if (!box) return
+  zoom.value = Math.min(1, fitZoom(box.clientWidth, layout.value.width))
+}
+function resetZoom(): void {
+  zoom.value = 1
+}
 
 /** 当前选中的知识点（`''` = 还没选，右侧详情卡不渲染）。 */
 const selected = ref('')
@@ -252,8 +295,9 @@ async function focusNode(kpId: string): Promise<void> {
   const box = canvas.value
   const node = layout.value.nodes.find((item) => item.kpId === kpId)
   if (!box || !node) return
-  const left = Math.max(0, node.x - box.clientWidth / 2)
-  const top = Math.max(0, node.y - box.clientHeight / 2)
+  // ★ Canvas 模式下画布按 `zoom` 缩过，滚动坐标要换算（SVG 模式 zoom 恒为 1）。
+  const left = Math.max(0, node.x * zoom.value - box.clientWidth / 2)
+  const top = Math.max(0, node.y * zoom.value - box.clientHeight / 2)
   box.scrollTo({
     left,
     top,
@@ -272,6 +316,13 @@ onMounted(() => {
   //   · 关卡阶段 → 闯关进度（决定「去闯关练一练」这个按钮该不该出现）。
   void insight.loadProfile()
   void quiz.loadProgress()
+  // 视口裁剪要的两个事件：滚动与尺寸变化（首次同步放在 nextTick，宿主此时才有尺寸）
+  void nextTick(() => syncViewport())
+  window.addEventListener('resize', syncViewport)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', syncViewport)
 })
 
 /* ------------------------------------------------------------------ *
@@ -327,11 +378,38 @@ function chapterNumber(title: string): number {
           <button class="btn k12-tap" type="button" data-testid="map-locate" @click="locate()">
             定位到我最近的进度
           </button>
+          <!-- ★ 缩放只在 Canvas 模式（>100 节点）出现：SVG 是 1:1 渲染，
+               「适应宽度」会把 13px 标签压小（见 GraphMap.vue 的样式说明）。 -->
+          <template v-if="useCanvas">
+            <button class="btn k12-tap" type="button" data-testid="map-fit" @click="fitToWidth()">
+              适应宽度
+            </button>
+            <button class="btn k12-tap" type="button" data-testid="map-zoom-reset" @click="resetZoom()">
+              1:1
+            </button>
+          </template>
           <span class="bar__hint">点一下图上的知识点，可以看到它的前置和下一步。</span>
         </div>
 
-        <div ref="canvas" class="canvas" data-testid="map-canvas">
-          <GraphMap :layout="layout" :selected="selected" @select="select" />
+        <!-- ★ 两条渲染路径（报告 §5.2）：≤100 节点走 SVG（1:1、标签可读）；
+             >100 节点走 Canvas（视口裁剪 + LOD，标签随缩放档退化）。
+             两者的 testid 锚点、选中语义、坐标来源完全一致。 -->
+        <div ref="canvas" class="canvas" data-testid="map-canvas" @scroll="syncViewport">
+          <GraphMap
+            v-if="!useCanvas"
+            :layout="layout"
+            :selected="selected"
+            :viewport="viewport"
+            @select="select"
+          />
+          <GraphCanvas
+            v-else
+            :layout="layout"
+            :selected="selected"
+            :viewport="viewport"
+            :zoom="zoom"
+            @select="select"
+          />
         </div>
         <p class="legend">
           <span class="legend__item"><span class="dot dot--mastered"></span>已掌握</span>
@@ -429,7 +507,7 @@ function chapterNumber(title: string): number {
 
 .summary {
   margin-bottom: 12px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   color: var(--k12-fg-2);
 }
 
@@ -442,7 +520,7 @@ function chapterNumber(title: string): number {
 }
 
 .bar__hint {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
@@ -462,7 +540,7 @@ function chapterNumber(title: string): number {
   gap: 16px;
   flex-wrap: wrap;
   margin-top: 8px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -502,7 +580,7 @@ function chapterNumber(title: string): number {
 }
 
 .detail__name {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-h3);
   font-weight: 650;
   color: var(--k12-fg);
 }
@@ -515,7 +593,7 @@ function chapterNumber(title: string): number {
   border-radius: var(--k12-r-control);
   background: var(--k12-surface);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: 1;
   cursor: pointer;
 }
@@ -525,7 +603,7 @@ function chapterNumber(title: string): number {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -538,12 +616,12 @@ function chapterNumber(title: string): number {
 }
 
 .detail__label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
 .detail__none {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
@@ -554,7 +632,7 @@ function chapterNumber(title: string): number {
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 
@@ -573,7 +651,7 @@ function chapterNumber(title: string): number {
   border-radius: var(--k12-r-control);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
 }
@@ -587,7 +665,7 @@ function chapterNumber(title: string): number {
 
 .section {
   margin: 18px 0 8px;
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-h2);
   font-weight: 650;
   color: var(--k12-fg);
 }
@@ -599,7 +677,7 @@ function chapterNumber(title: string): number {
 }
 
 .chapter__title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   margin-bottom: 5px;
   color: var(--k12-fg);
@@ -617,7 +695,7 @@ function chapterNumber(title: string): number {
   border-radius: var(--k12-r-pill);
   border: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   cursor: pointer;
 }
@@ -631,7 +709,7 @@ function chapterNumber(title: string): number {
 
 .state {
   padding: 10px 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 

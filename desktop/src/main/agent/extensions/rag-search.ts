@@ -112,6 +112,21 @@ export interface RagSearchResponse {
   }>
   context?: string
   degraded?: string
+  /**
+   * ★ 降级链的**逐级记录**（`RagSearchResult.attempts`，本轮新增的可选字段）。
+   *
+   * Python 从票 11 起就一直在记 `LevelAttempt(level, ok, detail, hits)`，只是**没有对外暴露**
+   * （那边的注释写着「只进日志/轨迹，不进 HTTP 契约」）。演示模式要展示「试了哪几级、哪级命中、
+   * 为什么落到下一级」，所以它现在**原样透传**。老 sidecar 不带这个字段 → 退化成
+   * 「只有最终档位可观测」，消费方**不许**编造中间档位（见 `readRetrievalFromDetails`）。
+   */
+  attempts?: Array<{ level?: string; ok?: boolean; detail?: string; hits?: number }>
+  /**
+   * 学段过滤条件**原文**（`RagSearchResult.gradeFilter`）：由 Python 按它真正下发的
+   * 白名单生成（`c.grade_level IN ('primary_high','junior')`），演示时用来证明
+   * 「隔离在 SQL 层强制」不是一句口号。
+   */
+  gradeFilter?: string
 }
 
 /**
@@ -122,6 +137,8 @@ export interface RagSearchResponse {
  */
 export interface RagSearchDetails {
   ok: boolean
+  /** 这一轮真实上送的检索词（模型自己拟的，**不是学生原话**）——诊断信封展示用。 */
+  query: string
   citations: RagCitation[]
   /** ★ 原样透传 Python 的判定；TS 不重新算一遍。 */
   degraded: Degraded
@@ -132,6 +149,10 @@ export interface RagSearchDetails {
   kpIds: string[]
   /** 向上兼容命中的条数（前端要标「延伸阅读」，这里给轨迹留档）。 */
   compatCount: number
+  /** 降级链的逐级记录（原样透传 Python；认不出就是空数组）。 */
+  attempts: Array<{ level: string; ok: boolean; detail: string; hits: number }>
+  /** 学段过滤条件原文（空串 = 后端没给）。 */
+  gradeFilter: string
   /**
    * 检索命中的**完整条目**（比 `citations` 多带 `text` / `score` / `parentChunkId` /
    * `expanded`），供界面的「查看教材原文」抽屉使用。
@@ -252,6 +273,31 @@ export function renderSearchText(
       ? `\n知识点 id（出题 generate_quiz / 查依赖图时用，**不要念给学生听**）：${kpIds.join('、')}`
       : ''
   return `${header}\n来源：\n${sources}${kpLine}\n正文（节级完整内容）：\n${body}`
+}
+
+/**
+ * 读降级链的逐级记录（`RagSearchResult.attempts`）。
+ *
+ * ★ 逐字段读 + 兜底：认不出的条目**跳过**（宁可少一行，也不要一行猜出来的状态）；
+ *   老后端没有这个字段 → 空数组（消费方据此如实显示「逐级不可观测」，不编造）。
+ */
+export function toAttempts(
+  response: RagSearchResponse
+): Array<{ level: string; ok: boolean; detail: string; hits: number }> {
+  const raw = Array.isArray(response.attempts) ? response.attempts : []
+  const out: Array<{ level: string; ok: boolean; detail: string; hits: number }> = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const level = typeof item.level === 'string' ? item.level : ''
+    if (level === '') continue
+    out.push({
+      level,
+      ok: item.ok === true,
+      detail: typeof item.detail === 'string' ? item.detail : '',
+      hits: typeof item.hits === 'number' && Number.isFinite(item.hits) ? item.hits : 0
+    })
+  }
+  return out
 }
 
 /**
@@ -406,6 +452,7 @@ export function createRagSearchExtension(
 
           const details: RagSearchDetails = {
             ok: true,
+            query,
             citations,
             degraded,
             hitCount: citations.length,
@@ -419,6 +466,9 @@ export function createRagSearchExtension(
               )
             ],
             compatCount: citations.filter((citation) => citation.compat).length,
+            // ★ 逐级记录与学段过滤条件**原样透传**（判定在 Python，TS 不重算、不补全）
+            attempts: toAttempts(payload),
+            gradeFilter: typeof payload.gradeFilter === 'string' ? payload.gradeFilter : '',
             // ★ 只带**引用行认得出来**的那些命中（学段认不准的连引用行都没有，
             //   带上它们的原文会让界面上出现「有原文、没有引用行」的孤儿）
             hits: toHitDetails(payload, citations)

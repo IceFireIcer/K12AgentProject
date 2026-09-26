@@ -33,7 +33,7 @@ from app.config import bundled_kb_path, resolve_data_dir
 from app.knowledge.deps import EXPANSION_LIMIT, expansion_kp_ids
 from app.knowledge.library import compatible_grades
 from app.rag import fallback
-from app.rag.contracts_bridge import Degraded, RagHit, RagSearchResult
+from app.rag.contracts_bridge import Degraded, RagHit, RagLevelAttempt, RagSearchResult
 from app.rag.embedder import (
     EmbedderUnavailable,
     LocalEmbedder,
@@ -96,10 +96,21 @@ class RetrievalResult:
         return [hit.model_dump(include=set(CITATION_FIELDS)) for hit in self.hits]
 
     def to_response(self) -> RagSearchResult:
+        # ★ 学段白名单**与 `search()` 里下发给四级检索的是同一个函数**（`compatible_grades`），
+        #   所以 `grade_filter` 展示的就是真正被拼进 SQL 的那份过滤条件（同源性由
+        #   `fallback.grade_filter_sql` 的文档与 `test_rag.py` 的 trace 用例钉住）。
+        allowed = compatible_grades(self.grade_level) if self.allow_compat else [self.grade_level]
         return RagSearchResult(
             hits=self.hits,
             context=build_context(self.hits),
             degraded=self.degraded,
+            # ★ 逐级记录与学段过滤原文（演示模式要看得见「试了哪几级、哪级命中、
+            #   隔离条件长什么样」）。判定仍然只发生在本文件里 —— 这两个字段**只读**。
+            attempts=[
+                RagLevelAttempt(level=a.level, ok=a.ok, detail=a.detail, hits=a.hits)
+                for a in self.attempts
+            ],
+            grade_filter=fallback.grade_filter_sql(allowed),
         )
 
 

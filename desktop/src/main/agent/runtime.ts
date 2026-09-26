@@ -53,6 +53,8 @@ import {
   describeProviderError,
   describeTurnException,
   MISSING_KEY_MESSAGE,
+  RAG_SEARCH_TOOL,
+  readDetails,
   // ★ 脱敏的**唯一实现处**在 `events.ts`（本文件只再导出，见文件末尾的说明）
   redactSecret,
   sanitizeProviderText,
@@ -134,6 +136,17 @@ import {
   type TraceExportOptions,
   type TraceRecordForUi
 } from './trace.ts'
+// ★ 轮次诊断信封（演示模式 / 答辩视角的数据底座）：与 `trace` 并列的第二条旁路。
+//   采集点在 `runTurn()` 那条既有链上，**不改任何对话语义**（信封只是观察者）。
+import {
+  byteHash,
+  DiagnosticsStore,
+  DIAGNOSTICS_FILE_NAME,
+  readRetrievalFromDetails,
+  TurnDiagnosticsRecorder,
+  type GradeSnapshotLike
+} from './diagnostics.ts'
+import type { DiagnosticsSnapshot } from '@shared/diagnostics'
 
 /* ------------------------------------------------------------------ *
  * 选项与返回类型
@@ -196,6 +209,14 @@ export interface ChatRuntimeOptions {
    *   这个是「过程里的实时快照」（界面要看见工具正在被调用）。
    */
   onTraceRecord?: (records: TraceRecordForUi[]) => void
+  /**
+   * 每轮结束推一次**诊断信封快照**（可选）。
+   *
+   * 主进程用它把「这一轮背后发生了什么」推给渲染进程的演示驾驶舱与机制浮窗。
+   * ★ 与 {@link ChatRuntime.diagnostics} 的分工：那个是**缓冲与落盘**（重启后还能回放），
+   *   这个是**实时推送**（演示时边跑边看）。
+   */
+  onDiagnosticsTurn?: (snapshot: DiagnosticsSnapshot) => void
 }
 
 export interface ChatTurnInput {
@@ -270,6 +291,13 @@ export interface ChatRuntime {
   readonly extensionReport: { registered: string[]; missing: string[]; missingTools: string[] }
   /** 工具调用轨迹（`docs/tool-trace.mmd` 的数据来源；退出时由 `dispose()` 导出）。 */
   readonly trace: ToolTraceRecorder
+  /**
+   * 轮次诊断信封的**环形缓冲 + 脱敏 JSONL**（演示模式的数据底座）。
+   *
+   * ★ 与 {@link ChatRuntime.trace} 并列：轨迹只记「调了什么工具」，
+   *   信封回答「这一轮为什么这么走」（Prompt / 画像 / 学段 / 检索 / 安全 / 拦截）。
+   */
+  readonly diagnostics: DiagnosticsStore
   /**
    * ★★ **保存设置后热切换 LLM 配置**（「设置改完即生效」，不必重启应用）。
    *
@@ -633,6 +661,18 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   }
   /** ★ 工具调用轨迹（票 08 的「设计合理性」证据；`dispose()` 时落盘）。 */
   const trace = new ToolTraceRecorder()
+  /**
+   * ★ 轮次诊断信封（演示模式的底座）。
+   *
+   * 落盘位置与 `chat-system-prompt.txt` 同一个 `logs/` 目录（按学生分）——
+   * 暖机读回上次的记录，于是「重启后还能回放」是真的（正文除外，见
+   * `diagnostics.ts` 的脱敏纪律）。
+   */
+  const diagnostics = new DiagnosticsStore({ filePath: join(paths.logDir, DIAGNOSTICS_FILE_NAME) })
+  const restoredTurns = diagnostics.warmup()
+  if (restoredTurns > 0) {
+    console.warn(`[diag] 已从磁盘暖机 ${restoredTurns} 轮诊断记录（正文不落盘，只留结构与结论）`)
+  }
   /** 扩展装配结论（供 `extensionReport` 诊断字段；注册发生在 Pi 调用工厂时）。 */
   let extensionReport: ReturnType<typeof registerAgentExtensions> | null = null
 
@@ -654,6 +694,11 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    * 一份文本、一个出口，第一轮 / 后续轮 / 落盘证据三者不会不一致。
    */
   let studentContextBlock = ''
+  /**
+   * 上一轮的画像块字节指纹（演示模式：证明「逐字节稳定 → 前缀可复用」）。
+   * `''` = 还没有过上一轮（这时不算「变了」）。
+   */
+  let lastStudentContextHash = ''
 
   /**
    * ★★ **唯一的 system prompt 组装出口**：学段（权威）+ 学生情况（画像），6 个落点都走它。
@@ -1318,6 +1363,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       }
     },
     trace,
+    diagnostics,
 
     /**
      * ★★ 保存设置后热切换 LLM 配置（见接口注释；「设置改完即生效」的落地）。
@@ -1602,6 +1648,72 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       busy = true
       const target = useProbe ? probeSink(sink) : sink
 
+      /**
+       * ★★ 轮次诊断信封（演示模式）：**这一轮从进来到收尾，所有机制数据都在这里收拢**。
+       *
+       * 为什么放在 `busy = true` 之后：`busy` / `disposed` 那两条早退**不是一轮对话**
+       * （学生会话被关掉 / 上一条还在答），给它们发号会让时间轴上出现空轮。
+       *
+       * ⚠️ 采集器**只观察**：它不返回值、不参与任何判定，坏了也不影响这一轮
+       *   （每次 `note*` 都是纯赋值，`finish` 在 finally 里兜底）。
+       */
+      const turnNumber = diagnostics.beginTurn()
+      const recorder = new TurnDiagnosticsRecorder({
+        turn: turnNumber,
+        requestId: sink.requestId,
+        text: input.text,
+        gradeLevel: gradeExtension.appliedGrade(),
+        grade: gradeExtension.snapshot() as GradeSnapshotLike
+      })
+      /** 这一轮开始时的轨迹轮次（用来把「本轮的工具调用」从全量记录里筛出来）。 */
+      const traceTurnAtStart = trace.turn
+      /** 收尾：落缓冲 + 推快照。**幂等**（早退路径与正常路径都会走它）。 */
+      const publishDiagnostics = (outcome: { ok: boolean; status: string }): void => {
+        try {
+          const turn = recorder.finish(outcome)
+          diagnostics.append(turn)
+          options.onDiagnosticsTurn?.(diagnostics.snapshot())
+        } catch (error) {
+          // 诊断是旁路：它坏掉绝不该把这一轮带崩
+          console.warn(`[diag] 本轮诊断信封收尾失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      /**
+       * 记这一轮的 Prompt 拼装结果。
+       *
+       * `perTurnApplied` 由调用方给：**这一轮真的走到模型**（或至少走到 `before_agent_start`）
+       * 才为真 —— 无 Key 与输入拦截那两条路都到不了那里，如实记 `false`，
+       * 免得演示时说成「三道注入都生效了」。
+       */
+      const notePromptFromState = (perTurnApplied: boolean): void => {
+        const prompt = state.lastPrompt
+        if (typeof prompt !== 'string' || prompt === '') return
+        recorder.notePrompt({
+          prompt,
+          gradeTemplate: gradeExtension.appliedGrade(),
+          hostPathClean: findHostPathLeaks(prompt, [options.userDataDir, process.execPath]).length === 0,
+          overrides: [
+            {
+              stage: 'override',
+              applied: true,
+              note: '建会话时整段替换 Pi 默认 prompt（防装机路径泄漏）'
+            },
+            {
+              stage: 'per-turn',
+              applied: perTurnApplied,
+              note: perTurnApplied
+                ? '`before_agent_start` 每轮重拼一次（抹掉 Pi 追加的 cwd 尾巴 + 换成本轮学段）'
+                : '这一轮没有走到模型，`before_agent_start` 未触发'
+            },
+            {
+              stage: 'authority',
+              applied: prompt.includes(GRADE_OVERRIDE_HEADING),
+              note: '学段权威段恒追加在末尾，使覆盖在提示词里可审计'
+            }
+          ]
+        })
+      }
+
       try {
         // ★★ 画像预取（票 20 的对话侧落点）：**必须在三条早退路径之前**
         //    （输入拦截 / 无 Key / 鉴权未过），否则那三条路径落盘的 `state.lastPrompt`
@@ -1615,6 +1727,8 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         //      切换学生走的是**新建会话**（`ipc/handlers.ts` 的 ensureChatRuntime → createChatRuntime），
         //      新的 `ChatRuntime` 自带一个空块，跨学生复用同一个 runtime 的路径不存在。
         studentContextBlock = await fetchStudentContext(paths.studentId)
+        recorder.noteStudentContext(studentContextBlock, lastStudentContextHash)
+        lastStudentContextHash = byteHash(studentContextBlock)
 
         // ★★ 内容安全【第一道：输入侧检查】（票 22 / §12）——**在发起模型调用之前**。
         //
@@ -1624,6 +1738,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         //
         //    ⚠️ 判定在 Python（`guard.check_input`），这里只投递 —— **绝不在 TS 侧另写词表**。
         const inputVerdict = await reviewInput(input.text, { gradeLevel: gradeExtension.appliedGrade() })
+        recorder.noteInputSafety(inputVerdict)
         if (inputVerdict && !inputVerdict.allowed) {
           // 证据：本轮**没有**经过 `before_agent_start`（没调 prompt），所以这里自己拼一份
           // 「本轮按哪个学段作答」的 prompt 落盘（同一个出口 `buildSystemPrompt`，不是另写一份；
@@ -1631,11 +1746,13 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           // 拦截计数不在这里单独存 —— 下面那行 `[safety]` 日志与 `blocked` 事件本身就是证据。
           state.lastPrompt = buildSystemPrompt(undefined)
           dumpPrompts(paths, state)
+          notePromptFromState(false)
           emitBlockedTurn(sink, inputVerdict)
           console.warn(
             `[safety] 输入侧拦截（不发模型请求）：类别=${inputVerdict.category} 来源=${inputVerdict.source} ` +
               `命中=${inputVerdict.matched.join('、') || '无'}（不回显正文）`
           )
+          publishDiagnostics({ ok: false, status: 'blocked' })
           return { ok: false, status: 'blocked', detail: `输入侧命中 ${inputVerdict.category}` }
         }
 
@@ -1662,6 +1779,9 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         // ★ 交接之后**再绑一次**：本轮的事件处理器（`agent_end` 写学习记录、Tool 读画像/题库）
         //   必须看到「本轮真正生效的学段」，而不是上一轮那一份。两次调用都是纯对象赋值，很便宜。
         bindCurrentSession()
+        // ★ 学段观察的**诊断落点**：与上面那次绑定同一个时刻（交接之后的真值），
+        //   所以信封里记的就是 `before_agent_start` 真正会用的那个学段。
+        recorder.noteGrade(gradeExtension.snapshot() as GradeSnapshotLike)
 
         /**
          * ★★ 内容安全【第三道：生成结束后整段终审】的**投递管道**（票 22）。
@@ -1693,13 +1813,17 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           //   与真正发出去的那份**同一个函数**（`buildSystemPrompt`：学段 + 本轮画像快照），不是另写一份。
           state.lastPrompt = buildSystemPrompt(undefined)
           dumpPrompts(paths, state)
+          notePromptFromState(false)
           emitTerminal(sink, MISSING_KEY_MESSAGE)
+          publishDiagnostics({ ok: false, status: 'missing-key' })
           return { ok: false, status: 'missing-key', detail: `key来源=${credentials.source}` }
         }
         if (!credentialState.authReady) {
           state.lastPrompt = buildSystemPrompt(undefined)
           dumpPrompts(paths, state)
+          notePromptFromState(false)
           emitTerminal(sink, `${MISSING_KEY_MESSAGE}（供应商凭证检查未通过）`)
+          publishDiagnostics({ ok: false, status: 'missing-key' })
           return { ok: false, status: 'missing-key', detail: 'checkAuth 未通过' }
         }
 
@@ -1711,7 +1835,37 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           //   建会话时的快照 —— 热切换之后要抹的是**当前那把**。
           { requestId: sink.requestId, secret: activeApiKey },
           // 诊断钩子（`K12_PI_TRACE=1`）：**只打事件名与结构性字段**，绝不记录消息正文或凭证
-          tracePiEvents ? { onEvent: tracePiEvent } : {}
+          {
+            onEvent: (event) => {
+              /**
+               * ★ 诊断采集（**永远开**，与 `K12_PI_TRACE` 那条排障日志分开）：
+               *   · `thinking_*` → 模型推理（默认折叠、不落盘）；
+               *   · 首个 `text_delta` → 首字延迟；
+               *   · `tool_execution_end` 的 `rag_search` → 四级降级链的逐级轨迹。
+               */
+              try {
+                if (event.type === 'message_update') {
+                  const update = event.assistantMessageEvent
+                  if (update && typeof update === 'object') {
+                    if (typeof update.type === 'string' && update.type.startsWith('thinking') && typeof update.delta === 'string') {
+                      recorder.noteThinkingDelta(update.delta)
+                    }
+                    if (update.type === 'text_delta') recorder.noteFirstToken()
+                    if (update.type === 'error') recorder.noteProviderError()
+                  }
+                } else if (event.type === 'tool_execution_end' && event.toolName === RAG_SEARCH_TOOL) {
+                  const retrieval = readRetrievalFromDetails(readDetails(event.result))
+                  if (retrieval) recorder.noteRetrieval(retrieval)
+                } else if (event.type === 'auto_retry_end' && event.success === false) {
+                  // 重试彻底失败 = 这一轮的终态是供应商错误（见 `mapPiEvent` 的同名分支）
+                  recorder.noteProviderError()
+                }
+              } catch {
+                // 诊断钩子坏掉不影响对话（与下面那条排障日志同一条纪律）
+              }
+              if (tracePiEvents) tracePiEvent(event)
+            }
+          }
         )
         try {
           await session.prompt(input.text)
@@ -1721,6 +1875,9 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           const { message, status } = describeTurnException(error, activeApiKey)
           binding.failWith(message)
           dumpPrompts(paths, state)
+          notePromptFromState(true)
+          recorder.noteTools(trace.records().filter((record) => record.turn > traceTurnAtStart))
+          publishDiagnostics({ ok: false, status })
           return { ok: false, status, detail: message }
         } finally {
           binding.unsubscribe()
@@ -1744,16 +1901,39 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
             `撤回=${gate.retractions} 次（正文 ${gate.bufferedChars} 字符）`
         )
 
+        // ★ 诊断信封的收尾（与上面那行日志同一个口径，但**结构化**并推给界面）：
+        //   工具调用窗口 = 「本轮开始之后记录的」那些（`trace.turn` 是单调的，见 trace.ts）。
+        recorder.noteTools(trace.records().filter((record) => record.turn > traceTurnAtStart))
+        recorder.noteSafetyFinal({
+          finalizations: gate.finalizations,
+          retractions: gate.retractions,
+          bufferedChars: gate.bufferedChars,
+          streamed: gate.finalizations > 0
+        })
+        notePromptFromState(true)
+
         dumpPrompts(paths, state)
         const leaks = state.wireLeaks
         if (leaks.length > 0) {
           // 泄漏是**开发期缺陷**，不该让学生看见：记在结论里，UI 只看到正常收尾
+          recorder.noteInterception({
+            source: 'provider 边界 · 宿主路径断言',
+            reason: '发出去的 system prompt 里出现了本机路径，本轮按缺陷记录',
+            detail: leaks.join(' / ')
+          })
+          publishDiagnostics({ ok: false, status: 'provider-error' })
           return { ok: false, status: 'provider-error', detail: `system prompt 泄漏：${leaks.join(' / ')}` }
         }
         // 撤回过的轮次：结论如实记（面向开发者），UI 那边看到的是安全文案
         if (gate.retractions > 0) {
+          publishDiagnostics({ ok: false, status: 'blocked' })
           return { ok: false, status: 'blocked', detail: '本轮回答被安全终审撤回' }
         }
+        // 供应商故障：终态是 `error`（正文可能只出来半句）——**信封里不能记成 ok**
+        // （`runTurn()` 的返回值语义不变：它回答的是「这一轮有没有走完」，不是「模型答得成不成功」）
+        publishDiagnostics(
+          recorder.hasProviderError ? { ok: false, status: 'provider-error' } : { ok: true, status: 'ok' }
+        )
         return { ok: true, status: 'ok' }
       } finally {
         busy = false

@@ -21,12 +21,15 @@
 import { app, BrowserWindow, dialog, ipcMain, type WebContents } from 'electron'
 import { writeFileSync } from 'node:fs'
 import { unlink } from 'node:fs/promises'
+import { join } from 'node:path'
 import { apiFetch } from '../bridge/client.ts'
 import { describeRuntimeFailure } from '../agent/events.ts'
 import { gradeStatePath } from '../agent/extensions/grade.ts'
 import { bindCodeRunner, createRendererCodeRunner } from '../agent/extensions/coding.ts'
 import { builtinCatalog } from '../agent/pi-bootstrap.ts'
 import { assertStudentId, isInside, resolveStudentPiPaths } from '../agent/pi-paths.ts'
+import { DiagnosticsStore, DIAGNOSTICS_FILE_NAME } from '../agent/diagnostics.ts'
+import type { DiagnosticsSnapshot } from '@shared/diagnostics'
 import type { ChatRuntime, ChatSessionSource } from '../agent/runtime.ts'
 import { createChatRuntime } from '../agent/runtime.ts'
 import {
@@ -44,6 +47,7 @@ import {
   type ChatSendResult,
   type CodeExecuteRequest,
   type CodeExecuteResult,
+  type DiagnosticsCallResult,
   type FetchModelsResult,
   type FileExportRequest,
   type FileExportResult,
@@ -555,7 +559,9 @@ export function chatRuntimeOptionsFromLlm(
     studentId: resolveActiveStudentId(),
     // ★ 工具调用轨迹的**实时**出口（右栏「工具调用轨迹」）：
     //   与 `trace` 字段的分工是「过程里的快照」vs「退出时落盘的完整记录」。
-    onTraceRecord: pushTraceRecords
+    onTraceRecord: pushTraceRecords,
+    // ★ 演示模式：每轮结束推一次**诊断信封快照**（演示驾驶舱 + 机制浮窗的数据来源）。
+    onDiagnosticsTurn: pushDiagnosticsTurn
   }
   if (!llm) return base
   return {
@@ -636,6 +642,12 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
       console.error('[main] Pi 会话兜底收尾异常（继续退出）：', error)
     })
   })
+
+  // ── 演示模式：轮次诊断信封（两条 invoke）───────────────────────────────
+  //   ★ 推送那条（`diagnostics:changed`）由 `runTurn()` 的回调驱动，不在这里注册。
+  //   ★ 两条都不接受任何入参：学生身份与落盘位置全由主进程决定
+  //     （渲染进程指定不了「读谁的」）。
+  registerDiagnosticsHandlers()
 
   // ── 设置域（票 07：渲染进程 → IPC → 主进程 → sidecar，渲染进程永远看不到 token）──
   //
@@ -994,6 +1006,68 @@ export const pushTraceRecords = createTraceProjector((snapshot) => {
     sendTraceTo(window.webContents, snapshot)
   }
 })
+
+/* ------------------------------------------------------------------ *
+ * 演示模式：轮次诊断信封（推送 + 读取 + 清空）
+ *
+ * ★ 与 `trace:changed` 并列的第二条旁路（**不是**第 7 个事件）：
+ *   轨迹回答「调了什么工具」，信封回答「这一轮为什么这么走」。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 当前学生的信封锁存**唯一出口**。
+ *
+ * ★ 优先用**正在跑的那个 runtime 手里那份**：清空必须同时清掉它的内存环形缓冲，
+ *   否则「清空之后下一轮推送又把旧轮次带回来」（两份缓冲各说各话）。
+ * ★ 还没有 runtime 时（学生刚打开应用、一次都没发过消息）另建一份**只读暖机**用的：
+ *   它读的就是同一个文件，所以演示页在冷启动时也能看到上次落盘的记录。
+ */
+function diagnosticsStoreFor(studentId: string): DiagnosticsStore {
+  if (runtime) return runtime.diagnostics
+  const paths = resolveStudentPiPaths(app.getPath('userData'), studentId)
+  const store = new DiagnosticsStore({ filePath: join(paths.logDir, DIAGNOSTICS_FILE_NAME) })
+  store.warmup()
+  return store
+}
+
+/** 把一份信封快照推给所有窗口（单窗口应用里就是那一个）。 */
+function pushDiagnosticsSnapshot(snapshot: DiagnosticsSnapshot): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    const webContents = window.webContents
+    if (webContents.isDestroyed()) continue
+    webContents.send(IPC.diagnosticsChanged, snapshot)
+  }
+}
+
+/**
+ * 信封推送出口（`createChatRuntime({ onDiagnosticsTurn })` 用）。
+ *
+ * ⚠️ `BrowserWindow.getAllWindows()` 在没有窗口时返回空数组（测试环境即如此）→
+ *    这条链路在单测里天然是 no-op，不会因为「没有窗口」而抛。
+ */
+export const pushDiagnosticsTurn = (snapshot: DiagnosticsSnapshot): void => {
+  pushDiagnosticsSnapshot(snapshot)
+}
+
+/** 两条 invoke 通道：读取与清空。**失败也给一句可读中文**，绝不抛过 IPC。 */
+function registerDiagnosticsHandlers(): void {
+  ipcMain.handle(IPC.diagnosticsRead, (): DiagnosticsCallResult => {
+    try {
+      return { ok: true, data: diagnosticsStoreFor(resolveActiveStudentId()).snapshot() }
+    } catch (error) {
+      return { ok: false, message: `读取演示数据失败：${error instanceof Error ? error.message : String(error)}` }
+    }
+  })
+
+  ipcMain.handle(IPC.diagnosticsClear, (): DiagnosticsCallResult => {
+    try {
+      // ★ 清空是**幂等**的：没有记录时也返回空快照（界面要的是「现在是空的」这个结论）
+      return { ok: true, data: diagnosticsStoreFor(resolveActiveStudentId()).clear() }
+    } catch (error) {
+      return { ok: false, message: `清空演示数据失败：${error instanceof Error ? error.message : String(error)}` }
+    }
+  })
+}
 
 /* ------------------------------------------------------------------ *
  * 学习档案（章节 / 报告 / 错题本 / 学习地图）

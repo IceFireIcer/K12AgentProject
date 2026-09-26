@@ -235,13 +235,13 @@ function retrySameKind(item: { kpId: string }): void {
 }
 
 .toolbar__hint {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
 .summary {
   margin-bottom: 10px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   color: var(--k12-fg-2);
 }
 
@@ -268,13 +268,13 @@ function retrySameKind(item: { kpId: string }): void {
 }
 
 .item__name {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   color: var(--k12-fg);
 }
 
 .item__chapter {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
@@ -285,7 +285,7 @@ function retrySameKind(item: { kpId: string }): void {
   border: 1px solid var(--k12-warn-border);
   color: var(--k12-warn);
   /* 错次角标（「错 3 次」）：选择器名含 count，走角标档 */
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 600;
 }
 
@@ -297,7 +297,7 @@ function retrySameKind(item: { kpId: string }): void {
   border-radius: var(--k12-r-control);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
 }
@@ -327,7 +327,7 @@ function retrySameKind(item: { kpId: string }): void {
   margin-top: 6px;
   padding-left: 8px;
   border-left: 2px solid var(--k12-border-strong);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -355,20 +355,20 @@ function retrySameKind(item: { kpId: string }): void {
 }
 
 .item__meta {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
 .footnote {
   margin-top: 12px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted-2);
 }
 
 .state {
   padding: 10px 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
@@ -379,7 +379,7 @@ function retrySameKind(item: { kpId: string }): void {
 
 .notice {
   margin-bottom: 10px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-good);
 }
 </style>

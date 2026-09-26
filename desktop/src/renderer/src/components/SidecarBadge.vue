@@ -46,7 +46,7 @@ const sidecar = useSidecarStore()
   border: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-ui);
 }
@@ -101,14 +101,14 @@ const sidecar = useSidecarStore()
 }
 
 .hint {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
   text-align: right;
   line-height: var(--k12-lh-ui);
 }
 
 .error {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-bad);
   text-align: right;
   line-height: var(--k12-lh-ui);
@@ -116,7 +116,7 @@ const sidecar = useSidecarStore()
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chip--starting .dot {
+  :root:not([data-k12-reduced-motion='off']) .chip--starting .dot {
     animation: none;
   }
 }

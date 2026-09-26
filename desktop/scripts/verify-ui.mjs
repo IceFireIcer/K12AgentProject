@@ -48,7 +48,7 @@
  *
  * 为什么 F 要「注入事件」而不是等模型出题：无 Key 时模型不会调用 `generate_quiz`，
  * 而卡片渲染是纯前端行为 —— 所以用真实结构的事件走**真实的归约器与真实组件**，
- * 数据取自 `server/resources/quizbank/junior.json`（真实题库，不是编的）。
+ * 数据取自 `server/resources/quizbank/chNN.json`（真实题库，不是编的）。
  * 注入路径依赖 dev 模式的 Vite 模块图；打包产物（file://）下会打印 [SKIP]。
  *
  * ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@
  * 只用 Node 内置能力（Node >= 22 的全局 fetch / WebSocket），不引入任何依赖。
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -289,7 +289,11 @@ console.log('== A. 静态契约（6 事件词表 / 渲染进程分派 / 学段�
   )
   check(
     '发送链路不传学段（sendChat 只带 text）',
-    /sendChat\(\{\s*text\s*\}\)/.test(chatStoreSource) && !/sendChat\(\{[^}]*gradeLevel/.test(chatStoreSource),
+    // ⚠️ 判据是「入参只有一个 `text` 字段」，**不是**「字面量恰好写成 `{ text }`」——
+    //    2026-09-26 实测：`sendChat({ text: outgoing })`（同一件事、换了个变量名）被旧正则
+    //    判成红，报了一个不存在的缺陷。契约那一侧仍由守卫 G6c 钉着字段集合恰好 `['text']`。
+    /sendChat\(\{\s*text:\s*[^,}]+?\s*\}\)/.test(chatStoreSource) &&
+      !/sendChat\(\{[^}]*gradeLevel/.test(chatStoreSource),
     'stores/chat.ts 里 sendChat 的入参只有 { text }'
   )
 
@@ -445,7 +449,14 @@ async function evaluate(expression) {
     awaitPromise: true
   })
   if (evaluated?.exceptionDetails) {
-    throw new Error(`页面执行异常：${evaluated.exceptionDetails.text ?? JSON.stringify(evaluated.exceptionDetails)}`)
+    // ★ 把**真正的异常文本**带上：`exceptionDetails.text` 在实测里经常只有一句「Uncaught」，
+    //   于是「哪一行炸的」全靠猜（本轮就为此多跑了一轮）。`exception.description` 才有
+    //   `TypeError: x is not a function` 这类可定位的信息。
+    const detail =
+      evaluated.exceptionDetails.exception?.description ??
+      evaluated.exceptionDetails.text ??
+      JSON.stringify(evaluated.exceptionDetails)
+    throw new Error(`页面执行异常：${String(detail).split('\n')[0]}`)
   }
   return evaluated?.result?.value
 }
@@ -1371,7 +1382,12 @@ if (gradeProbe?.present !== true) {
             const promptText = readFileSync(promptFile, 'utf8')
             const chapterLine = promptText
               .split(/\r?\n/)
-              .find((line) => line.includes('当前教材章节')) ?? ''
+              // ★ 锚的是**画像块里那一行的现行原话**（`extensions/profile.ts`：
+              //   `- 学生当前在看：<章标题>（只是背景，不必刻意围绕它）`）。
+              //   ⚠️ 旧锚点是「当前教材章节」—— 那句话 2026-09-21（D-064）就改掉了，
+              //   锚点却留在探针里，于是这一格**永远红**（报的是「章节没进 prompt」，
+              //   实测章节一直都在，见 2026-09-26 复核）。
+              .find((line) => line.includes('学生当前在看')) ?? ''
             if (target === '') {
               check(
                 '★★ 选「不限章节」后 prompt 里**没有**章节行（清空是真的清空）',
@@ -1476,7 +1492,7 @@ if (gradeProbe?.present !== true) {
               await collectUntilTerminal(thirdBefore, noKeyTimeoutMs)
               const clearedText = readFileSync(promptFile, 'utf8')
               const clearedLine =
-                clearedText.split(/\r?\n/).find((line) => line.includes('当前教材章节')) ?? ''
+                clearedText.split(/\r?\n/).find((line) => line.includes('学生当前在看')) ?? ''
               check(
                 '★★ 清空后落盘 prompt 里的章节行消失（回读同一份落盘文本）',
                 clearedLine === '',
@@ -1659,29 +1675,46 @@ if (!hasKey) {
 console.log('\n== F. 练习卡片渲染（payload 事件 → 卡片 → 逐题反馈 / 掌握度）==')
 
 /** 从真实题库文件取一道题，投影成**对外形态**（丢掉 answer，保留 explanation 之外的说明）。 */
-function readBankQuestion(gradeBankPath, type) {
-  const absolute = join(REPO_ROOT, gradeBankPath)
-  if (!existsSync(absolute)) scriptError(`读不到题库文件：${gradeBankPath}`)
-  const bank = JSON.parse(readFileSync(absolute, 'utf8'))
-  const question = (bank.questions ?? []).find((item) => item.type === type)
-  if (!question) scriptError(`题库 ${gradeBankPath} 里没有 ${type} 题型（练习卡片的渲染断言需要它）`)
-  return {
-    out: {
-      qid: question.qid,
-      kpId: question.kp_id,
-      type: question.type,
-      stem: question.stem,
-      options: question.options ?? null,
-      // explanation 是后端为了让模型组织语言才带的：**卡片不许渲染它**（里面常直接写着答案）
-      explanation: question.explanation ?? ''
-    },
-    answer: question.answer
+/**
+ * 从**真实题库**里取一道指定题型的题。
+ *
+ * ⚠️ 题库 2026-09-26 起是**按章分片**（`chNN.json`，一个文件跨四学段），旧的
+ *    `junior.json` 单文件形态已经不存在 —— 本节原来按单文件读，后来直接
+ *    `scriptError` 把整轮体检打断（实测）。现在按章扫，找到第一道该题型的题。
+ * ⚠️ 当前题库只有 `choice` / `blank` 两种题型（`code_blank` 由生成题承担，
+ *    它的投影与渲染由 `tests/renderer-quiz.test.ts` 单测钉着），所以本节的卡片断言
+ *    只用**真实存在的两种题型**。
+ */
+function readBankQuestion(type) {
+  const dir = join(REPO_ROOT, 'server/resources/quizbank')
+  if (!existsSync(dir)) scriptError('读不到题库目录：server/resources/quizbank')
+  const files = readdirSync(dir)
+    .filter((name) => /^ch\d+\.json$/.test(name))
+    .sort()
+  if (files.length === 0) scriptError('题库目录里没有 chNN.json 分片')
+  for (const name of files) {
+    const bank = JSON.parse(readFileSync(join(dir, name), 'utf8'))
+    const question = (bank.questions ?? []).find((item) => item.type === type)
+    if (question) {
+      return {
+        out: {
+          qid: question.qid,
+          kpId: question.kp_id,
+          type: question.type,
+          stem: question.stem,
+          options: question.options ?? null,
+          // explanation 是后端为了让模型组织语言才带的：**卡片不许渲染它**（里面常直接写着答案）
+          explanation: question.explanation ?? ''
+        },
+        answer: question.answer
+      }
+    }
   }
+  scriptError(`题库（${files.join(' / ')}）里没有 ${type} 题型（练习卡片的渲染断言需要它）`)
 }
 
-const choiceSource = readBankQuestion('server/resources/quizbank/junior.json', 'choice')
-const blankSource = readBankQuestion('server/resources/quizbank/junior.json', 'blank')
-const codeBlankSource = readBankQuestion('server/resources/quizbank/junior.json', 'code_blank')
+const choiceSource = readBankQuestion('choice')
+const blankSource = readBankQuestion('blank')
 
 /** `generate_quiz` 的 `details`（= payload 事件的 payload），形状与 `quiz.ts` 的 `QuizPayloadShape` 一致。 */
 const quizPayloadEvent = {
@@ -1692,7 +1725,9 @@ const quizPayloadEvent = {
     payload: {
       kpId: choiceSource.out.kpId,
       source: 'bank',
-      questions: [choiceSource.out, blankSource.out, codeBlankSource.out],
+      // 两种真实题型各一道：选择题考「选项渲染」、填空题考「输入框 + 作答链路」。
+      // （`code_blank` 不在随包题库里，见 `readBankQuestion` 的说明。）
+      questions: [choiceSource.out, blankSource.out],
       // 事件层附加的两个提示字段（`agent/events.ts` 的 readPayload）
       tool: 'generate_quiz',
       kind: 'quiz'
@@ -1788,22 +1823,41 @@ if (injected?.ok !== true) {
 } else {
   try {
     await waitFor(
-      `(() => document.querySelectorAll('[data-testid="quiz-card"]').length >= 1)()`,
+      // ★ 找的是**我们注入的那张**卡（那一轮的学生原话是这句），不是「最后一张卡」：
+      //   同一个应用里真跑过几轮之后，模型自己生成的练习卡会排在它后面 ——
+      //   实测「最后一张」取到过模型卡（1 道题 / 4 个选项），本节七条断言全红在一个不存在的缺陷上。
+      `(() => Array.from(document.querySelectorAll('[data-testid="chat-turn"]')).some((turn) => {
+        const user = turn.querySelector('[data-testid="user-message"]')
+        const text = user && user.textContent ? user.textContent : ''
+        return text.includes('帮我出两道题练一练') && turn.querySelector('[data-testid="quiz-card"]')
+      }))()`,
       '练习卡片出现在消息区',
       5000
     )
 
     const quizProbe = await evaluate(`(() => {
-      const cards = Array.from(document.querySelectorAll('[data-testid="quiz-card"]'))
-      const card = cards[cards.length - 1]
+      const owner = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+        .filter((turn) => {
+          const user = turn.querySelector('[data-testid="user-message"]')
+          const text = user && user.textContent ? user.textContent : ''
+          return text.includes('帮我出两道题练一练')
+        })
+        .pop()
+      const card = owner ? owner.querySelector('[data-testid="quiz-card"]') : null
+      if (!card) return { missing: true }
       const questions = Array.from(card.querySelectorAll('[data-testid="quiz-question"]'))
+      // ★ 单题模式的两个结构性锚点（报告 §2.3）：题体只有一行，题号步骤条给总量。
+      const steps = card.querySelectorAll('[data-testid^="quiz-step-"]').length
+      const positionNode = card.querySelector('[data-testid="quiz-position"]')
       const text = (el, sel) => {
         const node = el.querySelector(sel)
         return node && node.textContent ? node.textContent.trim() : ''
       }
       return {
-        cardCount: cards.length,
+        cardCount: owner ? owner.querySelectorAll('[data-testid="quiz-card"]').length : 0,
         questionCount: questions.length,
+        steps,
+        position: positionNode && positionNode.textContent ? positionNode.textContent.replace(/\\s+/g, ' ').trim() : '',
         types: questions.map((item) => item.getAttribute('data-type') || ''),
         qids: questions.map((item) => item.getAttribute('data-qid') || ''),
         stems: questions.map((item) => text(item, '[data-testid="quiz-stem"]')),
@@ -1816,20 +1870,41 @@ if (injected?.ok !== true) {
         verdicts: Array.from(card.querySelectorAll('[data-testid="quiz-verdict"]')).map((el) => el.textContent.trim()),
         mastery: Array.from(card.querySelectorAll('[data-testid="quiz-mastery"]')).map((el) => el.textContent.trim()),
         feedbackTexts: Array.from(card.querySelectorAll('[data-testid="quiz-feedback-text"]')).map((el) => el.textContent.trim()),
-        // ★ 答案泄漏防线的界面侧证据：整个页面文本里不许出现标准答案与解析
-        pageText: document.body.innerText || '',
-        domAttributes: Array.from(card.querySelectorAll('*'))
-          .flatMap((el) => Array.from(el.attributes).map((attr) => attr.name + '=' + attr.value))
-          .join(' | ')
+        // ★ 答案泄漏防线的界面侧证据：**只看这张练习卡片**。
+        //   ⚠️ 原来比的是整个页面文本 —— 实测被模型的自由回答污染：模型拿到题目与解析后
+        //   可能把解析原话讲出来（F 节提交后会真跑一轮），于是这条断言红在一个
+        //   「卡片没泄漏」的场景上（2026-09-26 复核）。卡片这一层才是这条防线的边界。
+        pageText: (() => {
+          const clone = card.cloneNode(true)
+          clone.querySelectorAll('[data-testid="quiz-feedback"]').forEach((el) => el.remove())
+          return clone.textContent || ''
+        })(),
+        domAttributes: (() => {
+          const clone = card.cloneNode(true)
+          clone.querySelectorAll('[data-testid="quiz-feedback"]').forEach((el) => el.remove())
+          return Array.from(clone.querySelectorAll('*'))
+            .flatMap((el) => Array.from(el.attributes).map((attr) => attr.name + '=' + attr.value))
+            .join(' | ')
+        })()
       }
     })()`)
 
+    if (quizProbe?.missing === true) {
+      check('练习卡片：注入的那张卡必须在页面上（这一节的其余断言都依赖它）', false, '找不到我们注入的那张练习卡')
+    } else {
     check(
-      '练习卡片：题目渲染出来（3 道题，题型标签正确）',
-      quizProbe.questionCount === 3 &&
-        JSON.stringify(quizProbe.types) === JSON.stringify(['choice', 'blank', 'code_blank']) &&
-        JSON.stringify(quizProbe.typeLabels) === JSON.stringify(['选择题', '填空题', '代码填空']),
-      `题目 ${quizProbe.questionCount} 道，题型 ${quizProbe.types.join(' / ')}，标签「${quizProbe.typeLabels.join('、')}」`
+      '★★ 练习卡片：默认只渲染一道题（单题模式，报告 §2.3）',
+      quizProbe.questionCount === 1 &&
+        quizProbe.steps === 2 &&
+        quizProbe.position.includes('第 1 / 2 题'),
+      `DOM 里的题 ${quizProbe.questionCount} 道（应为 1），题号步骤 ${quizProbe.steps} 颗（应为 2），` +
+        `位置行「${quizProbe.position}」`
+    )
+    check(
+      '练习卡片：当前渲染的是第 1 题（选择题），标签正确',
+      JSON.stringify(quizProbe.types) === JSON.stringify(['choice']) &&
+        JSON.stringify(quizProbe.typeLabels) === JSON.stringify(['选择题']),
+      `题型 ${quizProbe.types.join(' / ')}，标签「${quizProbe.typeLabels.join('、')}」`
     )
     check(
       '练习卡片：题干是题库原文（不是占位文字）',
@@ -1842,14 +1917,9 @@ if (injected?.ok !== true) {
       `选项数 = ${quizProbe.optionCounts[0]}（题库里 ${(choiceSource.out.options ?? []).length} 个）`
     )
     check(
-      '练习卡片：填空 / 代码填空各有输入框',
-      quizProbe.blankInputs >= 1 && quizProbe.codeBlankInputs >= 1,
-      `填空输入框 ${quizProbe.blankInputs} 个，代码填空输入框 ${quizProbe.codeBlankInputs} 个`
-    )
-    check(
-      '练习卡片：每题都有提交按钮（作答入口）',
-      quizProbe.submitButtons === 3,
-      `提交按钮 ${quizProbe.submitButtons} 个`
+      '练习卡片：一屏只有一个提交键（作答入口在卡脚）',
+      quizProbe.submitButtons === 1,
+      `提交按钮 ${quizProbe.submitButtons} 个（单题模式应为 1）`
     )
     check(
       '★ 逐题反馈：批改结果跨轮回来后，落在对应的题目下面',
@@ -1875,29 +1945,85 @@ if (injected?.ok !== true) {
       (item) => quizProbe.pageText.includes(item.value) || quizProbe.domAttributes.includes(item.value)
     )
     check(
-      '★★ 答案不泄漏到界面（标准答案 / 解析既不在文本里，也不在属性里）',
+      '★★ 答案不泄漏到卡片（标准答案 / 解析既不在卡片文本里，也不在属性里）',
       leakedHits.length === 0,
       leakedHits.length === 0
-        ? `已检查 ${leaked.length} 条敏感文本（题库答案 + 解析），界面里 0 命中`
+        ? `已检查 ${leaked.length} 条敏感文本（题库答案 + 解析），练习卡片里 0 命中`
         : `泄漏：${leakedHits.map((item) => item.label).join('、')}`
     )
+    }
 
     // 作答 → 提交：走真实的聊天链路（无 Key 时本轮会以 error 收尾，这不影响卡片的断言）
     //
-    // ⚠️ 必须点**还没作答**的那一题：实现层把答对之后的提交键改成禁用的「已完成」
-    //   （学生答对了再点一次没有意义，见 `cards/QuizCard.vue` 的 `submitLabel`）。
-    //   而上面注入的那条判分结果对应的正是**第 1 题** —— 直接 querySelector 拿第一个
-    //   `quiz-submit`，拿到的必然是个禁用按钮，`click()` 静默无效，
-    //   于是后面「出现【练习作答】」永远等不到。所以这里挑**第一个可点的**提交键。
+    // ⚠️ 单题模式一次只渲染一道题（报告 §2.3），提交键在**卡脚**（不在题体里）。
+    //   上面注入的判分结果对应第 1 题（答对 → 提交键禁用），所以要先把卡片翻到
+    //   第 2 题（未作答的填空题）再提交 —— 这一步本身就是「单题 + 可翻题」的行为断言。
+    const toSecond = await evaluate(`(() => {
+      const owner = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+        .filter((turn) => {
+          const user = turn.querySelector('[data-testid="user-message"]')
+          const text = user && user.textContent ? user.textContent : ''
+          return text.includes('帮我出两道题练一练')
+        })
+        .pop()
+      const card = owner ? owner.querySelector('[data-testid="quiz-card"]') : null
+      if (!card) return { ok: false, reason: '找不到练习卡片' }
+      // ⚠️ 用「前缀 + 取第二颗」而不是写死 `quiz-step-2`：步骤锚点里的编号是
+      //   模板动态拼出来的（`quiz-step-${index + 1}`），写死会在探针锚点自检里被
+      //   当成「源码里不存在这个锚点」。
+      const step = card.querySelectorAll('[data-testid^="quiz-step-"]')[1]
+      if (!step) return { ok: false, reason: '找不到第 2 颗题号步骤（步骤条没渲染？）' }
+      step.click()
+      return { ok: true }
+    })()`)
+    if (toSecond?.ok !== true) {
+      check('练习卡片：题号步骤条可点（单题模式下翻到第 2 题）', false, toSecond?.reason ?? '点击失败')
+    } else {
+      await delay(250)
+      const second = await evaluate(`(() => {
+        const owner = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+          .filter((turn) => {
+            const user = turn.querySelector('[data-testid="user-message"]')
+            const text = user && user.textContent ? user.textContent : ''
+            return text.includes('帮我出两道题练一练')
+          })
+          .pop()
+        const card = owner ? owner.querySelector('[data-testid="quiz-card"]') : null
+        if (!card) return { questionCount: 0, type: '', blanks: 0, position: '' }
+        const question = card.querySelector('[data-testid="quiz-question"]')
+        const positionNode = card.querySelector('[data-testid="quiz-position"]')
+        return {
+          questionCount: card.querySelectorAll('[data-testid="quiz-question"]').length,
+          type: question ? question.getAttribute('data-type') : '',
+          blanks: card.querySelectorAll('[data-testid="quiz-blank"]').length,
+          position: positionNode && positionNode.textContent ? positionNode.textContent.replace(/\\s+/g, ' ').trim() : ''
+        }
+      })()`)
+      check(
+        '练习卡片：点第 2 颗步骤翻到填空题（仍然只渲染一道题）',
+        second.questionCount === 1 && second.type === 'blank' && second.blanks === 1 && second.position.includes('第 2 / 2 题'),
+        `DOM 里的题 ${second.questionCount} 道，当前题型 ${second.type}，填空输入框 ${second.blanks} 个，位置行「${second.position}」`,
+        '单题模式要么翻不动、要么翻过去把两题都渲染出来 —— 都说明卡头/卡身的渲染源不是同一份状态'
+      )
+    }
+
     const beforeSubmit = await turnCount()
     const submitted = await evaluate(`(() => {
-      const card = Array.from(document.querySelectorAll('[data-testid="quiz-card"]')).pop()
+      const owner = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+        .filter((turn) => {
+          const user = turn.querySelector('[data-testid="user-message"]')
+          const text = user && user.textContent ? user.textContent : ''
+          return text.includes('帮我出两道题练一练')
+        })
+        .pop()
+      const card = owner ? owner.querySelector('[data-testid="quiz-card"]') : null
       if (!card) return { ok: false, reason: '找不到练习卡片' }
-      const button = Array.from(card.querySelectorAll('[data-testid="quiz-submit"]')).find(
-        (candidate) => !candidate.disabled
-      )
-      if (!button) return { ok: false, reason: '找不到可提交的作答按钮（全部已判分或禁用）' }
-      const question = button.closest('[data-testid="quiz-question"]')
+      // 提交键在**卡脚**（单题模式）：题体是当前渲染的那一道
+      const button = card.querySelector('[data-testid="quiz-submit"]')
+      if (!button) return { ok: false, reason: '找不到提交键' }
+      if (button.disabled) return { ok: false, reason: '当前题的提交键是禁用的（翻题没生效？）' }
+      const question = card.querySelector('[data-testid="quiz-question"]')
+      if (!question) return { ok: false, reason: '找不到当前题体' }
       const option = question && question.querySelector('[data-testid="quiz-option"] input[type="radio"]')
       if (option) option.click()
       const blank = question && question.querySelector('[data-testid="quiz-blank"], [data-testid="quiz-code-blank"]')
@@ -1939,6 +2065,262 @@ if (injected?.ok !== true) {
     }
   } catch (error) {
     check('练习卡片：payload 事件驱动渲染（题目 / 作答 / 反馈）', false, describe(error))
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * F2. 教材引用：**默认收起**（注入 citation 事件 → 真实 DOM）
+ * ------------------------------------------------------------------ */
+
+console.log('\n== F2. 教材引用（默认收起 / 点开展开 / 向上兼容留在收起态）==')
+
+/**
+ * 为什么 F2 要「注入 citation 事件」而不是等模型检索：
+ * 无 Key 时模型不会调 `rag_search`，一轮真实的引用根本不会发生 —— 而「引用默认收起」
+ * 是用户点名要的那条改动。这里用与 F 节同一套手法（把事件喂进渲染进程自己的
+ * `applyChatEvent`）造一条**带 5 条引用**（其中 1 条 `compat: true`）的 citation，
+ * 于是收起态、展开态、逐条标注、原文抽屉四条路径都能确定性验证。
+ * ★ 注入路径依赖 dev 模式的 Vite 模块图；打包产物（file://）下会打印 [SKIP]。
+ */
+/**
+ * ⚠️ 每跑一次都要**换一个 requestId**：对话列表按 `requestId` 做 key，
+ *    复用同一个 id 会让 Vue 直接复用上一轮那个 `<details>` DOM 节点 ——
+ *    于是「上一跑点开过」的展开状态被带进这一跑（实测：默认收起那一格红在
+ *    open=true / 671px 上，看起来像产品缺陷，其实是探针自己制造的状态残留）。
+ */
+const citationRequestId = `verify-citations-${Date.now()}`
+const citationPayloadEvent = {
+  name: 'citation',
+  data: {
+    requestId: citationRequestId,
+    citations: [
+      { chunkId: 'cite-1', chapterTitle: '第 1 章 走进人工智能', sectionTitle: '人工智能会做什么', gradeLevel: 'junior', compat: false },
+      { chunkId: 'cite-2', chapterTitle: '第 3 章 核心技术分支', sectionTitle: '从原始数据到特征', gradeLevel: 'junior', compat: false },
+      { chunkId: 'cite-3', chapterTitle: '第 3 章 核心技术分支', sectionTitle: '模型是怎样被训练的', gradeLevel: 'junior', compat: false },
+      { chunkId: 'cite-4', chapterTitle: '第 4 章 算法的边界', sectionTitle: '数据里的偏见', gradeLevel: 'junior', compat: false },
+      // 跨学段向上兼容：收起态也必须看得见这条标注（§6.4 / 陷阱清单 §2 / 票 13）
+      { chunkId: 'cite-5', chapterTitle: '第 6 章 神经网络', sectionTitle: '人工神经元与激活', gradeLevel: 'senior', compat: true }
+    ],
+    details: [
+      { chunkId: 'cite-1', text: '人工智能是让机器表现出像人一样的智能行为的技术总称。', score: 0.83, degraded: 'vector', expanded: false },
+      { chunkId: 'cite-2', text: '特征是把原始数据变成模型能用的数值形式。', score: 0.79, degraded: 'vector', expanded: false },
+      { chunkId: 'cite-3', text: '训练就是不断调整参数，让预测结果越来越接近真实答案。', score: 0.76, degraded: 'vector', expanded: false },
+      { chunkId: 'cite-4', text: '如果训练数据本身有偏差，模型学到的结论也会带上这种偏差。', score: 0.71, degraded: 'vector', expanded: false },
+      { chunkId: 'cite-5', text: '一个神经元把输入加权求和后，交给激活函数决定要不要往下传。', score: 0.68, degraded: 'vector', expanded: true }
+    ],
+    degraded: 'vector'
+  }
+}
+const citationDoneEvent = {
+  name: 'done',
+  data: { requestId: citationRequestId, messageId: `${citationRequestId}-1` }
+}
+
+/** 把这一轮引用注入**渲染进程自己的事件归约器**并落到 store（与 F 节同一条路径）。 */
+const CITATION_INJECTION = `(async () => {
+  const candidates = ['/src/api/events.ts', '/src/renderer/src/api/events.ts']
+  let events = null
+  for (const path of candidates) {
+    try {
+      events = await import(/* @vite-ignore */ path)
+      break
+    } catch (error) {
+      events = null
+    }
+  }
+  if (!events) return { ok: false, reason: '取不到渲染进程模块图（不是 dev 模式？）' }
+
+  const storeCandidates = ['/src/stores/chat.ts', '/src/renderer/src/stores/chat.ts']
+  let stores = null
+  for (const path of storeCandidates) {
+    try {
+      stores = await import(/* @vite-ignore */ path)
+      break
+    } catch (error) {
+      stores = null
+    }
+  }
+  if (!stores || typeof stores.useChatStore !== 'function') {
+    return { ok: false, reason: '取不到 stores/chat.ts（不是 dev 模式？）' }
+  }
+
+  const chat = stores.useChatStore()
+  const citationEvent = ${JSON.stringify(citationPayloadEvent)}
+  const doneEvent = ${JSON.stringify(citationDoneEvent)}
+
+  let state = events.startTurn(chat.conversation, citationEvent.data.requestId, '刚才那段是从哪里讲的？', chat.currentGrade ?? null)
+  state = events.applyChatEvent(state, citationEvent)
+  state = events.applyChatEvent(state, doneEvent)
+  chat.conversation = state
+  return { ok: true, requestId: citationEvent.data.requestId }
+})()`
+
+/** 最后一轮里那个引用折叠块的快照（全部取自**真实 DOM**）。 */
+const citationSnapshotExpression = `(() => {
+  const turns = document.querySelectorAll('[data-testid="chat-turn"]')
+  // ⚠️ 不能取「最后一轮」：上一节（F）提交练习后有一轮真实回答会**晚到**，
+  //    它落在注入的这一轮后面 —— 实测那会让快照取到 null（第一节 F2 就报
+  //    「Cannot read properties of null」）。判据换成「含引用折叠块的那一轮」。
+  const turn = Array.from(turns).reverse().find((item) => item.querySelector('[data-testid="citation-disclosure"]'))
+  if (!turn) return null
+  const box = turn.querySelector('[data-testid="citation-disclosure"]')
+  if (!box) return null
+  const h = (el) => (el ? Math.round(el.getBoundingClientRect().height) : -1)
+  const summary = box.querySelector('summary')
+  const sources = box.querySelector('[data-testid="citation-sources"]')
+  const chips = Array.from(box.querySelectorAll('[data-testid="citation-chip"]'))
+  /**
+   * 收起态下，书目**能不能被点到**。
+   *
+   * ⚠️ 不能用「rect 高度 = 0」当判据：Chromium 关着的 details 用的是
+   *    content-visibility: hidden —— 内层元素**仍然有一份布局盒**（rect 非 0，
+   *    实测 431px），只是既不绘制也不接收点击。所以这里做的是**命中测试**：
+   *    把点打在书目的盒子里，看落到的还是不是它自己。
+   */
+  const hitInside = (() => {
+    if (!sources) return null
+    const r = sources.getBoundingClientRect()
+    if (r.width < 1 || r.height < 1) return false
+    const x = Math.round(r.left + r.width / 2)
+    const y = Math.round(r.top + Math.min(20, r.height / 2))
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false
+    const hit = document.elementFromPoint(x, y)
+    return Boolean(hit && hit.closest('[data-testid="citation-sources"]'))
+  })()
+  return {
+    tag: box.tagName.toLowerCase(),
+    open: box.open === true,
+    blockH: h(box),
+    bodyH: h(sources),
+    listHittable: hitInside,
+    summaryText: summary ? (summary.textContent || '').replace(/\\s+/g, ' ').trim() : '',
+    compatInSummary: box.querySelectorAll('[data-testid="citation-compat-summary"]').length,
+    chips: chips.length,
+    chipLabels: chips.map((chip) => (chip.textContent || '').replace(/\\s+/g, ' ').trim()),
+    compatChips: box.querySelectorAll('[data-testid="citation-compat"]').length,
+    sources: sources ? sources.querySelectorAll('li').length : 0
+  }
+})()`
+
+let citationInjected = null
+try {
+  citationInjected = await evaluate(CITATION_INJECTION)
+} catch (error) {
+  citationInjected = { ok: false, reason: describe(error) }
+}
+
+if (citationInjected?.ok !== true) {
+  const message = `注入 citation 事件失败：${citationInjected?.reason ?? '未知原因'}`
+  if (isDevServer) {
+    check('教材引用：默认收起（注入 citation 事件驱动渲染）', false, message)
+  } else {
+    skip('教材引用：默认收起', `${message}（当前不是 dev 服务，无法驱动渲染进程模块图）`, 'F2')
+  }
+} else {
+  try {
+    await waitFor(
+      `(() => Boolean(document.querySelector('[data-testid="citation-disclosure"]')))()`,
+      '引用折叠块出现在消息区',
+      5000
+    )
+
+    // ① 默认收起：`<details>` 不带 open，整块只占一行（改造前 3～5 条是 200～400px）
+    const collapsed = await evaluate(citationSnapshotExpression)
+    check(
+      '教材引用：默认**收起**（一整块只占一行，不占屏幕）',
+      collapsed.tag === 'details' && collapsed.open === false && collapsed.blockH >= 0 && collapsed.blockH <= 40,
+      `折叠块 <${collapsed.tag}> open=${collapsed.open}，渲染高度 ${collapsed.blockH}px（阈值 ≤40px；改造前 3～5 条引用是 200～400px）`
+    )
+    check(
+      '教材引用：收起时书目**不可命中**（点它身上落不到它，不是「盖住了」）',
+      collapsed.listHittable === false,
+      `收起态下把点打在书目盒子里 → 落回引用列表 = ${collapsed.listHittable}` +
+        `（Chromium 对关着的 details 用 content-visibility: hidden：内层仍有布局盒 ${collapsed.bodyH}px，但不绘制、不接收点击；` +
+        '外层 details 自己只占 ' + collapsed.blockH + 'px —— 真正决定「占不占屏幕」的是后者）'
+    )
+    check(
+      '教材引用：摘要行说清「几段」',
+      collapsed.summaryText.includes('5 段'),
+      `摘要行：「${collapsed.summaryText}」`
+    )
+    // ★★ 跨学段取用必须**显式标注**，而收起是默认态 —— 标注不能跟着一起藏起来
+    check(
+      '教材引用：收起态就看得见「向上兼容」（§6.4 / 票 13 的可见性要求）',
+      collapsed.compatInSummary === 1,
+      `收起行里的「向上兼容」角标 ${collapsed.compatInSummary} 个（应为 1）`
+    )
+
+    // ② 点开：条目、逐条标注、原文抽屉三条链路都还在
+    await evaluate(`(() => {
+      const turns = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+      const box = turns.reverse().find((item) => item.querySelector('[data-testid="citation-disclosure"]'))
+        ?.querySelector('[data-testid="citation-disclosure"]')
+      box?.querySelector('summary')?.click()
+      return Boolean(box)
+    })()`)
+    await waitFor(
+      `(() => {
+        const turns = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+        const box = turns.reverse().find((item) => item.querySelector('[data-testid="citation-disclosure"]'))
+          ?.querySelector('[data-testid="citation-disclosure"]')
+        return box ? box.open === true : false
+      })()`,
+      '引用折叠块点开后处于展开态',
+      5000
+    )
+    const expanded = await evaluate(citationSnapshotExpression)
+    check(
+      '教材引用：点开后条目一条不少（5 条，每条都有可读文字）',
+      expanded.open === true &&
+        expanded.chips === 5 &&
+        expanded.chipLabels.every((label) => label.length > 0) &&
+        expanded.sources === 5,
+      `开合=${expanded.open}，章节胶囊 ${expanded.chips} 条、书目 ${expanded.sources} 条；` +
+        `文字：[${expanded.chipLabels.join(' ｜ ')}]`
+    )
+    check(
+      '教材引用：展开后逐条仍带「向上兼容」标注（回答「哪一条是跨学段的」）',
+      expanded.compatChips === 1,
+      `展开态下带「向上兼容」的条目 ${expanded.compatChips} 条（应为 1）`
+    )
+    check(
+      '教材引用：展开后占位回到正常高度（收起只是默认态，不是把内容砍掉）',
+      expanded.bodyH > 0,
+      `展开后书目渲染高度 ${expanded.bodyH}px`
+    )
+
+    // ③ 原文抽屉：折叠改造不许切断这条链路
+    await evaluate(`(() => {
+      const turns = Array.from(document.querySelectorAll('[data-testid="chat-turn"]'))
+      const box = turns.reverse().find((item) => item.querySelector('[data-testid="citation-disclosure"]'))
+        ?.querySelector('[data-testid="citation-disclosure"]')
+      box?.querySelector('.srcs__btn')?.click()
+      return true
+    })()`)
+    await waitFor(
+      `(() => Boolean(document.querySelector('[data-testid="source-drawer"]')))()`,
+      '教材原文抽屉打开',
+      5000
+    )
+    const drawer = await evaluate(`(() => {
+      const el = document.querySelector('[data-testid="source-drawer"]')
+      const titleEl = el ? el.querySelector('.src__title') : null
+      const textEl = el ? el.querySelector('.src__text') : null
+      return {
+        title: titleEl && titleEl.textContent ? titleEl.textContent.trim() : '',
+        textLen: textEl && textEl.textContent ? textEl.textContent.trim().length : 0
+      }
+    })()`)
+    check(
+      '教材引用：点「原文」仍能打开教材原文抽屉',
+      drawer.title.length > 0 && drawer.textLen > 0,
+      `抽屉标题「${drawer.title}」，原文 ${drawer.textLen} 字`
+    )
+    await evaluate(
+      `(() => { document.querySelector('[data-testid="source-drawer"] .src__close')?.click(); return true })()`
+    )
+  } catch (error) {
+    check('教材引用：默认收起（注入 citation 事件驱动渲染）', false, describe(error))
   }
 }
 

@@ -45,7 +45,10 @@
     "build:win": "npm run build && electron-builder --win && npm run check:server:packaged",
     "postinstall": "electron-builder install-app-deps",
     "ux:nonce": "node scripts/ux-probe-animation-nonce.mjs",
-    "ux:stage": "node scripts/ux-probe-stage-size.mjs"
+    "ux:stage": "node scripts/ux-probe-stage-size.mjs",
+    "ux:demo": "node scripts/ux-probe-demo.mjs",
+    "ux:motion": "node scripts/ux-probe-reduced-motion.mjs",
+    "ux:perf": "node scripts/ux-probe-perf.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.85.1",
@@ -75,6 +78,7 @@
     "unplugin-vue-components": "^32.1.0",
     "vite": "^7.3.0",
     "vue": "^3.5.42",
-    "vue-tsc": "^3.1.6"
+    "vue-tsc": "^3.1.6",
+    "vue-virtual-scroller": "^3.0.5"
   }
 }

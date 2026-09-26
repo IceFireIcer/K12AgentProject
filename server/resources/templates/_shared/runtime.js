@@ -331,6 +331,49 @@
     }
   })()
 
+  /*
+   * ★★ 减动效（优化报告 §3.3 的执行计划 10.1「动画沙箱内 anime.js 适配」）。
+   *
+   * 沙箱是一个 sandboxed iframe（没有同源权限），它读不到宿主页面的任何东西 ——
+   * 所以这里读的是**它自己文档**的 `prefers-reduced-motion`。宿主的"设置页三档开关"
+   * 用两种方式让这里跟上：
+   *   ① 用户选「开启/关闭」时，宿主会给动画卡片换 key 重建 iframe（`InlineCard.vue`），
+   *      新文档重新读一次当前偏好；
+   *   ② 用户选「自动」时，媒体查询本身就跟着系统走。
+   *
+   * 减动效下的表达：**瞬间到终态**（duration / stagger / holdMs 全部归零）——
+   * 学生看到的仍然是"演完"的那一屏（信息一个不丢），只是不再有移动过程。
+   */
+  function prefersReducedMotion() {
+    try {
+      return (
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      )
+    } catch (error) {
+      return false
+    }
+  }
+
+  var reducedMotion = prefersReducedMotion()
+
+  /** 当前该用的动效参数：减动效 → 全零（瞬间到终态）；否则用皮肤那一档。 */
+  function motionPreset() {
+    if (!reducedMotion) return MOTION
+    return { duration: 0, easing: 'linear', stagger: 0, holdMs: 0 }
+  }
+
+  // 模板里直接调 `anime()`（不走 Sandbox.timeline）的那几份也要跟着减动效。
+  // ★ 只在减动效时改 anime 的默认值；每次 iframe 都是新文档，不存在"改完关不掉"。
+  if (reducedMotion && typeof anime !== 'undefined' && anime && anime.defaults) {
+    try {
+      anime.defaults.duration = 0
+    } catch (error) {
+      /* anime 的 defaults 不可写时忽略：timeline 那条路已经零化了 */
+    }
+  }
+
   function numberOf(value, fallback) {
     var number = typeof value === 'number' ? value : parseFloat(value)
     return isFinite(number) ? number : fallback
@@ -2027,7 +2070,8 @@
    */
   function timeline(stepCount, builder) {
     var count = Math.max(1, Math.round(numberOf(stepCount, 1)))
-    var motion = MOTION
+    // 减动效 → 全零（见上面 motionPreset 的说明；`Sandbox.motion` 也跟着减）
+    var motion = motionPreset()
     if (typeof anime === 'undefined' || !anime || typeof anime.timeline !== 'function') {
       // 动画库没内联（演练开关 / 坏产物）：给一个空壳，让宿主照常走完上报链路
       reportError(new Error('动画库没有加载，Sandbox.timeline 无法创建时间线'))
@@ -2264,6 +2308,18 @@
     caption: caption,
     /** 更新步骤条。 */
     step: step
+  }
+
+  /*
+   * `Sandbox.motion` 也要跟着减动效：模板里有直接读 `Sandbox.motion.duration` 自己
+   * 起 anime() 的写法（不走 Sandbox.timeline）。用 getter 而不是改写属性 ——
+   * 模板读到的仍然是同一组字段名（`{duration, easing, stagger, holdMs}`），
+   * 只是减动效时全是零（见 motionPreset）。
+   */
+  try {
+    Object.defineProperty(Sandbox, 'motion', { get: motionPreset, enumerable: true })
+  } catch (error) {
+    /* 老环境不支持 defineProperty：保持字面量里的 MOTION（timeline 那条路已零化） */
   }
 
   window.Sandbox = Sandbox

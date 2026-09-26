@@ -128,6 +128,11 @@ const SAMPLE = `(() => {
     lastCards: last ? last.querySelectorAll('[data-testid="inline-cards"] > *').length : 0,
     lastSrcsH: h(last?.querySelector('[data-testid="citation-sources"]')),
     lastCites: last ? last.querySelectorAll('[data-testid="citation-sources"] li').length : 0,
+    // 引用块 2026-09-26 起**默认收起**（原生 details）：收起时 lastSrcsH = 0 是预期，
+    // 真正贡献高度的是那一行摘要 —— 两份高度都采回来，归因才不会把它笼统记成「其它」。
+    // ⚠️ 本段是模板字符串里的页面代码：注释里不能出现反引号（会提前结束字符串）。
+    lastCitesSummaryH: h(last?.querySelector('[data-testid="citation-disclosure"]')),
+    citesOpen: Boolean(last?.querySelector('[data-testid="citation-disclosure"]')?.open),
     streaming: document.querySelectorAll('[data-testid="chat-turn"][data-status="streaming"]').length
   }
 })()`
@@ -178,7 +183,12 @@ async function main() {
     if (grew > 8 && now.dist > 8) {
       const causes = []
       if (now.lastTextH > prev.lastTextH + 4) causes.push(`正文 +${now.lastTextH - prev.lastTextH}px`)
-      if (now.lastSrcsH > prev.lastSrcsH + 4) causes.push(`引用块 +${now.lastSrcsH - prev.lastSrcsH}px`)
+      // 引用默认收起：长高的一般是那一行摘要；列表只在学生点开之后才会长高（两种都记名字）
+      if (now.lastSrcsH > prev.lastSrcsH + 4) {
+        causes.push(`引用列表 +${now.lastSrcsH - prev.lastSrcsH}px（展开 ${prev.citesOpen}→${now.citesOpen}）`)
+      } else if (now.lastCitesSummaryH > prev.lastCitesSummaryH + 4) {
+        causes.push(`引用摘要 +${now.lastCitesSummaryH - prev.lastCitesSummaryH}px`)
+      }
       if (now.lastCardsH > prev.lastCardsH + 4)
         causes.push(`卡片 +${now.lastCardsH - prev.lastCardsH}px（${prev.lastCards}→${now.lastCards} 张）`)
       if (now.lastH > prev.lastH + 4 && causes.length === 0)

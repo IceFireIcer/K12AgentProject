@@ -732,7 +732,7 @@ watch(tab, () => {
   background: transparent;
   color: var(--k12-muted);
   font-family: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
   /* 真的放不下时**省略号**，不是硬切半个字（截断要看得出来是截断） */
@@ -771,7 +771,7 @@ watch(tab, () => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 12px 20px;
+  padding: var(--k12-sp-4) var(--k12-sp-3) var(--k12-sp-5);
 }
 
 .sec {
@@ -789,12 +789,12 @@ watch(tab, () => {
   margin-top: 8px;
 }
 .sec__title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .sec__hint {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -806,17 +806,17 @@ watch(tab, () => {
   padding: 10px 11px;
   border-radius: var(--k12-r-inset);
   background: var(--k12-surface-2);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg-2);
 }
 .warn {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-warn);
 }
 .note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -861,7 +861,7 @@ watch(tab, () => {
 .chain__label {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg-2);
 }
@@ -871,7 +871,7 @@ watch(tab, () => {
 }
 .chain__state {
   flex: none;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   /* 状态标签只占首行：`align-self` 让它跟着顶对齐，不在两行之间飘 */
   align-self: flex-start;
   line-height: var(--k12-lh-ui);
@@ -885,7 +885,7 @@ watch(tab, () => {
   padding: 9px 10px;
   border-radius: var(--k12-r-inset);
   background: var(--k12-surface-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -915,7 +915,7 @@ watch(tab, () => {
 .mastery__name {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -929,7 +929,7 @@ watch(tab, () => {
   flex: none;
   width: 34px;
   text-align: right;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -949,12 +949,12 @@ watch(tab, () => {
   gap: 3px;
 }
 .reco__title {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .reco__desc {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -978,7 +978,7 @@ watch(tab, () => {
 .tag {
   padding: 2px 7px;
   border-radius: var(--k12-r-flat);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 600;
   /* k12-mark：≤4 字的角标（「有降级」「3 次未成功」按角标口径） */
 }
@@ -1001,7 +1001,7 @@ watch(tab, () => {
   grid-template-columns: 8px auto 1fr;
   align-items: baseline;
   gap: 7px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
 }
 .trace__dot {
   width: 6px;
@@ -1039,12 +1039,12 @@ watch(tab, () => {
   gap: 8px;
 }
 .grade strong {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .grade__origin {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-accent-ink);
 }
@@ -1061,7 +1061,7 @@ watch(tab, () => {
   gap: 8px;
 }
 .signals__type {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .signals__bar {
@@ -1090,24 +1090,24 @@ watch(tab, () => {
 }
 .raws__name {
   flex: none;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .raws__value {
   min-width: 0;
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
   word-break: break-all;
 }
 
 .hist__line {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
 }
 .hist__src {
   margin-top: 2px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -1144,13 +1144,14 @@ watch(tab, () => {
   gap: 3px;
 }
 .kpd__title {
-  font-size: var(--k12-fs-lg);
+  /* 抽屉里的知识点名 = 卡片/区块内小标题档（h3 20px）。 */
+  font-size: var(--k12-fs-h3);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .kpd__sub code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .kpd__close {
@@ -1180,7 +1181,7 @@ watch(tab, () => {
   gap: 12px;
 }
 .kpd__hint {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -1197,7 +1198,7 @@ watch(tab, () => {
 }
 
 /* 窄屏：常驻栏变浮层（判断放 CSS，`open` 由 ChatView 持有） */
-@media (max-width: 1279px) {
+@media (max-width: 1023px) {
   .rail {
     position: fixed;
     inset: 0;

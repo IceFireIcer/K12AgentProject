@@ -78,7 +78,9 @@ const RENDERER_ONLY_PACKAGES = [
   'element-plus',
   'lucide-vue-next',
   'monaco-editor',
-  'pinia'
+  'pinia',
+  // 长列表虚拟化（报告 §5.2 / D10）：只被渲染进程 import，代码由 vite 打进 out/renderer。
+  'vue-virtual-scroller'
 ]
 
 /** 把 `files:` 段（缩进两格、到下一个顶级键为止）的原文取出来。 */
@@ -189,7 +191,10 @@ test('G24-6 resources/brand 不得被排除（主进程窗口图标要读它）'
 
 test('G24-7 renderer 构建必须 emptyOutDir（否则旧 chunk 会累加进包）', () => {
   assert.ok(
-    /build:\s*\{\s*emptyOutDir:\s*true\s*\}/.test(viteConfig),
+    // ⚠️ 只要求「renderer 的 build 段里开着 emptyOutDir」，不钉它是不是唯一一项 ——
+    //    build 段里还有 minify（WP-13 的压缩开关，报告 §5.1），写成严格紧邻的
+    //    `emptyOutDir: true }` 会在加第二个键时误报（2026-09-27 实测踩到一次）。
+    /build:\s*\{[\s\S]{0,400}?emptyOutDir:\s*true/.test(viteConfig),
     'electron.vite.config.ts 的 renderer 段缺少 `build: { emptyOutDir: true }`。\n' +
       'vite 的 outDir 在项目 root 之外时 `emptyOutDir` 默认是 false（对照实测：\n' +
       '往 out/renderer/assets/ 放一个假文件再构建 —— false 时它还在、true 时被清掉）。\n' +

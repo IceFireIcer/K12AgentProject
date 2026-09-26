@@ -741,6 +741,24 @@ class RagSearchRequest(CamelModel):
     include_expansion: bool = True
 
 
+class RagLevelAttempt(CamelModel):
+    """降级链**一级**的尝试记录（展示用；判定仍然只发生在 ``RagService.search()`` 里）。
+
+    与 Python 内部 ``app.rag.retriever.LevelAttempt`` **同形**（``level`` / ``ok`` /
+    ``detail`` / ``hits``）—— 这里只是把它变成可序列化的契约模型，
+    好让「四级降级链」这件事在界面上可观测、可答辩。
+    """
+
+    #: 档位：``vector`` | ``cloud`` | ``fts`` | ``outline``
+    level: Degraded
+    #: 这一级有没有命中（``False`` = 试过了但没结果 / 环境不具备）
+    ok: bool = False
+    #: 一句可读说明（例如「sqlite-vec KNN 无命中（学段内无内容？）」）
+    detail: str = ""
+    #: 这一级的命中条数（未尝试/未命中为 0）
+    hits: int = 0
+
+
 class RagSearchResult(CamelModel):
     """``POST /api/rag/search`` 的响应。
 
@@ -754,6 +772,16 @@ class RagSearchResult(CamelModel):
     context: str = ""
     #: 本次检索落在降级链的哪一级
     degraded: Degraded = "vector"
+    #: ★ 降级链的**逐级记录**（``vector`` → ``cloud`` → ``fts`` → ``outline``）
+    #:
+    #: 从票 11 起 ``RetrievalResult`` 就一直在记 ``LevelAttempt(level, ok, detail, hits)``，
+    #: 但当时**刻意没有对外暴露**（那边的注释写着「只进日志/轨迹，不进 HTTP 契约」）。
+    #: 演示模式要展示「试了哪几级、哪一级命中、为什么落到下一级」，于是把它原样透传。
+    #: ★ 它是**可选且只读**的展示数据：老消费方（不看这个字段的那批）行为一字不变；
+    #:   编排层仍然**不许**据此重新实现降级逻辑（降级仍然只在这一个函数里发生）。
+    attempts: list[RagLevelAttempt] = Field(default_factory=list)
+    #: ★ 学段过滤条件**原文**（由生成 WHERE 的同一份白名单渲染，展示「隔离在 SQL 层强制」用）。
+    grade_filter: str = ""
 
 
 class DepNode(CamelModel):
@@ -1585,6 +1613,7 @@ CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     RagHit,
     RagSearchRequest,
     RagSearchResult,
+    RagLevelAttempt,
     DepNode,
     # 学段信号
     GradeSignal,

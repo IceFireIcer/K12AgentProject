@@ -78,7 +78,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   color: var(--k12-muted);
   overflow: hidden;
 }

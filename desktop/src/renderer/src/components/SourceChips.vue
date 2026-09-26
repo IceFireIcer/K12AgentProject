@@ -43,7 +43,7 @@ defineProps<{ citations: Citation[] }>()
   border-radius: var(--k12-r-pill);
   border: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 500;
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
@@ -76,6 +76,6 @@ defineProps<{ citations: Citation[] }>()
   color: var(--k12-warn);
   /* k12-mark：「向上兼容」是 4 字角标（§6.4 要求显式标注跨学段取用），
    * 不是正文 —— 升到 12px 会与相邻的章节/小节同权，角标语义消失。 */
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
 }
 </style>

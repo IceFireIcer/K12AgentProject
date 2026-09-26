@@ -400,12 +400,12 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   gap: 3px;
 }
 .mp__title {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-h3);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .mp__sub {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .mp__close {
@@ -442,7 +442,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
 .mp__setup-text {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -466,7 +466,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
 }
 .mp__empty {
   padding: 16px 8px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
   text-align: center;
@@ -503,7 +503,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-ink);
   color: var(--k12-surface);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   white-space: nowrap;
 }
@@ -534,7 +534,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   align-items: center;
   gap: 6px;
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
@@ -543,7 +543,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
 }
 /* 供应商 · BaseURL：这一项的说明性 meta（读得懂的键值），不是角标 */
 .mp__item-meta {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -559,7 +559,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   border-radius: var(--k12-r-pill);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -583,7 +583,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   border-radius: var(--k12-r-control);
   background: transparent;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   cursor: pointer;
 }
@@ -606,7 +606,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .mp__spin {
+  :root:not([data-k12-reduced-motion='off']) .mp__spin {
     animation: none;
   }
 }
@@ -634,11 +634,11 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   gap: 3px;
 }
 .mp__result-line {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
 }
 .mp__result-msg {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -649,7 +649,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
 }
 /* 学生视角收尾那句：它是一句说明不是链接，所以用 meta 的字色而不是强调色 */
 .mp__hint {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -661,7 +661,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   border: none;
   background: transparent;
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   text-align: left;
   cursor: pointer;
 }

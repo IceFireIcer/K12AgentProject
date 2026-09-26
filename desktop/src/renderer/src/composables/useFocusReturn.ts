@@ -18,7 +18,11 @@
  *   useFocusReturn(panel, () => props.open)
  *   // 模板：<aside ref="panel" role="dialog" aria-modal="true"> … </aside>
  *
- * ⚠️ 不要给非模态的浮层用（比如 hover 菜单）：它们不该抢焦点。
+ * ⚠️ 不要给 hover 菜单这类"不该抢焦点"的浮层用。
+ * ★★ 2026-09-27（优化报告 §3.1）新增 `trap: false`：**非模态**浮层（可拖拽追问窗、
+ *    只读机制浮窗）需要「打开时焦点移入 + 关闭时归还」，但**不该把 Tab 锁在窗里** ——
+ *    学生要能 Tab 回页面继续操作（一边看动画一边追问就是这种场景）。
+ *    模态（带 `aria-modal="true"`）用默认值 `trap: true`。
  */
 import { nextTick, onBeforeUnmount, watch, type Ref } from 'vue'
 
@@ -45,11 +49,12 @@ function focusablesIn(root: HTMLElement): HTMLElement[] {
  * @param panelRef 面板根元素
  * @param isOpen   是否打开（传 getter，不要在调用处取一次值）
  * @param options.initial 优先聚焦的元素（默认第一个可聚焦元素，找不到则聚焦面板自身）
+ * @param options.trap    是否把 Tab 锁在面板内（模态 true；非模态浮层传 false）
  */
 export function useFocusReturn(
   panelRef: Ref<HTMLElement | null>,
   isOpen: () => boolean,
-  options: { initial?: () => HTMLElement | null | undefined } = {}
+  options: { initial?: () => HTMLElement | null | undefined; trap?: boolean } = {}
 ) {
   let trigger: HTMLElement | null = null
 
@@ -100,6 +105,9 @@ export function useFocusReturn(
     }
   })
 
-  window.addEventListener('keydown', onKeydown, true)
-  onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
+  // 非模态浮层不接管 Tab（见文件头）：只保留「移入 + 归还」两件事。
+  if (options.trap !== false) {
+    window.addEventListener('keydown', onKeydown, true)
+    onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true))
+  }
 }

@@ -21,11 +21,21 @@
  * 它只用在真正需要情感的位置（空态 / 高光态）—— 每个空态都摆一张图
  * 反而会把「这里没内容」变成视觉噪音。
  */
+import { watchEffect } from 'vue'
 import MascotMark from './MascotMark.vue'
+import type { EmptyStateTone } from '../types/component-props'
+import { EMPTY_STATE_DESC_MAX, EMPTY_STATE_TITLE_MAX } from './empty-state'
 
-withDefaults(
+/**
+ * 文案长度上限（报告 §4.2「EmptyState 的 title/desc 添加长度校验」）。
+ *
+ * ★ 上限从设计稿反推：标题一行放得下 ~18 个中文字，说明两行各 ~36 字。
+ *   超了不是"截断"，而是**在开发期报警告**（见下）—— 空态文案一旦长成一段文章，
+ *   学生就不会读了；但生产环境**绝不偷偷改文案**（内容比排版重要）。
+ */
+const props = withDefaults(
   defineProps<{
-    tone?: 'empty' | 'loading' | 'error' | 'success'
+    tone?: EmptyStateTone
     title: string
     /** 补充说明：为什么空 / 怎么办 */
     desc?: string
@@ -34,6 +44,27 @@ withDefaults(
   }>(),
   { tone: 'empty', desc: '', mascot: false }
 )
+
+/**
+ * 长度校验：只在**开发期**（`import.meta.env.DEV`）报警告，绝不改写文案。
+ *
+ * ★ 为什么是警告而不是截断：这是给学生看的话，"多了三个字" 与 "少了一整句怎么办"
+ *   比起来，后者严重得多。校验的目的是让写文案的人当场发现，而不是让界面撒谎。
+ */
+if (import.meta.env.DEV) {
+  watchEffect(() => {
+    if (props.title.length > EMPTY_STATE_TITLE_MAX) {
+      console.warn(
+        `[EmptyState] title 过长（${props.title.length} > ${EMPTY_STATE_TITLE_MAX}）：${props.title}`
+      )
+    }
+    if (props.desc.length > EMPTY_STATE_DESC_MAX) {
+      console.warn(
+        `[EmptyState] desc 过长（${props.desc.length} > ${EMPTY_STATE_DESC_MAX}）：${props.desc}`
+      )
+    }
+  })
+}
 </script>
 
 <template>
@@ -88,12 +119,12 @@ withDefaults(
   background: var(--k12-muted-2);
 }
 .es__bang {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 700;
   color: var(--k12-bad);
 }
 .es__ok {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 700;
   color: var(--k12-accent-ink);
 }
@@ -112,17 +143,19 @@ withDefaults(
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .es__spinner {
+  :root:not([data-k12-reduced-motion='off']) .es__spinner {
     animation: none;
   }
 }
 .es__title {
-  font-size: var(--k12-fs-sm);
+  /* 空态主信息 = 卡片/区块内小标题档（h3 20px）——
+   * 此前是 body-sm(14px)，比正文还小，读起来像脚注而不是「这里发生了什么」。 */
+  font-size: var(--k12-fs-h3);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .es__desc {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
   max-width: 44ch;

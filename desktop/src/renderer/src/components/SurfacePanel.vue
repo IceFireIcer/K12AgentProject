@@ -14,23 +14,42 @@
  *
  * `plain` 是给"只作分组、不参与层次"的容器用的（无底色无边框）。
  */
+import type { SurfacePadding, SurfaceRadius, SurfaceTone } from '../types/component-props'
+
 withDefaults(
   defineProps<{
-    tone?: 'card' | 'inset' | 'float' | 'plain'
-    radius?: 'inset' | 'card' | 'control'
-    padding?: string
+    tone?: SurfaceTone
+    /** 圆角（语义档：inset / card / control —— 见 base.css 的 r-* 映射）。 */
+    radius?: SurfaceRadius
+    /**
+     * 内边距（报告 §4.2：**枚举四选一**，不再是任意字符串）。
+     *
+     * 档位与设计 token 一一对应：none = 0 / sm = sp-3(12) / md = sp-4(16) / lg = sp-5(24)。
+     * ★ 为什么收成枚举：旧版允许 `padding="14px 16px"` 这类任意值，
+     *   几十个调用点各写一套内边距，卡片与卡片之间的呼吸感就不一样了 ——
+     *   这正是报告说的「缺少 TypeScript 约束」的后果。
+     */
+    padding?: SurfacePadding
     /** 去掉内边距（卡头/卡身/卡脚自己控制间距的内容用它） */
     flush?: boolean
   }>(),
-  { tone: 'card', radius: 'card', padding: 'var(--k12-sp-4)', flush: false }
+  { tone: 'card', radius: 'card', padding: 'md', flush: false }
 )
+
+/** 内边距枚举 → 设计 token（唯一映射表，模板不写第二份）。 */
+const PADDING_TOKENS: Record<SurfacePadding, string> = {
+  none: '0',
+  sm: 'var(--k12-sp-3)',
+  md: 'var(--k12-sp-4)',
+  lg: 'var(--k12-sp-5)'
+}
 </script>
 
 <template>
   <div
     class="sf"
     :class="[`sf--${tone}`, `sf--r-${radius}`, { 'sf--flush': flush }]"
-    :style="flush ? undefined : { padding }"
+    :style="flush || padding === 'none' ? undefined : { padding: PADDING_TOKENS[padding] }"
   >
     <slot name="head" />
     <slot />

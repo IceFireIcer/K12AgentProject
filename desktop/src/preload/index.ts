@@ -12,6 +12,7 @@
  */
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+import { isDiagnosticsSnapshot, type DiagnosticsSnapshot } from '@shared/diagnostics'
 import {
   IPC,
   type AnimationComposeRequest,
@@ -33,6 +34,7 @@ import {
   type CodeHintRequest,
   type CodeRunHintRequest,
   type CodeTemplateRequest,
+  type DiagnosticsCallResult,
   type FetchModelsResult,
   type FileExportRequest,
   type FileExportResult,
@@ -82,6 +84,20 @@ export interface TurnEntries {
 }
 
 export interface K12Api {
+  /**
+   * 演示模式：读**轮次诊断信封快照**（最近 N 轮）。
+   *
+   * ★ 不接受任何入参：学生身份与落盘位置由主进程决定（渲染进程指定不了「读谁的」）。
+   */
+  readDiagnostics(): Promise<DiagnosticsCallResult>
+  /**
+   * 演示模式：清空诊断记录（内存环形缓冲 + 落盘的 JSONL，幂等）。
+   *
+   * ★ 回执里是**清空之后**的快照，所以界面直接拿它渲染空态即可。
+   */
+  clearDiagnostics(): Promise<DiagnosticsCallResult>
+  /** 演示模式：订阅每轮结束推送的诊断信封快照，返回取消订阅函数。 */
+  onDiagnosticsChanged(listener: (snapshot: DiagnosticsSnapshot) => void): () => void
   /** 读当前 sidecar 状态（不含 token）。 */
   getSidecarInfo(): Promise<SidecarState>
   /** 订阅 sidecar 状态变化，返回取消订阅函数。 */
@@ -358,6 +374,25 @@ declare global {
 }
 
 const api: K12Api = {
+  // ── 演示模式：轮次诊断信封（两条 invoke + 一条推送）────────────────────
+  readDiagnostics: (): Promise<DiagnosticsCallResult> =>
+    ipcRenderer.invoke(IPC.diagnosticsRead) as Promise<DiagnosticsCallResult>,
+
+  clearDiagnostics: (): Promise<DiagnosticsCallResult> =>
+    ipcRenderer.invoke(IPC.diagnosticsClear) as Promise<DiagnosticsCallResult>,
+
+  onDiagnosticsChanged: (listener): (() => void) => {
+    const handler = (_event: IpcRendererEvent, snapshot: unknown): void => {
+      // 边界处过滤：`turns` 必须是数组（半截对象直接丢掉，别让演示页出现一行空白信封）
+      if (!isDiagnosticsSnapshot(snapshot)) return
+      listener(snapshot)
+    }
+    ipcRenderer.on(IPC.diagnosticsChanged, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.diagnosticsChanged, handler)
+    }
+  },
+
   getSidecarInfo: (): Promise<SidecarState> =>
     ipcRenderer.invoke(IPC.sidecarGetInfo) as Promise<SidecarState>,
 
@@ -784,6 +819,11 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.fileExport,
   // 工具调用轨迹（**推送**：主进程每记录一条就推一次全量快照）
   IPC.traceChanged,
+  // 演示模式：轮次诊断信封（推送 + 读取 + 清空）。
+  // ★ 与轨迹并列的第二条旁路：它回答的是「这一轮为什么这么走」。
+  IPC.diagnosticsChanged,
+  IPC.diagnosticsRead,
+  IPC.diagnosticsClear,
   // 学生身份 / 画像 / 学段证据（invoke；身份由主进程决定）
   IPC.studentGet,
   IPC.profileRead,

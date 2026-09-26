@@ -32,7 +32,7 @@
  *      点击链路（`emit('branch')` → 页面确认框）**一字未改**。
  */
 import { computed, ref } from 'vue'
-import { BookMarked, Ellipsis, GitBranch, X } from 'lucide-vue-next'
+import { BookMarked, ChevronRight, Ellipsis, GitBranch, X } from 'lucide-vue-next'
 import type { ChatTurn } from '../api/events'
 import type { CitationDetail } from '@shared/ipc-events'
 import { GRADE_LABELS, TURN_STATUS_LABELS, showsStatusChip } from '../labels'
@@ -41,6 +41,7 @@ import { useDismissable } from '../composables/useDismissable'
 import { useEscape } from '../composables/useEscape'
 import { useFocusReturn } from '../composables/useFocusReturn'
 import InlineCard from '../cards/InlineCard.vue'
+import ProgressCard from '../cards/ProgressCard.vue'
 import MarkdownProse from './MarkdownProse.vue'
 import BlockedNotice from './BlockedNotice.vue'
 import DegradedNotice from './DegradedNotice.vue'
@@ -118,6 +119,17 @@ const awaiting = computed(() => streaming.value && props.turn.text.trim().length
  *   却看不到那句话到底出自哪里（`text` / `score` / `parentChunkId` 本来就在返回里）。
  */
 const sourceOpen = ref<string | null>(null)
+/**
+ * 引用折叠行的开合态（原生 `<details>` 的变化同步过来）。
+ *
+ * ★ 为什么同步一份：结构化探针锚点量的是「引用默认收起」这条**行为**
+ *   （`data-probe-expanded`，见 `scripts/probe-lib.mjs`）—— 原生 `open` 属性在 DOM 上
+ *   也能读，但探针自检的接口要求一个**稳定的数据属性**（不依赖属性是布尔还是字符串）。
+ */
+const citationOpen = ref(false)
+function onCitationToggle(event: Event): void {
+  citationOpen.value = (event.target as HTMLDetailsElement).open
+}
 const activeSource = computed<CitationDetail | null>(() =>
   sourceOpen.value === null ? null : (props.detailOf?.(sourceOpen.value) ?? null)
 )
@@ -185,6 +197,30 @@ const sourceRows = computed(() =>
     excerpt: excerptOf(citation.chunkId)
   }))
 )
+
+/**
+ * 这一张卡片旁边要不要跟一张**独立的闯关进度卡**（报告 §2.3：进度/掌握度独立成卡，
+ * 不嵌进题卡）。
+ *
+ * ★ 判据只读「载荷里有没有 `levels` 数组」，**不在前端推导任何关卡状态** ——
+ *   状态机在后端（`routes/quiz.py` 的 `apply_level_progress`），前端只读。
+ * ★ 出题载荷（还没作答）与判分结果载荷都可能带 `levels`：前者是初始进度，
+ *   后者是「进度变了」的那一份 —— 谁带就跟着谁渲染，两条路径一个规则。
+ */
+function hasLevels(card: { payload?: unknown }): boolean {
+  const payload = card.payload
+  if (typeof payload !== 'object' || payload === null) return false
+  return Array.isArray((payload as { levels?: unknown }).levels)
+}
+
+/**
+ * 这一轮里有没有**跨学段向上兼容**取用的条目。
+ *
+ * ★ 它决定收起那一行要不要挂「向上兼容」角标。收起是默认态，而执行文档 §6.4 与
+ *   `docs/业务陷阱清单.md` §2 要求跨学段取用必须**显式标注** —— 标注不能因为默认收起
+ *   就从学生眼前消失（展开后每一条仍有自己的 `citation-compat`，那回答的是「哪一条」）。
+ */
+const hasCompat = computed(() => props.turn.citations.some((citation) => citation.compat))
 
 /* ── 分叉点：收进 `⋯` 小菜单 ───────────────────────────────────────────────
  * ★ 为什么不再是一条常显的链接：它挂在**每条回答**下面，学生划着读的时候
@@ -278,38 +314,68 @@ function pickBranch(): void {
             <MarkdownProse :text="turn.text" :streaming="streaming" />
           </div>
 
-          <!-- 引用：既有 chips（沿用既有契约），也可点开原文。
-               ★ 列表本身保留（`citation-sources` 的 `li` 条数被体检脚本用来判「引用渲染出来了没」），
-                 但排版从「编号 + 两行元信息」改成**一条书目**：
-                 小节标题是主行、章节是它的出处、再补一行节级摘录 —— 读起来是
-                 「这句话出自《第 3 章 · 核心技术分支》」，而不是一次查询的结果集。 -->
-          <div v-if="turn.citations.length > 0" class="cites">
-            <p class="cites__label">这段话参考了这些地方</p>
-            <SourceChips :citations="turn.citations" />
-            <ul class="srcs" data-testid="citation-sources">
-              <li v-for="(row, index) in sourceRows" :key="row.citation.chunkId">
-                <button
-                  type="button"
-                  class="srcs__btn"
-                  :title="`查看教材原文：${row.citation.sectionTitle}`"
-                  @click="sourceOpen = row.citation.chunkId"
-                >
-                  <span class="srcs__num k12-num">{{ index + 1 }}</span>
-                  <span class="srcs__text">
-                    <span class="srcs__title">{{ row.citation.sectionTitle }}</span>
-                    <span class="srcs__path">出自 {{ row.citation.chapterTitle }}</span>
-                    <span v-if="row.excerpt" class="srcs__excerpt">{{ row.excerpt }}</span>
-                  </span>
-                  <span class="srcs__more">原文</span>
-                </button>
-              </li>
-            </ul>
-          </div>
+          <!-- 引用：**默认收起**，点这一行才展开（用户 2026-09-26 的设计裁决）。
+               ★★ 为什么用原生 <details>/<summary> 而不是自己写「按钮 + aria-expanded + v-if」：
+                  · 展开/收起语义、键盘 Tab + Enter、读屏播报全部自带 —— 本项目在
+                    `views/Dependency.vue` 的折叠组上已经定过这条（「自己写手风琴就必然有人漏掉一条」）；
+                  · 收起时内层是**真的不渲染**（不是裁剪宽度）—— `tests/panel-collapse.test.ts`
+                    记过这一类缺陷：被裁剪的元素仍有矩形，体检脚本会把看不见的东西量成「学生能点的目标」。
+               ★★ 为什么默认收起：一次检索常常回来 3～5 条，每条是「小节 + 出处 + 摘录」三行，
+                  实测一次插入 376～663px，学生要读的正文被压到屏幕下方。收起来之后这行只占一行，
+                  想知道「具体参考了哪些地方」的学生点一下就有 —— 信息一条没删。
+               ★ 列表本身与既有锚点一个字没改（`citation-sources` 的 `li` 条数被体检脚本用来
+                 判「引用真的渲染出来了没」），只是搬进了折叠体里。 -->
+          <details
+            v-if="turn.citations.length > 0"
+            class="cites"
+            data-testid="citation-disclosure"
+            data-probe-id="citation-disclosure"
+            :data-probe-expanded="citationOpen ? 'true' : 'false'"
+            @toggle="onCitationToggle"
+          >
+            <summary class="cites__toggle k12-tap">
+              <span class="cites__label">这段话参考了这些地方 · {{ turn.citations.length }} 段</span>
+              <!-- 跨学段取用必须**显式标注**（§6.4 / 陷阱清单 §2）：收起态也要看得见，
+                   展开后每条自己的角标回答的是「哪一条」。 -->
+              <span v-if="hasCompat" class="cites__compat" data-testid="citation-compat-summary">向上兼容</span>
+              <ChevronRight :size="13" class="cites__ico" aria-hidden="true" />
+            </summary>
+            <div class="cites__body">
+              <SourceChips :citations="turn.citations" />
+              <ul class="srcs" data-testid="citation-sources">
+                <li v-for="(row, index) in sourceRows" :key="row.citation.chunkId">
+                  <button
+                    type="button"
+                    class="srcs__btn"
+                    :title="`查看教材原文：${row.citation.sectionTitle}`"
+                    @click="sourceOpen = row.citation.chunkId"
+                  >
+                    <span class="srcs__num k12-num">{{ index + 1 }}</span>
+                    <span class="srcs__text">
+                      <span class="srcs__title">{{ row.citation.sectionTitle }}</span>
+                      <span class="srcs__path">出自 {{ row.citation.chapterTitle }}</span>
+                      <span v-if="row.excerpt" class="srcs__excerpt">{{ row.excerpt }}</span>
+                    </span>
+                    <span class="srcs__more">原文</span>
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </details>
         </div>
 
-        <!-- 内联卡片组：与正文分离（先给依据、再给互动） -->
+        <!-- 内联卡片组：与正文分离（先给依据、再给互动）。
+             ★★ 闯关进度卡**由这一层独立渲染**（报告 §2.3：进度卡从练习卡内移出）——
+                练习卡只管题目/作答，进度/掌握度是另一块内容，不该把题卡拉长。 -->
         <div v-if="turn.cards.length > 0" class="cards" data-testid="inline-cards">
-          <InlineCard v-for="card in turn.cards" :key="card.id" :card="card" />
+          <template v-for="card in turn.cards" :key="card.id">
+            <InlineCard :card="card" />
+            <ProgressCard
+              v-if="hasLevels(card)"
+              data-probe-id="progress-detached"
+              :payload="card.payload"
+            />
+          </template>
         </div>
 
         <BlockedNotice v-if="turn.blocked" :notice="turn.blocked" />
@@ -458,7 +524,7 @@ function pickBranch(): void {
    * 全页**只有这一处**用 accent 竖线 —— 引用行让位（见 .srcs__btn）。 */
   border-right: 3px solid var(--k12-accent);
   color: var(--k12-fg);
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-ui);
   white-space: pre-wrap;
   word-break: break-word;
@@ -495,7 +561,7 @@ function pickBranch(): void {
   flex-wrap: wrap;
 }
 .who {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-muted);
 }
@@ -504,7 +570,7 @@ function pickBranch(): void {
   align-items: center;
   padding: 2px 8px;
   border-radius: var(--k12-r-pill);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   background: var(--k12-surface-2);
   color: var(--k12-muted);
@@ -537,14 +603,14 @@ function pickBranch(): void {
  * `MarkdownProse.vue`（P1-4：实现与样式必须同组件，否则又会分叉）。
  * 本文件只给**对话气泡自己的**那几条：字号档与字色（共享组件按 `inherit` 取）。 */
 .text {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
   word-break: break-word;
 }
 /* 检索中：一句话说明当前在做什么（刻意不用三点脉冲 —— 那是 AI 味最重的 loader） */
 .awaiting {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .caret {
@@ -566,16 +632,62 @@ function pickBranch(): void {
   }
 }
 
-/* ── 引用 ── */
+/* ── 引用：默认收起的一行摘要 + 折叠体 ───────────────────────────────────
+ * 摘要行**本身就是开关**（原生 `<summary>`）：这里只给它一个「可点」的样子，
+ * 高度由设计系统的 `.k12-tap` 兜底（28px）—— 不再在页面里写死尺寸。 */
 .cites {
+  display: block;
+}
+.cites__toggle {
+  padding: 2px 8px 2px 4px;
+  border-radius: var(--k12-r-control);
+  /* 去掉浏览器默认那个三角：我们自己给箭头（收起与展开只差一个旋转）。 */
+  list-style: none;
+  cursor: pointer;
+}
+.cites__toggle::-webkit-details-marker {
+  display: none;
+}
+@media (hover: hover) and (pointer: fine) {
+  .cites__toggle:hover {
+    background: var(--k12-surface-2);
+  }
+}
+.cites__label {
+  font-size: var(--k12-fs-caption);
+  font-weight: 650;
+  color: var(--k12-muted);
+}
+/* 「向上兼容」角标：与 `SourceChips` 里那条**同一套令牌**（同一件事在收起态与展开态
+ * 不能长成两个样子）。4 字角标 → micro 档，不是正文。 */
+.cites__compat {
+  padding: 0 6px;
+  border-radius: var(--k12-r-flat);
+  background: var(--k12-warn-soft);
+  border: 1px solid var(--k12-warn-border);
+  color: var(--k12-warn);
+  font-size: var(--k12-fs-label);
+  font-weight: 500;
+}
+.cites__ico {
+  flex: none;
+  color: var(--k12-muted-2);
+  transition: transform var(--k12-dur-state) var(--k12-ease-state);
+}
+.cites[open] .cites__ico {
+  transform: rotate(90deg);
+}
+/* 减动效偏好：这是一个纯装饰的旋转，直接关掉（信息由箭头方向本身表达）。 */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-k12-reduced-motion='off']) .cites__ico {
+    transition: none;
+  }
+}
+.cites__body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-.cites__label {
-  font-size: var(--k12-fs-xs);
-  font-weight: 650;
-  color: var(--k12-muted);
+  margin-top: 6px;
 }
 .srcs {
   display: flex;
@@ -614,7 +726,7 @@ function pickBranch(): void {
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
   /* 角标档：这是 1、2 这样的**序号**（≤4 字），正是 `--k12-fs-micro` 的用途 */
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 700;
   display: inline-flex;
   align-items: center;
@@ -628,7 +740,7 @@ function pickBranch(): void {
   gap: 1px;
 }
 .srcs__title {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-fg);
   overflow: hidden;
@@ -636,14 +748,14 @@ function pickBranch(): void {
   white-space: nowrap;
 }
 .srcs__path {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 /* 摘录：正文的**同族**（它是教材里那句话本身），所以比元信息实一档，
  * 但比回答正文小一档 —— 引用整体是「依据」，不跟回答抢注意力。 */
 .srcs__excerpt {
   margin-top: 2px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg-2);
   overflow: hidden;
@@ -657,7 +769,7 @@ function pickBranch(): void {
   background: var(--k12-surface);
   border: 1px solid var(--k12-border);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -707,19 +819,19 @@ function pickBranch(): void {
   gap: 3px;
 }
 .src__title {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .src__sub code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 /* 副标题在两种视角下共用一个类：学生看到的是「第3章 · 核心技术分支」，
  * 教师看到的是等宽的 `chunk:<uuid>` —— 所以字号/颜色共用，等宽字体只给 `code`。 */
 .src__sub {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -748,13 +860,13 @@ function pickBranch(): void {
 }
 /* 原文用较大的行高：它是要被**读**的段落，不是 UI 文案 */
 .src__text {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
   white-space: pre-wrap;
 }
 .src__missing {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -768,7 +880,7 @@ function pickBranch(): void {
 }
 .src__mono {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-accent-ink);
   word-break: break-all;
 }
@@ -832,7 +944,7 @@ function pickBranch(): void {
   background: transparent;
   color: var(--k12-fg-2);
   font-family: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   text-align: left;
   cursor: pointer;

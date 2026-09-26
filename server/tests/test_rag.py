@@ -773,7 +773,13 @@ class TestResponseShape(RagCase):
         self.assertTrue(payload.context)
         self.assertEqual(payload.degraded, "vector")
         dumped = payload.model_dump(by_alias=True)
-        self.assertEqual(set(dumped), {"hits", "context", "degraded"})
+        # ★ 2026-09-26：新增 `attempts` / `gradeFilter` 两个**只读展示字段**
+        #   （演示模式要看得见「试了哪几级、隔离条件长什么样」）。它们是纯附加的：
+        #   老消费方不看即可，行为一字不变。
+        self.assertEqual(set(dumped), {"hits", "context", "degraded", "attempts", "gradeFilter"})
+        self.assertTrue(dumped["attempts"], "逐级记录必须真的有内容（否则降级链在界面上不可观测）")
+        self.assertIn("vector", {item["level"] for item in dumped["attempts"]})
+        self.assertIn("grade_level IN (", dumped["gradeFilter"])
         first = dumped["hits"][0]
         # 事件载荷的 5 个冻结字段 + 内部字段都要在（camelCase）
         for key in ("chunkId", "chapterTitle", "sectionTitle", "gradeLevel", "compat", "text", "kpId"):
@@ -792,6 +798,64 @@ class TestResponseShape(RagCase):
         hits = self.service().search(query=SHORT_QUERY, grade_level="junior", top_k=20).hits
         context = retriever.build_context(hits, max_chars=500)
         self.assertLessEqual(len(context), 520)
+
+
+class TestGradeFilterTrace(RagCase):
+    """★★ 展示用的学段过滤条件必须与**真正执行**的 SQL 同源（2026-09-26 演示模式）。
+
+    ══════════════════════════════════════════════════════════════════════════
+    这条守的是什么
+    ══════════════════════════════════════════════════════════════════════════
+    `RagSearchResult.gradeFilter` 会是演示模式屏幕上的一句原话（「学段隔离在 SQL 层强制，
+    模型改不了 WHERE」）。如果它只是手写文案、与真正下发的 SQL 无关，那句展示就是装饰 ——
+    答辩时被人追问一句「你怎么证明这就是它执行的 WHERE」就答不上来。
+
+    ★ 判据用 **`sqlite3.set_trace_callback`**（抓真正执行过的语句），
+      而不是读源码文本 —— 源码里出现过 `grade_level IN` 并不能证明这条查询真的被下发过。
+    ★ 强制走 FTS 那条路（`embedder=None`）：向量那半会用 sqlite-vec / numpy，
+      而 FTS 的 SQL 里**一定**带 `grade_level IN (?, …)`，所以判据是确定的。
+    """
+
+    def test_display_matches_executed_sql(self) -> None:
+        from app.knowledge.library import compatible_grades
+        from app.rag import fallback
+
+        service = self.service(embedder=None)
+        service.search(query=SHORT_QUERY, grade_level="junior", top_k=3)
+        conn = service._conn
+        self.assertIsNotNone(conn, "首次检索之后必须已有连接，否则 trace 抓不到任何东西")
+
+        traced: list[str] = []
+        conn.set_trace_callback(traced.append)
+        try:
+            result = service.search(query=SHORT_QUERY, grade_level="junior", top_k=3)
+        finally:
+            conn.set_trace_callback(None)
+
+        allowed = compatible_grades("junior")
+        payload = result.to_response()
+        self.assertEqual(payload.grade_filter, fallback.grade_filter_sql(allowed))
+
+        in_clauses = [sql for sql in traced if "grade_level IN (" in sql]
+        self.assertTrue(in_clauses, f"这一轮应当有带学段过滤的 SQL：{traced}")
+        for sql in in_clauses:
+            fragment = sql.split("grade_level IN (", 1)[1].split(")", 1)[0]
+            # 两种形态都要认：FTS / LIKE 那条路把学段作为**绑定参数**下发（`?`），
+            # 而 sqlite-vec 的 KNN 那条路是**内联字面量**（`'junior','primary_high',…`）。
+            # 无论哪种，**学段集合与顺序都必须与展示串逐字一致**。
+            if "?" in fragment:
+                self.assertEqual(
+                    fragment.count("?"),
+                    len(allowed),
+                    f"实际执行的过滤条件有 {fragment.count('?')} 个占位符，展示串却列了 {len(allowed)} 个学段：{sql}",
+                )
+            else:
+                executed = [item.strip().strip("'") for item in fragment.split(",") if item.strip() != ""]
+                self.assertEqual(
+                    executed,
+                    list(allowed),
+                    f"实际执行的 WHERE 与展示的 `gradeFilter` 不是同一份白名单：{sql}",
+                )
 
 
 class TestHttpRoute(RagCase):
@@ -826,7 +890,7 @@ class TestHttpRoute(RagCase):
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(set(body), {"hits", "context", "degraded"})
+        self.assertEqual(set(body), {"hits", "context", "degraded", "attempts", "gradeFilter"})
         self.assertEqual(body["degraded"], "vector")
         self.assertTrue(body["hits"])
         self.assertIn("chunkId", body["hits"][0])

@@ -218,6 +218,19 @@ const TERMS = [
 const TERM_EXEMPT_FILES = new Set([
   // 教师专用的数据检视页（`PAGES.knowledge.nav === 'teacher'`，学生侧栏里进不去，守卫 ③ 钉着）
   'views/Knowledge.vue',
+  /**
+   * ★★ 演示驾驶舱的技术口原文案（2026-09-26 演示模式）。
+   *
+   * 那一页整页就是技术证据：提示词分段、四级降级链的逐级记录、沙箱隔离、契约防漂移链、
+   * 架构守卫编号 —— `SQL` / `FTS5` / `Pyodide` / `nonce` / `契约` / `兜底` / `降级链`
+   * 这些词**一个都不能删**（删了就没有可答辩的内容了）。处置与 `views/Knowledge.vue` 同一性质：
+   * 把技术原文集中到一个**只在演示 / 教师面渲染**的模块里。
+   *
+   * ⚠️ 这条例外的凭据在 `tests/demo-mode.test.ts`（「豁免必须名副其实」）：
+   *   它机械复核 —— 本模块**只被**演示页与机制浮窗 import，而演示页的 `PAGES.demo.nav`
+   *   是 `'debug'`（学生与教师档都进不去）。谁把它 import 进学生可见的组件，那条立刻红。
+   */
+  'components/diag/evidence.ts',
   // 取数层：只把契约字段搬进 store，自己一个字都不渲染
   'stores/knowledge.ts',
   'stores/settings.ts',
@@ -574,7 +587,18 @@ test('★★ 参考资料库是教师专属页：侧栏判定走唯一谓词，�
     /nav:\s*'teacher'/,
     "参考资料库必须标成教师专属：`PAGES.knowledge.nav = 'teacher'`（学生侧栏里进不去）"
   )
-  assert.match(ui, /nav:\s*boolean\s*\|\s*'teacher'/, "PageMeta.nav 必须是三态联合（true / 'teacher' / false）")
+  // ★ 2026-09-26：`nav` 扩成四态（true / 'teacher' / 'debug' / false）—— 演示驾驶舱
+  //   是第三档（比教师档更高）专属的页。断言按**前缀**匹配，新增档位不该让它变红。
+  assert.match(
+    ui,
+    /nav:\s*boolean\s*\|\s*'teacher'/,
+    "PageMeta.nav 必须是多态联合（true / 'teacher' / 'debug' / false）"
+  )
+  assert.match(
+    ui,
+    /export function requiredViewFor\(/,
+    '需要「这一页要求的最低档位」的判据（档位降级时把人带走）'
+  )
 
   assert.match(
     ui,
@@ -582,20 +606,23 @@ test('★★ 参考资料库是教师专属页：侧栏判定走唯一谓词，�
     '需要「切回学生视角时把停在教师页的人带走」的判据'
   )
 
-  // 侧栏必须真的调那个谓词（只定义不调 = 页面照旧进侧栏）
+  // 侧栏必须真的调那个谓词（只定义不调 = 页面照旧进侧栏）。
+  // ★ 传的是**当前档位**（`viewMode.mode`）而不是「是不是教师视角」：三档之后
+  //   「可见」由档位高低决定，布尔量表达不了「演示档 ⊃ 教师档」这层关系。
   assert.match(
     sidebar,
-    /visibleInSidebar\(PAGES\[name\],\s*viewMode\.isTeacher\)/,
-    '侧栏的过滤必须调 visibleInSidebar，并把视角传进去'
+    /visibleInSidebar\(PAGES\[name\],\s*viewMode\.mode\)/,
+    '侧栏的过滤必须调 visibleInSidebar，并把当前档位传进去'
   )
 
-  // App.vue：切回学生视角要把人从教师专属页带回对话
-  const watchAt = app.indexOf('isTeacherOnlyPage(ui.page)')
-  assert.ok(watchAt > 0, 'App.vue 必须处理「切回学生视角时停在教师专属页」这一状态迁移')
+  // App.vue：**档位降级**时把人从该档专属页带回对话（三档通用）。
+  const watchAt = app.indexOf('requiredViewFor(ui.page)')
+  assert.ok(watchAt > 0, 'App.vue 必须处理「档位降级时停在该档专属页」这一状态迁移')
   const block = app.slice(Math.max(0, watchAt - 500), watchAt + 200)
   assert.match(block, /ui\.go\('chat'\)/, '落点是对话页')
-  // 只处理「教师 → 学生」这一个方向（反过来把评委弹走是没道理的）
-  assert.match(block, /wasTeacher === true && !isTeacher/, '只在从教师切回学生时触发')
+  // 只处理**降级**这一个方向（`viewModeAllows` 为假 = 当前档位够不到这一页）；
+  // 升级（学生 → 教师 → 演示）不该把任何人弹走。
+  assert.match(block, /viewModeAllows\(mode,\s*required\)/, '判据必须是档位高低，而不是字面量比较')
 })
 
 test('★★ 上面那些判据必须**真的按三态工作**（不是只看函数在不在）', async () => {
@@ -608,35 +635,64 @@ test('★★ 上面那些判据必须**真的按三态工作**（不是只看函
   // —— 三态语义整个塌掉（`'teacher'` 也返回 true，知识库回到学生侧栏），
   // 上一条守卫**照样全绿**（变异验证抓到的）。
   // 所以这里把谓词**当函数调**，用三个代表值把三态钉死。
-  const { PAGES, visibleInSidebar, isTeacherOnlyPage } = await import('../src/renderer/src/stores/ui.ts')
+  const { PAGES, visibleInSidebar, isTeacherOnlyPage, requiredViewFor } = await import(
+    '../src/renderer/src/stores/ui.ts'
+  )
 
-  // ① 普通页：两种视角都进侧栏
-  assert.equal(visibleInSidebar(PAGES.chat, false), true, '对话页在学生视角下必须可见')
-  assert.equal(visibleInSidebar(PAGES.chat, true), true, '对话页在教师视角下也必须可见')
+  // ① 普通页：三档视角都进侧栏
+  assert.equal(visibleInSidebar(PAGES.chat, 'student'), true, '对话页在学生视角下必须可见')
+  assert.equal(visibleInSidebar(PAGES.chat, 'teacher'), true, '对话页在教师视角下也必须可见')
+  assert.equal(visibleInSidebar(PAGES.chat, 'debug'), true, '对话页在演示档下同样可见')
 
   // ② 教师专属页：**学生视角不可见、教师视角可见**（两侧都要断，少一侧就不算三态）
   assert.equal(
-    visibleInSidebar(PAGES.knowledge, false),
+    visibleInSidebar(PAGES.knowledge, 'student'),
     false,
     '学生视角下「参考资料库」**不许**进侧栏（它是数据检视页，含 kb.sqlite 路径与两个破坏性按钮）'
   )
   assert.equal(
-    visibleInSidebar(PAGES.knowledge, true),
+    visibleInSidebar(PAGES.knowledge, 'teacher'),
     true,
     '教师视角下「参考资料库」必须可见（功能没被删，只是默认不给学生看）'
+  )
+
+  // ②' 演示档专属页（2026-09-26 起的第三档）：**只有最高档可见**，
+  //     且教师档看得到它 —— 反过来会让「进演示模式时知识库页突然消失」。
+  assert.equal(
+    visibleInSidebar(PAGES.demo, 'student'),
+    false,
+    '学生视角下「演示驾驶舱」不许进侧栏（那一页摊开的是提示词原文与原始信封）'
+  )
+  assert.equal(
+    visibleInSidebar(PAGES.demo, 'teacher'),
+    false,
+    '教师档也不给「演示驾驶舱」入口：它是答辩时自己讲的那一页，不是评委随手点的'
+  )
+  assert.equal(visibleInSidebar(PAGES.demo, 'debug'), true, '演示档必须看得到「演示驾驶舱」')
+  assert.equal(
+    visibleInSidebar(PAGES.knowledge, 'debug'),
+    true,
+    '演示档是**更高**的一档，教师档的页在演示档下必须照旧可见'
   )
 
   // ③ `isTeacherOnlyPage` 与它同源
   assert.equal(isTeacherOnlyPage('knowledge'), true, 'knowledge 是教师专属页')
   assert.equal(isTeacherOnlyPage('chat'), false, 'chat 不是教师专属页')
   assert.equal(isTeacherOnlyPage('dependency'), false, '学习地图不是教师专属页（学生会用它）')
+  assert.equal(isTeacherOnlyPage('demo'), false, '演示页不是「教师专属页」——它比教师档更高（要求最低档位 debug）')
+  assert.equal(requiredViewFor('demo'), 'debug', '演示页要求的最低档位是 debug（App.vue 的迁移监听读它）')
+  assert.equal(requiredViewFor('knowledge'), 'teacher', '知识库页要求的最低档位是 teacher')
+  assert.equal(requiredViewFor('chat'), null, '对话页对所有档位开放')
 
-  // ④ 反面对照：**没有哪一页会在两种视角下都不可见** ——
+  // ④ 反面对照：**没有哪一页会在三档视角下都不可见** ——
   //    那等于做出一个谁都不用的页面（D-040 那个「做了却进不去」的坑）。
   for (const [name, meta] of Object.entries(PAGES)) {
-    const anywhere = visibleInSidebar(meta, false) || visibleInSidebar(meta, true)
+    const anywhere =
+      visibleInSidebar(meta, 'student') ||
+      visibleInSidebar(meta, 'teacher') ||
+      visibleInSidebar(meta, 'debug')
     if (meta.nav === false) continue // `false` 的页明确不进侧栏，靠别的入口（本项目当前没有这种页）
-    assert.ok(anywhere, `「${meta.title}」（${name}）在两种视角下都进不了侧栏 —— 做了却点不到`)
+    assert.ok(anywhere, `「${meta.title}」（${name}）在三档视角下都进不了侧栏 —— 做了却点不到`)
   }
 })
 
@@ -647,10 +703,16 @@ test('★★ 上面那些判据必须**真的按三态工作**（不是只看函
 test('★★ 五处核心主行动按钮必须共用 .k12-cta（而不是各写一份皮肤）', () => {
   const base = read('src', 'renderer', 'src', 'assets', 'base.css')
   assert.match(base, /^\.k12-cta\s*\{/m, '设计系统里必须有 .k12-cta 这一套配方')
-  // 禁用态不许用 opacity 压（会掉到不可读）；用实心灰底
+  // 禁用态（2026-09-27 口径变更，优化报告 §3.2）：底色用 `--k12-accent-disabled`、
+  // 文字用 `--k12-muted`、透明度 0.6 —— 报告给的就是这三条，按"报告为需求权威"落地。
+  // ⚠️ 旧断言是 `doesNotMatch(/opacity/)`（本仓原口径：禁用态不许靠透明度表达）。
+  //    改判据而不是改需求：**决定可读性的是底色与文字色**，透明度只是观感强度。
   const ctaAt = base.indexOf('.k12-cta {')
-  const ctaBlock = base.slice(ctaAt, ctaAt + 1400)
-  assert.doesNotMatch(ctaBlock, /opacity/, '禁用态不得靠降低透明度（文字会掉到不可读）')
+  // ⚠️ 窗口 1400 → 2400（2026-09-27）：`.k12-cta` 区块里新增了交互态注释与 :active 规则，
+  //    1400 字的窗口再切不到 `:disabled` 那一段（旧断言会假红成"没有禁用态"）。
+  const ctaBlock = base.slice(ctaAt, ctaAt + 2400)
+  assert.match(ctaBlock, /--k12-accent-disabled/, '禁用态底色必须走 accent-disabled token（报告 §3.2）')
+  assert.match(ctaBlock, /color:\s*var\(--k12-muted\)/, '禁用态文字必须是 muted（可读性由它决定）')
   assert.match(ctaBlock, /:disabled/, '必须显式给禁用态')
   assert.match(ctaBlock, /min-height/, '高度必须是下限（固定 height 会在大字号下裁字，P-071）')
 
@@ -664,7 +726,11 @@ test('★★ 五处核心主行动按钮必须共用 .k12-cta（而不是各写�
   const CTA_CLASS = /class="(?:[^"]*\s)?k12-cta(?![\w-])(?:\s[^"]*)?"/g
   const sites: Array<[string, string, number]> = [
     ['components/ContextRail.vue', '右栏「去闯关检验」', 2],
-    ['views/Quiz.vue', '闯关页「提交这题」', 1],
+    // 闯关页两处（2026-09-26）：单卡屏的「提交这题」与**收尾卡**的主行动（「去下一关」）。
+    // 二者**运行时互斥**（收尾卡出现时题体与卡脚都不渲染），所以「同一屏只允许一个主色填充」
+    // 这条纪律仍然成立；而 `scripts/verify-guard-mutations.mjs` 的 ⑤ 因此需要 `all: true`
+    // 才能把两处一起改掉（它默认只替换第一处）。
+    ['views/Quiz.vue', '闯关页「提交这题」+ 收尾卡主行动', 2],
     ['views/Coding.vue', '编程页「运行」', 1],
     ['views/Dependency.vue', '依赖图「开始学习这个知识点」', 1]
   ]
@@ -1219,7 +1285,16 @@ test('★★ 空态必须是引导 / 高光，不是系统占位', () => {
     '错题本空态必须用 success 色调 —— 它是一份「全对」的成绩，不是加载失败'
   )
   // 空态组件必须支持这一档（否则上面的 tone 会被忽略、静默退化成普通空态）
-  assert.match(empty, /'empty' \| 'loading' \| 'error' \| 'success'/, 'EmptyState 必须支持 success 档')
+  // ⚠️ 2026-09-27（WP-12 组件 API 标准化）：四态联合类型搬进了**词表**
+  //    `types/component-props.ts`（单一出处），组件里只剩 `tone?: EmptyStateTone` ——
+  //    判据相应改为「词表里有 success 档 + 组件真的引用它」。
+  const vocabulary = read('src', 'renderer', 'src', 'types', 'component-props.ts')
+  assert.match(
+    vocabulary,
+    /'empty' \| 'loading' \| 'error' \| 'success'/,
+    'EmptyState 的四态必须在词表里（含 success 档）'
+  )
+  assert.match(empty, /EmptyStateTone/, 'EmptyState 必须引用词表里的四态类型（而不是各写一份）')
   assert.match(empty, /data-tone='success'|\[data-tone='success'\]/, 'success 档要有自己的视觉（不能与 empty 同款）')
 
   // 导出成 Markdown 的那一份也要跟着改（它是同一个空态的另一种出口）

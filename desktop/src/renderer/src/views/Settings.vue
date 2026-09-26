@@ -68,6 +68,7 @@ import {
   ListChecks,
   Palette,
   Plug,
+  Radar,
   Server,
   ShieldCheck,
   SlidersHorizontal
@@ -80,6 +81,13 @@ import { useKnowledgeStore } from '../stores/knowledge'
 import { useSettingsStore } from '../stores/settings'
 import { useSidecarStore } from '../stores/sidecar'
 import { useStudyStore } from '../stores/study'
+import { useUiStore } from '../stores/ui'
+import {
+  REDUCED_MOTION_OPTIONS,
+  reducedMotionMode,
+  setReducedMotionMode,
+  type ReducedMotionMode
+} from '../stores/reducedMotion'
 import { SATS, useThemeStore, type SatKey } from '../stores/theme'
 import { useViewModeStore } from '../stores/viewMode'
 import PageIdentity from '../components/PageIdentity.vue'
@@ -94,6 +102,8 @@ const sidecar = useSidecarStore()
 const theme = useThemeStore()
 /** 学生 / 教师视角（见文件头：这是**防误入**，不是权限）。 */
 const viewMode = useViewModeStore()
+/** 页面导航（演示驾驶舱的跳转入口用；导航唯一真相在 `stores/ui.ts` 的 `PAGES` + `go`）。 */
+const ui = useUiStore()
 
 /* ------------------------------------------------------------ 供应商 */
 
@@ -282,6 +292,18 @@ function setSat(value: SatKey): void {
   if (value === 'vivid' || value === 'soft' || value === 'mono') theme.setSat(value)
 }
 
+/**
+ * 减少动效三档（报告 §3.3）：写 store（顺手落盘 + 立刻写 `<html>` 属性），
+ * 页面**不另存一份**（两份状态里必然有一份会过期 —— 与排版模式同一条纪律）。
+ *
+ * ★ 实时生效的证据链：`set()` → `document.documentElement[data-k12-reduced-motion]` →
+ *   CSS 的减动效规则 / `useReducedMotion()` 的 computed 同时跟随。不需要刷新。
+ */
+const motionMode = computed<ReducedMotionMode>({
+  get: () => reducedMotionMode.value,
+  set: (next) => setReducedMotionMode(next)
+})
+
 /* ------------------------------------------------------------ 生命周期 */
 
 onMounted(() => {
@@ -460,9 +482,21 @@ async function openAdvancedArea(): Promise<void> {
   activeId.value = first
 }
 
-/** 收起高级区（只在学生视角下给这个按钮：教师视角下它是强制展开的）。 */
+/** 收起高级区（只在学生视角下给这个按钮：教师视角下它是强制展开的）。 */ 
 function closeAdvancedArea(): void {
   viewMode.closeAdvanced()
+}
+
+/**
+ * 进入演示驾驶舱：**先切到最高档，再跳页**。
+ *
+ * ★ 顺序不能反：演示页的 `nav` 是 `'debug'`，档位还是 teacher 时侧栏里没有那一项，
+ *   `App.vue` 的档位迁移监听也会在**下一次档位变化时**把人带回对话页 ——
+ *   先跳页再切档等于让他刚进去就被弹出来。两行代码的顺序就是这段注释的全部意义。
+ */
+function enterDemo(): void {
+  viewMode.setMode('debug')
+  ui.go('demo')
 }
 
 onBeforeUnmount(() => {
@@ -748,6 +782,37 @@ onBeforeUnmount(() => {
             </div>
             <p class="hint">{{ theme.satMeta.desc }}。点一下立刻生效，不用保存。</p>
           </div>
+
+          <!-- ★★ 减少动效（报告 §3.3 的「用户控制面板」）：三档 = 自动 / 开启 / 关闭。
+               · 落盘 `localStorage`（重启保留）；写 store 的同时立刻写 `<html>` 属性，
+                 所以「点一下立刻生效」不是文案，而是同一条链路上真的发生的事；
+               · 文案取自报告原文：「减少动效可以降低视觉疲劳，适合对运动敏感的用户。
+                 开启后会关闭页面切换、滚动动画和装饰性动效。」
+               · 三档是 `role="radiogroup"` + 每档自己的选中态（不只靠颜色：底色 + 描边
+                 + `aria-checked`），与上面的饱和度卡同一套无障碍口径。 -->
+          <div class="field" data-testid="settings-motion-block">
+            <p class="field__label">减少动效</p>
+            <div class="motion" role="radiogroup" aria-label="减少动效">
+              <button
+                v-for="option in REDUCED_MOTION_OPTIONS"
+                :key="option.value"
+                type="button"
+                role="radio"
+                class="motion__opt"
+                :class="{ 'motion__opt--on': motionMode === option.value }"
+                :data-testid="`settings-motion-${option.value}`"
+                :data-active="String(motionMode === option.value)"
+                :aria-checked="motionMode === option.value"
+                @click="motionMode = option.value"
+              >
+                <span class="motion__label">{{ option.label }}</span>
+                <span class="motion__desc">{{ option.desc }}</span>
+              </button>
+            </div>
+            <p class="hint" data-testid="settings-motion-hint">
+              减少动效可以降低视觉疲劳，适合对运动敏感的用户。开启后会关闭页面切换、滚动动画和装饰性动效。
+            </p>
+          </div>
         </SurfacePanel>
 
         <!-- ── 高级设置（教师 / 答辩）────────────────────────────────────────
@@ -797,6 +862,43 @@ onBeforeUnmount(() => {
               <span class="adv__knob" aria-hidden="true" />
               <span class="adv__toggle-text">{{ viewMode.isTeacher ? '已打开' : '未打开' }}</span>
             </button>
+          </div>
+
+          <!-- ── 演示驾驶舱（第三档：学生 / 教师 / 演示）────────────────────────
+
+               ★ 三档的分工：学生什么都不看；教师看摘要与右栏证据；**演示档**摊开
+                 Prompt 原文、画像字节指纹、检索四级链的逐级记录与原始信封。
+               ★ 入口是那颗「进入演示驾驶舱」——它同时把档位切到最高档，
+                 所以从这一页点过去一定能看到侧栏多出那一项（不需要再回来开开关）。
+               ⚠️ 同样**不是权限**：它与教师视角是同一种「防误入」，不是安全边界。 -->
+          <div class="adv__switch">
+            <div class="adv__switch-text">
+              <p class="adv__switch-title">演示 / 调试档</p>
+              <p class="adv__switch-desc">
+                打开后，设置页会多出「演示驾驶舱」入口：一次提问背后的提示词拼装、画像指纹、
+                检索逐级记录、安全三阶段与拦截记录都摊在那里，供答辩讲解与回放。
+              </p>
+            </div>
+            <div class="adv__actions">
+              <button
+                type="button"
+                class="adv__enter"
+                data-testid="settings-demo-enter"
+                @click="enterDemo()"
+              >
+                <Radar :size="13" />
+                进入演示驾驶舱
+              </button>
+              <button
+                v-if="viewMode.isDebug"
+                type="button"
+                class="adv__close"
+                data-testid="settings-demo-exit"
+                @click="viewMode.setMode('teacher')"
+              >
+                退出演示档
+              </button>
+            </div>
           </div>
 
         <!-- ④ 供应商：技术设置（默认收起在高级区里）。
@@ -1201,7 +1303,7 @@ onBeforeUnmount(() => {
   padding: 9px 13px;
   border-radius: var(--k12-r-inset);
   border: 1px solid var(--k12-border-strong);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
 }
 .banner--bad {
@@ -1241,7 +1343,7 @@ onBeforeUnmount(() => {
   border-radius: var(--k12-r-control);
   background: transparent;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-ui);
   text-align: left;
   cursor: pointer;
@@ -1295,7 +1397,7 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--k12-muted);
   font-family: inherit;
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   line-height: var(--k12-lh-ui);
   text-align: left;
   white-space: nowrap;
@@ -1330,14 +1432,14 @@ onBeforeUnmount(() => {
   color: var(--k12-muted);
 }
 .card__title {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 620;
   color: var(--k12-fg);
 }
 /* meta 不是角标：12px */
 .card__meta {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   text-align: right;
 }
@@ -1365,7 +1467,7 @@ onBeforeUnmount(() => {
   background: var(--k12-surface);
   color: var(--k12-fg-2);
   font-family: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1384,7 +1486,7 @@ onBeforeUnmount(() => {
 /* 保存状态：说清"有没有东西没存" —— 比一个孤零零的保存按钮有用 */
 .save-state {
   margin-right: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
 }
 .save-state[data-phase='dirty'] {
@@ -1403,7 +1505,7 @@ onBeforeUnmount(() => {
 }
 .form :deep(.el-form-item__label) {
   padding-bottom: 4px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
@@ -1417,7 +1519,7 @@ onBeforeUnmount(() => {
 }
 .hint {
   margin-top: 6px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1433,7 +1535,7 @@ onBeforeUnmount(() => {
 /* 代码片不是角标：12px（原来是 11px，与角标同档，读不清） */
 .hint code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   padding: 1px 5px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
@@ -1441,16 +1543,16 @@ onBeforeUnmount(() => {
 }
 .mono {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-accent-ink);
 }
 .warn {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-warn);
 }
 .notice {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-good);
 }
@@ -1464,7 +1566,7 @@ onBeforeUnmount(() => {
   background: var(--k12-surface);
   color: var(--k12-fg);
   font-family: inherit;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-ui);
   cursor: pointer;
 }
@@ -1483,7 +1585,7 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 .cands__note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .cands__list,
@@ -1516,7 +1618,7 @@ onBeforeUnmount(() => {
   background: var(--k12-surface-2);
   color: var(--k12-fg-2);
   font-family: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1559,13 +1661,13 @@ onBeforeUnmount(() => {
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
   border: 1px solid var(--k12-border);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
 .key-hint,
 .key-cleared {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .key-cleared {
@@ -1589,13 +1691,13 @@ onBeforeUnmount(() => {
   background: var(--k12-warn-soft);
 }
 .probe__title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .probe__msg {
   margin-top: 4px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1607,7 +1709,7 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 .field__label {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
@@ -1631,14 +1733,14 @@ onBeforeUnmount(() => {
   background: var(--k12-good);
 }
 .readonly__text {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 620;
   color: var(--k12-fg);
 }
 .readonly__origin {
   padding-left: 9px;
   border-left: 1px solid var(--k12-border);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-accent-ink);
   font-weight: 600;
 }
@@ -1655,7 +1757,7 @@ onBeforeUnmount(() => {
   border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
 }
 .sidecar__text {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 620;
   color: var(--k12-fg);
 }
@@ -1671,7 +1773,7 @@ onBeforeUnmount(() => {
 .rules li {
   display: flex;
   gap: 9px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1682,7 +1784,7 @@ onBeforeUnmount(() => {
 }
 .rules code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   padding: 1px 5px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
@@ -1709,7 +1811,7 @@ onBeforeUnmount(() => {
   color: var(--k12-muted);
 }
 .adv__title {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 620;
   color: var(--k12-fg);
 }
@@ -1723,7 +1825,7 @@ onBeforeUnmount(() => {
   background: var(--k12-surface);
   color: var(--k12-fg-2);
   font-family: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1732,10 +1834,40 @@ onBeforeUnmount(() => {
     color: var(--k12-accent-ink);
   }
 }
+/* 演示档那一行的动作区：主入口（进入驾驶舱）+ 次级出口（退出演示档）并排。
+ * ★ 与 `.adv__close` 同一配方（`min-height: 28px` 是触控下限），用 accent 底色把它
+ *   与「收起」这种次要动作区分开 —— 这一行里只有一个是主行动。 */
+.adv__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+  flex: none;
+}
+.adv__enter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  min-height: 30px;
+  border: 1px solid var(--k12-accent-border);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-accent-soft);
+  color: var(--k12-accent-ink);
+  font-family: inherit;
+  font-size: var(--k12-fs-caption);
+  font-weight: 650;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .adv__enter:hover {
+    border-color: var(--k12-accent-ink);
+  }
+}
 /* ★ 这段文案里**不许**出现「安全 / 权限 / 保护」这类词：开关是可绕过的，
  *   把它说成安全边界会让人以为界面藏起来的东西是安全的（见 stores/viewMode.ts）。 */
 .adv__note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1760,12 +1892,12 @@ onBeforeUnmount(() => {
   gap: 3px;
 }
 .adv__switch-title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .adv__switch-desc {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1784,7 +1916,7 @@ onBeforeUnmount(() => {
   background: var(--k12-surface-2);
   color: var(--k12-muted);
   font-family: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
 }
@@ -1840,6 +1972,46 @@ onBeforeUnmount(() => {
   border-color: var(--k12-accent);
   box-shadow: inset 0 0 0 1px var(--k12-accent);
 }
+/* 减少动效三档：比饱和度卡更简单（没有预览小样，只有「档名 + 一句说明」）。
+ * 三张同宽排开（窄屏由 grid 自动换行），选中态与饱和度卡同一配方。 */
+.motion {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.motion__opt {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  min-height: 28px;
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .motion__opt:hover {
+    border-color: var(--k12-accent-border);
+  }
+}
+.motion__opt--on {
+  border-color: var(--k12-accent);
+  box-shadow: inset 0 0 0 1px var(--k12-accent);
+  background: var(--k12-accent-soft);
+}
+.motion__label {
+  font-size: var(--k12-fs-body-sm);
+  font-weight: 650;
+  color: var(--k12-fg);
+}
+.motion__desc {
+  font-size: var(--k12-fs-caption);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
+}
 /* 小样：一个「页面底色 + 强调条 + 标签胶囊 + 白卡」的等比缩影。
  * ★ 为什么放这四样：三档饱和度的差别**不在强调色本身**（accent 由学段决定），
  *   而在「页面底色 / 浅底分级 / 胶囊底色」这三处（实测 vivid `#FFF2E4` vs
@@ -1889,7 +2061,7 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 .sat__label {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
@@ -1908,7 +2080,7 @@ onBeforeUnmount(() => {
   color: var(--k12-surface);
 }
 .sat__desc {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -1925,7 +2097,7 @@ onBeforeUnmount(() => {
   min-height: 28px;
   display: flex;
   align-items: center;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   cursor: pointer;
 }
@@ -1948,7 +2120,7 @@ onBeforeUnmount(() => {
 }
 
 /* ── 窄窗口：索引收成一行横向 tab，右栏单列满宽 ───────────────────────── */
-@media (max-width: 1279px) {
+@media (max-width: 1023px) {
   .st__body {
     grid-template-columns: minmax(0, 1fr);
   }

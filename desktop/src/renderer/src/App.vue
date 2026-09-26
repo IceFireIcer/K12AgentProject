@@ -40,8 +40,10 @@ import Coding from './views/Coding.vue'
 import Quiz from './views/Quiz.vue'
 import Knowledge from './views/Knowledge.vue'
 import Dependency from './views/Dependency.vue'
+import Demo from './views/Demo.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import FloatPanel from './components/FloatPanel.vue'
+import DiagnosticsPanel from './components/DiagnosticsPanel.vue'
 import ModelPicker from './components/ModelPicker.vue'
 import { useOnBackendReady } from './composables/useOnBackendReady'
 import { useChatStore } from './stores/chat'
@@ -50,8 +52,9 @@ import { useSettingsStore } from './stores/settings'
 import { useSidecarStore } from './stores/sidecar'
 import { useStudentStore } from './stores/student'
 import { useTraceStore } from './stores/trace'
-import { nextView, isTeacherOnlyPage, PAGES, useUiStore, VIEW_LABELS } from './stores/ui'
+import { nextView, requiredViewFor, viewModeAllows, PAGES, useUiStore, VIEW_LABELS } from './stores/ui'
 import { useViewModeStore } from './stores/viewMode'
+import { useDiagnosticsStore } from './stores/diagnostics'
 
 const ui = useUiStore()
 const viewMode = useViewModeStore()
@@ -59,6 +62,7 @@ const chat = useChatStore()
 const sidecar = useSidecarStore()
 const student = useStudentStore()
 const trace = useTraceStore()
+const diagnostics = useDiagnosticsStore()
 const confirm = useConfirm()
 const settings = useSettingsStore()
 
@@ -121,6 +125,10 @@ onMounted(() => {
   chat.connect()
   // 工具调用轨迹（独立于 6 事件的通道；右栏据此显示「本轮调了什么」）
   trace.connect()
+  // ★ 轮次诊断信封（演示驾驶舱 + 机制浮窗的共同数据源）。
+  //   ⚠️ 与轨迹同一性质：**永远订阅**，因为它是一条不产生任何界面的旁路 ——
+  //      只在演示页挂载时订阅，会让「先聊两句、再打开驾驶舱」看不到刚才那几轮。
+  diagnostics.connect()
 })
 
 // 首屏取数：立刻跑一次 + sidecar 就绪后补跑一次（见上面那段说明）
@@ -137,12 +145,22 @@ useOnBackendReady(loadInitialData)
  * ★ 只处理「从教师切回学生」这一个方向：反过来（学生 → 教师）停在对话页是正常的，
  *   没有理由把评委弹到知识库页上去。
  */
+/**
+ * 档位**降级**时，把停在该档专属页上的人带回对话页（三档通用）。
+ *
+ * ★ 为什么必须有这一段：教师档看得到「参考资料库」（`nav: 'teacher'`）、演示档看得到
+ *   「演示驾驶舱」（`nav: 'debug'`）。如果人正停在那页、把档位调低，侧栏里那一项会消失 ——
+ *   而页面本身**还在渲染**（它是 `KeepAlive` 里的分支，没有路由会把他弹走）。
+ *   结果是「一个侧栏里找不到、也说不清怎么进来的页面」，只能靠顶栏的三步循环摸出去。
+ * ★ 判据是**档位高低**（`viewModeAllows`）不是「是不是教师」：三档之后，
+ *   「教师 → 学生」「演示 → 教师」「演示 → 学生」三个方向都要管，
+ *   而「学生 → 教师」这种**升级**不该把任何人弹走。
+ */
 watch(
-  () => viewMode.isTeacher,
-  (isTeacher, wasTeacher) => {
-    if (wasTeacher === true && !isTeacher && isTeacherOnlyPage(ui.page)) {
-      ui.go('chat')
-    }
+  () => viewMode.mode,
+  (mode) => {
+    const required = requiredViewFor(ui.page)
+    if (required !== null && !viewModeAllows(mode, required)) ui.go('chat')
   }
 )
 
@@ -150,6 +168,7 @@ onUnmounted(() => {
   chat.disconnect()
   sidecar.disconnect()
   trace.disconnect()
+  diagnostics.disconnect()
 })
 </script>
 
@@ -189,12 +208,16 @@ onUnmounted(() => {
         <Study v-else-if="ui.page === 'study'" />
         <Settings v-else-if="ui.page === 'settings'" />
         <Knowledge v-else-if="ui.page === 'knowledge'" />
+        <!-- 演示驾驶舱（只在演示 / 调试档可达；档位降级会被上面的 watch 带回对话页） -->
+        <Demo v-else-if="ui.page === 'demo'" />
         <Dependency v-else />
       </KeepAlive>
 
       <!-- 全局浮层：挂在外壳上（不是某张卡里），换页时不卸载，位置与记录得以延续 -->
       <template #overlay>
         <FloatPanel />
+        <!-- 只读机制浮窗：与「追问窗」并列的第二只（语义不同，见组件头注释） -->
+        <DiagnosticsPanel />
       </template>
     </AppShell>
 
@@ -242,7 +265,7 @@ onUnmounted(() => {
   border-radius: var(--k12-r-control);
   background: transparent;
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;

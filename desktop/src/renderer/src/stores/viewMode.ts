@@ -40,8 +40,27 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 
-/** 两种视角：`student` 是默认，`teacher` 才显示技术分节与原始诊断信息。 */
-export type ViewMode = 'student' | 'teacher'
+/**
+ * ★★ 档位类型与「档位高低」判据住在 `stores/ui.ts`（**不是这里**）：
+ *   `tests/student-view-discipline.test.ts` 会**直接 import `stores/ui.ts`**（Node 的 ESM 加载器），
+ *   而 Node 解析不了渲染进程里那种不带后缀的相对 import。所以 `ui.ts` 必须是**零运行时 import**
+ *   的纯模块，档位表只能放在它那边；本文件只用 `import type`（类型 import 编译后被完全擦除，
+ *   不会让 Node 去解析那一条边）。
+ *
+ * ★ 三档视角（从小到大 = 能看到的内部信息从少到多）：
+ *
+ * | 档位 | 谁看 | 看什么 |
+ * | --- | --- | --- |
+ * | `student` | 学生 | 什么都不看（默认） |
+ * | `teacher` | 评委 / 老师 | 决策链摘要 + 工具轨迹 + 学段标签 + 契约静态卡 |
+ * | `debug` | 开发者 / 答辩演示 | 决策链全量 + 模型推理 + Prompt 原文 + 原始信封 |
+ *
+ * ★ 它**不是权限系统**（与教师视角同一条纪律，见下文）：没有账号体系，渲染进程里的任何开关
+ *   都可绕过；真正被强制的边界只在后端（SQL 层学段隔离 / 判分只在 Python / 代码只在 Worker）。
+ */
+import type { ViewMode } from './ui'
+
+export type { ViewMode }
 
 /** localStorage 的键（带应用前缀，避免与同源下别的东西撞名）。 */
 export const VIEW_MODE_STORAGE_KEY = 'k12.viewMode'
@@ -56,9 +75,13 @@ export const VIEW_MODE_STORAGE_KEY = 'k12.viewMode'
  */
 export function readStoredViewMode(): ViewMode {
   try {
-    return globalThis.localStorage?.getItem(VIEW_MODE_STORAGE_KEY) === 'teacher'
-      ? 'teacher'
-      : 'student'
+    const raw = globalThis.localStorage?.getItem(VIEW_MODE_STORAGE_KEY)
+    // ★ 两个分支的**次序**不能反：先认 teacher、再认 debug，最后一律兜到学生视角
+    //   （判错方向的代价不对称，与改造前那条注释同一个理由：判成学生视角只是评委
+    //   多按一下开关）。⚠️ 别在这段注释里照抄三元表达式的字面量 ——
+    //   `tests/student-view-discipline.test.ts` 的「默认视角必须是学生」那条守卫
+    //   读的是**含注释的源码窗口**，注释里抄一份 `: '…'` 会让变异验证假绿（实测踩到过）。
+    return raw === 'teacher' ? 'teacher' : raw === 'debug' ? 'debug' : 'student'
   } catch {
     return 'student'
   }
@@ -67,8 +90,23 @@ export function readStoredViewMode(): ViewMode {
 export const useViewModeStore = defineStore('viewMode', () => {
   const mode = ref<ViewMode>(readStoredViewMode())
 
-  /** 是否处于教师 / 答辩视角（模板里读它，别自己比较字面量）。 */
-  const isTeacher = computed(() => mode.value === 'teacher')
+  /**
+   * 是否处于教师 / 答辩视角**或更高档**（模板里读它，别自己比较字面量）。
+   *
+   * ★ 这两个派生标志是**字面量比较**（而不是去查 `ui.ts` 的档位表）：本文件不能用运行时
+   *   import（见文件头那段 Node ESM 的说明）。`tests/demo-mode.test.ts` 断言了它们与
+   *   档位表**逐档等价**（student 为假、teacher/debug 为真），所以两处不会悄悄漂移。
+   */
+  const isTeacher = computed(() => mode.value === 'teacher' || mode.value === 'debug')
+
+  /**
+   * 是否处于**演示 / 调试档**（三档里最高的那一档：能看到 Prompt 原文与原始信封）。
+   *
+   * ⚠️ 与 `isTeacher` 是**两个**问题：「老师能看到什么」与「哪些入口只给开发者」。
+   *   演示驾驶舱只挂在 `isDebug` 上，`isTeacher` 仍然看不到它（那一页是给「你自己 + 答辩」
+   *   用的，不是给评委随手点的）。
+   */
+  const isDebug = computed(() => mode.value === 'debug')
 
   /** 「高级设置（教师 / 答辩）」区是否已展开（**纯内存**，不持久化）。 */
   const advancedOpen = ref(false)
@@ -80,6 +118,17 @@ export const useViewModeStore = defineStore('viewMode', () => {
   /** 学生视角 ↔ 教师视角互切。 */
   function toggle(): void {
     mode.value = mode.value === 'teacher' ? 'student' : 'teacher'
+  }
+
+  /**
+   * 明确设定档位（设置页用）。
+   *
+   * ★ 与 `toggle()` 并存而不是取代它：`toggle()` 是「学生 ↔ 教师」的既有交互
+   *   （`ui-shell` 与设置页的开关都按它写），三档之后它仍然只在这一对之间来回 ——
+   *   进 `debug` 必须是一次**显式**动作（点「进入演示驾驶舱」），不该藏在连按里。
+   */
+  function setMode(next: ViewMode): void {
+    mode.value = next
   }
 
   function openAdvanced(): void {
@@ -99,5 +148,5 @@ export const useViewModeStore = defineStore('viewMode', () => {
     }
   })
 
-  return { mode, isTeacher, advancedOpen, set, toggle, openAdvanced, closeAdvanced }
+  return { mode, isTeacher, isDebug, advancedOpen, set, setMode, toggle, openAdvanced, closeAdvanced }
 })

@@ -1257,7 +1257,7 @@ onDeactivated(() => {
   border-radius: var(--k12-r-pill);
   background: transparent;
   color: var(--k12-muted-2);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   cursor: pointer;
 }
 .tab:hover {
@@ -1281,7 +1281,7 @@ onDeactivated(() => {
   flex-wrap: wrap;
 }
 .gradebar__label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .gradebar__btn {
@@ -1290,7 +1290,7 @@ onDeactivated(() => {
   border-radius: var(--k12-r-pill);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1306,7 +1306,7 @@ onDeactivated(() => {
   font-weight: 650;
 }
 .gradebar__note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   margin-left: 4px;
 }
@@ -1380,7 +1380,7 @@ onDeactivated(() => {
   border-radius: var(--k12-r-inset);
   background: var(--k12-warn-soft);
   color: var(--k12-warn);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
 }
 
@@ -1397,7 +1397,7 @@ onDeactivated(() => {
 .anim__title {
   flex: 0 1 auto;
   min-width: 0;
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   line-height: var(--k12-lh-tight);
   color: var(--k12-fg);
@@ -1411,7 +1411,7 @@ onDeactivated(() => {
 }
 /* 「现在放的是什么 · 给谁看」：从卡头搬到舞台下方的控件带里 */
 .anim__sub {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
 }
 /* ── 换一段：舞台下方的控件带（现在是什么 · 换来源 · 换年级；胶片条紧跟其后）── */
@@ -1430,7 +1430,7 @@ onDeactivated(() => {
 .anim__sub code,
 .anim__strip-note code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   padding: 1px 6px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
@@ -1442,7 +1442,7 @@ onDeactivated(() => {
   border-radius: var(--k12-r-pill);
   background: var(--k12-chip-bg);
   color: var(--k12-chip-fg);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 650;
 }
 .anim__ghost {
@@ -1456,7 +1456,7 @@ onDeactivated(() => {
   gap: 7px;
   padding: 8px 12px;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
   flex: none;
@@ -1529,20 +1529,21 @@ onDeactivated(() => {
   border-radius: var(--k12-r-inset);
   background: color-mix(in srgb, var(--k12-surface) 88%, transparent);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   pointer-events: none;
 }
 
 /* 文字讲解（降级视图）：深底上的浅字，与沙箱画面的位置一致 */
 .anim__fallback {
   width: 100%;
-  padding: 20px 22px;
+  /* 优化报告 §1.2：间距并入 8 点网格，20px → 24px（sp-5）。 */
+  padding: var(--k12-sp-5);
   border-radius: var(--k12-r-inset);
   background: color-mix(in srgb, var(--k12-surface) 8%, transparent);
   border: 1px solid color-mix(in srgb, var(--k12-surface) 16%, transparent);
 }
 .anim__fallback-text {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-body);
   color: var(--k12-screen-fg);
   white-space: pre-wrap;
@@ -1554,7 +1555,7 @@ onDeactivated(() => {
  * 这里**不留空容器**：降级块现在只有「文字要点 + 一句提示」两块内容。 */
 .anim__reason {
   margin-top: 12px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-screen-dim);
 }
@@ -1607,18 +1608,18 @@ onDeactivated(() => {
   background: var(--k12-accent);
 }
 .anim__time {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
   flex: none;
 }
 .anim__control-err {
   padding: 0 18px 14px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-warn);
 }
 
 .anim__note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
   padding: 0 2px;
@@ -1630,7 +1631,7 @@ onDeactivated(() => {
 }
 .anim__note code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   padding: 1px 6px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
@@ -1656,13 +1657,13 @@ onDeactivated(() => {
 }
 /* 13px：次级区块标题，不得与身份行争字号。 */
 .strip__title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
 .strip__meta {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 /* 横向排开：项宽固定 220px、项高**下限** 108px（可随内容长高，见 .tpl）。
@@ -1677,7 +1678,7 @@ onDeactivated(() => {
   padding-bottom: 2px;
 }
 .strip__empty {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
   padding: 12px 2px;
@@ -1745,7 +1746,7 @@ onDeactivated(() => {
 .tpl__name {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 620;
   line-height: var(--k12-lh-snug);
   color: var(--k12-fg);
@@ -1758,7 +1759,7 @@ onDeactivated(() => {
   overflow: hidden;
 }
 .tpl__concept {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
   white-space: nowrap;
   overflow: hidden;
@@ -1785,7 +1786,7 @@ onDeactivated(() => {
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
 }
 .anim__strip-note {
   background: var(--k12-surface-2);
@@ -1795,7 +1796,7 @@ onDeactivated(() => {
   margin-top: 2px;
   padding: 10px 11px;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
 }
 </style>

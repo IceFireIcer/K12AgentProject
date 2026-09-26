@@ -31,11 +31,16 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const PROBE = readFileSync(join(HERE, 'ux-page-probe.js'), 'utf8')
 const BASE = process.env.K12_DEBUG_BASE ?? 'http://127.0.0.1:9222'
 
-/** 三个视口：最窄（窗口下限）/ 常见 / 设计基准。 */
+/**
+ * 四个视口（优化报告 §2.2：新增 1024 档）：
+ *   1024 平板/小笔记本（窗口下限，1024 起不再横向滚动）
+ *   1280 标准笔记本（右栏可折） · 1440 设计基准 · 1920 超宽
+ */
 const VIEWPORTS = [
-  [1120, 700],
+  [1024, 700],
   [1280, 800],
-  [1440, 900]
+  [1440, 900],
+  [1920, 1080]
 ]
 
 /**

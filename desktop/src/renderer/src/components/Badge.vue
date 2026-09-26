@@ -11,18 +11,26 @@
  *   「看起来拿到了但其实是空的」徽章）。
  */
 import { computed } from 'vue'
+import type { BadgeLevel } from '../types/component-props'
+import { badgeLevelIndex, badgeLevelOf } from './badge-level'
 
 const props = defineProps<{
   /** 徽章原值（如 `熟练-3`）；空 = 还没有徽章。 */
   badge: string | null
   /** 徽章对应的知识点名（悬停提示用，可空）。 */
   name?: string
+  /**
+   * 档位（**严格枚举**，报告 §4.2 的「Badge.level 改枚举」）。
+   *
+   * ★ 后端下发的是**中文档位名 + 计数**的原样串（`熟练-3`），所以默认从 `badge` 里解析；
+   *   调用方若已经知道英文档位（将来服务端直接给 level 的场景），可以显式传它覆盖解析。
+   *   两条路的取值都收在 {@link BADGE_LEVELS} 这五个字面量上 —— 不再有「任意字符串」。
+   */
+  level?: BadgeLevel
   /** 紧凑模式（列表里的小尺寸）。 */
   compact?: boolean
 }>()
 
-/** 五档（与 `routes/quiz.py` 的 `BADGE_LEVELS` 一一对应，**顺序也是契约**）。 */
-const BADGE_TIERS = ['起步', '初通', '熟练', '精通', '大师'] as const
 /**
  * 每档的配色（按档位递进：灰 → 学段色 → 学段压深色 → 青 → 金）。
  *
@@ -49,10 +57,14 @@ const parts = computed(() => {
   return { tier, count: Number.isFinite(count) ? count : 0 }
 })
 
-/** 档位序号（0 = 起步；认不出的档位名退回 0，不猜高档）。 */
+/**
+ * 档位序号（0 = 起步；认不出的档位名退回 0，不猜高档）。
+ * ★ 序号来自**枚举**（`props.level` 显式给的那一档，或从原值解析出来的那一档），
+ *   不再直接拿字符串去 indexOf 中文名。
+ */
 const tierIndex = computed(() => {
-  const index = BADGE_TIERS.indexOf(parts.value.tier as (typeof BADGE_TIERS)[number])
-  return index >= 0 ? index : 0
+  const level = props.level ?? badgeLevelOf(props.badge)
+  return badgeLevelIndex(level)
 })
 
 const color = computed(() => TIER_COLORS[tierIndex.value] ?? TIER_COLORS[0])
@@ -114,7 +126,7 @@ const title = computed(() => {
   gap: 5px;
   padding: 3px 9px 3px 6px;
   border-radius: var(--k12-r-pill);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   line-height: var(--k12-lh-snug);
   color: var(--k12-fg);
@@ -129,7 +141,7 @@ const title = computed(() => {
 .badge--compact {
   padding: 2px 7px 2px 5px;
   /* k12-mark：紧凑徽章（列表里的小记号），角标档 11px —— 与 .badge 的 12px 拉开一档 */
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
 }
 
 /* 还没拿到：中性虚线档（**不是锁态** —— 去掉关卡锁定后这里只表示「再答对几题就有」） */
@@ -173,7 +185,8 @@ const title = computed(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .badge {
+  /* «关闭»档要能覆盖系统偏好（见 base.css 的减动效说明）：:not(...) 是那半个开关 */
+  :root:not([data-k12-reduced-motion='off']) .badge {
     animation: none;
   }
 }

@@ -56,6 +56,8 @@ import { useStudyStore, type SessionSummaryShape } from '../stores/study'
 import { displaySessionTitle } from '../study/session-title'
 import { useViewModeStore } from '../stores/viewMode'
 import { useDismissable } from '../composables/useDismissable'
+import Skeleton from './Skeleton.vue'
+import VirtualList from './VirtualList.vue'
 
 const chat = useChatStore()
 const confirm = useConfirm()
@@ -431,9 +433,16 @@ function relativeTime(ms: number): string {
       {{ chat.sessionBridgeError }}
     </p>
 
-    <p v-if="study.sessionsLoading && items.length === 0" class="sl__state" data-testid="session-loading">
-      正在读取…
-    </p>
+    <!-- 加载态：知道内容结构（几条会话行）→ 用**骨架屏**而不是一句「正在读取…」，
+         这样列表出现时不会整体跳一下（优化报告 §3.2 的 Loading 四形态分工）。 -->
+    <div
+      v-if="study.sessionsLoading && items.length === 0"
+      class="sl__state"
+      data-testid="session-loading"
+    >
+      <Skeleton :rows="4" variant="row" />
+      <p class="sl__loading-text">正在读取…</p>
+    </div>
     <p v-else-if="study.sessionsError" class="sl__state sl__state--error" data-testid="session-error">
       {{ study.sessionsError }}
     </p>
@@ -441,10 +450,19 @@ function relativeTime(ms: number): string {
       还没有历史对话，问第一个问题就会出现在这里。
     </p>
 
-    <ul v-else class="sl__list" data-testid="session-tree">
+    <!-- ★ 长列表虚拟化（报告 §5.2 / D10）：超过阈值（默认 60 条）才走虚拟通道。
+         短列表（真机探针跑的那些）走的还是原来那条 `<ul>` 路径，DOM 形状一字未改 ——
+         `ux-audit` 的 D10（树形连接线几何）与折叠 / 右键菜单都不受影响。
+         行模板只有一份：两条路径共用下面这段 slot。 -->
+    <VirtualList
+      v-else
+      class="sl__list"
+      :items="items"
+      :min-item-size="52"
+      data-testid="session-tree"
+    >
+      <template #default="{ item }">
       <li
-        v-for="item in items"
-        :key="item.id"
         class="sl__row"
         :data-depth="item.depth"
         :data-testid="`session-row-${item.id}`"
@@ -477,6 +495,7 @@ function relativeTime(ms: number): string {
           type="button"
           class="sl__fold"
           data-testid="session-fold"
+          data-probe-id="session-fold"
           :aria-expanded="!collapsed.has(item.id)"
           :title="collapsed.has(item.id) ? '展开这条的分支' : '收起这条的分支'"
           @click.stop="toggleCollapse(item.id)"
@@ -561,7 +580,8 @@ function relativeTime(ms: number): string {
           <Ellipsis :size="14" />
         </button>
       </li>
-    </ul>
+      </template>
+    </VirtualList>
   </aside>
 
   <!-- 行菜单（Teleport 到 body：列表是 `overflow-y: auto` 的滚动容器，
@@ -612,7 +632,7 @@ function relativeTime(ms: number): string {
 .sl__title {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
@@ -627,7 +647,7 @@ function relativeTime(ms: number): string {
   border-radius: var(--k12-r-control);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
   flex: none;
@@ -649,7 +669,7 @@ function relativeTime(ms: number): string {
   border-radius: var(--k12-r-inset);
   background: var(--k12-warn-soft);
   color: var(--k12-warn);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
 }
 
@@ -723,7 +743,7 @@ function relativeTime(ms: number): string {
 
 /* 标题单行省略：列表项高度必须齐平（两行的项会让整列看起来没对齐） */
 .sl__item-title {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-ui);
   overflow: hidden;
@@ -810,7 +830,7 @@ function relativeTime(ms: number): string {
   /* ★ 删除用**警示色**而不是默认前景色：菜单里只有这一项，而它的后果不可撤销
    *   （与确认框的 `danger: true` 同一套语义，见 `stores/confirm.ts`）。 */
   color: var(--k12-warn);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   text-align: left;
   cursor: pointer;
@@ -913,7 +933,7 @@ function relativeTime(ms: number): string {
   display: flex;
   align-items: center;
   gap: 3px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -922,7 +942,7 @@ function relativeTime(ms: number): string {
 }
 
 .sl__item-meta {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted-2);
 }
@@ -936,7 +956,7 @@ function relativeTime(ms: number): string {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-accent-ink);
   overflow: hidden;
@@ -950,8 +970,13 @@ function relativeTime(ms: number): string {
 .sl__state {
   flex: none;
   padding: 6px 2px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
+  color: var(--k12-muted-2);
+}
+.sl__loading-text {
+  margin-top: var(--k12-sp-2);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 .sl__state--error {
@@ -959,7 +984,7 @@ function relativeTime(ms: number): string {
 }
 
 /* 窄窗口：这一列收成图标条（与左导航同一档断点 1280） */
-@media (max-width: 1279px) {
+@media (max-width: 1023px) {
   .sl {
     width: 60px;
     padding: 14px 8px;

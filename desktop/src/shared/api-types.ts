@@ -3019,6 +3019,36 @@ export interface components {
             text: string;
         };
         /**
+         * RagLevelAttempt
+         * @description 降级链**一级**的尝试记录（展示用；判定仍然只发生在 ``RagService.search()`` 里）。
+         *
+         *     与 Python 内部 ``app.rag.retriever.LevelAttempt`` **同形**（``level`` / ``ok`` /
+         *     ``detail`` / ``hits``）—— 这里只是把它变成可序列化的契约模型，
+         *     好让「四级降级链」这件事在界面上可观测、可答辩。
+         */
+        RagLevelAttempt: {
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /**
+             * Hits
+             * @default 0
+             */
+            hits: number;
+            /**
+             * Level
+             * @enum {string}
+             */
+            level: "vector" | "cloud" | "fts" | "outline";
+            /**
+             * Ok
+             * @default false
+             */
+            ok: boolean;
+        };
+        /**
          * RagSearchRequest
          * @description ``POST /api/rag/search`` 的请求体（供 Pi 的 `rag_search` Tool 调用）。
          *
@@ -3056,6 +3086,8 @@ export interface components {
          *     **不要**在编排层再实现一遍降级逻辑。
          */
         RagSearchResult: {
+            /** Attempts */
+            attempts?: components["schemas"]["RagLevelAttempt"][];
             /**
              * Context
              * @default
@@ -3067,6 +3099,11 @@ export interface components {
              * @enum {string}
              */
             degraded: "vector" | "cloud" | "fts" | "outline";
+            /**
+             * Gradefilter
+             * @default
+             */
+            gradeFilter: string;
             /** Hits */
             hits?: components["schemas"]["RagHit"][];
         };

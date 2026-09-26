@@ -169,14 +169,14 @@ watch(
    * 它**不是**页面身份行：身份行走 PageIdentity（24px），本页内容区的最大字号
    * 由各分页自己的 hero 承担（ReportTab 的 `.hero__num`），所以这里不能取 xl ——
    * 取了就会与内容抢焦点、且与顶栏 17px 的页面名重复两遍。 */
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 700;
 }
 
 .study__sub {
   margin-top: 3px;
   /* 当前分页的一句话说明 → meta 档 */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
@@ -197,7 +197,7 @@ watch(
   color: var(--k12-muted-2);
   /* 分页按钮 = 学生要点的一串列表项 → 次级正文档。
    * 高度由 padding + line-height 撑着，不钉像素高度 —— 字号抬升不会把它挤变形。 */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   cursor: pointer;
 }
 
@@ -222,7 +222,7 @@ watch(
   background: var(--k12-warn-soft);
   color: var(--k12-warn);
   /* 桥接失败说明 → meta 档 */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: 1.6;
 }
 

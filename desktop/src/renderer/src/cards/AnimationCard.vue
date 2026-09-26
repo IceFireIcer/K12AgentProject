@@ -36,6 +36,10 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { InlineCard } from '../api/events'
 import { GRADE_LABELS } from '../labels'
+import { useDiagnosticsStore } from '../stores/diagnostics'
+import CardHeader from '../components/card/CardHeader.vue'
+import CardBody from '../components/card/CardBody.vue'
+import DiagPeekButton from '../components/diag/DiagPeekButton.vue'
 import {
   AnimationSandboxHost,
   SANDBOX_ATTRIBUTE,
@@ -162,6 +166,8 @@ const mountIframe = ref<boolean>(shouldMountIframe(view.html))
 
 /** 是否已进入降级视图（文字讲解）。 */
 const degraded = ref<boolean>(false)
+/** 演示模式的沙箱事件（渲染进程独有；主进程看不到 iframe 与 Worker）。 */
+const diagnostics = useDiagnosticsStore()
 /**
  * 降级的可读原因（**只进 `data-*` 属性**，不摆给学生看 —— 学生只该看到「能动/不能动」）。
  * 例：「沙箱在 5 秒内没有就绪（payloadId=xxxxx）」；这类内部细节（含 payloadId）留在这里，
@@ -217,6 +223,9 @@ function goDegraded(reason: string): void {
   degraded.value = true
   degradeReason.value = reason
   phase.value = 'degraded'
+  // ★ 演示模式的沙箱事件（渲染进程独有）：5 秒没就绪 / 沙箱自报错误 → 整段降级为文字。
+  //   这一条正是「绝不白屏」那条纪律的可观测证据。
+  diagnostics.noteSandbox({ animationReadyTimeout: /5 秒内没有就绪/.test(reason) })
   // 拆掉 iframe：它已经不可用了，留着只会占内存（也可能继续发消息）
   mountIframe.value = false
   host.value?.dispose()
@@ -320,85 +329,94 @@ watch(iframeEl, (element) => {
 
 <template>
   <article
-    class="anim"
+    class="k12-card anim"
     :class="{ 'anim--expanded': expanded, 'anim--degraded': degraded }"
     data-testid="animation-card"
     :data-degraded="String(degraded)"
     :data-phase="phase"
     :data-payload-id="payloadId"
   >
-    <header class="anim__head">
-      <span class="title">动画讲解</span>
-      <span v-if="view.concept" class="chip" data-testid="animation-concept">{{ view.concept }}</span>
-      <!-- ── 来源两态切换（内置 / 我的）──────────────────────────────────
-           原来是**一颗只读的来源标签**（内置模板 / 即时生成）：学生看到它，却改不了它。
-           现在它是两个可点的按钮 —— 「内置」是本张卡片带来的那一份，「我的」是动画库里
-           存过的那一份（没有时按钮不可点，而不是点了报错）。
-           ⚠️ 选中态的配方与 `views/Animation.vue` 的 `.tpl--on`、`views/Study.vue` 的
-             `.tab--on` **一致**（accent-soft 底 + accent-border 描边 + accent-ink 文字）：
-             同一个「我在看这一份」的意思，在三处必须是同一个长相。 -->
-      <span class="src" role="group" aria-label="动画来源">
+    <CardHeader>
+      <template #title>
+        <span class="title">动画讲解</span>
+      </template>
+      <template #meta>
+        <span v-if="view.concept" class="chip" data-testid="animation-concept">{{ view.concept }}</span>
+        <!-- ── 来源两态切换（内置 / 我的）──────────────────────────────────
+             原来是**一颗只读的来源标签**（内置模板 / 即时生成）：学生看到它，却改不了它。
+             现在它是两个可点的按钮 —— 「内置」是本张卡片带来的那一份，「我的」是动画库里
+             存过的那一份（没有时按钮不可点，而不是点了报错）。
+             ⚠️ 选中态的配方与 `views/Animation.vue` 的 `.tpl--on`、`views/Study.vue` 的
+               `.tab--on` **一致**（accent-soft 底 + accent-border 描边 + accent-ink 文字）：
+               同一个「我在看这一份」的意思，在三处必须是同一个长相。 -->
+        <span class="src" role="group" aria-label="动画来源">
+          <button
+            type="button"
+            class="src__btn"
+            :class="{ 'src__btn--on': source === 'builtin' }"
+            :aria-pressed="source === 'builtin'"
+            data-testid="animation-source-builtin"
+            @click="emit('switch-source', 'builtin')"
+          >内置</button>
+          <button
+            type="button"
+            class="src__btn"
+            :class="{ 'src__btn--on': source === 'mine' }"
+            :aria-pressed="source === 'mine'"
+            :disabled="!hasSaved"
+            :title="hasSaved ? '看我保存过的那一份' : '这一份还没有保存过'"
+            data-testid="animation-source-mine"
+            @click="emit('switch-source', 'mine')"
+          >我的</button>
+        </span>
+        <span v-if="gradeChip" class="chip" data-testid="animation-grade">{{ gradeChip }}</span>
+        <span
+          class="chip"
+          :class="degraded ? 'chip--warn' : phase === 'ready' ? 'chip--ok' : ''"
+          data-testid="animation-status"
+        >{{ statusText }}</span>
+        <span v-if="view.source === 'template' && phase === 'ready'" class="chip tool" data-testid="animation-duration">
+          {{ (view.durationMs / 1000).toFixed(1) }}s
+        </span>
+      </template>
+      <template #actions>
+        <!-- 演示档专用：就地看「沙箱有没有在 5 秒内就绪 / 有没有降级为文字」 -->
+        <DiagPeekButton />
+        <!-- 对象级动作（这张卡自己的）：按当前学段重画 / 在线生成 / 全屏看 -->
         <button
           type="button"
-          class="src__btn"
-          :class="{ 'src__btn--on': source === 'builtin' }"
-          :aria-pressed="source === 'builtin'"
-          data-testid="animation-source-builtin"
-          @click="emit('switch-source', 'builtin')"
-        >内置</button>
+          class="btn"
+          :disabled="generating"
+          data-testid="animation-redraw"
+          v-if="canRedraw"
+          @click="emit('redraw')"
+        >按当前学段重画</button>
         <button
           type="button"
-          class="src__btn"
-          :class="{ 'src__btn--on': source === 'mine' }"
-          :aria-pressed="source === 'mine'"
-          :disabled="!hasSaved"
-          :title="hasSaved ? '看我保存过的那一份' : '这一份还没有保存过'"
-          data-testid="animation-source-mine"
-          @click="emit('switch-source', 'mine')"
-        >我的</button>
-      </span>
-      <span v-if="gradeChip" class="chip" data-testid="animation-grade">{{ gradeChip }}</span>
-      <span
-        class="chip"
-        :class="degraded ? 'chip--warn' : phase === 'ready' ? 'chip--ok' : ''"
-        data-testid="animation-status"
-      >{{ statusText }}</span>
-      <span v-if="view.source === 'template' && phase === 'ready'" class="chip tool" data-testid="animation-duration">
-        {{ (view.durationMs / 1000).toFixed(1) }}s
-      </span>
-      <span class="spacer" />
-      <button
-        type="button"
-        class="btn"
-        :disabled="generating"
-        data-testid="animation-redraw"
-        v-if="canRedraw"
-        @click="emit('redraw')"
-      >按当前学段重画</button>
-      <button
-        type="button"
-        class="btn btn--primary"
-        :disabled="generating"
-        data-testid="animation-generate"
-        @click="emit('generate')"
-      >{{ generating ? '正在做…' : '在线生成' }}</button>
-      <button
-        type="button"
-        class="btn btn--ghost"
-        data-testid="animation-expand"
-        :title="expanded ? '回到对话里' : '放大到全屏看（卡片里是缩略，字会小一些）'"
-        @click="toggleExpand"
-      >
-        {{ expanded ? '收起' : '全屏看' }}
-      </button>
-    </header>
+          class="btn btn--primary"
+          :disabled="generating"
+          data-testid="animation-generate"
+          @click="emit('generate')"
+        >{{ generating ? '正在做…' : '在线生成' }}</button>
+        <button
+          type="button"
+          class="btn btn--ghost"
+          data-testid="animation-expand"
+          :title="expanded ? '回到对话里' : '放大到全屏看（卡片里是缩略，字会小一些）'"
+          @click="toggleExpand"
+        >
+          {{ expanded ? '收起' : '全屏看' }}
+        </button>
+      </template>
+    </CardHeader>
 
-    <!-- 父组件给的提示（没做成 / 已经去问了）：**只说学生能感知的事**，
-         内部原因（哪个环节失败）留在控制台，不摆在这里。 -->
-    <p v-if="notice" class="anim__notice" data-testid="animation-notice">{{ notice }}</p>
+    <CardBody>
+      <!-- 父组件给的提示（没做成 / 已经去问了）：**只说学生能感知的事**，
+           内部原因（哪个环节失败）留在控制台，不摆在这里。 -->
+      <p v-if="notice" class="anim__notice" data-testid="animation-notice">{{ notice }}</p>
 
-    <!-- ── 可播放的沙箱 ─────────────────────────────────────────── -->
-    <div v-if="mountIframe" class="anim__stage">
+      <!-- ── 可播放的沙箱 ─────────────────────────────────────────── -->
+      <div v-if="mountIframe" class="anim__stage">
       <!-- ── 可播放的沙箱（**只用内联 `srcdoc`**，理由见 script 里 mountIframe 的注释）──
          ⚠️ 不要给 `:src` 或把一次性 nonce 地址绑上来：载荷里的地址是**持久化的**，
          而 nonce 单次消费 + TTL 120s，任何第二次加载都会拿到 403 JSON 被渲染给学生。
@@ -431,34 +449,32 @@ watch(iframeEl, (element) => {
       </div>
     </div>
 
-    <!-- ── 降级视图：文字讲解（**这条分支的存在就是为了不白屏**） ── -->
-    <div v-else class="anim__fallback" data-testid="animation-fallback">
-      <p class="anim__fallback-text" data-testid="animation-fallback-text">{{ view.fallbackText }}</p>
-      <!-- ★ 这里原来还有一张 `<img class="anim__fallback-img">`：主进程按**同一段文案**
-           生成的静态 SVG（正文截 34 字，见 `src/main/agent/extensions/animation.ts` 的
-           `buildInlineFallbackImage`）。它与上面那段完整文案说的是同一件事，现在整段删掉 ——
-           降级说明只留一处（报告 1.8 / 4.3）。主进程那段生成照旧保留：载荷契约那一侧
-           还有别的消费者，要删得先确认；本卡片只是不再引用 `view.fallbackImage`。 -->
-      <p
-        v-if="degraded"
-        class="anim__reason"
-        data-testid="animation-degrade-reason"
-        :data-degrade-reason="degradeReason || null"
-      >
-        {{ DEGRADED_NOTICE_TEXT }}
-      </p>
-    </div>
+      <!-- ── 降级视图：文字讲解（**这条分支的存在就是为了不白屏**） ── -->
+      <div v-else class="anim__fallback" data-testid="animation-fallback">
+        <p class="anim__fallback-text" data-testid="animation-fallback-text">{{ view.fallbackText }}</p>
+        <!-- ★ 这里原来还有一张 `<img class="anim__fallback-img">`：主进程按**同一段文案**
+             生成的静态 SVG（正文截 34 字，见 `src/main/agent/extensions/animation.ts` 的
+             `buildInlineFallbackImage`）。它与上面那段完整文案说的是同一件事，现在整段删掉 ——
+             降级说明只留一处（报告 1.8 / 4.3）。主进程那段生成照旧保留：载荷契约那一侧
+             还有别的消费者，要删得先确认；本卡片只是不再引用 `view.fallbackImage`。 -->
+        <p
+          v-if="degraded"
+          class="anim__reason"
+          data-testid="animation-degrade-reason"
+          :data-degrade-reason="degradeReason || null"
+        >
+          {{ DEGRADED_NOTICE_TEXT }}
+        </p>
+      </div>
+    </CardBody>
   </article>
 </template>
 
 <style scoped>
 .anim {
-  padding: 14px 16px;
-  /* 卡片本体 → 卡片圆角 + paper 白面（与 base.css 的 .k12-card 同配方） */
-  border-radius: var(--k12-r-card);
-  background: var(--k12-surface);
-  border: 1px solid var(--k12-border-strong);
-  box-shadow: var(--k12-shadow-card);
+  /* 卡片皮肤（白面 / 边框 / 圆角 / 投影）唯一来源 = base.css 的 `.k12-card`；
+   * 三段结构的内边距与底色 = `.k12-card-head/-body/-foot`。 */
+  min-width: 0;
   /**
    * ★★ 舞台高度 = **按比例 + 下限 + 上限**，不是定值。
    *
@@ -526,7 +542,7 @@ watch(iframeEl, (element) => {
   border: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-ui);
 }
@@ -570,7 +586,7 @@ watch(iframeEl, (element) => {
   background: transparent;
   padding: 2px 11px;
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-ui);
   cursor: pointer;
@@ -608,27 +624,19 @@ watch(iframeEl, (element) => {
    * 不涂成红色（红的留给「连文字都看不成」那种真正的失败）。 */
   background: var(--k12-surface-2);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
 }
 
-.anim__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
 .title {
-  /* 卡片标题 → 区块标题档（与 ProgressCard / QuizCard 的 `.title` 同一落点） */
-  font-size: var(--k12-fs-lg);
+  /* 档位由 `.k12-card-head` 给（h3 20px）；这里只补字重 */
   font-weight: 650;
 }
 
 .tool {
   font-family: var(--k12-font-mono);
   /* 时长读数这类等宽小字：meta 档（不是 ≤4 字角标，角标另走 .chip） */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 500;
 }
 
@@ -646,7 +654,7 @@ watch(iframeEl, (element) => {
   border-radius: var(--k12-r-card);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
 }
@@ -681,13 +689,8 @@ watch(iframeEl, (element) => {
   color: var(--k12-fg-2);
 }
 
-.spacer {
-  flex: 1 1 auto;
-}
-
 .anim__stage {
   position: relative;
-  margin-top: 12px;
 }
 
 .anim__frame {
@@ -722,7 +725,7 @@ watch(iframeEl, (element) => {
   justify-content: center;
   margin: 0;
   /* 加载说明是一整句给学生看的话 → 次级正文档（与 views/Animation.vue 的 `.anim__veil` 同一落点） */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   color: var(--k12-muted);
   /* 半透明遮罩：压在 iframe 之上（与 views/Animation.vue 的 `.anim__veil` 同一手法） */
   background: color-mix(in srgb, var(--k12-surface) 86%, transparent);
@@ -740,7 +743,7 @@ watch(iframeEl, (element) => {
 
 .anim__progress {
   /* 旧值不在 8 档之内：进度读数是 meta → meta 档（与 views/Animation.vue 的 `.anim__time` 同一落点） */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -764,7 +767,7 @@ watch(iframeEl, (element) => {
 
 .anim__fallback-text {
   /* 降级后的文字讲解 = 沙箱位置的替代正文 → 正文档 */
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: 1.85;
   white-space: pre-wrap;
   word-break: break-word;
@@ -776,7 +779,7 @@ watch(iframeEl, (element) => {
 .anim__reason {
   margin-top: 10px;
   /* 降级气泡下的脚注 → meta 档（与 views/Animation.vue 的 `.anim__reason` 同一落点） */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: 1.6;
   color: var(--k12-muted-2);
 }

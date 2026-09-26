@@ -45,6 +45,7 @@ import {
 } from '../stores/animation'
 import { useChatStore } from '../stores/chat'
 import { useModelStore } from '../stores/model'
+import { useReducedMotion } from '../composables/useReducedMotion'
 import type { GradeLevel } from '@shared/ipc-events'
 import AnimationCard from './AnimationCard.vue'
 import CodingCard from './CodingCard.vue'
@@ -118,8 +119,16 @@ const gradeLevel = computed<string | null>(() => {
  * ★ 重建键：**来源一变就换实例** —— 这是「载荷只读一次」那个约束唯一的解法。
  *
  * 键里带上卡片 id（同一条消息里可能有好几张动画卡片，它们的实例不能互相串）。
+ *
+ * ★★ 2026-09-27（报告 §3.3）：键里再带上**减动效的有效值** —— 沙箱是独立文档
+ *   （没有同源权限），宿主读得到 `prefers-reduced-motion`，但宿主的"设置页三档开关"
+ *   是写在宿主 `<html>` 上的属性，沙箱看不见。所以设置一变就重建 iframe：
+ *   新文档重新读一次偏好，动画立刻按新模式播（见 `_shared/runtime.js` 的减动效段）。
  */
-const animationKey = computed(() => `${props.card.id}#${source.value}`)
+const reducedMotion = useReducedMotion()
+const animationKey = computed(
+  () => `${props.card.id}#${source.value}#${reducedMotion.value ? 'reduced' : 'full'}`
+)
 
 /** 已经离开的卡片不再占状态（消息列表会整段重画）。 */
 onBeforeUnmount(() => {

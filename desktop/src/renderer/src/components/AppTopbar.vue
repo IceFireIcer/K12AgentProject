@@ -110,7 +110,15 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
            ★ 学生视角下弹层是**只读**的（换模型连带 BaseURL/Key/计费，是老师或家长的事），
              所以 `modelTitle` 也随视角变 —— 学生视角下不再写「点击更换」，
              否则就是承诺一件点不动的事（见 `ModelPicker.vue` 文件头）。 -->
-      <button type="button" class="tb__model" :title="modelTitle" @click="model.openPicker()">
+      <!-- 稳定锚点（优化报告 §5.3）：探针按 `topbar-model` 找这颗 chip；
+           此前只有类名 `.tb__model`，探针只能靠 `composer-model` 兜底。 -->
+      <button
+        type="button"
+        class="tb__model"
+        data-testid="topbar-model"
+        :title="modelTitle"
+        @click="model.openPicker()"
+      >
         <Cpu :size="13" />
         <span class="tb__model-name">{{ model.shortLabel }}</span>
       </button>
@@ -134,7 +142,8 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
   gap: 16px;
   padding: 0 24px;
   background: var(--k12-surface);
-  border-bottom: 1px solid var(--k12-border);
+  /* chrome 与内容的分隔用**强边框**（优化报告 §2.1：顶栏加底部 border 增强分隔）。 */
+  border-bottom: 1px solid var(--k12-border-strong);
   position: relative;
   z-index: 2;
   color: var(--k12-fg);
@@ -151,16 +160,18 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
   gap: 1px;
 }
 .tb__title {
-  /* ★ 15px —— 刻意**小于**内容区的身份行（22px）与卡片标题（16px）。
+  /* ★ 18px（`--k12-fs-body-lg`）—— 刻意**小于**内容区的身份行（h1 32px），
+   *   也小于卡片/区块标题（h3 20px）。
    *
    * 顶栏是 chrome：它回答「你在哪一页」，不回答「这页在讲什么」。
-   * 此前是 18px，比内容区最大的字号（16px）还大 —— 于是整页的重心落在外壳上，
-   * 内容反而退到后面。这是本轮排版返工的第一个根因。
-   * 现在内容区的最大字号由各页的 `.k12-identity`（22px）承担，chrome 退后。 */
-  font-size: var(--k12-fs-title);
+   * 历史：它曾是 18px，而内容区最大只有 16px ⇒ 整页重心落在外壳上；
+   * 2026-09-27 按优化报告 §2.1 定为 18px（body-lg）+ fg-2，让 chrome 退到次级层级，
+   * 而内容区的最大视觉焦点交给 `.k12-identity`（h1 32px）。 */
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   line-height: var(--k12-lh-tight);
-  color: var(--k12-fg);
+  /* 次级层级（优化报告 §2.1：chrome 用 fg-2，主标题才用 fg）。 */
+  color: var(--k12-fg-2);
   /* 窄窗口下**截断标题**而不是把右边那排控件挤出窗口 */
   overflow: hidden;
   text-overflow: ellipsis;
@@ -168,7 +179,7 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
 }
 /* 副标题说明「你现在在学什么」，是内容不是装饰，用 fg-2（9.2:1）而非 muted */
 .tb__sub {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg-2);
   overflow: hidden;
@@ -215,7 +226,7 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
  * 所以用 meta 档（`--k12-fs-xs`），而不是角标档。角标档只给 ≤4 字的记号。 */
 .tb__model-name {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
 }
 </style>

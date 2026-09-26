@@ -864,7 +864,7 @@ async function exportCsv(): Promise<void> {
             v-if="focusedNode"
             class="insp"
             tone="float"
-            :padding="'var(--k12-sp-3)'"
+            padding="sm"
             data-testid="dependency-inspector"
           >
             <header class="insp__head">
@@ -1059,7 +1059,7 @@ async function exportCsv(): Promise<void> {
          ⚠️ 用 el-collapse 而不是自写手风琴：EP 的折叠有正确的
             `aria-expanded` / 键盘语义，且 `--el-transition-duration: 0s`
             已在 base.css 里把展开动画归零（本版不做装饰性动效）。 -->
-    <SurfacePanel class="appendix" :padding="'0 var(--k12-sp-4)'">
+    <SurfacePanel class="appendix" padding="none">
       <el-collapse class="appendix__collapse">
         <el-collapse-item name="rules">
           <template #title>
@@ -1167,14 +1167,14 @@ async function exportCsv(): Promise<void> {
 .dg__done code,
 .notes code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
 }
 .btn__label {
   margin-left: 6px;
 }
 /* 导出回执：一行 meta（不占版面，也不做自动消失的定时器） */
 .dg__done {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-good);
 }
 .dg__done code {
@@ -1185,7 +1185,7 @@ async function exportCsv(): Promise<void> {
 }
 /* 导出取消 / 失败：一行状态，不是横幅（它不是页面的主要状态） */
 .dg__export-note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -1194,7 +1194,7 @@ async function exportCsv(): Promise<void> {
 }
 /* 教师视角里的口径句（数据来源 / 处置）：12px meta，与栅格里的说明同档 */
 .dg__tech {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1231,7 +1231,7 @@ async function exportCsv(): Promise<void> {
   padding: 8px 11px;
   border-radius: var(--k12-r-inset);
   background: var(--k12-surface-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -1290,7 +1290,7 @@ async function exportCsv(): Promise<void> {
   background: var(--k12-surface-2);
   color: var(--k12-muted);
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
 }
 .layer__nodes {
   flex: 1;
@@ -1341,7 +1341,7 @@ async function exportCsv(): Promise<void> {
  * 现在节点 ≥14px（与正文同级、字重更高），任何侧栏 / 浮层的标签都不得压过它。
  * ⚠️ 这是本页的焦点规则：不要为了"塞下更多标签"把节点降回 13px。 */
 .node__name {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   font-weight: 650;
   color: var(--k12-fg);
 }
@@ -1358,7 +1358,7 @@ async function exportCsv(): Promise<void> {
 .node__tag {
   padding: 2px 7px;
   border-radius: var(--k12-r-flat);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   background: var(--k12-surface-2);
   color: var(--k12-muted);
@@ -1370,7 +1370,7 @@ async function exportCsv(): Promise<void> {
 /* 掌握度百分比是读数（meta）→ 12px */
 .node__pct {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
@@ -1419,7 +1419,7 @@ async function exportCsv(): Promise<void> {
 }
 /* 13px：不得压过画布节点的 14px —— 它只是浮层的分组标签。 */
 .insp__title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
@@ -1428,7 +1428,7 @@ async function exportCsv(): Promise<void> {
 }
 .insp__meta {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 /* 选中节点名 14px：明显低于身份行的 22px，且与它所描述的那个节点**同档** ——
@@ -1436,7 +1436,7 @@ async function exportCsv(): Promise<void> {
  * ⚠️ 不得升回 16px 以上；也不要用 --k12-fs-title（15px）——
  *    契约里那个档位**只给顶栏页面名（chrome）**，不得用于内容区。 */
 .insp__name {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   font-weight: 650;
   color: var(--k12-fg);
   line-height: var(--k12-lh-snug);
@@ -1448,13 +1448,13 @@ async function exportCsv(): Promise<void> {
   background: var(--k12-surface-2);
   color: var(--k12-accent-ink);
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   /* 长 kp_id 不换行会把浮层顶宽 */
   word-break: break-all;
 }
 .insp__hint {
   margin-top: -2px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .insp__kv {
@@ -1478,17 +1478,17 @@ async function exportCsv(): Promise<void> {
 }
 .insp__mastery-num {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
 .insp__label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 /* 「还没有记录」这类中性说明：与 muted 同档，不吓人也不消失 */
 .insp__none {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -1514,7 +1514,7 @@ async function exportCsv(): Promise<void> {
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1534,7 +1534,7 @@ async function exportCsv(): Promise<void> {
 .insp__row dt {
   flex: none;
   width: 52px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .insp__row dd {
@@ -1543,7 +1543,7 @@ async function exportCsv(): Promise<void> {
   align-items: center;
   gap: 5px;
   flex-wrap: wrap;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-fg-2);
 }
@@ -1552,7 +1552,7 @@ async function exportCsv(): Promise<void> {
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
 }
 .insp__tag[data-mastered='true'] {
@@ -1560,7 +1560,7 @@ async function exportCsv(): Promise<void> {
   color: var(--k12-accent-ink);
 }
 .insp__dim {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   font-weight: 400;
 }
@@ -1584,7 +1584,7 @@ async function exportCsv(): Promise<void> {
   padding-right: 2px;
 }
 .edges__none {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 .edge {
@@ -1607,7 +1607,7 @@ async function exportCsv(): Promise<void> {
   }
 }
 .edge__name {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-fg-2);
 }
@@ -1617,13 +1617,13 @@ async function exportCsv(): Promise<void> {
 }
 .edge__rel {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 /* 内部 slug（教师视角）：等宽 + 折行，它是要被**核对**的值，不截断。 */
 .edge__ids {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   color: var(--k12-muted);
   word-break: break-all;
 }
@@ -1634,6 +1634,11 @@ async function exportCsv(): Promise<void> {
  * 这里只去掉 EP 折叠自身的两条边框（外层 SurfacePanel 已有卡边框）。 */
 .appendix__collapse {
   border: none;
+}
+/* ★ 内边距走 SurfacePanel 的枚举（报告 §4.2）之后，这里补回「横向 16 / 纵向 0」：
+ *   折叠头的分隔线要通到卡片边缘，所以纵向不能有 padding（见 .appendix__collapse 的 border 归零）。 */
+.appendix {
+  padding: 0 var(--k12-sp-4);
 }
 .appendix__collapse :deep(.el-collapse-item__header),
 .appendix__collapse :deep(.el-collapse-item__wrap) {
@@ -1647,7 +1652,7 @@ async function exportCsv(): Promise<void> {
   padding-bottom: var(--k12-sp-4);
 }
 .appendix__t {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
@@ -1668,18 +1673,18 @@ async function exportCsv(): Promise<void> {
   min-width: 0;
 }
 .appendix__h {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .appendix__p {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
 .appendix__p code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   padding: 1px 5px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
@@ -1698,7 +1703,7 @@ async function exportCsv(): Promise<void> {
   gap: 6px;
 }
 .notes li {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1727,7 +1732,7 @@ async function exportCsv(): Promise<void> {
   flex: none;
 }
 .quick__l {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   margin-right: 2px;
 }
@@ -1739,7 +1744,7 @@ async function exportCsv(): Promise<void> {
   border-radius: var(--k12-r-pill);
   background: var(--k12-surface);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1779,24 +1784,24 @@ async function exportCsv(): Promise<void> {
 .qgroup__sum::before {
   content: '▸';
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   transition: transform var(--k12-dur-state) var(--k12-ease-state);
 }
 .qgroup[open] > .qgroup__sum::before {
   transform: rotate(90deg);
 }
 @media (prefers-reduced-motion: reduce) {
-  .qgroup__sum::before {
+  :root:not([data-k12-reduced-motion='off']) .qgroup__sum::before {
     transition: none;
   }
 }
 .qgroup__title {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-fg-2);
 }
 .qgroup__count {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .qgroup__items {
@@ -1812,7 +1817,7 @@ async function exportCsv(): Promise<void> {
   border-radius: var(--k12-r-pill);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {

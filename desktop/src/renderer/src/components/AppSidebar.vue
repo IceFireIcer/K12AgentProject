@@ -96,7 +96,9 @@ interface NavItem {
 
 /** 侧栏项：被 `visibleInSidebar` 放行的页，按 `PAGE_ORDER` 的顺序（不另排序、不另起名） */
 const navItems = computed<NavItem[]>(() =>
-  PAGE_ORDER.filter((name) => visibleInSidebar(PAGES[name], viewMode.isTeacher)).map((name) => ({
+  // ★ 传的是**档位**而不是「是不是教师视角」：三档之后「可见」由档位高低决定
+  //   （演示档看得到教师档的页），判据收口在 `visibleInSidebar` 里。
+  PAGE_ORDER.filter((name) => visibleInSidebar(PAGES[name], viewMode.mode)).map((name) => ({
     name,
     title: PAGES[name].title,
     icon: ICONS[PAGES[name].icon ?? ''] ?? LayoutDashboard
@@ -290,14 +292,14 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   min-width: 0;
 }
 .sb__brand-name {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   line-height: var(--k12-lh-snug);
   color: var(--k12-fg);
 }
 .sb__brand-sub {
   /* 产品副标题 = 说明性 meta，不是角标 */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   /* ★ 行高必须显式写 snug：不写就继承正文的 1.7，两行标签块被撑到 43.8px ——
    * 比 36px 的品牌标还高，品牌带因此比顶栏高一截（垂直节奏错位）。
    * 写 snug 之后 40.2px，稳稳落在 64px 的品牌带里。 */
@@ -351,7 +353,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   justify-content: center;
   background: color-mix(in srgb, var(--k12-accent) 16%, var(--k12-surface));
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   font-weight: 600;
 }
 .sb__student-text {
@@ -362,7 +364,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   flex: 1;
 }
 .sb__student-name {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   color: var(--k12-fg);
   /* 侧栏是 chrome，不是正文：两行都不吃正文的 1.7 行高 ——
@@ -372,7 +374,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
 /* 「初中 · AI 引擎推算」是「系统在适配我」的唯一可见证据，用 fg-2 保证可读；
  * 它是**可读的键值说明**（学段 + 来源），不是角标，用 12px。 */
 .sb__student-grade {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg-2);
 }
@@ -394,7 +396,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
 /* 组标题（「能力」「学习数据」）：它是**分组标题**，不是角上的记号。
  * 它比导航项（14px）小、比角标大 —— 12px 是它该在的档。 */
 .sb__section-label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-muted);
   letter-spacing: 0.02em;
@@ -412,7 +414,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   border-radius: var(--k12-r-control);
   background: transparent;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   font-weight: 500;
   cursor: pointer;
   text-align: left;
@@ -482,7 +484,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   background: var(--k12-bad);
 }
 .sb__stat-k {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 550;
   color: var(--k12-fg-2);
 }
@@ -494,7 +496,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
 }
 /* 起不来时把原因列出来（细节同时在 title 里，窄屏折掉这行也读得到） */
 .sb__stat-err {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-bad);
   word-break: break-word;
@@ -502,7 +504,7 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
 
 /* ── 窄窗口：收成图标条（断点 1280，同时右栏在 ChatView 里改浮层）─────────
  * ★ 只有这一档隐藏文字；≥1280px 是完整的 248px 栏（目标窗口 1440×900）。 */
-@media (max-width: 1279px) {
+@media (max-width: 1023px) {
   .sb {
     width: var(--k12-w-sidebar-narrow);
   }

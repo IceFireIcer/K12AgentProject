@@ -100,14 +100,14 @@ const label = computed(() => {
 
 .progress__label {
   flex: none;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .progress__fill {
+  :root:not([data-k12-reduced-motion='off']) .progress__fill {
     transition: none;
   }
 }

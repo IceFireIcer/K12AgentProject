@@ -23,8 +23,21 @@
  */
 import { computed } from 'vue'
 import { edgePath, nodeLabel, nodeRect, type GraphLayout } from './layout'
+import { edgeRect, visibleItems, type MapViewport } from './culling'
 
-const props = defineProps<{ layout: GraphLayout; selected?: string }>()
+const props = defineProps<{
+  layout: GraphLayout
+  selected?: string
+  /**
+   * 当前视口（画布坐标；由 `MapTab.vue` 跟着滚动容器给）。
+   *
+   * ★ 给了就**只渲染可见节点 ±100px**（报告 §5.2 的视口裁剪）；不给 = 全量渲染
+   *   （单测 / 旧调用点的行为一字不差）。
+   * ★ 裁剪**不改任何几何**：被裁掉的是本来就在屏幕外的元素，
+   *   留下那些的坐标、字号、层级全是布局输出的原值。
+   */
+  viewport?: MapViewport | null
+}>()
 
 const emit = defineEmits<{ select: [kpId: string] }>()
 
@@ -35,9 +48,19 @@ const viewBox = computed(() =>
     : '0 0 100 100'
 )
 
+/** 这一帧真正要渲染的节点（没有视口 = 全部；有视口 = 可见 ±100px）。 */
+const visibleNodes = computed(() =>
+  props.viewport ? visibleItems(props.layout.nodes, nodeRect, props.viewport) : props.layout.nodes
+)
+
+/** 这一帧真正要渲染的边（按包围盒与视口相交判定）。 */
+const visibleEdges = computed(() =>
+  props.viewport ? visibleItems(props.layout.edges, edgeRect, props.viewport) : props.layout.edges
+)
+
 /** 每个节点的矩形与选中环（预算一次，避免模板里反复调用）。 */
 const rects = computed(() =>
-  props.layout.nodes.map((node) => {
+  visibleNodes.value.map((node) => {
     const rect = nodeRect(node)
     return {
       node,
@@ -68,7 +91,7 @@ function labelOf(node: { name: string; kpId: string; mastered: boolean }): strin
     <!-- 边：先画（在节点下层），直角折线 -->
     <g class="map__edges">
       <path
-        v-for="edge in layout.edges"
+        v-for="edge in visibleEdges"
         :key="`${edge.fromKpId}->${edge.toKpId}`"
         :d="edgePath(edge)"
         class="edge"
@@ -213,7 +236,7 @@ function labelOf(node: { name: string; kpId: string; mastered: boolean }): strin
 }
 
 .node__text {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   fill: var(--k12-fg);
   pointer-events: none;
 }

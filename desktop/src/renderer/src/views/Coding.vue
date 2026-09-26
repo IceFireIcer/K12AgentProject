@@ -46,7 +46,7 @@
  *   两处各写一份会立刻分叉（同一件事两份实现），所以本页自己装配编辑器与运行区，
  *   而**共用**同一套底层件：`monaco-setup.ts` / `pyodide-runner.ts` / `cards/coding.ts` 的纯函数。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   AlertTriangle,
   Check,
@@ -63,7 +63,8 @@ import { useCodeStore, CODE_HINT_MAX } from '../stores/code'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { useQuizStore } from '../stores/quiz'
 import { useOnBackendReady } from '../composables/useOnBackendReady'
-import { createCodeEditor, observeEditorResize, type CodeEditorHandle } from '../sandbox/monaco-setup'
+import CodeEditorSkeleton from '@/components/CodeEditorSkeleton.vue'
+import { MONACO_MAX_LOAD_ATTEMPTS } from '../sandbox/monaco-setup'
 import {
   runStudentCode,
   runnerStatusSnapshot,
@@ -229,7 +230,7 @@ async function openTask(kpId: string, force = false): Promise<void> {
   // ★ store 只在草稿为空时才填脚手架；**换题目必须显式换上这一题的草稿**，
   //   否则学生会带着上一题的代码继续做（草稿是页面内存里的一份，不落库）。
   code.draft = scaffold
-  editor?.setValue(scaffold)
+  editorRef.value?.setValue(scaffold)
 }
 
 /**
@@ -250,10 +251,37 @@ function retryTemplate(): void {
  * 编辑器：Monaco（懒加载，卸载时释放）
  * ------------------------------------------------------------------ */
 
-const editorHost = ref<HTMLElement | null>(null)
-/** 非响应式：编辑器句柄只在装配 / 释放时进出。 */
-let editor: CodeEditorHandle | null = null
-let stopResizeObserver: (() => void) | null = null
+/**
+ * 代码编辑器（异步组件，报告 §5.1）—— 与 `cards/CodingCard.vue` 同一个组件、同一个上限。
+ *
+ * ★ 三个包装件各自的落点（与卡片里的注释同源，改一处要一起想）：
+ *   · `loader` 把 `CodeEditor.vue` 切成独立 chunk（进这一页才下载）；
+ *   · `loadingComponent` 是 chunk 在途的骨架；
+ *   · `onError` 在 chunk 读取失败时重试 **≤3 次**。
+ */
+const AsyncCodeEditor = defineAsyncComponent({
+  loader: () => import('@/components/CodeEditor.vue'),
+  loadingComponent: CodeEditorSkeleton,
+  delay: 200,
+  timeout: 10000,
+  onError(_error, retry, fail, attempts) {
+    if (attempts <= MONACO_MAX_LOAD_ATTEMPTS) retry()
+    else fail()
+  }
+})
+
+/**
+ * 编辑器组件句柄（`CodeEditor.vue` 的 `defineExpose`）。
+ * ★ 装配 / 释放归组件自己；本页只用句柄（运行锁、换题 setValue、出现后补布局）。
+ */
+const editorRef = ref<{
+  isReady(): boolean
+  getValue(): string
+  setValue(text: string): void
+  setReadOnly(readOnly: boolean): void
+  layout(): void
+  focus(): void
+} | null>(null)
 const editorReady = ref(false)
 /** 装配失败时的可读说明（**绝不白屏**：脚手架会以只读文本顶上）。 */
 const editorFailure = ref('')
@@ -275,45 +303,33 @@ const editorVisible = computed(() => editorHasWork.value || editorFailure.value 
 const showEditorEmpty = computed(() => !editorHasWork.value && editorFailure.value === '')
 
 /**
- * 装配 Monaco（异步：内部才动态 import，vite 因此把它切成独立 chunk）。
+ * 装配成功（`CodeEditor.vue` 的 ready 事件）。
  *
- * ★ 这里是「进编程页才加载 Monaco」的落点 —— 对话为主的应用不该为这一页付启动成本。
+ * ★ 「装配是异步的，期间模板可能已经读回来了」这条对齐**不能删**：
+ *   组件挂载那一刻的 `:value="code.draft"` 可能还是空串（模板在途），
+ *   ready 回来时再对齐一次，免得出现「编辑器空着、store 里已经有脚手架」。
  */
-async function mountEditor(): Promise<void> {
-  if (editor !== null) return
-  await nextTick()
-  const host = editorHost.value
-  if (host === null) return
-  try {
-    editor = await createCodeEditor({
-      container: host,
-      value: code.draft,
-      theme: 'vs',
-      // 学生的改动**只回写 store**（页面内存里的一份草稿，不落库、不进会话、不上传）
-      onChange: (value) => {
-        code.draft = value
-      }
-    })
-    stopResizeObserver = observeEditorResize(host, editor)
-    editorReady.value = true
-    editorFailure.value = ''
-    // ★ 装配是异步的，期间模板可能已经读回来了 —— 再对齐一次，
-    //   免得出现「编辑器空着、store 里已经有脚手架」这种两边不一致的状态。
-    if (editor.getValue() !== code.draft) editor.setValue(code.draft)
-  } catch (error) {
-    editorFailure.value = `代码编辑器没能加载起来：${
-      error instanceof Error ? error.message : String(error)
-    }（下面的脚手架可以手动复制出去练）`
-  }
+function onEditorReady(): void {
+  editorReady.value = true
+  editorFailure.value = ''
+  const handle = editorRef.value
+  if (handle && handle.getValue() !== code.draft) handle.setValue(code.draft)
+}
+
+/** 装配失败：一句可读说明（下面的脚手架可以手动复制出去练）。 */
+function onEditorFailure(message: string): void {
+  editorReady.value = false
+  editorFailure.value = `代码编辑器没能加载起来：${message}（下面的脚手架可以手动复制出去练）`
+}
+
+/** 学生的改动**只回写 store**（页面内存里的一份草稿，不落库、不进会话、不上传）。 */
+function onEditorChange(value: string): void {
+  code.draft = value
 }
 
 onBeforeUnmount(() => {
-  stopResizeObserver?.()
-  stopResizeObserver = null
   unsubscribeStatus?.()
   unsubscribeStatus = null
-  editor?.dispose()
-  editor = null
 })
 
 /* ------------------------------------------------------------------ *
@@ -387,7 +403,7 @@ async function run(): Promise<void> {
   downloaded.value = false
   running.value = true
   // 运行期间锁住编辑器：避免「边跑边改」让显示的输出与眼前的代码对不上
-  editor?.setReadOnly(true)
+  editorRef.value?.setReadOnly(true)
 
   try {
     const outcome = await runStudentCode(source, { log: (line) => console.info(line) })
@@ -404,7 +420,7 @@ async function run(): Promise<void> {
     localFailure.value = `运行失败：${error instanceof Error ? error.message : String(error)}`
   } finally {
     running.value = false
-    editor?.setReadOnly(false)
+    editorRef.value?.setReadOnly(false)
   }
 
   if (localFailure.value !== '') return
@@ -440,7 +456,7 @@ const hintButtonTitle = computed(
 /** 回到这一题的起点（脚手架）。草稿会丢，所以只在学生自己按的时候做。 */
 function resetToScaffold(): void {
   code.resetToScaffold()
-  editor?.setValue(code.draft)
+  editorRef.value?.setValue(code.draft)
   runOutput.value = null
   localFailure.value = ''
   localHint.value = ''
@@ -566,7 +582,6 @@ onMounted(() => {
   unsubscribeStatus = subscribeRunnerStatus((status) => {
     runnerStatus.value = status
   })
-  void mountEditor()
 })
 
 /**
@@ -587,18 +602,20 @@ useOnBackendReady(() => {
 watch(
   () => code.template?.scaffold ?? '',
   (scaffold) => {
-    if (scaffold !== '' && editor !== null && editor.getValue() !== scaffold) editor.setValue(scaffold)
+    const handle = editorRef.value
+    if (scaffold !== '' && handle && handle.isReady() && handle.getValue() !== scaffold) {
+      handle.setValue(scaffold)
+    }
   }
 )
 
 /**
- * ★ 编辑区从「空态」变回「有活干」时：先装配编辑器，再重算布局。
+ * ★ 编辑区从「空态」变回「有活干」时：补一次布局。
  *
- * ① **装配要在这里补一次**（本轮新增）：没有题目时右栏只渲染空态
- *    （报告 1.6），代码壳连同 `editorHost` 都不在 DOM 里 —— 于是 `onMounted` 里那次
- *    `mountEditor()` 拿不到宿主节点。学生点完关卡的那一拍宿主才出现，必须在这里补装配。
- *    `mountEditor()` 是幂等的（`editor !== null` 直接返回），重复调用无副作用。
- * ② **布局也要在这里补一次**：Monaco 的 `automaticLayout: false` 意味着**它自己不会去量**
+ * ★ 装配**不再**需要在这里补：编辑器是异步组件（`AsyncCodeEditor`），
+ *   它跟着这一支一起挂载，`onMounted` 自己会去装配（旧实现里那个「宿主节点晚出现，
+ *   必须在 watch 里补一次 mountEditor()」的问题从结构上消失了）。
+ * ★ 布局仍要在这里补一次：Monaco 的 `automaticLayout: false` 意味着**它自己不会去量**
  *    （见 `sandbox/monaco-setup.ts` 的注释：布局由本页的 ResizeObserver 显式驱动）。
  *    不等 ResizeObserver 那一拍，学生点完关卡会先看到一帧**空白的编辑框**
  *    （有时长到下一帧才恢复）—— 那正好是「我点了没反应」的观感。
@@ -607,8 +624,7 @@ watch(
 watch(editorVisible, (visible) => {
   if (!visible) return
   void nextTick(() => {
-    void mountEditor()
-    editor?.layout()
+    editorRef.value?.layout()
   })
 })
 </script>
@@ -856,7 +872,8 @@ watch(editorVisible, (visible) => {
           hint="先看任务要求，再在下面补全 TODO 并运行"
         />
 
-        <SurfacePanel class="code__panel" padding="14px 16px">
+        <!-- 内边距走 SurfacePanel 的枚举（报告 §4.2）：md = sp-4（16px，8 点网格） -->
+        <SurfacePanel class="code__panel" padding="md">
           <header class="code__panel-head">
             <span class="code__panel-title">代码</span>
             <!-- 状态角标：`title` 里那句「第一次点运行时才准备环境」= 学生在意但不该占位的信息 -->
@@ -871,20 +888,24 @@ watch(editorVisible, (visible) => {
             <span v-if="code.hintLoading" class="chip">正在取提示…</span>
           </header>
 
-          <!-- ★ 这里是 Monaco 的宿主节点，`mountEditor()` 必须拿得到它。
+          <!-- ★ 这里是 Monaco 的宿主（异步组件 `AsyncCodeEditor` 自己装配）。
                ⚠️ 本块只在「有活干」（`editorVisible`）时渲染 —— 原来它靠 `v-show` 常驻 DOM
                   来保证挂载那一刻宿主存在，现在空态是**整栏的另一个分支**，宿主会跟着这一支
-                  一起出现/消失。所以装配不能只靠 `onMounted` 那一次：`editorVisible` 变真时
-                  由文件末尾那个 watch 补一次 `mountEditor()`（幂等）。
-                  ⚠️ 别把它改成只在别处装配：宿主要么在这一支里，要么装配时机必须跟着它走。 -->
+                  一起出现/消失。异步组件跟着这一支一起挂载，装配时机天然跟着它走 ——
+                  文件末尾那个 watch 只剩「补一次 layout」这一个职责。 -->
           <div class="code__editor-wrap">
-            <div ref="editorHost" class="code__editor" data-testid="coding-view-editor"></div>
-            <!-- 编辑器没装配好（还在加载 / 加载失败）时，脚手架以只读文本顶上 —— 保底可读 -->
-            <pre
-              v-if="!editorReady"
-              class="code__scaffold"
-              data-testid="coding-view-scaffold-raw"
-            >{{ code.draft }}</pre>
+            <!-- ★ 异步组件（报告 §5.1）：chunk 在途时由它自己的 loadingComponent 顶上；
+                 下面那层骨架覆盖的是 **Monaco 内核装配**那一段等待（同一个骨架组件）。 -->
+            <AsyncCodeEditor
+              ref="editorRef"
+              class="code__editor"
+              data-testid="coding-view-editor"
+              :value="code.draft"
+              @ready="onEditorReady"
+              @failure="onEditorFailure"
+              @change="onEditorChange"
+            />
+            <CodeEditorSkeleton v-if="!editorReady && editorFailure === ''" class="code__editor-skeleton" />
             <p v-if="editorFailure" class="code__brief-err" data-testid="coding-view-editor-failure">
               <AlertTriangle :size="14" />{{ editorFailure }}
             </p>
@@ -1085,19 +1106,19 @@ watch(editorVisible, (visible) => {
   color: var(--k12-muted);
 }
 .code__brief-title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
 /* 任务名 = **块标题档**。不得回到 22px：那是身份行的档位。 */
 .code__name {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   line-height: var(--k12-lh-snug);
   color: var(--k12-fg);
 }
 .code__desc {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1105,7 +1126,7 @@ watch(editorVisible, (visible) => {
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-warn);
 }
@@ -1115,7 +1136,7 @@ watch(editorVisible, (visible) => {
 }
 .code__mono {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-accent-ink);
 }
@@ -1125,7 +1146,7 @@ watch(editorVisible, (visible) => {
 /* 键值对的标签与取值都是 meta：12px（EP 默认 14px 在 268px 的简报里比正文还重）。 */
 .code__desc-list :deep(.el-descriptions__label),
 .code__desc-list :deep(.el-descriptions__content) {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
 }
 .code__sec {
@@ -1135,12 +1156,12 @@ watch(editorVisible, (visible) => {
   padding: 2px 0 0;
 }
 .code__sec-label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
 .code__sec-note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -1164,7 +1185,7 @@ watch(editorVisible, (visible) => {
 }
 /* 分组标签：meta 档 13px（不是 micro —— 它是标签不是角标）。 */
 .pathgrp__label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
@@ -1178,7 +1199,7 @@ watch(editorVisible, (visible) => {
   border-radius: var(--k12-r-inset);
   background: transparent;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   text-align: left;
   cursor: pointer;
@@ -1201,7 +1222,7 @@ watch(editorVisible, (visible) => {
   transform: rotate(90deg);
 }
 @media (prefers-reduced-motion: reduce) {
-  .pathgrp__ico {
+  :root:not([data-k12-reduced-motion='off']) .pathgrp__ico {
     transition: none;
   }
 }
@@ -1225,7 +1246,7 @@ watch(editorVisible, (visible) => {
   color: var(--k12-fg-2);
   /* ★ 列表项按字号阶梯是 **sm（14px）**，不是 meta 档 —— 关卡名是学生要读的内容
    *   （原来这里是 `--k12-fs-xs` 13px，与「列表项 = 14px」那条档位不符）。 */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   text-align: left;
   cursor: pointer;
   min-height: 30px;
@@ -1274,7 +1295,7 @@ watch(editorVisible, (visible) => {
 }
 .path__stage {
   flex: none;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 /* 当前这一题：accent-soft 底 + accent 边 —— 与「哪一关在学」是两件事，所以两种标记都在 */
@@ -1301,13 +1322,13 @@ watch(editorVisible, (visible) => {
   margin-top: 2px;
 }
 .code__hint-title {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
 .code__hint-text {
   margin-top: 2px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -1322,7 +1343,8 @@ watch(editorVisible, (visible) => {
    * ⚠️ 内边距（18 / 22 / 20）必须与 PageActions 的默认 `--pa-pad-y/x` 一致，
    *    否则吸顶时会漏出/盖住内容。 */
   gap: var(--k12-gap);
-  padding: 18px 22px 20px;
+  /* 优化报告 §1.2：18/22/20 → 16/24/24（8 点网格）。 */
+  padding: var(--k12-sp-4) var(--k12-sp-5) var(--k12-sp-5);
   overflow-y: auto;
 }
 .code__panel-head {
@@ -1333,7 +1355,7 @@ watch(editorVisible, (visible) => {
   margin-bottom: 10px;
 }
 .code__panel-title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
@@ -1343,7 +1365,7 @@ watch(editorVisible, (visible) => {
   border-radius: var(--k12-r-pill);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
 }
 .chip[data-phase='ready'],
@@ -1366,10 +1388,14 @@ watch(editorVisible, (visible) => {
 }
 
 .code__editor-wrap {
+  /* 骨架是**覆盖层**（见 `.code__editor-skeleton`）：这里必须是定位上下文，
+   * 否则骨架会排在编辑器下面，把右栏撑高一倍。 */
+  position: relative;
   border: 1px solid var(--k12-border-strong);
   border-radius: var(--k12-r-inset);
   overflow: hidden;
-  background: var(--k12-surface);
+  /* 深色面：Monaco 固定 vs-dark（报告 §5.1 的主题精简），外框与编辑器同底才没有色缝 */
+  background: var(--k12-editor-bg);
 }
 /* ★ 420px 的由来（与 `sandbox/monaco-setup.ts` 的 lineHeight 24 + padding 上下各 8 配套）：
  *   (420 − 8 − 8) ÷ 24 ≈ 16 行 —— 一份模板的脚手架通常 10–20 行，
@@ -1382,19 +1408,10 @@ watch(editorVisible, (visible) => {
   width: 100%;
   height: 420px;
 }
-/* Monaco 未就绪时的脚手架回显（**保底可读**，不是空白） */
-.code__scaffold {
-  margin: 0;
-  padding: 12px;
-  min-height: 180px;
-  font-family: var(--k12-font-mono);
-  /* ★ 与编辑器同档：脚手架回显是代码，学生要照着抄 —— 不许比编辑器里那 15px 小一档
-   *   （原来这里是 `--k12-fs-xs` 13px，与「代码不许比正文小」的口径打架）。 */
-  font-size: var(--k12-fs-sm);
-  line-height: var(--k12-lh-ui);
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--k12-fg-2);
+/* Monaco 内核装配中：骨架盖住编辑区（不占第二块高度） */
+.code__editor-skeleton {
+  position: absolute;
+  inset: 0;
 }
 .code__actions {
   margin-top: 10px;
@@ -1426,12 +1443,12 @@ watch(editorVisible, (visible) => {
 }
 .code__attempts {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .code__local-hint {
   margin-top: 8px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-warn);
 }
@@ -1452,20 +1469,20 @@ watch(editorVisible, (visible) => {
 }
 .out__feedback {
   margin-top: 8px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   white-space: pre-wrap;
   word-break: break-word;
 }
 .out__error {
   margin-top: 8px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   color: var(--k12-bad);
 }
 .out__failure {
   margin-top: 8px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-bad);
 }
@@ -1473,7 +1490,7 @@ watch(editorVisible, (visible) => {
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px dashed var(--k12-border-strong);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1485,7 +1502,7 @@ watch(editorVisible, (visible) => {
 }
 .block__label {
   display: block;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-muted);
   margin-bottom: 4px;
@@ -1497,7 +1514,7 @@ watch(editorVisible, (visible) => {
   background: var(--k12-surface);
   border: 1px solid var(--k12-border);
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1509,7 +1526,7 @@ watch(editorVisible, (visible) => {
 }
 .raw summary {
   cursor: pointer;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .raw summary:hover {
@@ -1538,13 +1555,13 @@ watch(editorVisible, (visible) => {
 }
 .hint__text {
   flex: 1;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   word-break: break-word;
 }
 
 .code__foot-note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg-2);
 }
@@ -1552,7 +1569,7 @@ watch(editorVisible, (visible) => {
 /* 导出回执：与操作行同一屏，紧跟在按钮区下面（学生刚点完就在手边） */
 .code__download-note {
   margin-top: var(--k12-sp-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
   word-break: break-all;

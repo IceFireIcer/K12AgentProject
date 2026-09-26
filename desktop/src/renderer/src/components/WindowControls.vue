@@ -149,7 +149,7 @@ async function close(): Promise<void> {
 
 /* 窄窗口：窗口按钮是**最后才让位**的东西（没有它就没法关窗），
  * 只把可点区收窄一点，不隐藏。 */
-@media (max-width: 1279px) {
+@media (max-width: 1023px) {
   .wc__btn {
     width: 38px;
   }

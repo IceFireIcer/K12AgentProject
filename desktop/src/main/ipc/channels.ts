@@ -14,6 +14,7 @@
 
 import type { components } from '@shared/api-types'
 import type { GradeLevel } from '@shared/ipc-events'
+import type { DiagnosticsSnapshot } from '@shared/diagnostics'
 // 导出物后缀的白名单类型（**纯类型 import，编译后擦除**）：定义在 `study/export-naming.ts`，
 // 那里同时是 `sanitizeFileName` 的实现处 —— 后缀集合只有一份，不会「契约里收 .csv、
 // 清理函数里只认 .md」这种分叉。
@@ -249,6 +250,25 @@ export const IPC = {
    */
   traceChanged: 'trace:changed',
 
+  // ── 演示模式：轮次诊断信封（主进程 → 渲染进程的推送 + 两条 invoke）─────────
+  //
+  // ★★ 为什么是**独立通道**而不是塞进 `trace:changed`：轨迹回答的是「调了什么工具」，
+  //    信封回答的是「这一轮为什么这么走」（Prompt 拼装 / 画像稳定性 / 学段观察 /
+  //    四级降级链 / 安全三阶段 / 拦截记录）。两者体量与消费方都不同 ——
+  //    混在一起会让每个轨迹消费方都被迫理解一堆它不关心的字段
+  //    （与 `shared/ipc-events.ts` 里「轨迹要走并列通道」那一条同一纪律）。
+  // ★ 三条通道：一条推送（每轮结束推一次全量快照）+ 两条 invoke（读取与清空，
+  //   两者都要回执：清空后界面要立刻显示空态，而不是等下一次推送）。
+  /** 主进程 → 渲染进程：**轮次诊断信封快照**（最近 N 轮，全量替换）。 */
+  diagnosticsChanged: 'diagnostics:changed',
+  /** 渲染进程 → 主进程：读当前快照（进演示页 / 挂了推送后补一次）。 */
+  diagnosticsRead: 'diagnostics:read',
+  /**
+   * 渲染进程 → 主进程：清空（内存环形缓冲 + 落盘的 JSONL，幂等）。
+   * ★ 演示前清残留、演示后清敏感 —— 这条是那两件事的唯一入口。
+   */
+  diagnosticsClear: 'diagnostics:clear',
+
   // ── 学生身份 ──────────────────────────────────────────────────────────
   /**
    * 渲染进程 → 主进程：读**当前学生**（昵称 / 学段 / 当前章节）。
@@ -399,7 +419,10 @@ export const PUSH_CHANNELS: readonly IpcChannel[] = [
   IPC.sessionChanged,
   // ★ 每轮结束后推送该轮的条目 id —— 没有它，「从这里重新问」只对历史消息可用
   //   （实时聊出来的轮次没有 entryId，按钮渲染不出来）。
-  IPC.turnEntries
+  IPC.turnEntries,
+  // ★ 演示模式：每轮结束推一次**诊断信封快照**。
+  //   ⚠️ 只有它进这个清单；`diagnosticsRead` / `diagnosticsClear` 都是 **invoke**（有回执）。
+  IPC.diagnosticsChanged
 ]
 
 /**
@@ -479,6 +502,18 @@ export interface ChapterState {
 /** 章节读取的回执（与 {@link GradeCallResult} 同形，便于前端统一处理）。 */
 export type ChapterCallResult<T> =
   | { ok: true; data: T }
+  | { ok: false; message: string }
+
+/**
+ * 诊断信封两条 invoke 通道（`diagnostics:read` / `diagnostics:clear`）的回执。
+ *
+ * ★ 与 `StudyCallResult` 同形（`{ok, data} | {ok:false, message}`）：**失败也给一句可读中文**，
+ *   绝不让异常穿过 IPC 变成界面上的堆栈文本。
+ * ★ `data` 是完整的 `DiagnosticsSnapshot`（清空那条返回的是**清空之后**的快照），
+ *   所以界面拿到回执就能立刻渲染，不需要再发一次读取。
+ */
+export type DiagnosticsCallResult =
+  | { ok: true; data: DiagnosticsSnapshot }
   | { ok: false; message: string }
 
 /** 手动设定章节的回执（回的是**生效后的**章标题；空串 = 已清除）。 */

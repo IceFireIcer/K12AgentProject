@@ -80,8 +80,10 @@ const MUTATIONS = [
   {
     name: '③ 默认视角：把默认改成教师视角',
     file: 'src/renderer/src/stores/viewMode.ts',
-    find: "      ? 'teacher'\n      : 'student'",
-    replace: "      ? 'teacher'\n      : 'teacher'",
+    // ⚠️ 锚点跟着 2026-09-26 的三档改造走（原来是 `? 'teacher'\n : 'student'` 两行写法）——
+    //    锚点失配时脚本会**显式报出来**（找不到锚点 = 这条变异静默失效，等于没验）。
+    find: "return raw === 'teacher' ? 'teacher' : raw === 'debug' ? 'debug' : 'student'",
+    replace: "return raw === 'teacher' ? 'teacher' : raw === 'debug' ? 'debug' : 'teacher'",
     expect: '默认视角必须是学生'
   },
   {
@@ -94,8 +96,12 @@ const MUTATIONS = [
   {
     name: '⑤ CTA：把闯关页主提交键的类名换成本地皮肤',
     file: 'src/renderer/src/views/Quiz.vue',
+    // ⚠️ 必须 `all: true`：2026-09-26 起闯关页有**两处** `.k12-cta`（单卡屏的「提交这题」
+    // 与收尾卡的主行动，运行时互斥）。只替换第一处的话，另一处仍能满足「至少 2 处」，
+    // 这条变异会**静默失效**（脚本会报「守卫仍然是绿的」）。
     find: 'class="k12-cta"',
     replace: 'class="qitem__btn"',
+    all: true,
     expect: '五处核心主行动按钮'
   },
   {
@@ -673,6 +679,325 @@ const MUTATIONS = [
     replace: '  --k12-anim-min: 300px;',
     testFile: 'tests/animation-card-stage.test.ts',
     expect: 'G-P2-3a'
+  },
+  {
+    name: '65 演示驾驶舱：把页面放回学生侧栏（nav 改成恒可见）',
+    file: 'src/renderer/src/stores/ui.ts',
+    find: "    nav: 'debug',",
+    replace: '    nav: true,',
+    testFile: 'tests/demo-mode.test.ts',
+    expect: '演示证据模块'
+  },
+  {
+    name: '66 演示信封：落盘时把学生正文原样写出去',
+    file: 'src/main/agent/diagnostics.ts',
+    find: "    input: { text: '', safetyInput: { ...turn.input.safetyInput } },",
+    replace: '    input: { text: turn.input.text, safetyInput: { ...turn.input.safetyInput } },',
+    testFile: 'tests/demo-mode.test.ts',
+    expect: '落盘前剥离'
+  },
+  {
+    name: '67 档位表：把最高档从顺序表里删掉（教师档与演示档的包含关系塌掉）',
+    file: 'src/renderer/src/stores/ui.ts',
+    find: "export const VIEW_MODE_ORDER: readonly ViewMode[] = ['student', 'teacher', 'debug']",
+    replace: "export const VIEW_MODE_ORDER: readonly ViewMode[] = ['student', 'teacher', 'teacher']",
+    testFile: 'tests/demo-mode.test.ts',
+    expect: '档位高低表'
+  },
+  {
+    name: '68 闯关排版：把默认从「一次一张」改回「全部铺开」',
+    file: 'src/renderer/src/stores/quizLayout.ts',
+    // ⚠️ 锚点单行（工作区 CRLF）。这条去掉的就是用户这次要的默认节奏：
+    //   默认铺开 = 这次改动对「打开就看」的学生完全没生效。
+    find: "export const QUIZ_LAYOUT_DEFAULT: QuizLayout = 'single'",
+    replace: "export const QUIZ_LAYOUT_DEFAULT: QuizLayout = 'list'",
+    testFile: 'tests/quiz-layout-mode.test.ts',
+    expect: '默认排版是「一次一张」'
+  },
+  {
+    name: '69 教材引用：把折叠块改成默认展开（那一堆引用又铺满屏幕）',
+    file: 'src/renderer/src/components/ChatMessage.vue',
+    find: '<details v-if="turn.citations.length > 0" class="cites" data-testid="citation-disclosure">',
+    replace: '<details open v-if="turn.citations.length > 0" class="cites" data-testid="citation-disclosure">',
+    testFile: 'tests/citation-collapse.test.ts',
+    expect: '教材引用默认收起'
+  },
+  /* ------------------------------------------------------------------ *
+   * 设计 token 守卫（优化报告 §1.1 字体系统 / §1.2 间距网格）
+   * —— 守卫在 `tests/design-tokens.test.ts` 与 `tests/spacing-grid.test.ts`
+   * ------------------------------------------------------------------ */
+  {
+    name: '70 字号层次：把身份行从 h1(32) 改回 h2(24)',
+    file: 'src/renderer/src/assets/base.css',
+    // ⚠️ 锚点单行（工作区 CRLF）。
+    find: '  font-size: var(--k12-fs-h1);\n  font-weight: 650;',
+    replace: '  font-size: var(--k12-fs-h2);\n  font-weight: 650;',
+    testFile: 'tests/design-tokens.test.ts',
+    expect: '四处层次落点'
+  },
+  {
+    name: '71 字号层次：把卡头从 h3(20) 改回 body-lg(18)',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  font-size: var(--k12-fs-h3);\n}\n.k12-card-body {',
+    replace: '  font-size: var(--k12-fs-body-lg);\n}\n.k12-card-body {',
+    testFile: 'tests/design-tokens.test.ts',
+    expect: '四处层次落点'
+  },
+  {
+    name: '72 顶栏层级：把页面名颜色从 fg-2 改回 fg（chrome 抢焦点）',
+    file: 'src/renderer/src/components/AppTopbar.vue',
+    find: '  color: var(--k12-fg-2);\n  /* 窄窗口下**截断标题**',
+    replace: '  color: var(--k12-fg);\n  /* 窄窗口下**截断标题**',
+    testFile: 'tests/design-tokens.test.ts',
+    expect: '四处层次落点'
+  },
+  {
+    name: '73 顶栏分隔：把底边从 border-strong 改回 border',
+    file: 'src/renderer/src/components/AppTopbar.vue',
+    find: '  border-bottom: 1px solid var(--k12-border-strong);',
+    replace: '  border-bottom: 1px solid var(--k12-border);',
+    testFile: 'tests/design-tokens.test.ts',
+    expect: '四处层次落点'
+  },
+  {
+    name: '74 字号别名：把 --k12-fs-micro 从别名改成写死的 12px',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  --k12-fs-micro: var(--k12-fs-label);',
+    replace: '  --k12-fs-micro: 12px;',
+    testFile: 'tests/design-tokens.test.ts',
+    expect: '旧字号名只许作为别名保留'
+  },
+  {
+    name: '75 间距网格：把 sp-5 改回 20px（8 点网格破裂）',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  --k12-sp-5: 24px;',
+    replace: '  --k12-sp-5: 20px;',
+    testFile: 'tests/spacing-grid.test.ts',
+    expect: '间距阶梯严格是'
+  },
+  {
+    name: '76 语义间距：把消息间距改回 36px',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  --k12-gap-msg: 32px;',
+    replace: '  --k12-gap-msg: 36px;',
+    testFile: 'tests/spacing-grid.test.ts',
+    expect: '语义间距只有四档'
+  },
+  {
+    name: '77 圆角：把控件圆角改回 14px（与卡片同值的旧形态）',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  --k12-r-control: var(--k12-r-md);',
+    replace: '  --k12-r-control: 14px;',
+    testFile: 'tests/radius-tokens.test.ts',
+    expect: '圆角五档梯度与语义映射'
+  },
+  {
+    name: '78 EP 主题：把 info 改回 Element 默认灰（不再是 k12 青）',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  --el-color-info: var(--k12-cyan);',
+    replace: '  --el-color-info: #909399;',
+    testFile: 'tests/ep-theme.test.ts',
+    expect: 'EP 语义色与边框'
+  },
+  {
+    name: '79 断点：把最小宽度改回 1120px（1024 档被排除）',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  min-width: 1024px;',
+    replace: '  min-width: 1120px;',
+    testFile: 'tests/breakpoints.test.ts',
+    expect: '最小宽度降到 1024px'
+  },
+  {
+    name: '80 断点：把聊天气泡网格的 3 列档改回 2 列',
+    file: 'src/renderer/src/views/Chat.vue',
+    find: '  .chat__entries {\n    grid-template-columns: repeat(3, minmax(0, 1fr));',
+    replace: '  .chat__entries {\n    grid-template-columns: repeat(2, minmax(0, 1fr));',
+    testFile: 'tests/breakpoints.test.ts',
+    expect: '聊天气泡网格'
+  },
+  {
+    name: '81 交互态：把 hover 改回与默认同色（88% → 100%，按下没有反馈）',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  --k12-accent-hover: color-mix(in srgb, var(--k12-accent-ink) 88%, var(--k12-fg));',
+    replace: '  --k12-accent-hover: color-mix(in srgb, var(--k12-accent-ink) 100%, var(--k12-fg));',
+    testFile: 'tests/interaction-states.test.ts',
+    expect: '交互态派生规则'
+  },
+  {
+    name: '82 骨架屏：会话列表的加载分支退回一句纯文字（组件变死代码）',
+    file: 'src/renderer/src/components/SessionList.vue',
+    find: '      <Skeleton :rows="4" variant="row" />\n      <p class="sl__loading-text">正在读取…</p>',
+    replace: '      <p class="sl__loading-text">正在读取…</p>',
+    testFile: 'tests/skeleton.test.ts',
+    expect: '至少一处长列表真的用了骨架屏'
+  },
+  {
+    name: '83 卡片结构：卡头不再走 base.css 的类名（自己另起一套皮肤）',
+    file: 'src/renderer/src/components/card/CardHeader.vue',
+    find: '<header class="k12-card-head" data-testid="card-header">',
+    replace: '<header class="my-card-head" data-testid="card-header">',
+    testFile: 'tests/card-structure.test.ts',
+    expect: '三个卡片子组件存在'
+  },
+  {
+    name: '84 练习卡：题体退回「全铺开」（一次渲染全部题）',
+    file: 'src/renderer/src/cards/QuizCard.vue',
+    find: 'v-for="row in visibleRows"',
+    replace: 'v-for="row in items"',
+    testFile: 'tests/card-single-question.test.ts',
+    expect: '题体唯一渲染源是 visibleRows'
+  },
+  {
+    name: '85 进度卡：消息层不再独立渲染（退回「进度卡挂在题卡里」的世界）',
+    file: 'src/renderer/src/components/ChatMessage.vue',
+    find: 'v-if="hasLevels(card)"',
+    replace: 'v-if="false"',
+    testFile: 'tests/card-single-question.test.ts',
+    expect: '进度卡不再嵌在练习卡里'
+  },
+  {
+    name: '86 练习卡：把「下一题」的可用条件摘掉（没答对也能往下走）',
+    file: 'src/renderer/src/cards/QuizCard.vue',
+    find: ':disabled="!currentSettled"',
+    replace: ':disabled="false"',
+    testFile: 'tests/card-single-question.test.ts',
+    expect: '「下一题」只在'
+  },
+  {
+    name: '87 卡片结构：练习卡退回自写皮肤（不给 k12-card，走回旧的自带圆角/白面）',
+    file: 'src/renderer/src/cards/QuizCard.vue',
+    find: 'class="k12-card quiz"',
+    replace: 'class="quiz"',
+    testFile: 'tests/card-structure.test.ts',
+    expect: '四张卡片迁移到三段结构'
+  },
+  {
+    name: '88 Monaco：把语言注册退回全量清单（~90 种语言全部拉进产物）',
+    file: 'src/renderer/src/sandbox/monaco-setup.ts',
+    find: "await import('monaco-editor/languages/definitions/python/register')",
+    replace: "await import('monaco-editor/basic-languages/monaco.contribution')",
+    testFile: 'tests/monaco-bundle.test.ts',
+    expect: '只注册 Python 语言'
+  },
+  {
+    name: '89 Monaco：把渲染构建的压缩关掉（chunk 立刻涨回 4.87MB）',
+    file: 'electron.vite.config.ts',
+    find: "minify: 'esbuild'",
+    replace: 'minify: false',
+    testFile: 'tests/monaco-bundle.test.ts',
+    expect: '渲染构建必须开着压缩'
+  },
+  {
+    name: '90 Monaco：把默认主题改回浅色 vs（报告 §5.1 的主题精简失效）',
+    file: 'src/renderer/src/sandbox/monaco-setup.ts',
+    find: "export const DEFAULT_EDITOR_THEME: CodeEditorTheme = 'vs-dark'",
+    replace: "export const DEFAULT_EDITOR_THEME: CodeEditorTheme = 'vs'",
+    testFile: 'tests/monaco-bundle.test.ts',
+    expect: '主题精简为 vs-dark'
+  },
+  {
+    name: '91 减少动效：把「关闭」档写成跟随系统（第三档变成假选项）',
+    file: 'src/renderer/src/stores/reducedMotion.ts',
+    find: "  if (value === 'off') return false",
+    replace: "  if (value === 'off') return matchesSystem",
+    testFile: 'tests/reduced-motion-mode.test.ts',
+    expect: '三档语义'
+  },
+  {
+    name: '92 减少动效：媒体块去掉 `:not(off)`（「关闭」档覆盖不了系统偏好）',
+    file: 'src/renderer/src/assets/base.css',
+    find: "  :root:not([data-k12-reduced-motion='off']) *,\n  :root:not([data-k12-reduced-motion='off']) *::before,\n  :root:not([data-k12-reduced-motion='off']) *::after {",
+    replace: '  *,\n  *::before,\n  *::after {',
+    testFile: 'tests/reduced-motion-mode.test.ts',
+    expect: 'CSS 两块减动效规则'
+  },
+  {
+    name: '93 减少动效：composable 退回裸系统偏好（三档开关对 JS 侧失效）',
+    file: 'src/renderer/src/composables/useReducedMotion.ts',
+    find: '  return computed(() => reducedMotionEffective.value)',
+    replace: '  return computed(() => false)',
+    testFile: 'tests/reduced-motion-mode.test.ts',
+    expect: 'useReducedMotion 返回有效值'
+  },
+  {
+    name: '94 组件 API：SurfacePanel.padding 退回任意字符串（枚举约束失效）',
+    file: 'src/renderer/src/components/SurfacePanel.vue',
+    find: '    padding?: SurfacePadding',
+    replace: '    padding?: string',
+    testFile: 'tests/component-api.test.ts',
+    expect: 'defineProps 一律类型化'
+  },
+  {
+    name: '95 组件 API：BadgeLevel 退回宽 string（枚举词表失效）',
+    file: 'src/renderer/src/components/badge-level.ts',
+    find: "export type BadgeLevel = 'starter' | 'beginner' | 'skilled' | 'expert' | 'master'",
+    replace: 'export type BadgeLevel = string',
+    testFile: 'tests/component-api.test.ts',
+    expect: '词表'
+  },
+  {
+    name: '96 组件 API：布尔属性改回匈牙利命名（isCompact）',
+    file: 'src/renderer/src/components/Badge.vue',
+    find: '  compact?: boolean',
+    replace: '  isCompact?: boolean',
+    testFile: 'tests/component-api.test.ts',
+    expect: '布尔属性一律正向命名'
+  },
+  {
+    name: '97 图谱：视口裁剪的余量改成 0（报告要求的 ±100px 消失）',
+    file: 'src/renderer/src/study/map/culling.ts',
+    find: 'export const CULL_MARGIN_PX = 100',
+    replace: 'export const CULL_MARGIN_PX = 0',
+    testFile: 'tests/map-performance.test.ts',
+    expect: '视口裁剪'
+  },
+  {
+    name: '98 图谱：Canvas 阈值提到 1000（500 节点场景不再切 Canvas）',
+    file: 'src/renderer/src/study/map/lod.ts',
+    find: 'export const CANVAS_NODE_THRESHOLD = 100',
+    replace: 'export const CANVAS_NODE_THRESHOLD = 1000',
+    testFile: 'tests/map-performance.test.ts',
+    expect: 'Canvas 阈值'
+  },
+  {
+    name: '99 长列表：虚拟化阈值提到 99 万（等于永远不虚拟化）',
+    file: 'src/renderer/src/components/VirtualList.vue',
+    find: 'virtualizeAt: 60',
+    replace: 'virtualizeAt: 999999',
+    testFile: 'tests/map-performance.test.ts',
+    expect: '长列表虚拟化'
+  },
+  {
+    name: '100 图谱：SVG 的边退回全量渲染（视口裁剪只裁了节点）',
+    file: 'src/renderer/src/study/map/GraphMap.vue',
+    find: 'v-for="edge in visibleEdges"',
+    replace: 'v-for="edge in layout.edges"',
+    testFile: 'tests/map-performance.test.ts',
+    expect: '渲染层'
+  },
+  {
+    name: '101 探针：题卡摘掉 data-probe-id（结构化锚点腐烂）',
+    file: 'src/renderer/src/cards/QuizCard.vue',
+    find: '    data-probe-id="quiz-card"\n',
+    replace: '',
+    testFile: 'tests/probe-structure.test.ts',
+    expect: '锚点的选择器必须真的存在于渲染层'
+  },
+  {
+    name: '102 探针：ux-pages-audit 不再跑锚点自检（失配变成静默）',
+    file: 'scripts/ux-pages-audit.mjs',
+    find: 'const anchors = await cdp.evaluate(VERIFY_ANCHORS_SCRIPT)',
+    replace: 'const anchors = { checked: 0, total: 0, missing: [], mismatched: [] }',
+    testFile: 'tests/probe-structure.test.ts',
+    expect: '隔离与截图'
+  },
+  {
+    name: '103 探针：隔离脚本改成 clear()（会顺手删掉学生的偏好）',
+    file: 'scripts/probe-lib.mjs',
+    find: '        localStorage.removeItem(key)',
+    replace: '        localStorage.clear()',
+    testFile: 'tests/probe-structure.test.ts',
+    expect: '隔离与截图'
   }
 ]
 

@@ -78,3 +78,7 @@ UI/.vite/
 #   渲染出的 HTML 与截图每次跑都会重建，入库只是 6MB 噪声（2026-09-23 清掉过一次）。
 preset-content/_meta/rendered/
 preset-content/_meta/shots/
+
+# === 真机探针的失败截图（报告 §5.3：失败自动截图留现场）===
+# ★ 只在断言变红时产生，跑一次体检可能出几十张 PNG；现场用来排查，不入库。
+desktop/.probe-artifacts/

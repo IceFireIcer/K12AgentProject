@@ -74,12 +74,27 @@ class RagSearchRequest(_CamelModel):
     include_expansion: bool = True
 
 
+class RagLevelAttempt(_CamelModel):
+    """降级链一级的尝试记录（与 ``app/contracts.RagLevelAttempt`` 逐字段一致）。"""
+
+    level: Degraded
+    ok: bool = False
+    detail: str = ""
+    hits: int = 0
+
+
 class RagSearchResult(_CamelModel):
-    """``POST /api/rag/search`` 响应。降级链已在 Python 侧跑完，调用方只读 ``degraded``。"""
+    """``POST /api/rag/search`` 响应。降级链已在 Python 侧跑完，调用方只读 ``degraded``。
+
+    ★ ``attempts`` / ``grade_filter`` 是**展示用**的只读字段（演示模式的可观测化）：
+    逐级记录让人看见「试了哪几级、哪级命中」，过滤原文让人看见「WHERE 由谁强制」。
+    """
 
     hits: list[RagHit] = Field(default_factory=list)
     context: str = ""
     degraded: Degraded = "vector"
+    attempts: list[RagLevelAttempt] = Field(default_factory=list)
+    grade_filter: str = ""
 
 
 class DepNode(_CamelModel):
@@ -101,6 +116,7 @@ __all__ = [
     "DepNode",
     "DepRelation",
     "RagHit",
+    "RagLevelAttempt",
     "RagSearchRequest",
     "RagSearchResult",
 ]

@@ -37,6 +37,7 @@
  */
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
+  Activity,
   ArrowDown,
   BookMarked,
   Clapperboard,
@@ -54,6 +55,7 @@ import {
   Trophy
 } from 'lucide-vue-next'
 import ContextRail from '../components/ContextRail.vue'
+import TeacherGate from '../components/TeacherGate.vue'
 import MessageComposer from '../components/MessageComposer.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChapterIndicator from '../components/ChapterIndicator.vue'
@@ -63,6 +65,7 @@ import { useConfirm } from '../stores/confirm'
 import { useInsightStore } from '../stores/insight'
 import { useModelStore } from '../stores/model'
 import { usePanelsStore } from '../stores/panels'
+import { useDiagnosticsPanel } from '../stores/diagnosticsPanel'
 import { useStudentStore } from '../stores/student'
 import { useTraceStore } from '../stores/trace'
 import { useUiStore, type PageName } from '../stores/ui'
@@ -272,9 +275,11 @@ function onSend(text: string): void {
  * ★ 状态在 `stores/panels.ts`（localStorage 持久化）：组件里再存一份 ref 就会出现
  *   「一处改了另一处没同步」，而这类不同步在界面上表现成「点了没反应」。 */
 const panels = usePanelsStore()
+/** 只读机制浮窗（演示档用的那只；与「追问窗」是两只独立实例）。 */
+const diagnosticsPanel = useDiagnosticsPanel()
 const historyOpen = computed(() => panels.historyOpen)
 const railOpen = computed(() => panels.railOpen)
-const NARROW = '(max-width: 1279px)'
+const NARROW = '(max-width: 1023px)'
 let mql: MediaQueryList | null = null
 /** 记录「这次收起是断点自动做的」—— 离开窄屏时才还原，不覆盖学生主动关掉的选择。 */
 let autoClosed = false
@@ -344,6 +349,18 @@ function setRailOpen(open: boolean): void {
 
 function toggleRail(): void {
   setRailOpen(!panels.railOpen)
+}
+
+/**
+ * 打开只读机制浮窗（演示浮窗）。
+ *
+ * ★ 锚点取自触发按钮（`openFrom` 内部读 `getBoundingClientRect`）——
+ *   出场动画从按钮长出来、退场沿同路径收回，与追问窗同一条手感。
+ * ★ 这里**不打开右栏**：两者是并列的两块证据面（右栏是常驻的检索/轨迹/学段证据，
+ *   浮窗是「就地看一眼这一轮」，讲演示时经常需要其中一个不动、另一个飘过去）。
+ */
+function openDiagnostics(event: MouseEvent): void {
+  diagnosticsPanel.openFrom(event.currentTarget as Element | null)
 }
 
 /** 左栏（历史对话）开关：没有断点逻辑 —— 窄窗口下这一列本来就收成图标条（见 SessionList 的 CSS）。 */
@@ -592,6 +609,22 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
         <ChapterIndicator class="chat__bar-chapter" />
 
         <div class="chat__bar-right">
+          <!-- ★★ 演示浮窗入口（只在教师 / 演示档存在）：在**真实页面里**就地解释这一轮
+               背后的机制。它是只读浮窗 —— 打开后没有一处能改运行时状态。
+               ⚠️ 包在 `<TeacherGate>` 里：学生视角下这个按钮**不在 DOM 里**
+               （不是 CSS 藏起来），与右栏那批证据同一处置。 -->
+          <TeacherGate>
+            <button
+              type="button"
+              class="chat__bar-btn"
+              data-testid="diag-panel-toggle"
+              title="看看这一轮背后发生了什么"
+              @click="openDiagnostics($event)"
+            >
+              <Activity :size="14" />
+              <span>本轮机制</span>
+            </button>
+          </TeacherGate>
           <button
             type="button"
             class="chat__bar-btn"
@@ -940,12 +973,12 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   min-width: 0;
 }
 .chat__bar-title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .chat__bar-meta {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -968,7 +1001,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   gap: 6px;
   padding: 7px 12px;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
 }
@@ -1006,7 +1039,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 20px 24px 8px;
+  padding: var(--k12-sp-5) var(--k12-sp-5) var(--k12-sp-2);
   display: flex;
   flex-direction: column;
 }
@@ -1025,7 +1058,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   max-width: calc(var(--k12-w-reading) + 40px);
   margin: 0 auto;
   flex: none;
-  padding: 0 20px 16px;
+  padding: 0 var(--k12-sp-5) var(--k12-sp-4);
 }
 
 /* ── 底部区（回到最新 + 待发送 + 输入条）─────────────────────────────────
@@ -1061,7 +1094,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   border: 1px solid var(--k12-accent-border);
   background: var(--k12-surface);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   cursor: pointer;
   box-shadow: var(--k12-shadow-raise);
@@ -1096,7 +1129,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   border-top: 1px solid var(--k12-accent-border);
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
 }
 .chat__queued-text {
   overflow: hidden;
@@ -1109,7 +1142,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
 .chat__queued-note {
   margin-left: auto;
   flex: none;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .chat__queued-cancel {
@@ -1120,7 +1153,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   border-radius: var(--k12-r-pill);
   background: var(--k12-surface);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
 }
@@ -1131,7 +1164,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   margin: 0 auto;
   flex: none;
   padding: 6px 14px 8px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-warn);
   background: var(--k12-warn-soft);
 }
@@ -1173,14 +1206,14 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   user-select: none;
 }
 .chat__hello-title {
-  font-size: var(--k12-fs-2xl);
+  font-size: var(--k12-fs-hero);
   font-weight: 650;
   line-height: var(--k12-lh-tight);
   letter-spacing: -0.01em;
   color: var(--k12-fg);
 }
 .chat__hello-sub {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
   max-width: 58ch;
@@ -1192,7 +1225,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
  *   所以底卡与绿点一起去掉，只留一句灰字（`--k12-muted`）。
  * ★ 来源（手动选中 / AI 引擎推算）不在这里复读 —— 只在侧栏身份卡一处出现（2.1）。 */
 .chat__hello-grade {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
   max-width: 72ch;
@@ -1224,7 +1257,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
 .chat__llm-text {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1239,7 +1272,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   border-radius: var(--k12-r-control);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
 }
@@ -1286,12 +1319,12 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   min-width: 0;
 }
 .chat__entry-label {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .chat__entry-desc {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -1307,7 +1340,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   border-radius: var(--k12-r-pill);
   background: transparent;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1349,7 +1382,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   flex: 1;
 }
 .chat__opening-text {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg);
 }
@@ -1367,7 +1400,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   cursor: pointer;
 }
@@ -1385,7 +1418,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   border-radius: var(--k12-r-pill);
   background: transparent;
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
@@ -1401,7 +1434,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   align-items: center;
   gap: 6px;
   padding-top: 6px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -1414,12 +1447,19 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   border-radius: var(--k12-r-inset);
   background: var(--k12-warn-soft);
   color: var(--k12-warn);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
 }
 
-/* ── 空态在窄窗口下的收拢 ─────────────────────────────────────────────── */
+/* ── 空态能力入口的列数：1440 基准 4 列 → 1024 档 3 列 → 更窄 2 列 ────────
+ * 优化报告 §2.2：1024–1279 区间新增 3 列（原来直接从 4 列掉到 2 列，
+ * 中间那一档的空白被白白浪费）。 */
 @media (max-width: 1439px) {
+  .chat__entries {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 1023px) {
   .chat__entries {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

@@ -66,6 +66,11 @@ defineExpose({ scrollToTop: resetScroll })
 
 <template>
   <div class="shell">
+    <!-- 键盘用户的第一个 Tab 落点：跳过侧栏与顶栏，直接进内容区（优化报告 §3.1）。
+         ★ 平时 sr-only（读屏可读、视觉隐藏），**聚焦时可见** —— 否则键盘用户
+           看不到自己 Tab 到了哪儿。目标容器同时带 `tabindex="-1"`，
+           这样 href 锚点跳转后焦点真的落进去（否则只是滚动，焦点还在链接上）。 -->
+    <a class="skip-link" href="#k12-content">跳到主内容</a>
     <AppSidebar />
     <div class="shell__main">
       <div class="shell__head">
@@ -78,7 +83,13 @@ defineExpose({ scrollToTop: resetScroll })
       </div>
 
       <!-- `is-scrolled` 供 PageActions 吸顶时补分隔线（纯 CSS 判断不了是否已吸住） -->
-      <main ref="contentRef" class="shell__content" :class="{ 'is-scrolled': scrolled }">
+      <main
+        id="k12-content"
+        ref="contentRef"
+        class="shell__content"
+        :class="{ 'is-scrolled': scrolled }"
+        tabindex="-1"
+      >
         <slot />
       </main>
     </div>
@@ -102,6 +113,27 @@ defineExpose({ scrollToTop: resetScroll })
   overflow: hidden;
   display: flex;
   background: var(--k12-page);
+}
+
+/* 「跳到主内容」：整页 Tab 顺序的第 0 站。
+ * ★ 平时视觉隐藏但**可聚焦**（用 clip-path 而不是 display:none —— 后者键盘也够不到，
+ *   与 `.sr-only` 同一条理由）；聚焦时显形，浮在最上层。 */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 60;
+  padding: 8px 14px;
+  border: 1px solid var(--k12-accent-ink);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface);
+  color: var(--k12-accent-ink);
+  font-size: var(--k12-fs-body-sm);
+  font-weight: 650;
+  clip-path: inset(50%);
+}
+.skip-link:focus-visible {
+  clip-path: none;
 }
 .shell__main {
   flex: 1;

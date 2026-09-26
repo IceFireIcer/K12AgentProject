@@ -20,6 +20,26 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 /**
+ * 三档视角（从小到大 = 能看到的内部信息从少到多）：`student` / `teacher` / `debug`。
+ *
+ * ★★ 类型与档位表**住在这里**（`stores/ui.ts`）而不是 `stores/viewMode.ts`：
+ *   本文件被 `tests/student-view-discipline.test.ts` 与 `tests/ui-shell.test.ts`
+ *   **直接用 Node 的 ESM 加载器 import**，而 Node 解析不了渲染进程里那种不带后缀的相对
+ *   import。所以这里必须是一个**零运行时 import** 的纯模块 —— `stores/viewMode.ts`
+ *   用 `import type` 反过来拿这个类型（类型 import 编译后完全擦除，不会产生那条边）。
+ */
+export type ViewMode = 'student' | 'teacher' | 'debug'
+
+/** 档位从低到高（**唯一判据**：`visibleInSidebar` / `requiredViewFor` / ViewMode 的派生标志都对齐它）。 */
+export const VIEW_MODE_ORDER: readonly ViewMode[] = ['student', 'teacher', 'debug']
+
+/** `mode` 是否**至少**达到 `required`（`required === null` = 所有档位都能看）。 */
+export function viewModeAllows(mode: ViewMode, required: ViewMode | null): boolean {
+  if (required === null) return true
+  return VIEW_MODE_ORDER.indexOf(mode) >= VIEW_MODE_ORDER.indexOf(required)
+}
+
+/**
  * 全部页面（**侧栏可见与否都在这里**）。
  *
  * ★ 三个分组（2026-09-21 起）：`跟团团聊` / `动手试试` / `我的记录`。
@@ -37,6 +57,7 @@ export type PageName =
   | 'settings'
   | 'knowledge'
   | 'dependency'
+  | 'demo'
 
 /** 学习档案里的分页（概览 / 错题本 / 章节 / 地图 / 会话）。 */
 export type StudyTab = 'report' | 'mistakes' | 'chapters' | 'map' | 'sessions'
@@ -51,7 +72,8 @@ export interface PageMeta {
   /**
    * 侧栏可见性：
    *   `true`      —— 学生与教师视角都显示；
-   *   `'teacher'` —— **只在教师 / 答辩视角显示**（数据检视 / 破坏性运维类页面）；
+   *   `'teacher'` —— **只在教师 / 答辩视角及更高档显示**（数据检视 / 破坏性运维类页面）；
+   *   `'debug'`   —— **只在演示 / 调试档显示**（演示驾驶舱：Prompt 原文与原始信封在那一页）；
    *   `false`     —— 不进侧栏，**必须有别的入口**（本项目没有 router，
    *                  没有入口就等于点不到，见 D-040 的补记）。
    *
@@ -59,7 +81,7 @@ export interface PageMeta {
    *   （入口在设置页的高级区里说清怎么打开），后者「本来就不该出现在导航里」。
    *   判据见 `visibleInSidebar()` —— 侧栏不要自己比较这个字段。
    */
-  nav: boolean | 'teacher'
+  nav: boolean | 'teacher' | 'debug'
   /** 侧栏图标名（`lucide-vue-next` 的组件名）。 */
   icon?: string
 }
@@ -71,9 +93,11 @@ export interface PageMeta {
  *   这两种「差不多」的写法在 `'teacher'` 上给出相反结果，而写错的表现是
  *   「教师视角下知识库页不见了」—— 一个只有评委才会发现、且会被当成功能没做的错误。
  */
-export function visibleInSidebar(meta: PageMeta, isTeacher: boolean): boolean {
+export function visibleInSidebar(meta: PageMeta, mode: ViewMode): boolean {
   if (meta.nav === true) return true
-  if (meta.nav === 'teacher') return isTeacher
+  // ★ 判据是**档位高低**（`viewModeAllows`）：演示档看得到教师档的页，反过来看不到 ——
+  //   否则一进演示模式，「参考资料库」会突然从侧栏消失，看起来像功能坏了。
+  if (meta.nav === 'teacher' || meta.nav === 'debug') return viewModeAllows(mode, meta.nav)
   return false
 }
 
@@ -138,6 +162,22 @@ export const PAGES: Record<PageName, PageMeta> = {
     section: '我的记录',
     nav: true,
     icon: 'GitBranch'
+  },
+  /**
+   * ★★ 演示驾驶舱（2026-09-26）：**只在演示 / 调试档可见**。
+   *
+   * 这一页摊开的是后端隐藏机制（Prompt 分段拼装、画像字节指纹、四级降级链、
+   * 安全三阶段、拦截记录、原始信封）。给评委看的那一半仍然在 `<TeacherGate>` 里
+   * （右栏与设置页高级区）；这一页是**答辩时讲给自己/评委听**的驾驶舱，
+   * 所以它既不在学生视角、也不在教师视角的侧栏里出现（`nav: 'debug'`），
+   * 入口是设置页「高级设置」里的「进入演示驾驶舱」。
+   */
+  demo: {
+    title: '演示驾驶舱',
+    subtitle: '隐藏机制 · 轮次诊断 · 答辩回放',
+    section: '我的记录',
+    nav: 'debug',
+    icon: 'Radar'
   }
 }
 
@@ -155,6 +195,7 @@ export const PAGE_ORDER: readonly PageName[] = [
   'study',
   'dependency',
   'knowledge',
+  'demo',
   'settings'
 ]
 
@@ -168,6 +209,19 @@ export const PAGE_ORDER: readonly PageName[] = [
  */
 export function isTeacherOnlyPage(page: PageName): boolean {
   return PAGES[page].nav === 'teacher'
+}
+
+/**
+ * 这一页**要求的最低档位**（`null` = 三档都能看）。
+ *
+ * ★ 与 `visibleInSidebar` 的分工：那个回答「进不进侧栏」，这个回答「停在这一页上还合不合法」。
+ *   两者读**同一个** `nav` 字段，所以不会出现「侧栏里看不到它、停在里面又没人管」这种只有
+ *   评委才会撞见的不一致。`App.vue` 的档位迁移监听读的就是它。
+ */
+export function requiredViewFor(page: PageName): ViewMode | null {
+  const nav = PAGES[page].nav
+  if (nav === 'teacher' || nav === 'debug') return nav
+  return null
 }
 
 /* ------------------------------------------------------------------ *

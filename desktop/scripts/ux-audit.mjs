@@ -276,7 +276,7 @@ async function modelReadiness(cdp) {
     chip: (document.querySelector('[data-testid="composer-model"]')?.innerText ?? '').replace(/\\s+/g, ' ').trim(),
     composer: Boolean(document.querySelector('[data-testid="composer-input"]')),
     needSetup: Boolean(document.querySelector('[data-testid="chat-llm-unconfigured"]')),
-    degraded: (document.querySelector('[data-testid="degraded-notice"]')?.innerText ?? '').trim().slice(0, 40)
+    degraded: (document.querySelector('[data-testid="error-notice"]')?.innerText ?? '').trim().slice(0, 40)
   }))()`)
   // ⚠️ 先分清「不在对话页」与「模型没配」：两者都会让 chip 读不到，但处置完全不同
   //    （前者是探针的前置条件没准备好，后者才是环境问题）。混在一起说会把人带去买 Key。

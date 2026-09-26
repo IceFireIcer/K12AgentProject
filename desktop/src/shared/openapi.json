@@ -3138,6 +3138,42 @@
         "title": "RagHit",
         "type": "object"
       },
+      "RagLevelAttempt": {
+        "additionalProperties": false,
+        "description": "降级链**一级**的尝试记录（展示用；判定仍然只发生在 ``RagService.search()`` 里）。\n\n与 Python 内部 ``app.rag.retriever.LevelAttempt`` **同形**（``level`` / ``ok`` /\n``detail`` / ``hits``）—— 这里只是把它变成可序列化的契约模型，\n好让「四级降级链」这件事在界面上可观测、可答辩。",
+        "properties": {
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "hits": {
+            "default": 0,
+            "title": "Hits",
+            "type": "integer"
+          },
+          "level": {
+            "enum": [
+              "vector",
+              "cloud",
+              "fts",
+              "outline"
+            ],
+            "title": "Level",
+            "type": "string"
+          },
+          "ok": {
+            "default": false,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "level"
+        ],
+        "title": "RagLevelAttempt",
+        "type": "object"
+      },
       "RagSearchRequest": {
         "additionalProperties": false,
         "description": "``POST /api/rag/search`` 的请求体（供 Pi 的 `rag_search` Tool 调用）。\n\n``grade_level`` 是**必填**：学段过滤写在 SQL 层，模型改不了 WHERE（AGENTS §5.2）。",
@@ -3185,6 +3221,13 @@
         "additionalProperties": false,
         "description": "``POST /api/rag/search`` 的响应。\n\n降级链整条在 Python 侧一次调用内完成（§8.5）：调用方只读 ``degraded``，\n**不要**在编排层再实现一遍降级逻辑。",
         "properties": {
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/RagLevelAttempt"
+            },
+            "title": "Attempts",
+            "type": "array"
+          },
           "context": {
             "default": "",
             "title": "Context",
@@ -3199,6 +3242,11 @@
               "outline"
             ],
             "title": "Degraded",
+            "type": "string"
+          },
+          "gradeFilter": {
+            "default": "",
+            "title": "Gradefilter",
             "type": "string"
           },
           "hits": {

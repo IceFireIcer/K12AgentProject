@@ -27,6 +27,7 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useEscape } from '../composables/useEscape'
+import { useFocusReturn } from '../composables/useFocusReturn'
 import { GripHorizontal, Minus, MessageCircleQuestion, X, Sparkles } from 'lucide-vue-next'
 import { useFloatPanel } from '../stores/floatPanel'
 import { useChatStore } from '../stores/chat'
@@ -206,6 +207,13 @@ onMounted(() => {
 
 /** Esc 关闭：模态必须有键盘出口，否则键盘用户被卡在里面。 */
 useEscape(() => floatPanel.close(), () => floatPanel.open)
+
+/**
+ * 焦点契约（优化报告 §3.1）：打开时把焦点移入窗内，关闭时归还触发它的那颗按钮。
+ * ★ `trap: false` —— 这是**非模态**浮窗（要能一边看动画一边追问），
+ *   把 Tab 锁在窗里反而让学生回不到页面。
+ */
+useFocusReturn(rootRef, () => floatPanel.open, { trap: false })
 </script>
 
 <template>
@@ -327,13 +335,13 @@ useEscape(() => floatPanel.close(), () => floatPanel.open)
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 650;
 }
 .fp__title {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
   overflow: hidden;
@@ -370,7 +378,7 @@ useEscape(() => floatPanel.close(), () => floatPanel.open)
   padding: 9px 11px;
   background: var(--k12-accent-soft);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
 }
 .fp__hint svg {
@@ -391,7 +399,7 @@ useEscape(() => floatPanel.close(), () => floatPanel.open)
 .fp__empty {
   padding: 18px 8px;
   text-align: center;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
@@ -426,7 +434,7 @@ useEscape(() => floatPanel.close(), () => floatPanel.open)
   color: var(--k12-muted);
 }
 .fp__text {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   margin: 0;
   white-space: pre-wrap;

@@ -155,7 +155,8 @@ function gradeLabelOf(key: string) {
 
 <style scoped>
 .gm {
-  padding: 16px 20px 20px;
+  /* 优化报告 §1.2：间距并入 8 点网格（20 → 24）。 */
+  padding: var(--k12-sp-4) var(--k12-sp-5) var(--k12-sp-5);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -168,7 +169,7 @@ function gradeLabelOf(key: string) {
 .gm__sub {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
 }
 .gm__chip {
@@ -178,7 +179,7 @@ function gradeLabelOf(key: string) {
   color: var(--k12-accent-ink);
   /* 页头汇总胶囊：选择器名含 chip，形态是填充胶囊 + 650 的**记号**，
    * 与 .pal__chip 同族 → 走角标档 11px（版式契约 §1 判据①）。 */
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 650;
   flex: none;
 }
@@ -200,17 +201,17 @@ function gradeLabelOf(key: string) {
   gap: 8px;
 }
 .card__title {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-h3);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .card__meta {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 .card__note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -248,17 +249,17 @@ function gradeLabelOf(key: string) {
   border-radius: 50%;
 }
 .axis__label {
-  font-size: var(--k12-fs-md);
+  font-size: var(--k12-fs-body);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .axis__layer {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-accent-ink);
   font-weight: 600;
 }
 .axis__tone {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -291,24 +292,24 @@ function gradeLabelOf(key: string) {
   flex: none;
 }
 .col__grade {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .col__tone {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 .col__k {
   margin-top: 4px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-muted);
   letter-spacing: 0.04em;
 }
 .col__v {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -317,7 +318,7 @@ function gradeLabelOf(key: string) {
   /* 引用行：极小元素 → 圆角 flat 档（版式契约 §5） */
   border-radius: var(--k12-r-flat);
   background: var(--k12-accent-soft);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-accent-ink);
 }
@@ -329,7 +330,7 @@ function gradeLabelOf(key: string) {
 .tag {
   padding: 2px 7px;
   border-radius: var(--k12-r-flat);
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 600;
 }
 .tag--ok {

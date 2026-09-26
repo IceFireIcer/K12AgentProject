@@ -67,7 +67,7 @@ defineProps<{ notice: BlockedNotice }>()
   border: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-ui);
 }
@@ -82,14 +82,14 @@ defineProps<{ notice: BlockedNotice }>()
  * 此前它是「我们换了一个更合适的说法」那种短标签，所以是 `muted` + `sm`；
  * 现在它承载的是「刚才那条为什么换了、接下来能怎么办」，读起来必须像一句人话。 */
 .label {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg-2);
 }
 
 .reason {
   margin-top: 6px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted-2);
   word-break: break-word;

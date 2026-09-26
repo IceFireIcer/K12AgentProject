@@ -163,7 +163,8 @@ function isActive(grade: GradeKey, sat: SatKey) {
 
 <style scoped>
 .pal {
-  padding: 16px 20px 20px;
+  /* 优化报告 §1.2：间距并入 8 点网格（20 → 24）。 */
+  padding: var(--k12-sp-4) var(--k12-sp-5) var(--k12-sp-5);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -176,7 +177,7 @@ function isActive(grade: GradeKey, sat: SatKey) {
 .pal__sub {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
 }
 .pal__sub code {
@@ -192,7 +193,7 @@ function isActive(grade: GradeKey, sat: SatKey) {
    * 填充胶囊 + 650 的**记号**，与 .fp__chip / .sb__badge 同族 → 留角标档 11px。
    * ⚠️ 内容长于 4 字，是本页唯一"擦边"的一处：升到 12px 就与紧邻的说明行
    * .pal__sub（12px）同权，页头「说明 / 记号」这层区分会被抹掉。理由见交付说明。 */
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
   font-weight: 650;
   flex: none;
 }
@@ -214,17 +215,17 @@ function isActive(grade: GradeKey, sat: SatKey) {
   gap: 8px;
 }
 .card__title {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-h3);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .card__meta {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 .card__note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 .card__note code {
@@ -256,11 +257,11 @@ function isActive(grade: GradeKey, sat: SatKey) {
 }
 .var__name {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
 }
 .var__label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
@@ -297,12 +298,12 @@ function isActive(grade: GradeKey, sat: SatKey) {
   flex: 1;
 }
 .sat__label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .sat__desc {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -323,7 +324,7 @@ function isActive(grade: GradeKey, sat: SatKey) {
 }
 .matrix__cell--head {
   justify-content: center;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-muted);
   padding: 4px 0;
@@ -334,12 +335,12 @@ function isActive(grade: GradeKey, sat: SatKey) {
   gap: 2px;
 }
 .matrix__grade {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 620;
   color: var(--k12-fg);
 }
 .matrix__layer {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 .matrix__cell--swatch {
@@ -366,7 +367,7 @@ function isActive(grade: GradeKey, sat: SatKey) {
 .sw__name {
   margin-left: auto;
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 

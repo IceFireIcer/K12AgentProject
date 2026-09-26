@@ -128,13 +128,13 @@ function ratio(mastered: number, total: number): number {
 
 .summary {
   margin-bottom: 12px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   color: var(--k12-fg-2);
 }
 
 .summary__note {
   color: var(--k12-muted-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
 }
 
 .list {
@@ -160,13 +160,13 @@ function ratio(mastered: number, total: number): number {
 }
 
 .chapter__title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   color: var(--k12-fg);
 }
 
 .chapter__count {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-variant-numeric: tabular-nums;
   color: var(--k12-accent-ink);
   font-weight: 600;
@@ -199,13 +199,13 @@ function ratio(mastered: number, total: number): number {
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
   border: 1px solid var(--k12-border);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
 .state {
   padding: 10px 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 

@@ -27,11 +27,17 @@
  *   所以"点运行 → 立刻看到输出"是本地的、离线的、可中断的；
  *   而"老师怎么讲这个错"由模型经既有对话输出给出（模型那边会调 `evaluate_code`）。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { useChatStore } from '../stores/chat'
+import { useDiagnosticsStore } from '../stores/diagnostics'
 import { useKnowledgeStore } from '../stores/knowledge'
+import CardHeader from '../components/card/CardHeader.vue'
+import CardBody from '../components/card/CardBody.vue'
+import CardFoot from '../components/card/CardFoot.vue'
+import CodeEditorSkeleton from '../components/CodeEditorSkeleton.vue'
+import DiagPeekButton from '../components/diag/DiagPeekButton.vue'
 import type { InlineCard } from '../api/events'
-import { createCodeEditor, observeEditorResize, type CodeEditorHandle } from '../sandbox/monaco-setup'
+import { MONACO_MAX_LOAD_ATTEMPTS } from '../sandbox/monaco-setup'
 import { kpLabel } from '../study/kp-label'
 import {
   runStudentCode,
@@ -54,10 +60,32 @@ import {
 
 const props = defineProps<{ card: InlineCard }>()
 const chat = useChatStore()
+/** 演示模式的沙箱事件（只有渲染进程采集得到，见 `stores/diagnostics.ts`）。 */
+const diagnostics = useDiagnosticsStore()
 const knowledge = useKnowledgeStore()
 
 const view = computed(() => readCodingCard(props.card.payload))
 const kpId = computed(() => (view.value.kind === 'unknown' ? '' : view.value.kpId))
+
+/**
+ * 代码编辑器（异步组件，报告 §5.1）：只有编程卡真的渲染时才拉它的 chunk。
+ *
+ * ── 三个包装件各自解决什么 ───────────────────────────────────────────────
+ *   · `loader`：把 `CodeEditor.vue` 切成独立 chunk（进卡片才下载）；
+ *   · `loadingComponent`：chunk 在途时的骨架（与下面那层覆盖骨架同一个组件）；
+ *   · `onError`：chunk 读取失败时重试 **≤3 次**（与 `monaco-setup.ts` 的
+ *     `MONACO_MAX_LOAD_ATTEMPTS` 同一个上限口径 —— 一个是读 chunk，一个是装配内核）。
+ */
+const AsyncCodeEditor = defineAsyncComponent({
+  loader: () => import('../components/CodeEditor.vue'),
+  loadingComponent: CodeEditorSkeleton,
+  delay: 200,
+  timeout: 10000,
+  onError(_error, retry, fail, attempts) {
+    if (attempts <= MONACO_MAX_LOAD_ATTEMPTS) retry()
+    else fail()
+  }
+})
 
 /**
  * 卡片头上那个知识点 chip 的文字（**教材里的中文名**，不是 slug）。
@@ -101,13 +129,37 @@ const running = ref(false)
 /** 本地提示（无编辑器、空代码之类），不是 `error` 事件。 */
 const localHint = ref<string | null>(null)
 
-const editorHost = ref<HTMLElement | null>(null)
-let editor: CodeEditorHandle | null = null
-let stopResizeObserver: (() => void) | null = null
+/**
+ * 编辑器组件句柄（`CodeEditor.vue` 通过 `defineExpose` 给的五个方法）。
+ *
+ * ★ 与旧实现的差别：以前是「卡片自己 `createCodeEditor()` 并把句柄存在 `let editor` 里」，
+ *   现在装配与释放都归 `CodeEditor.vue`（异步组件），这里只**用**句柄。
+ *   卡片仍然保留 `editorReady` / `editorFailure` 两个状态：界面文案与探针锚点都没变。
+ */
+const editorRef = ref<{
+  isReady(): boolean
+  getValue(): string
+  setValue(text: string): void
+  setReadOnly(readOnly: boolean): void
+  layout(): void
+  focus(): void
+} | null>(null)
 /** 编辑器是否已就绪（模板卡片挂载后异步装配 Monaco）。 */
 const editorReady = ref(false)
 /** Monaco 装配失败时的可读说明（**绝不白屏**）。 */
 const editorFailure = ref<string | null>(null)
+
+/** 装配成功（`CodeEditor.vue` 的 ready 事件）：只翻状态，不动其它。 */
+function onEditorReady(): void {
+  editorReady.value = true
+  editorFailure.value = null
+}
+
+/** 装配失败：收成一句可读说明（学生仍可用「复制脚手架」这条保底路径）。 */
+function onEditorFailure(message: string): void {
+  editorReady.value = false
+  editorFailure.value = `代码编辑器没能加载起来：${message}`
+}
 
 /** Pyodide 加载状态（进卡片才开始加载，界面要能看出来）。 */
 const runnerStatus = ref<RunnerStatus>(runnerStatusSnapshot())
@@ -154,31 +206,9 @@ const interventionNotice = computed(() => {
 
 /** 当前源码（编辑器里学生改过的版本）。 */
 function currentCode(): string {
-  if (editor) return editor.getValue()
+  const handle = editorRef.value
+  if (handle && handle.isReady()) return handle.getValue()
   return view.value.kind === 'template' ? view.value.scaffold : ''
-}
-
-/** 装配 Monaco（模板卡片才需要；异步、失败可读）。 */
-async function mountEditor(): Promise<void> {
-  if (view.value.kind !== 'template') return
-  await nextTick()
-  const host = editorHost.value
-  if (!host) return
-  try {
-    editor = await createCodeEditor({
-      container: host,
-      value: view.value.scaffold,
-      theme: 'vs'
-    })
-    stopResizeObserver = observeEditorResize(host, editor)
-    editorReady.value = true
-    editorFailure.value = null
-  } catch (error) {
-    // ★ 装配失败不许白屏：给一句中文 + 仍然允许用「复制脚手架」的方式继续学
-    editorFailure.value = `代码编辑器没能加载起来：${
-      error instanceof Error ? error.message : String(error)
-    }`
-  }
 }
 
 onMounted(() => {
@@ -192,7 +222,7 @@ onMounted(() => {
 })
 
 /**
- * 卸载：释放编辑器与订阅（Worker 是窗口级共享的，交给整页卸载时统一收）。
+ * 卸载：退订状态（编辑器的释放归 `CodeEditor.vue` 自己的 `onBeforeUnmount`）。
  *
  * ★ 本卡片处在 `App.vue` 的 `<KeepAlive>` 里：切到设置页再回来时**编辑器内容与本地运行结果
  *   都还在**（正是 KeepAlive 的目的）。切走走的是 `onDeactivated`，这里只在真正卸载时执行；
@@ -200,28 +230,17 @@ onMounted(() => {
  *   切回来后 ResizeObserver 会再报一次真实尺寸并触发 `layout()`，不会留下空白编辑器。
  */
 onBeforeUnmount(() => {
-  stopResizeObserver?.()
-  stopResizeObserver = null
   unsubscribeStatus?.()
   unsubscribeStatus = null
-  editor?.dispose()
-  editor = null
 })
 
 // 模板变了（例如模型重新取了一次模板）：把编辑器内容换掉
 watch(
   () => (view.value.kind === 'template' ? view.value.scaffold : null),
   (next) => {
-    if (next && editor) editor.setValue(next)
+    const handle = editorRef.value
+    if (next && handle && handle.isReady()) handle.setValue(next)
   }
-)
-
-watch(
-  () => view.value.kind,
-  (kind) => {
-    if (kind === 'template') void mountEditor()
-  },
-  { immediate: true }
 )
 
 /**
@@ -247,7 +266,7 @@ async function run(): Promise<void> {
   localHint.value = null
   running.value = true
   // 运行期间锁住编辑器：避免"边跑边改"导致显示的输出与眼前的代码对不上
-  editor?.setReadOnly(true)
+  editorRef.value?.setReadOnly(true)
 
   try {
     const outcome = await runStudentCode(code, {
@@ -260,6 +279,16 @@ async function run(): Promise<void> {
       elapsedMs: outcome.elapsedMs,
       failure: outcome.failure ?? null
     }
+    // ★ 演示模式的沙箱事件：**只有渲染进程采集得到**（主进程与数据服务都没有执行入口，
+    //   见 `stores/diagnostics.ts` 的 `noteSandbox`）。记录的是「在哪执行、有没有被中断」，
+    //   不含学生代码本身。
+    diagnostics.noteSandbox({
+      codeExecutedIn: 'renderer-worker',
+      interrupted: outcome.interrupted,
+      // 输出被截断时执行器会在 stderr 里留一句可读说明（见 `pyodide-runner.ts`），
+      // 这里只认那句话，**不猜**一个字符数阈值（猜出来的阈值会随执行器实现漂移）。
+      outputTruncated: /截断|过长/.test(outcome.stderr)
+    })
   } catch (error) {
     // 兜底：`runStudentCode` 自己已收敛异常，这里防的是"兜底逻辑本身出错"
     localResult.value = {
@@ -271,7 +300,7 @@ async function run(): Promise<void> {
     }
   } finally {
     running.value = false
-    editor?.setReadOnly(false)
+    editorRef.value?.setReadOnly(false)
   }
 
   // 真实输出已经显示了；再请模型给中文反馈（那一步失败不影响上面的展示）
@@ -312,7 +341,7 @@ function retryCard(): void {
 /** 重置为脚手架（学生改乱了之后想重来）。 */
 function resetToScaffold(): void {
   if (view.value.kind !== 'template') return
-  editor?.setValue(view.value.scaffold)
+  editorRef.value?.setValue(view.value.scaffold)
   localResult.value = null
   localHint.value = null
 }
@@ -373,153 +402,173 @@ const interruptNotice = computed(() => {
   <!-- 模板卡片：Monaco + 运行 / 求助 -->
   <article
     v-if="view.kind === 'template'"
-    class="coding"
+    class="k12-card coding"
     data-testid="coding-card"
     :data-kp-id="view.kpId"
     :data-tool="card.tool ?? ''"
   >
-    <header class="coding__head">
-      <span class="title">编程练习</span>
-      <!-- ★★ 这里原来直接印 `{{ view.kpId }}`（`prog-loop-jr` 这种 slug）——
-           卡片在**对话正文里**，那是学生看得最多的地方，摆一个内部主键
-           与走查那条「立刻隐藏所有 ID」正面冲突。改成教材里的中文名；
-           取不到名字时**整个 chip 不出现**（不回落成 slug）。
-           原始 id 仍在容器的 `data-kp-id` 上（排障与断言要用，但不渲染）。 -->
-      <span v-if="kpName" class="chip tool" data-testid="coding-kp" :title="view.kpId">{{ kpName }}</span>
-      <span
-        class="chip"
-        :class="`chip--${pyodideBadge.tone}`"
-        :title="pyodideBadge.title"
-        data-testid="coding-pyodide"
-      >
-        {{ pyodideBadge.text }}
-      </span>
-    </header>
-
-    <p v-if="view.expectedBehavior" class="coding__goal" data-testid="coding-goal">
-      <span class="coding__goal-label">做到这样就算完成：</span>{{ view.expectedBehavior }}
-    </p>
-
-    <!-- 编辑器宿主（Monaco 挂载点） -->
-    <div class="coding__editor-wrap">
-      <div ref="editorHost" class="coding__editor" data-testid="coding-editor"></div>
-      <p v-if="editorFailure" class="coding__editor-failure" data-testid="coding-editor-failure">
-        {{ editorFailure }}
-      </p>
-      <pre v-else-if="!editorReady" class="coding__scaffold" data-testid="coding-scaffold-raw">{{
-        view.scaffold
-      }}</pre>
-    </div>
-
-    <div class="coding__actions">
-      <button
-        class="btn btn--primary"
-        type="button"
-        data-testid="coding-run"
-        :disabled="running || chat.streaming"
-        @click="run"
-      >
-        {{ running ? '正在运行…' : '运行' }}
-      </button>
-      <button
-        class="btn"
-        type="button"
-        data-testid="coding-help"
-        :disabled="running || chat.streaming"
-        @click="askForHint"
-      >
-        求助
-      </button>
-      <button class="btn" type="button" data-testid="coding-reset" @click="resetToScaffold">
-        重置代码
-      </button>
-      <button
-        v-if="editorFailure"
-        class="btn"
-        type="button"
-        data-testid="coding-copy"
-        @click="copyScaffold"
-      >
-        复制脚手架
-      </button>
-    </div>
-
-    <p v-if="interruptNotice" class="coding__warn" data-testid="coding-interrupt-notice">
-      {{ interruptNotice }}
-    </p>
-
-    <!-- 运行结果（点「运行」立刻出现） -->
-    <section v-if="display" class="out" data-testid="coding-output">
-      <header class="out__head">
-        <span class="chip" :class="display.ok ? 'chip--ok' : 'chip--warn'" data-testid="coding-verdict">
-          {{ display.ok ? '运行成功' : display.interrupted ? '已中断' : '运行失败' }}
+    <CardHeader>
+      <template #title>
+        <span class="title">编程练习</span>
+      </template>
+      <template #meta>
+        <!-- ★★ 这里原来直接印 `{{ view.kpId }}`（`prog-loop-jr` 这种 slug）——
+             卡片在**对话正文里**，那是学生看得最多的地方，摆一个内部主键
+             与走查那条「立刻隐藏所有 ID」正面冲突。改成教材里的中文名；
+             取不到名字时**整个 chip 不出现**（不回落成 slug）。
+             原始 id 仍在容器的 `data-kp-id` 上（排障与断言要用，但不渲染）。 -->
+        <span v-if="kpName" class="chip tool" data-testid="coding-kp" :title="view.kpId">{{ kpName }}</span>
+        <span
+          class="chip"
+          :class="`chip--${pyodideBadge.tone}`"
+          :title="pyodideBadge.title"
+          data-testid="coding-pyodide"
+        >
+          {{ pyodideBadge.text }}
         </span>
-        <span class="chip" data-testid="coding-elapsed">
-          {{ formatRunMeta(display.elapsedMs, display.interrupted) }}
-        </span>
-        <span v-if="display.consecutiveFailures > 0" class="chip" data-testid="coding-failures">
-          连续失败 {{ display.consecutiveFailures }} 次
-        </span>
-      </header>
+      </template>
+      <template #actions>
+        <!-- 演示档专用：就地看一眼「刚才那次运行背后发生了什么」（沙箱 / 中断 / 输出截断） -->
+        <DiagPeekButton />
+      </template>
+    </CardHeader>
 
-      <!-- 运行器故障（不是学生的报错）：单独一条，别和学生报错混在一起 -->
-      <p v-if="display.failure" class="out__failure" data-testid="coding-runner-failure">
-        {{ display.failure }}
+    <CardBody>
+      <p v-if="view.expectedBehavior" class="coding__goal" data-testid="coding-goal">
+        <span class="coding__goal-label">做到这样就算完成：</span>{{ view.expectedBehavior }}
       </p>
 
-      <!-- ★ 中文反馈（后端翻译好的）：界面上的主角 -->
-      <p v-if="display.feedback" class="out__feedback" data-testid="coding-feedback">
-        {{ display.feedback }}
-      </p>
-
-      <!-- stdout：程序真实打印出来的东西 -->
-      <div v-if="display.stdout" class="block">
-        <span class="block__label">程序输出</span>
-        <pre class="block__code" data-testid="coding-stdout">{{ display.stdout }}</pre>
+      <!-- 编辑器宿主（Monaco 挂载点） -->
+      <div class="coding__editor-wrap">
+        <!-- ★ 异步组件（报告 §5.1）：chunk 加载中由它自己的 loadingComponent 顶上；
+             下面那层骨架覆盖的是**Monaco 内核装配**那一段等待（两层同一个骨架组件）。 -->
+        <AsyncCodeEditor
+          ref="editorRef"
+          class="coding__editor"
+          data-testid="coding-editor"
+          :value="view.scaffold"
+          @ready="onEditorReady"
+          @failure="onEditorFailure"
+        />
+        <CodeEditorSkeleton v-if="!editorReady && !editorFailure" class="coding__editor-skeleton" />
+        <p v-if="editorFailure" class="coding__editor-failure" data-testid="coding-editor-failure">
+          {{ editorFailure }}
+        </p>
       </div>
 
-      <!-- ★ 原始 traceback 默认折叠：给学生看的是中文反馈，原文留给排查 -->
-      <details v-if="display.stderr" class="raw" data-testid="coding-raw-details">
-        <summary>原始报错（给老师/家长看）</summary>
-        <pre class="block__code" data-testid="coding-stderr">{{ display.stderr }}</pre>
-      </details>
-    </section>
+      <p v-if="interruptNotice" class="coding__warn" data-testid="coding-interrupt-notice">
+        {{ interruptNotice }}
+      </p>
 
-    <!-- ★ 分级提示：1→2→3 累积显示，越往后越具体 -->
-    <section v-if="hints.length > 0" class="hints" data-testid="coding-hints">
-      <span class="block__label">提示（越往下越具体）</span>
-      <ol class="hints__list">
-        <li
-          v-for="hint in hints"
-          :key="hint.level"
-          class="hint"
-          data-testid="coding-hint"
-          :data-level="hint.level"
+      <!-- 运行结果（点「运行」立刻出现） -->
+      <section v-if="display" class="out" data-testid="coding-output">
+        <header class="out__head">
+          <span class="chip" :class="display.ok ? 'chip--ok' : 'chip--warn'" data-testid="coding-verdict">
+            {{ display.ok ? '运行成功' : display.interrupted ? '已中断' : '运行失败' }}
+          </span>
+          <span class="chip" data-testid="coding-elapsed">
+            {{ formatRunMeta(display.elapsedMs, display.interrupted) }}
+          </span>
+          <span v-if="display.consecutiveFailures > 0" class="chip" data-testid="coding-failures">
+            连续失败 {{ display.consecutiveFailures }} 次
+          </span>
+        </header>
+
+        <!-- 运行器故障（不是学生的报错）：单独一条，别和学生报错混在一起 -->
+        <p v-if="display.failure" class="out__failure" data-testid="coding-runner-failure">
+          {{ display.failure }}
+        </p>
+
+        <!-- ★ 中文反馈（后端翻译好的）：界面上的主角 -->
+        <p v-if="display.feedback" class="out__feedback" data-testid="coding-feedback">
+          {{ display.feedback }}
+        </p>
+
+        <!-- stdout：程序真实打印出来的东西 -->
+        <div v-if="display.stdout" class="block">
+          <span class="block__label">程序输出</span>
+          <pre class="block__code" data-testid="coding-stdout">{{ display.stdout }}</pre>
+        </div>
+
+        <!-- ★ 原始 traceback 默认折叠：给学生看的是中文反馈，原文留给排查 -->
+        <details v-if="display.stderr" class="raw" data-testid="coding-raw-details">
+          <summary>原始报错（给老师/家长看）</summary>
+          <pre class="block__code" data-testid="coding-stderr">{{ display.stderr }}</pre>
+        </details>
+      </section>
+
+      <!-- ★ 分级提示：1→2→3 累积显示，越往后越具体 -->
+      <section v-if="hints.length > 0" class="hints" data-testid="coding-hints">
+        <span class="block__label">提示（越往下越具体）</span>
+        <ol class="hints__list">
+          <li
+            v-for="hint in hints"
+            :key="hint.level"
+            class="hint"
+            data-testid="coding-hint"
+            :data-level="hint.level"
+          >
+            <span class="chip chip--accent" data-testid="coding-hint-level">第 {{ hint.level }} 级</span>
+            <span class="hint__text" data-testid="coding-hint-text">{{ hint.hint }}</span>
+          </li>
+        </ol>
+      </section>
+
+      <p v-if="interventionNotice" class="coding__intervene" data-testid="coding-intervene">
+        {{ interventionNotice }}
+      </p>
+
+      <p v-if="localHint" class="coding__hint" data-testid="coding-hint-local">{{ localHint }}</p>
+      <!-- ★★ 这一行只剩下**真实的行为告知**（走查 C7：同一件安全承诺说三遍 = 一遍都记不住）。
+           原来前半句还写着「代码在你电脑上的沙箱里运行，不会上传」，与编程页页脚那句重复；
+           现在**全应用只留一处**常驻安全声明 = `views/Coding.vue` 页脚
+           （`data-testid="coding-view-run-locally"`），这里不再复读。
+           保留下来的这半句是**必须说**的（走查后修正、且 D-063 要求承诺与实际一致）：
+           点「求助」会把**学生代码的前 400 字**发给智团团
+           （见 `cards/coding.ts` 的 `buildHintRequestMessage` + `codePreview`）——
+           一个把字面意思当真的 10 岁学生，若只读到「不会上传」就去点求助，
+           会以为求助也是本地的。
+           ⚠️ 改这句话之前先读 `buildHintRequestMessage`：它带 `codePreview(code)`。 -->
+      <p class="coding__foot">
+        点「求助」时，会把你写的那几行发给智团团看。它是靠这个帮你找问题的。
+      </p>
+    </CardBody>
+
+    <!-- 卡脚：运行 / 求助 / 重置（都是「状态提交」类动作，版式契约 §7） -->
+    <CardFoot>
+      <div class="coding__actions">
+        <button
+          class="btn btn--primary"
+          type="button"
+          data-testid="coding-run"
+          :disabled="running || chat.streaming"
+          @click="run"
         >
-          <span class="chip chip--accent" data-testid="coding-hint-level">第 {{ hint.level }} 级</span>
-          <span class="hint__text" data-testid="coding-hint-text">{{ hint.hint }}</span>
-        </li>
-      </ol>
-    </section>
-
-    <p v-if="interventionNotice" class="coding__intervene" data-testid="coding-intervene">
-      {{ interventionNotice }}
-    </p>
-
-    <p v-if="localHint" class="coding__hint" data-testid="coding-hint-local">{{ localHint }}</p>
-    <!-- ★★ 这一行只剩下**真实的行为告知**（走查 C7：同一件安全承诺说三遍 = 一遍都记不住）。
-         原来前半句还写着「代码在你电脑上的沙箱里运行，不会上传」，与编程页页脚那句重复；
-         现在**全应用只留一处**常驻安全声明 = `views/Coding.vue` 页脚
-         （`data-testid="coding-view-run-locally"`），这里不再复读。
-         保留下来的这半句是**必须说**的（走查后修正、且 D-063 要求承诺与实际一致）：
-         点「求助」会把**学生代码的前 400 字**发给智团团
-         （见 `cards/coding.ts` 的 `buildHintRequestMessage` + `codePreview`）——
-         一个把字面意思当真的 10 岁学生，若只读到「不会上传」就去点求助，
-         会以为求助也是本地的。
-         ⚠️ 改这句话之前先读 `buildHintRequestMessage`：它带 `codePreview(code)`。 -->
-    <p class="coding__foot">
-      点「求助」时，会把你写的那几行发给智团团看。它是靠这个帮你找问题的。
-    </p>
+          {{ running ? '正在运行…' : '运行' }}
+        </button>
+        <button
+          class="btn"
+          type="button"
+          data-testid="coding-help"
+          :disabled="running || chat.streaming"
+          @click="askForHint"
+        >
+          求助
+        </button>
+        <button class="btn" type="button" data-testid="coding-reset" @click="resetToScaffold">
+          重置代码
+        </button>
+        <button
+          v-if="editorFailure"
+          class="btn"
+          type="button"
+          data-testid="coding-copy"
+          @click="copyScaffold"
+        >
+          复制脚手架
+        </button>
+      </div>
+    </CardFoot>
   </article>
 
   <!-- ── 认不出的载荷：不猜内容，但**残余能读到的部分照样给学生** ──────────
@@ -534,65 +583,77 @@ const interruptNotice = computed(() => {
        提示正文**照后端原文**显示（卡片不生成任何提示文本），并说明它在编程卡里会累积。 -->
   <article
     v-else-if="view.kind === 'hint'"
-    class="coding coding--hint"
+    class="k12-card coding coding--hint"
     data-testid="coding-card-hint"
     :data-level="view.level"
     :data-kp-id="view.kpId"
   >
-    <header class="coding__head">
-      <span class="title">编程提示</span>
-      <span class="chip">第 {{ view.level }} 级 / 共 3 级</span>
-    </header>
-    <p class="coding__goal" data-testid="coding-hint-text">{{ view.hint }}</p>
-    <p class="coding__fallback">
-      这条提示也会累加到上面那张编程卡里（{{ view.level }} 级为止），照着改一版再点运行。
-    </p>
+    <CardHeader>
+      <template #title>
+        <span class="title">编程提示</span>
+      </template>
+      <template #meta>
+        <span class="chip">第 {{ view.level }} 级 / 共 3 级</span>
+      </template>
+    </CardHeader>
+    <CardBody>
+      <p class="coding__goal" data-testid="coding-hint-text">{{ view.hint }}</p>
+      <p class="coding__fallback">
+        这条提示也会累加到上面那张编程卡里（{{ view.level }} 级为止），照着改一版再点运行。
+      </p>
+    </CardBody>
   </article>
 
   <article
     v-else-if="view.kind === 'unknown'"
-    class="coding coding--unknown"
+    class="k12-card coding coding--unknown"
     data-testid="coding-card-unknown"
     :data-tool="card.tool ?? ''"
     :data-detail="view.text || null"
   >
-    <header class="coding__head">
-      <span class="title">编程练习</span>
-      <span class="chip chip--warn">这张卡片这次没画出来</span>
-    </header>
-    <p v-if="view.task" class="coding__goal" data-testid="coding-unknown-task">
-      <span class="coding__goal-label">这题要做的：</span>{{ view.task }}
-    </p>
-    <!-- ★ 这一句**永远是学生话**：编程侧的失败文本是写给模型/排障的
-         （例如「取代码模板需要知识点 id…请先确认要练哪个知识点」），
-         照搬进学生气泡就是又一份"开发者视角"。原文只进上面的 `data-detail`。 -->
-    <p class="coding__fallback" data-testid="coding-unknown-notice">
-      卡片里原来的代码框和运行按钮这次没能准备好。你可以点下面的按钮让智团团重出一遍，也可以直接问它「这道题用中文讲讲怎么做」。
-    </p>
-    <div class="coding__actions">
-      <!-- ★ 读不出知识点 id 时不渲染（点了也不知道要重取哪道题 —— 那是假按钮） -->
-      <button
-        v-if="view.kpId"
-        class="btn btn--primary"
-        type="button"
-        data-testid="coding-unknown-retry"
-        :disabled="chat.streaming"
-        @click="retryCard"
-      >
-        让智团团再出一遍
-      </button>
-    </div>
+    <CardHeader>
+      <template #title>
+        <span class="title">编程练习</span>
+      </template>
+      <template #meta>
+        <span class="chip chip--warn">这张卡片这次没画出来</span>
+      </template>
+    </CardHeader>
+    <CardBody>
+      <p v-if="view.task" class="coding__goal" data-testid="coding-unknown-task">
+        <span class="coding__goal-label">这题要做的：</span>{{ view.task }}
+      </p>
+      <!-- ★ 这一句**永远是学生话**：编程侧的失败文本是写给模型/排障的
+           （例如「取代码模板需要知识点 id…请先确认要练哪个知识点」），
+           照搬进学生气泡就是又一份"开发者视角"。原文只进上面的 `data-detail`。 -->
+      <p class="coding__fallback" data-testid="coding-unknown-notice">
+        卡片里原来的代码框和运行按钮这次没能准备好。你可以点下面的按钮让智团团重出一遍，也可以直接问它「这道题用中文讲讲怎么做」。
+      </p>
+    </CardBody>
+    <!-- 卡脚：重出这张卡（状态提交类动作） -->
+    <CardFoot>
+      <div class="coding__actions">
+        <!-- ★ 读不出知识点 id 时不渲染（点了也不知道要重取哪道题 —— 那是假按钮） -->
+        <button
+          v-if="view.kpId"
+          class="btn btn--primary"
+          type="button"
+          data-testid="coding-unknown-retry"
+          :disabled="chat.streaming"
+          @click="retryCard"
+        >
+          让智团团再出一遍
+        </button>
+      </div>
+    </CardFoot>
   </article>
 </template>
 
 <style scoped>
 .coding {
-  padding: 14px 16px;
-  /* 卡片本体 → 卡片圆角；白面（paper）+ 可见边框 + 近距离投影，与 base.css 的 .k12-card 同配方 */
-  border-radius: var(--k12-r-card);
-  background: var(--k12-surface);
-  border: 1px solid var(--k12-border-strong);
-  box-shadow: var(--k12-shadow-card);
+  /* 卡片皮肤（白面 / 边框 / 圆角 / 投影）唯一来源 = base.css 的 `.k12-card`；
+   * 三段结构的内边距与底色 = `.k12-card-head/-body/-foot`。 */
+  min-width: 0;
 }
 
 .coding--unknown {
@@ -604,7 +665,7 @@ const interruptNotice = computed(() => {
 .coding__fallback {
   margin-top: 10px;
   /* 说明文字是**给学生读的** → 次级正文档（与 `.coding__goal` 同档） */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: 1.8;
   color: var(--k12-muted);
 }
@@ -624,7 +685,7 @@ const interruptNotice = computed(() => {
   border: 1px solid var(--k12-border);
   background: var(--k12-surface-2);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-ui);
 }
@@ -664,30 +725,21 @@ const interruptNotice = computed(() => {
   color: var(--k12-accent-ink);
 }
 
-.coding__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
 .title {
-  /* 卡片标题：按语义走区块标题档（14px 的原值是正文档，对「标题」太轻） */
-  font-size: var(--k12-fs-lg);
+  /* 档位由 `.k12-card-head` 给（h3 20px）；这里只补字重 */
   font-weight: 650;
 }
 
 .tool {
   font-family: var(--k12-font-mono);
   /* 知识点 id：是 id 不是角标（长度也远超 4 字）→ meta 档，micro 档不适用 */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 500;
 }
 
 .coding__goal {
-  margin-top: 8px;
   /* 学习目标：可读的说明文字（学生要照着做）→ 次级正文档 */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: 1.8;
   color: var(--k12-muted);
   word-break: break-word;
@@ -699,14 +751,17 @@ const interruptNotice = computed(() => {
 }
 
 .coding__editor-wrap {
+  /* 骨架是**覆盖层**：它盖在编辑器宿主上（宿主尺寸由 .coding__editor 给），
+   * 因此这里必须是定位上下文 —— 否则骨架会排在编辑器下面，把卡片撑高一倍。 */
+  position: relative;
   margin-top: 10px;
   border: 1px solid var(--k12-border-strong);
   /* 卡内嵌入块（编辑器外框）→ inset 档 */
   border-radius: var(--k12-r-inset);
   overflow: hidden;
-  /* 白面：Monaco 的 vs 主题本身就是白底，这里必须同为 paper，否则外框与
-   * 编辑器之间会露出一条色差缝 */
-  background: var(--k12-surface);
+  /* 深色面：Monaco 固定 vs-dark（报告 §5.1 的主题精简），外框必须与编辑器同底，
+   * 否则两者之间会露出一条色差缝（同值 token 见 base.css 的 --k12-editor-bg）。 */
+  background: var(--k12-editor-bg);
 }
 
 .coding__editor {
@@ -714,31 +769,22 @@ const interruptNotice = computed(() => {
   height: 300px;
 }
 
-/* Monaco 未就绪时的脚手架回显（**保底可读**，不是空白） */
-.coding__scaffold {
-  margin: 0;
-  padding: 12px;
-  min-height: 120px;
-  font-family: var(--k12-font-mono);
-  /* 旧值不在 8 档之内：等宽脚手架回显 → meta 档（与下面的代码块同一个落点） */
-  font-size: var(--k12-fs-xs);
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--k12-muted);
+/* Monaco 内核装配中：骨架盖住编辑区（不占第二块高度） */
+.coding__editor-skeleton {
+  position: absolute;
+  inset: 0;
 }
 
 .coding__editor-failure {
   margin: 0;
   padding: 12px;
   /* 编辑器没起来时给学生看的说明 → 次级正文档（可读的失败说明，不是脚注） */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: 1.7;
   color: var(--k12-bad);
 }
 
 .coding__actions {
-  margin-top: 10px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -760,7 +806,7 @@ const interruptNotice = computed(() => {
   border-radius: var(--k12-r-control);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   cursor: pointer;
 }
@@ -802,7 +848,7 @@ const interruptNotice = computed(() => {
 .out__feedback {
   margin-top: 8px;
   /* 后端翻译好的中文反馈：这张卡片上的主角 → 次级正文档 */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: 1.8;
   white-space: pre-wrap;
   word-break: break-word;
@@ -811,7 +857,7 @@ const interruptNotice = computed(() => {
 .out__failure {
   margin-top: 8px;
   /* 运行器故障说明：整句可读文案 → 次级正文档 */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: 1.7;
   color: var(--k12-bad);
 }
@@ -823,7 +869,7 @@ const interruptNotice = computed(() => {
 .block__label {
   display: block;
   /* 块内小标签（「程序输出」）→ meta 档 */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-muted);
   margin-bottom: 4px;
@@ -838,7 +884,7 @@ const interruptNotice = computed(() => {
   border: 1px solid var(--k12-border);
   font-family: var(--k12-font-mono);
   /* 旧值不在 8 档之内：程序输出 / 原始报错是等宽读数 → meta 档 */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
@@ -853,7 +899,7 @@ const interruptNotice = computed(() => {
 .raw summary {
   cursor: pointer;
   /* 折叠条的说明文字 → meta 档（与 views/Coding.vue 的 `.raw summary` 同一落点） */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
@@ -887,7 +933,7 @@ const interruptNotice = computed(() => {
 .hint__text {
   flex: 1;
   /* 分级提示正文：学生要照着改代码 → 次级正文档 */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: 1.8;
   word-break: break-word;
 }
@@ -900,14 +946,14 @@ const interruptNotice = computed(() => {
   /* 边框是「画」的那一层 → accent（不是 accent-ink：那是给文字用的） */
   border: 1px solid var(--k12-accent);
   /* 老师要介入的提示：一句写给学生的完整话 → 次级正文档 */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: 1.7;
 }
 
 .coding__warn {
   margin-top: 8px;
   /* 能力自检的说明（「不支持中断死循环」）→ meta 档 */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: 1.7;
   color: var(--k12-bad);
 }
@@ -916,14 +962,14 @@ const interruptNotice = computed(() => {
   margin-top: 8px;
   /* 本卡片的即时提示（「先写一点代码」）→ meta 档。
    * 这一条**是要读的文字** → accent-ink（accent 配在这个字号上对比度不够）。 */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-accent-ink);
 }
 
 .coding__foot {
   margin-top: 12px;
   /* 卡片脚注（「求助会把你的代码发给智团团」这条行为告知）→ meta 档 */
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: 1.6;
   color: var(--k12-muted-2);
 }

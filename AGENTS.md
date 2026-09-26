@@ -44,10 +44,13 @@
 - **设计令牌** `--k12-*`：改 `scripts/design/tokens.source.json` → `npm run gen:tokens`；**勿手改** `tokens.generated.css`（CI 查 diff）。字号走 `base.css` `:root` 阶梯，**页面不写死 `font-size: Npx`**。
 - **品牌**：真源 `src/shared/brand.ts`；`index.html` title 与 `electron-builder.yml` `productName` **须手工同步**。**userData slug 钉死**（`applyStableUserDataSlug`），改名不迁数据。
 - **双视角（D-063）**：技术证据进 `<TeacherGate>`；学生面禁技术词/内部 id/kp slug（用 `kpLabel()`）；承诺文案不得超出该路径实际行为。守卫：`student-view-discipline.test.ts` + `npm run ux:student`。
+- **三档视角（D-094，2026-09-26）**：`student < teacher < debug`，判据只有「当前档位 ≥ 该页要求的档位」（`stores/ui.ts` 的 `VIEW_MODE_ORDER` / `viewModeAllows` / `requiredViewFor`）。**演示驾驶舱**（`PAGES.demo.nav === 'debug'`）摊开后端隐藏机制，入口在设置页高级区（先切档再跳页）；技术口原文案集中在 `components/diag/evidence.ts`（守卫按文件豁免，凭据在 `tests/demo-mode.test.ts`）。
+- **演示数据（D-093/D-095）**：轮次信封走**独立推送通道** `diagnostics:changed`（+ `diagnostics:read` / `diagnostics:clear` 两条 invoke），**不进 6 事件词表**；落盘到 `pi-agent/logs/turn-diagnostics.jsonl` 的是**剥掉正文**的那份（只留长度/哈希/计数/结论），暖机后跨重启可回放。RAG 的 `attempts` / `gradeFilter` 是**只读展示字段**，逐级同源性由 `test_rag.py` 的 trace 用例钉住。守卫：`tests/demo-mode.test.ts` + `npm run ux:demo`。
 - **Pi**：锁 `^0.85.1`；**必须** `systemPromptOverride`（防装机路径泄漏）；**`session_end` 不存在**（用 `session_shutdown` / `agent_end`）；会话目录必须改道 `students/<id>/`；`models.json` 是设置页**每次重写**的派生产物；内置模型 ID 不写 `models[]`（会丢 compat）。SDK 无 `createAgent`/`PiAgent`/`registerExtension`。
 - **会话**：切换 = **先 dispose 旧再装配新**（或分叉后再 dispose）；`cwd` 统一 `piSessionCwd`；删除当前会话须先换会话再 `unlink`；invoke 通道**不进** `PUSH_CHANNELS`。
 - **NSIS**：`deleteAppDataOnUninstall: false`（**勿改 true** —— 会删光学生数据）；引导式 `oneClick: false` 成套配置勿拆。
 - **打包依赖**：electron-builder **只收 `dependencies`**；渲染依赖放 `devDependencies`。renderer `emptyOutDir: true` 不能删。`resources/` 只放主进程直读物，防双份进包。
+- **渲染进程必须压缩**（2026-09-27，P-148）：`electron.vite.config.ts` 的 renderer 段写死 `minify: 'esbuild'` —— electron-vite 三个目标的默认值是 `minify: false`，关掉它 Monaco chunk 立刻从 2.52MB 涨回 **4.87MB**（报告 §5.1 的 <3MB 验收线从结构上做死）。守卫：`tests/monaco-bundle.test.ts`。新增渲染专用依赖时，同步加进 `tests/bundle-budget.test.ts` 的 `RENDERER_ONLY_PACKAGES`（例：`vue-virtual-scroller`）。
 - **本地只构建便携版**（2026-09-22 用户裁决）：日常出包一律 `npm run build:portable`（只出一个 `dist/<name>-<ver>-portable.exe`）。安装器 nsis 由 **CI/nightly** 出；`build:win` 留给手动发版，**本地别跑**。
 - **Electron 侧禁原生数据库模块**；Anime.js **锁 v3**；零 CDN（Pyodide/Monaco/动画库本地）。
 
@@ -99,11 +102,16 @@ npm run ux:reload                  # ★ 先跑：HMR 不重跑 onMounted
 npm run ux | ux:pages | ux:layout | ux:student | ux:scroll | ux:busy
 npm run ux:nonce                   # 动画资源请求计数：必须 0 次（一次性 nonce 不许被取第二次，D-084）
 npm run ux:stage                   # 动画舞台的屏幕有效字号（缩放/节点字/字幕/步骤条，三视口；D-085）
+npm run ux:motion                  # 减少动效三档（自动/开启/关闭）：用 CDP 模拟系统偏好 + 探针动画量时长（D-100）
+npm run ux:perf                    # 性能基准线：FCP / LCP / FID + DCL / load（门槛见脚本头；D-102）
 npm run smoke:wire                 # 需 sidecar：--data-dir 必须显式且 ≠ server/_data，见脚本头
 ```
 
 坑：探针默认停在**对话页**且两栏可能默认收起（脚本会展开）；窗口须前台可见（否则几何断言假红）；
 按文字点侧栏时标签要与 `PAGES.title` 一致（对话页叫**问问智团团** —— `ux:nonce` 曾因写成「对话」而静默跳过整轮）；
+`ux:layout` 用过视口仿真（`Emulation.setDeviceMetricsOverride`）之后，CDP 的键盘事件不再送达渲染进程 ——
+键盘类审计（`ux` / `ux:keyboard`）要先跑或重启应用再跑（P-149）；`K12_DEBUG_PORT` 绑不上先查僵尸监听（P-152）；
+探针的锚点 / 隔离 / 截图 / axe 类规则统一在 `scripts/probe-lib.mjs`，改组件前先读 `docs/agents/probe-guide.md`；
 改守卫后跑 `guards:mutation` 验「真的会红」。
 
 ## CI 读法

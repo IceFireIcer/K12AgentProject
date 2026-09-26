@@ -59,7 +59,16 @@ export default defineConfig({
     //   它**照样会被 electron-builder 收进 asar**（`files` 拦的是我们预期的文件名，
     //   拦不住一个我们没预料到的 hash 文件）。让构建自己清干净是唯一可靠的修法。
     //   ⚠️ 只影响 renderer：`out/main` / `out/preload` 是各自独立的构建目标，不在这个目录下。
-    build: { emptyOutDir: true },
+    build: {
+      emptyOutDir: true,
+      // ★★ 报告 §5.1（WP-13）：electron-vite 的渲染进程默认 **minify: false** ——
+      //   同一份 Monaco 代码因此从 ~2.5MB 涨到 ~5.0MB（实测，2026-09-27）。
+      //   渲染进程是纯前端产物（模板在构建期已编译成 render 函数），压缩没有任何副作用；
+      //   不压就等于把「编辑器 chunk < 3MB」这条报告验收项从结构上做死。
+      //   ⚠️ 压缩后 asar 里**字符串仍在**（中文文案、`data-testid` 都能 grep），
+      //   只有标识符会被换名 —— `npm run build:portable` 后核对改动仍可搜字符串。
+      minify: 'esbuild'
+    },
     resolve: {
       alias: {
         ...sharedAlias,

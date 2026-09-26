@@ -87,12 +87,18 @@ useFocusReturn(panelRef, () => props.open, {
           <p v-if="body" class="cd__body">{{ body }}</p>
 
           <div class="cd__foot">
-            <button type="button" class="cd__btn cd__btn--cancel" @click="emit('cancel')">
+            <button
+              type="button"
+              class="cd__btn cd__btn--cancel"
+              data-testid="confirm-no"
+              @click="emit('cancel')"
+            >
               {{ cancelText }}
             </button>
             <button
               type="button"
               class="cd__btn cd__btn--primary"
+              data-testid="confirm-yes"
               :data-danger="danger"
               @click="emit('confirm')"
             >
@@ -120,7 +126,7 @@ useFocusReturn(panelRef, () => props.open, {
 .cd__box {
   width: 100%;
   max-width: 420px;
-  padding: 20px;
+  padding: var(--k12-sp-5);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -146,13 +152,13 @@ useFocusReturn(panelRef, () => props.open, {
   color: var(--k12-bad);
 }
 .cd__title {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   line-height: var(--k12-lh-snug);
   color: var(--k12-fg);
 }
 .cd__body {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -168,7 +174,7 @@ useFocusReturn(panelRef, () => props.open, {
   border-radius: var(--k12-r-control);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   cursor: pointer;
 }

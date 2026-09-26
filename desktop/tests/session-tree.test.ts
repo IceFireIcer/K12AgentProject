@@ -302,9 +302,11 @@ test('★★ 收起一个节点 = 藏掉**整棵子树**（不是只藏直接子
   assert.match(source, /guard < 64/, '★ 祖先链要有步数上限（防坏数据死循环）')
 })
 
-test('★ 窄栏（<1280）里树形前导折掉（60px 宽度下缩进只会挤掉文字）', () => {
+test('★ 窄栏（<1024）里树形前导折掉（60px 宽度下缩进只会挤掉文字）', () => {
   const source = read(SESSION_LIST)
-  const narrow = source.slice(source.indexOf('@media (max-width: 1279px)'))
+  // ★ 2026-09-27（优化报告 §2.2）：窄栏档从 <1280 改为 **<1024** ——
+  //   1024–1279 现在是"平板/小笔记本"档（侧栏保持完整展开），不再折树形前导。
+  const narrow = source.slice(source.indexOf('@media (max-width: 1023px)'))
   assert.match(narrow, /\.sl__tree/, '★ 窄栏规则里要显式处理前导')
   assert.match(narrow, /\.sl__fold/, '★ 箭头也要一起折掉（同上）')
 })

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _NEEDED = (
     "Citation",
     "RagHit",
+    "RagLevelAttempt",
     "RagSearchRequest",
     "RagSearchResult",
     "DepNode",
@@ -100,6 +101,7 @@ __all__ = [
     "DepNode",
     "DepRelation",
     "RagHit",
+    "RagLevelAttempt",
     "RagSearchRequest",
     "RagSearchResult",
     "contract_parity_report",

@@ -53,7 +53,7 @@ const viewMode = useViewModeStore()
 }
 /* 标题用 xs 而不是 micro：它是标签不是角标（micro 只给 ≤4 字的角标）。 */
 .gate__label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-muted);
 }

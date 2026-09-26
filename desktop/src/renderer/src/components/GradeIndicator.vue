@@ -250,7 +250,7 @@ async function choose(level: GradeLevel): Promise<void> {
   border: 1px solid var(--k12-accent-border);
   color: var(--k12-accent-ink);
   font: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   line-height: var(--k12-lh-ui);
   white-space: nowrap;
@@ -304,7 +304,7 @@ async function choose(level: GradeLevel): Promise<void> {
 }
 
 .grade__hint {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -328,7 +328,7 @@ async function choose(level: GradeLevel): Promise<void> {
   background: var(--k12-surface);
   color: var(--k12-fg-2);
   font: inherit;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 
@@ -361,7 +361,7 @@ async function choose(level: GradeLevel): Promise<void> {
 
 .grade__warn {
   margin-top: 5px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-warn);
 }

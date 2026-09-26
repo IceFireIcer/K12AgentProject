@@ -3515,3 +3515,165 @@ P-122（锚点没命中却打印成功）—— 三条都在讲同一件事：**
    只能靠 git 恢复）。改法：脚本支持按编号筛选（`… 62 63 64`）、恢复改成**内容回写**而不是
    `copyFileSync`、并在崩后用手查 `*.mutation-backup` 兜底。
    ★ 这一条的方法论与 P-140 同源：**先保证验证工具本身能给出可信结论**。
+
+## P-145 ★★ 守卫读的是**含注释的源码窗口**：注释里照抄一句字面量会让变异验证假绿（2026-09-26）
+
+代码里那句 `readStoredViewMode()` 的三元表达式改完写法之后，我在它上面加了一句注释说明兜底方向，
+注释里顺手抄了 `: 'student'` 这个片段（写「`: 'student'` 兜底」）。
+而 `student-view-discipline.test.ts` 的「默认视角必须是学生」那条守卫是用**正则扫带注释的源码窗口**的，
+于是变异脚本把真正的三元兜底改成 `'teacher'` 之后，**注释里那一片段照样喂饱了断言** —— 守卫仍然是绿的。
+`npm run guards:mutation` 的第 ③ 条当场报出来（「守卫仍然是绿的！这条断言没有在守那件事」），
+这条缺陷才没有溜过去。
+
+**改法**：注释里不照抄被判据匹配的字面量（改写成自然语言描述），并在那条守卫旁边写明这条教训。
+**为什么值得记**：这不是「注释写错了」，而是**判据的锚点落在了注释上** —— 与 P-144 的「量错元素」同源：
+验证工具指向的不是它以为的那个对象。凡是「用源码文本当判据」的守卫，都有这一类的假绿面。
+
+**相关**：`tests/student-view-discipline.test.ts`（默认视角那条）、`scripts/verify-guard-mutations.mjs` 第 ③ 条。
+
+## P-146 变异脚本在 Windows 上崩过一次：`BlockedNotice.vue` 被留在变异状态（2026-09-26）
+
+`npm run guards:mutation` 跑到第 ⑥ 条（安全提示：把规则原文摆回学生那一半）时，
+脚本在这一轮**没能恢复原文件**：`BlockedNotice.vue` 里的 `<TeacherGate label="安全终审原因">…</TeacherGate>`
+被留成了裸 `<p class="reason">`。后果是下一轮再跑时第 ⑥ 条报「找不到锚点 → 这条守卫未被验证」，
+同时工作区里躺着一处**不是任何人有意做的改动**。
+（P-144 的追记里已经记过一次同类事故：句柄被占时 `copyFileSync` 恢复会失败。这次是它的再现。）
+
+**处置**：用 `apply_patch` 把那三行按 diff 反向写回去（没有用 `git checkout --`，避免连带丢掉同一文件里别人的改动），
+跑一次全量变异验证（66 条全红、逐条恢复），并确认 `git status` 里没有 `*.mutation-backup` 残留。
+**教训**：① 变异验证**跑完要看 `git status`**，不能只看脚本的最后一行；② 崩过之后要按编号分片重跑，
+别指望「再跑一遍就好了」——锚点已经被改掉的那几条会静默变成「未验证」。
+
+## P-147 ★★ 探针的锚点会**静默烂掉**：一次真机体检里抓到五处「代码是对的、探针在撒谎」（2026-09-26）
+
+**现象**：给引用收起 / 闯关单卡两处改动做真机取证时，`npm run ux:pages` 与 `scripts/verify-ui.mjs`
+一共红出五条，逐条查下来**没有一条是产品缺陷**：
+
+1. `sendChat({ text })` 的字面量断言 —— store 早已写成 `sendChat({ text: outgoing })`（同一件事、换了个变量名），
+   正则却钉死字面量，报出「发送链路传了学段」这种**不存在**的缺陷；
+2. `readBankQuestion('server/resources/quizbank/junior.json', …)` —— 题库 2026-09-26 起**按章分片**
+   （`chNN.json`），旧单文件形态已不存在 → `scriptError` 把整轮体检打断，后面的节根本没跑；
+   同一处还压着「必须有 `code_blank` 题」的旧假设（随包题库现在只有 `choice` / `blank`）；
+3. 章节进 prompt 的锚点是 `当前教材章节` —— 那句画像文案 2026-09-21（D-064）就改成了
+   「学生当前在看：…」，锚点没跟着改 → 这一格**永远红**，而实测章节一直都在两份落盘 prompt 里；
+4. 注入探针复用固定 `requestId` → 对话列表按 requestId 做 key，Vue **直接复用上一跑的 `<details>` DOM 节点**，
+   于是「上一跑点开过」的展开状态被当成「默认没收起」（红在 `open=true / 671px` 上）；
+5. 答案泄漏检查比的是**整页文本** → F 节提交后会真跑一轮，模型把解析原话讲了出来，
+   于是「卡片没泄漏」被判成泄漏（判据的边界画错了位置）。
+
+**根因**：探针是**另一份实现**，它对这几件事各有一份副本 —— 源码的写法、题库的文件形态与题型集合、
+画像文案、DOM 复用语义、泄漏判据的边界。产品改一处、探针不改，红的是探针，而报告上看起来像产品坏了。
+更糟的是反向：锚点失配时 `verify-ui` 会 `scriptError` 或静默降级成 `[INFO]`（引用那一节原本就有这个风险）。
+
+**解决**：逐条把判据改成「能自我解释」的那一条，而不是照抄当前实现：
+① 断言「入参只有一个 `text` 字段」而不是某个字面量；② 题库按章扫、题型按**实际存在的**断言
+（`code_blank` 的投影与渲染由 `tests/renderer-quiz.test.ts` 单测承担）；③ 锚点换成现行原话
+「学生当前在看」，并在注释里写清它为什么变过；④ 每跑一次换一个 `requestId`；
+⑤ 泄漏检查只看**卡片子树**，并把批改后的反馈块摘掉（解析本来就该在判分后出现）。
+
+**防呆**：锚点旁写出来源与历史（「这条锚点跟着 D-064 改过」「题库现在没有 code_blank」）；
+新加的引用一节把「Chromium 关着的 `<details>` 仍有 phantom 布局盒（实测 431px），
+所以收起判据是**外层高度 + 命中测试**，不是内层 rect = 0」也写进注释 —— 否则下一个人会照着
+rect = 0 去改 CSS。
+
+**报告用法**：难题与解决方案一章的「工具也会撒谎」一节：**证据链自己也要被证据校验**；
+真机体检的价值一半在于抓到产品缺陷，另一半在于它逼你把「判据的边界」写清楚。
+
+## P-148 ★★ electron-vite 的渲染进程**默认不压缩**：同一份 Monaco 是 4.87MB 还是 2.52MB（2026-09-27）
+
+**现象**：优化报告 §5.1 要求 `editor.api` chunk <3MB，而基线实测 4.87MB（5,103.77 kB）。
+按「只注册 Python 语言 + 关 feature」精简之后重新构建，体积几乎没动 —— 因为**根本没人压缩它**。
+
+**根因**：`electron-vite` 给 **三个目标**（main / preload / renderer）的默认 config 都写了
+`build.minify: false`（实测：`node_modules/electron-vite/dist/chunks/*.js` 里三处 `minify: false`）。
+vite 自己的默认是 `'esbuild'`，被这一层默认值盖掉了；README 里也不提醒。
+
+**改法**：`electron.vite.config.ts` 的 renderer 段显式写 `build.minify: 'esbuild'`。
+实测：`editor.api` **5,103.77 → 2,646.80 kB**、主包 1,806.60 → 784.18 kB、worker 584.8 → 266.2 kB；
+顺带把语言注册收成只 Python 之后，产物里的语言 chunk 从 ~90 个降到 1 个。
+
+**为什么值得记**：这不是「实现慢」，是**构建默认值把验收项做死**。
+凡是「产物体积」类的验收，先量一次产物、再动代码 —— 顺序反了会把默认值当成优化空间。
+守卫 `tests/monaco-bundle.test.ts` 同时钉住"压缩开关"与"产物 <3MB"两条。
+
+**相关**：`electron.vite.config.ts`、`desktop/src/renderer/src/sandbox/monaco-setup.ts`、`tests/monaco-bundle.test.ts`。
+
+## P-149 ★★ `Emulation.setDeviceMetricsOverride` 之后，CDP 的键盘输入不再送达渲染进程（2026-09-27）
+
+**现象**：跑完 `npm run ux:layout`（为四视口逐个 `Emulation.setDeviceMetricsOverride`）之后，
+`npm run ux` 一口气红了 8 条：`A2b / A3 Enter 直接发送`、`A5 发送后输入框清空`、`B1 / B2 滚动跟随`、
+`G1–G3 忙时排队`。逐条手工复核：**App 逻辑全部正常**。
+
+**根因（实测对照）**：
+
+```text
+① page-side dispatchEvent(new KeyboardEvent('keydown', { key:'Enter' })) → 轮次 1 → 2、输入框清空 ✅
+② 点 [data-testid="composer-send"]                                      → 轮次 0 → 1 ✅
+③ CDP Input.dispatchKeyEvent（keyDown + keyUp, key=Enter）               → 页面里的调试监听器一条都没收到 ❌
+```
+
+也就是说：视口仿真之后，**CDP 的 `Input.*` 事件不再进渲染进程**（窗口看不出来、`Page.bringToFront`
+也救不回来）。同一条命令在**重启应用**后立刻恢复正常。
+
+**处置**：这是**探针环境问题**，不是产品缺陷 —— 没有改 App 代码；写进 `docs/agents/probe-guide.md`
+的排错段，并记在这里。顺序纪律：**键盘类真机审计（`ux` / `ux:keyboard`）要放在视口仿真之前跑，
+或者重启应用再跑**。
+
+**为什么值得记**：探针报告的「红」有第三种来源 —— **输入通道被环境弄哑**。它比锚点腐烂更隐蔽：
+锚点腐烂至少能靠源码扫描发现，而"事件根本没送到"在页面上没有任何痕迹（页面看起来完全正常）。
+判据：**先在页面里挂一个监听器自证输入通道**，再去看业务断言。
+
+**相关**：`scripts/ux-layout-audit.mjs`、`scripts/ux-audit.mjs`、`docs/agents/probe-guide.md`。
+
+## P-150 `width: 28px` 不等于点得准：flex 子项会在窄窗口把按钮压到 15px（2026-09-27）
+
+**现象**：首次跑通 `npm run ux:layout` 的四视口，1024px 下对话页报「触控目标过小 ×1」。
+量出来是输入条上的「语音输入」按钮：`cp__att 15×28` —— 宽度只剩一半（CSS 里明明写着 `width: 28px`）。
+
+**根因**：`cp__att` 是 flex 行里的子项，**没有 `flex: none`**。输入条在 1024 宽时是过约束的，
+浏览器按 `flex-shrink: 1`（默认）把它压到 15px；`width` 只是"建议值"。
+
+**改法**：`.cp__att { flex: none; }`（并写明理由）。同类风险：任何"尺寸写死 + 可点"的 flex 子项
+（`.cp__send`、`.sl__fold`、`.k12-tap` 系列）都要显式 `flex: none` 或 `min-width`。
+
+**为什么值得记**：触控下限（28px）是**量出来的**，不是写出来的 —— 写死尺寸的组件在窄窗口会
+被布局悄悄破坏，而"看起来还行"的截图量不出 15px。这正是四视口探针的价值。
+
+**相关**：`desktop/src/renderer/src/components/MessageComposer.vue`、`scripts/ux-layout-audit.mjs`。
+
+## P-151 探针属性名撞上守卫的字面量：`data-probe-open` 里的 `open` 被判为「默认展开」（2026-09-27）
+
+**现象**：给引用折叠块加结构化探针属性 `:data-probe-open="…"` 之后，
+`tests/citation-collapse.test.ts` 的「**不许写 `open` 属性**」那条守卫立刻变红 ——
+它的正则 `\bopen\b` 把 `data-probe-open` 里的 `open` 也算了进去（`-` 是词边界）。
+
+**处置**：把属性改名 `data-probe-expanded`（语义一样：开合态），守卫不动 ——
+那条守卫守的是「`<details>` 不许默认展开」，它的锚点是对的，撞的是命名。
+顺带在 `probe-lib.mjs` 的锚点表与 `tests/probe-structure.test.ts` 里同步改名。
+
+**为什么值得记**：源码级守卫用词边界匹配时，**新加的属性名可能踩进已有判据**。
+撞上了先想"改我这边的名字"还是"改守卫"：这次是命名该让路（守卫的语义更硬）。
+同类风险：`open` / `loading` / `disabled` 这些既是属性名又是状态的词，最容易被当锚点。
+
+**相关**：`tests/citation-collapse.test.ts`、`scripts/probe-lib.mjs`、`components/ChatMessage.vue`。
+
+## P-152 `K12_DEBUG_PORT` 静默绑不上：僵尸监听多半是**上一轮 sidecar 还活着**（2026-09-27）
+
+**现象**：`K12_DEBUG_PORT=9222 npm run dev` 启动成功，但 `/json/list` 连不上；
+主进程日志里只有一行被忽略的 `bind() returned an error: 每个套接字地址只允许使用一次` +
+`Cannot start http server for devtools`。`Get-NetTCPConnection` 显示 9222 是 `Listen`，
+但 `OwningProcess` 指向一个**已经不存在的 PID**（`Get-Process` / `Get-CimInstance` 都查不到）。
+
+**根因**：那条监听不是"没释放"，而是**被继承句柄吊着**：上一轮 `npm run dev` 的 Electron 已经退出，
+而它拉起的 sidecar（`python -m app.main …`）没有一起退 —— sidecar 拿着 devtools socket 的句柄，
+于是内核仍然把端口算作占用，而记录的属主 PID 早已消失。
+
+**处置**：列出 `python … -m app.main` 的残留进程（按启动时间对上端口创建时间），
+逐个 `Stop-Process`；端口立刻释放。**不要**去 `taskkill` 那些 `python -m http.server`（那是别的用途）。
+下次遇到：`netstat -ano | findstr :9222` → 属主 PID → `Get-CimInstance Win32_Process -Filter "ProcessId = <pid>"`
+（查不到就是这类僵尸）→ 找同批次启动的 sidecar 收掉。
+
+**为什么值得记**：这条故障的表现是"探针连不上"，很容易被误判成探针坏了 / 端口写错。
+判据链（端口 → 属主 PID → 进程是否存在 → 同批次 sidecar）三步就能定性。
+
+**相关**：`desktop/scripts/ux-*.mjs` 的 `K12_DEBUG_BASE`、`src/main/index.ts` 的 CDP 开关。

@@ -534,13 +534,13 @@ onMounted(() => {
  * 与栅格里的说明同档（13px / `--k12-fs-xs`）：它们是**排障读物**，不是页面正文，
  * 但也不是 ≤4 字的角标 —— 12px（`--k12-fs-micro`）只留给角标。 */
 .kb__tech {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
 .kb__tech code {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
 }
 /* 路径：等宽 + 浅底，可换行（截短后仍可能很长，`break-all` 保证它不顶破容器）。
  * 完整路径在 `title` 上，悬停可见 —— 截短是不占版面，不是丢信息。 */
@@ -587,12 +587,12 @@ onMounted(() => {
   gap: 4px;
 }
 .kb__import-name {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 .kb__import-meta {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -606,7 +606,7 @@ onMounted(() => {
   gap: 4px;
 }
 .kb__problems li {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -634,7 +634,7 @@ onMounted(() => {
   flex-wrap: wrap;
   align-items: baseline;
   gap: 6px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -676,12 +676,12 @@ onMounted(() => {
   gap: 3px;
 }
 .card__title {
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 620;
   color: var(--k12-fg);
 }
 .card__note {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -692,7 +692,7 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-good);
 }
@@ -724,7 +724,7 @@ onMounted(() => {
    * 表头仍归 `base.css` 的 `.el-table th.el-table__cell`（特异性更高）压成 12px：
    * 表头是标签、正文是数据，**差一档正是想要的**。
    */
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
 }
 
 /**
@@ -757,14 +757,14 @@ onMounted(() => {
  *    降到 11px 的实际后果：表格里最需要逐字读的列反而最小。 */
 .mono {
   font-family: var(--k12-font-mono);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   padding: 2px 6px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-surface-2);
   color: var(--k12-accent-ink);
 }
 .type {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
 }
 </style>

@@ -53,12 +53,17 @@
  * 这和 Pyodide 的懒加载口径一致（`sandbox/pyodide-runner.ts` 也只在进卡片时创建 Worker）。
  *
  * ---------------------------------------------------------------------------
- * 语言与主题
+ * 语言与主题（报告 §5.1 的「只加载 Python / 主题精简」）
  * ---------------------------------------------------------------------------
  *
- * 语言固定 `python`；主题默认 `vs`（浅色，与卡片的白底协调），
- * 学生可用 {@link setEditorTheme} 切到 `vs-dark`（票 18 的"展开/全屏"之外的小福利，
- * 不引入任何额外资源）。
+ * 语言固定 `python`：只注册**这一种**语言的词法高亮
+ * （`languages/definitions/python/register`），不再拉 `basic-languages` 的全量清单 ——
+ * 后者会注册 ~90 种语言的 register 入口（每一种又各自懒加载自己的定义），
+ * 对只写 Python 的学生是纯噪声。
+ *
+ * 主题按报告 §5.1 **只保留 `vs-dark`**（编辑器固定深色皮肤，卡片与编程页的编辑器外框
+ * 随之走 `--k12-editor-bg`）。`vs` 仍然留在 {@link CodeEditorTheme} 里，只作为「未来若
+ * 要做浅色皮肤」的代码路径 —— **不暴露入口**（没有任何调用点传它）。
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- monaco 的类型面很大，只声明用到的部分 */
@@ -90,8 +95,17 @@ export interface CodeEditorHandle {
 
 export type CodeEditorTheme = 'vs' | 'vs-dark'
 
-/** 默认主题（浅色，与卡片底色一致）。 */
-export const DEFAULT_EDITOR_THEME: CodeEditorTheme = 'vs'
+/**
+ * 默认（也是当前唯一的）主题：`vs-dark`。
+ *
+ * ★ 报告 §5.1 要求主题精简为只保留 `vs-dark`（计划 §3 D9 的收口口径：需求层照报告做，
+ *   编辑器固定深色皮肤）。`vs` 这个字面量保留在类型里，注释里说明它是**未来路径**，
+ *   不给任何入口 —— 改回去之前先读这一段。
+ */
+export const DEFAULT_EDITOR_THEME: CodeEditorTheme = 'vs-dark'
+
+/** 加载 Monaco 的最大尝试次数（报告 §5.1「失败重试 ≤3 次」）。 */
+export const MONACO_MAX_LOAD_ATTEMPTS = 3
 
 /** Monaco 用的语言 id（契约里 `CodeTemplate.language` 固定 `"python"`）。 */
 export const EDITOR_LANGUAGE = 'python'
@@ -140,6 +154,11 @@ export function editorOptions() {
     parameterHints: { enabled: false },
     // 关掉 minimap 与滚动条装饰：小卡片里它们只占地方
     minimap: { enabled: false },
+    // ★ 多光标（报告 §5.1 点名要移除的一项）：monaco 0.56 的 standalone 入口
+    //   把编辑器内核整体打进来，没有「编译期删掉多光标」的开关 —— 等价做法是把
+    //   上限压到 1（再想加第二个光标就撞上限），并关掉列选择（鼠标拖出来的第二个光标）。
+    multiCursorLimit: 1,
+    columnSelection: false,
     scrollBeyondLastLine: false,
     // 字体：等宽，与设计系统的 --font-mono 同族（回退链保证本机一定有字体可用）
     fontFamily:
@@ -166,6 +185,45 @@ export function editorOptions() {
 let monacoReady: Promise<any> | null = null
 
 /**
+ * 装配一次 Monaco（三个动态 import + worker 映射）。
+ *
+ * ★ 三个 import 的顺序有实义：语言注册与 worker 都必须在**任何** `editor.create` 之前
+ *   落地（语言不注册 = 没有高亮；worker 不映射 = 生产构建下 404）。
+ */
+async function importMonacoOnce(): Promise<any> {
+  // ★ 动态 import：这一行是懒加载的关键（vite 据此切 chunk）。
+  //
+  // ⚠️ **不要 import 'monaco-editor'（包根）**。实测（vite build，monaco 0.56）：
+  //    包根 `esm/vs/index.js` 会 register **每一种**语言，还会拉进
+  //    `external/monaco-lsp-client` —— 于是生产产物里出现五个语言服务 worker：
+  //
+  //        ts.worker   13,307 kB
+  //        css.worker   1,909 kB
+  //        html.worker  1,285 kB
+  //        json.worker    883 kB
+  //        ─────────────────────── 约 17.4 MB，本项目**一个都用不到**
+  //
+  //    改用 `editor/editor.api`（编辑器内核 + 语言注册表，不含任何内置语言）
+  //    + 只注册 Python 一个语言定义，这 17.4 MB 全部消失。
+  const monaco = await import('monaco-editor/editor/editor.api')
+  // ★ 只注册 Python（报告 §5.1「配置只加载 Python 语言」）。
+  //   ⚠️ 不要换回 `basic-languages/monaco.contribution` —— 那个文件会把 ~90 种语言的
+  //   register 入口全部拉进来（每种语言再各自懒加载定义），对只写 Python 的场景是纯噪声。
+  await import('monaco-editor/languages/definitions/python/register')
+  // ★ 说明符必须是这个**短形式**（见文件头：`esm/vs/...` 会让生产构建直接失败）
+  const { default: EditorWorker } = await import('monaco-editor/editor/editor.worker?worker')
+
+  // ★ 告诉 Monaco：worker 用这个 vite 打出来的入口。
+  //   只映射 `editorWorkerService` —— 我们只注册了 Python 的词法高亮，
+  //   没有语言服务（LSP），所以不存在 ts/json/css/html 那四个 worker 的需求。
+  ;(self as unknown as { MonacoEnvironment?: unknown }).MonacoEnvironment = {
+    getWorker: (): Worker => new EditorWorker()
+  }
+
+  return monaco
+}
+
+/**
  * 懒加载并装配 Monaco（**幂等**）。
  *
  * ★ 这里是"进卡片才加载"的落点：动态 `import()` 让 vite 把 Monaco 切成独立 chunk，
@@ -173,43 +231,41 @@ let monacoReady: Promise<any> | null = null
  *
  * 同时完成 worker 装配 —— **必须在任何 `monaco.editor.create` 之前**，
  * 否则 Monaco 会去猜 worker 地址（生产构建下就是那个 404）。
+ *
+ * ★★ 失败重试（报告 §5.1「失败重试 ≤3 次」，2026-09-27）：
+ *   第一次打开编程环境时，chunk 是从本地磁盘读的 —— 读失败只可能发生在磁盘抖动 /
+ *   安装包被占用这类瞬时故障上，**再试一次的代价远小于让学生看到一句"起不来"**。
+ *   三次都失败才向上抛；抛之前把缓存的 Promise 清掉，这样学生再点一次能重新试
+ *   （而不是被一个已经失败的 Promise 永久钉住）。
  */
 export async function loadMonaco(): Promise<any> {
   if (monacoReady) return await monacoReady
 
-  monacoReady = (async () => {
-    // ★ 动态 import：这一行是懒加载的关键（vite 据此切 chunk）。
-    //
-    // ⚠️ **不要 import 'monaco-editor'（包根）**。实测（vite build，monaco 0.56）：
-    //    包根 `esm/vs/index.js` 会 register **每一种**语言，还会拉进
-    //    `external/monaco-lsp-client` —— 于是生产产物里出现五个语言服务 worker：
-    //
-    //        ts.worker   13,307 kB
-    //        css.worker   1,909 kB
-    //        html.worker  1,285 kB
-    //        json.worker    883 kB
-    //        ─────────────────────── 约 17.4 MB，本项目**一个都用不到**
-    //
-    //    改用 `editor/editor.api`（编辑器内核 + 语言注册表，不含任何内置语言）
-    //    + 只注册 Python 一个语言贡献，这 17.4 MB 全部消失，
-    //    产物里只剩 `editor.worker` 与 `python-*.js`。
-    const monaco = await import('monaco-editor/editor/editor.api')
-    // 只注册 Python 的高亮（K12 的编程练习就是 Python；契约 `language` 也固定 "python"）
-    await import('monaco-editor/basic-languages/monaco.contribution')
-    // ★ 说明符必须是这个**短形式**（见文件头：`esm/vs/...` 会让生产构建直接失败）
-    const { default: EditorWorker } = await import('monaco-editor/editor/editor.worker?worker')
-
-    // ★ 告诉 Monaco：worker 用这个 vite 打出来的入口。
-    //   只映射 `editorWorkerService` —— 我们只注册了 Python 的词法高亮，
-    //   没有语言服务（LSP），所以不存在 ts/json/css/html 那四个 worker 的需求。
-    ;(self as unknown as { MonacoEnvironment?: unknown }).MonacoEnvironment = {
-      getWorker: (): Worker => new EditorWorker()
+  const pending = (async () => {
+    let lastError: unknown = null
+    for (let attempt = 1; attempt <= MONACO_MAX_LOAD_ATTEMPTS; attempt += 1) {
+      try {
+        return await importMonacoOnce()
+      } catch (error) {
+        lastError = error
+        // 前两次失败后短暂等待再试（磁盘抖动 / 句柄占用往往几十毫秒内就释放）
+        if (attempt < MONACO_MAX_LOAD_ATTEMPTS) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, attempt * 150))
+        }
+      }
     }
-
-    return monaco
+    throw lastError instanceof Error ? lastError : new Error(String(lastError))
   })()
 
-  return await monacoReady
+  monacoReady = pending
+  try {
+    return await pending
+  } catch (error) {
+    // ★ 只有「还是这次失败的那一个 Promise」才清缓存：并发调用各自拿到的都是 pending，
+    //   后到的调用不该把别人已经成功的装配再抹掉。
+    if (monacoReady === pending) monacoReady = null
+    throw error
+  }
 }
 
 export interface CreateEditorOptions {

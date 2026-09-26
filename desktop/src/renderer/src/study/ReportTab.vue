@@ -910,7 +910,7 @@ onMounted(() => {
 }
 
 .toolbar__label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
@@ -929,7 +929,7 @@ onMounted(() => {
   border-radius: var(--k12-r-pill);
   background: var(--k12-surface);
   color: var(--k12-muted);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   cursor: pointer;
 }
 
@@ -962,13 +962,13 @@ onMounted(() => {
 
 /* 学生名刻意停在 13px：hero 里只允许「平均掌握度」一个 22px */
 .hero__name {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 
 .hero__grade {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -979,7 +979,7 @@ onMounted(() => {
 }
 
 .hero__num {
-  font-size: var(--k12-fs-xl);
+  font-size: var(--k12-fs-h2);
   font-weight: 650;
   line-height: var(--k12-lh-snug);
   letter-spacing: -0.01em;
@@ -989,12 +989,12 @@ onMounted(() => {
 /* 单位不跟着 22px 放大：否则「%」成了第二个大元素 */
 .hero__unit {
   margin-left: 2px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   color: var(--k12-muted);
 }
 
 .hero__cap {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -1009,7 +1009,7 @@ onMounted(() => {
 }
 
 .stat__label {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -1017,20 +1017,20 @@ onMounted(() => {
  * `--k12-fs-xl` 只留给页面身份行与 hero。 */
 .stat__value {
   margin-top: 2px;
-  font-size: var(--k12-fs-lg);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   color: var(--k12-fg);
 }
 
 .stat__hint {
   margin-top: 2px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
 .summary {
   margin-top: 12px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
@@ -1039,22 +1039,23 @@ onMounted(() => {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  margin: 20px 0 8px;
-  font-size: var(--k12-fs-lg);
+  /* 优化报告 §1.2：20px → 24px（sp-5），8px → sp-2。 */
+  margin: var(--k12-sp-5) 0 var(--k12-sp-2);
+  font-size: var(--k12-fs-body-lg);
   font-weight: 650;
   color: var(--k12-fg);
 }
 
 /* 区块标题上的口径说明（「共 N 个」「置信度 62%」）——12px meta，不是小标题 */
 .section__meta {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 400;
   color: var(--k12-muted);
 }
 
 .subsection {
   margin: 14px 0 8px;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
@@ -1078,21 +1079,21 @@ onMounted(() => {
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
 }
 
 .reco__desc {
   flex: 1;
   min-width: 0;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
 }
 
 .reco__meta {
   flex: none;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -1108,14 +1109,14 @@ onMounted(() => {
 }
 
 .chart__title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
 
 .chart__meta {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -1185,14 +1186,14 @@ onMounted(() => {
 
 .chart__day {
   flex: none;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   font-variant-numeric: tabular-nums;
 }
 
 .chart__note {
   margin-top: 8px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted-2);
 }
@@ -1208,7 +1209,7 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }
 
@@ -1252,7 +1253,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
 }
 
 .row__name {
@@ -1283,7 +1284,7 @@ onMounted(() => {
   background: var(--k12-accent-soft);
   color: var(--k12-accent-ink);
   /* 掌握度档位角标（「已掌握 / 正在学 / 需要练」≤4 字）：选择器名含 tag，走角标档 */
-  font-size: var(--k12-fs-micro);
+  font-size: var(--k12-fs-label);
 }
 
 .row__meta {
@@ -1329,20 +1330,20 @@ onMounted(() => {
 }
 
 .sig__type {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 620;
   color: var(--k12-fg-2);
 }
 
 .sig__val {
   margin-left: auto;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 650;
   color: var(--k12-accent-ink);
 }
 
 .sig__raw {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -1353,21 +1354,21 @@ onMounted(() => {
 }
 
 .trail__move {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg);
 }
 
 .trail__meta {
   margin-top: 4px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-fg-2);
 }
 
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
 }
 
 .table th,
@@ -1390,13 +1391,13 @@ onMounted(() => {
 
 .badges {
   margin-top: 8px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-good);
 }
 
 .state {
   padding: 10px 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
@@ -1414,11 +1415,11 @@ onMounted(() => {
 
 .notice {
   margin-bottom: 10px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-good);
 }
 
-@media (max-width: 1279px) {
+@media (max-width: 1023px) {
   .signals {
     grid-template-columns: minmax(0, 1fr);
   }

@@ -23,6 +23,7 @@ import { useChatStore } from '../stores/chat'
 import { formatMs } from '../study/report-markdown'
 import { displaySessionTitle } from '../study/session-title'
 import MarkdownProse from '../components/MarkdownProse.vue'
+import VirtualList from '../components/VirtualList.vue'
 
 defineOptions({ name: 'StudySessionsTab' })
 
@@ -121,8 +122,17 @@ function close(): void {
       {{ study.searchHits ? '没有匹配的会话。' : '还没有历史会话，到对话页问第一个问题吧。' }}
     </p>
 
-    <ul v-else class="list" data-testid="sessions-list">
-      <li v-for="item in shown" :key="item.id" class="item" :data-session-id="item.id">
+    <!-- ★ 长列表虚拟化（报告 §5.2 / D10）：超过阈值才走虚拟通道，短列表原样渲染 ——
+         行模板只有这一份（`VirtualList` 的两条路径共用同一个 slot）。 -->
+    <VirtualList
+      v-else
+      class="list"
+      :items="shown"
+      :min-item-size="64"
+      data-testid="sessions-list"
+    >
+      <template #default="{ item }">
+      <li class="item" :data-session-id="item.id">
         <button
           class="item__head"
           type="button"
@@ -167,7 +177,8 @@ function close(): void {
           </template>
         </div>
       </li>
-    </ul>
+      </template>
+    </VirtualList>
   </section>
 </template>
 
@@ -193,7 +204,7 @@ function close(): void {
   background: var(--k12-surface);
   color: var(--k12-fg);
   font-family: inherit;
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
 }
 
 .search::placeholder {
@@ -208,7 +219,7 @@ function close(): void {
   border-radius: var(--k12-r-control);
   background: var(--k12-surface);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
   flex: none;
@@ -254,19 +265,19 @@ function close(): void {
 }
 
 .item__title {
-  font-size: var(--k12-fs-sm);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   color: var(--k12-fg);
 }
 
 .item__meta {
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
 .item__snippet {
   margin-top: 5px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
@@ -282,7 +293,7 @@ function close(): void {
 
 .detail__note {
   margin-bottom: 8px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted-2);
 }
@@ -299,7 +310,7 @@ function close(): void {
 .message {
   display: flex;
   gap: 8px;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
 }
 
@@ -326,7 +337,7 @@ function close(): void {
 
 .state {
   padding: 10px 0;
-  font-size: var(--k12-fs-xs);
+  font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
 
