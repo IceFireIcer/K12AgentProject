@@ -1,5 +1,7 @@
 # Nightly —— **真的把程序构建出来**（安装版 + 绿色压缩包 + 便携版），
-# 产物**发到 GitHub Releases**（同时留一份 artifact）。
+# 产物**发到 GitHub Releases**；artifact 只给「不发布 Release 的 push 轮」留 1 天
+# （见文件末尾「验包副本」那一步：artifact 吃的是**账户级配额**，14 天保留会把额度吃光，
+#  2026-09-27 改 —— 起因见那里的注释）。
 #
 # 与 `ci.yml` 的分工（两条 workflow 别混）：
 #   - `ci.yml`      每次 push/PR 跑的**门禁**：测试 + 自检，几分钟，不下载模型、不出包。
@@ -181,32 +183,14 @@ jobs:
           Get-ChildItem -File | Where-Object { $_.Extension -in '.exe', '.zip' } |
             Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}} | Format-Table -AutoSize
 
-      - name: 上传安装版与绿色版
-        uses: actions/upload-artifact@v4
-        with:
-          name: k12-agent-windows-${{ github.run_number }}
-          # ★ 只收**发布用**的那几个文件：`win-unpacked/` 有几万个文件，
-          #   上传它既慢又没用（zip 里已经是它的全部内容）。
-          # ⚠️ 不要在这里列 `latest.yml` —— 那是**自动更新**用的清单，
-          #    本项目没开 publish provider，electron-builder 根本不会生成它。
-          #    列了它会让 `upload-artifact` 因为「路径不匹配」而**整个步骤失败**
-          #    （实测：本地打三个目标只产出 5 个文件，latest.yml 一个都没有）。
-          path: |
-            desktop/dist/*-setup.exe
-            desktop/dist/*-win-x64.zip
-            desktop/dist/*-portable.exe
-            desktop/dist/*.blockmap
-          # 保留 14 天：nightly 产物是「验证这一天的代码能构建」，不是长期分发
-          retention-days: 14
-          if-no-files-found: error
-
       # ── 发布到 GitHub Releases ─────────────────────────────────────────
-      # ★ 为什么既发 Release 又留 artifact：两者的用途不同 ——
-      #   artifact 挂在**这次 run** 上（排查时从 Actions 页直接下，14 天后自动过期）；
-      #   Release 给的是**稳定的下载页与直链**（发给别人、写进文档、贴进报告）。
+      # ★ Release 与 artifact 的分工（2026-09-27 起**按事件类型互斥**）——
+      #   Release：定时 / 手动轮的**唯一长期分发**渠道（Release 资源不吃 Actions 配额，
+      #            单个文件 < 2 GiB，总量与带宽都不限）；
+      #   artifact：只给 push 轮留 1 天，见文件末尾「验包副本」那一步。
       # ★★ push 触发的那一轮**只构建、不发布**（D-067）：它的目的是「验这次安装器改动
       #   打得出来」，不该冒充当天的 nightly 去抢 `nightly-<日期>` 标签、覆盖真正的夜间产物。
-      #   产物仍会进 artifact，Actions 页照样能下载验包。
+      #   产物仍会进 artifact（1 天），Actions 页照样能下载验包。
       - name: 生成发布说明（最近 20 条提交标题）
         if: github.event_name != 'push'
         shell: bash
@@ -302,6 +286,41 @@ jobs:
           fi
 
           echo "发布完成：$(gh release view "$TAG" --json url -q .url)"
+
+      # ── 验包副本（只在 push 轮；**排在最后**，失败也不会连累 Release）──────
+      # ★★ 2026-09-27 改。背景（实机实测，不是假设）：
+      #   artifact 吃的是**账户级配额**（Artifacts 与 Packages 共用同一个池；
+      #   Actions cache 那 10 GB 是**独立**额度，不占这个），而 GitHub Free / Pro / Team
+      #   的 artifact 额度只有 500 MB / 1 GB / 2 GB。一个 nightly 包 ~0.85 GiB，
+      #   按原来的 `retention-days: 14` 算，稳态要 ~12 GiB —— 于是 2026-09-23 起
+      #   连续 4 轮都死在 `Failed to CreateArtifact: Artifact storage quota has been hit`。
+      #   ⚠️ 那几轮**包已经打好、`check:server:packaged` 也过了**，只因这一步排在
+      #   「发布到 Releases」**前面**，整个 job 判红 → Release 步骤被跳过 →
+      #   09-23 之后一个 nightly 都没发出去（清 artifact 只能救急，治不了根）。
+      #
+      #   现在的分工（两边的 `if` 互斥，谁也不挡谁）：
+      #     - 定时 / 手动轮：产物**只走 Release**，这里整步跳过 → 配额压力为 0；
+      #     - push 轮：按 D-067 **不发布 Release**，所以留一份 artifact 给自己验包，
+      #       只留 1 天 —— 它是「这一轮的可下载副本」，不是长期分发渠道。
+      - name: 上传安装版与绿色版（只给不发布 Release 的 push 轮留 1 天）
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: k12-agent-windows-${{ github.run_number }}
+          # ★ 只收**发布用**的那几个文件：`win-unpacked/` 有几万个文件，
+          #   上传它既慢又没用（zip 里已经是它的全部内容）。
+          # ⚠️ 不要在这里列 `latest.yml` —— 那是**自动更新**用的清单，
+          #    本项目没开 publish provider，electron-builder 根本不会生成它。
+          #    列了它会让 `upload-artifact` 因为「路径不匹配」而**整个步骤失败**
+          #    （实测：本地打三个目标只产出 5 个文件，latest.yml 一个都没有）。
+          path: |
+            desktop/dist/*-setup.exe
+            desktop/dist/*-win-x64.zip
+            desktop/dist/*-portable.exe
+            desktop/dist/*.blockmap
+          # 只留 1 天：临时副本；长期分发的稳定副本是 Release
+          retention-days: 1
+          if-no-files-found: error
 
 # ─────────────────────────────────────────────────────────────────────────
 # 为什么用 NSIS 而不是 Inno Setup
