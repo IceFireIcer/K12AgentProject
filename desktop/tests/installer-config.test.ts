@@ -14,6 +14,7 @@
  *   G21-6  ★ 版本号派生：形状满足 NSIS（三段数字、每段 ≤ 65535）、CI 下单调递增
  *   G21-7  打包前**必须**盖版本号（否则每个 nightly 都叫 0.1.0、安装包互相覆盖）
  *   G21-8  打包相关改动 push 即构建（否则要等第二天凌晨才知道打不打得出来）
+ *   G21-9  ★ 正式发版（`release.yml`）：手动触发 + `K12_VERSION` 钉死版本号 + 发**非** prerelease
  *
  * 跑法：`npm test`。
  */
@@ -30,6 +31,7 @@ const repoRoot = resolve(desktopRoot, '..')
 const builderYml = readFileSync(join(desktopRoot, 'electron-builder.yml'), 'utf8')
 const versionScript = join(desktopRoot, 'scripts', 'build-version.mjs')
 const nightlyYml = readFileSync(join(repoRoot, '.github', 'workflows', 'nightly.yml'), 'utf8')
+const releaseYml = readFileSync(join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf8')
 
 /** 从 `electron-builder.yml` 里读 `nsis:` 那一段的原文（缩进两格、到下一个顶级键为止）。 */
 function nsisBlock(): string {
@@ -241,5 +243,87 @@ test('G21-8 打包相关改动 push 即构建（且那一轮不发 Release）', 
     nightlyYml,
     /if:\s*github\.event_name\s*!=\s*'push'/,
     'push 触发的那一轮不得发布 Release（产物仍进 artifact，能下载验包）'
+  )
+})
+
+test('G21-9 ★ 正式发版：手动触发 + K12_VERSION 钉死版本号 + 发非 prerelease', () => {
+  // ① 只能**手动**触发：正式版的版本号是人给的，不该被 push / 定时任务自动发出去
+  //    （自动跑就变成「算出来的版本号」，与标签 `v<版本号>` 的含义冲突）。
+  const onAt = releaseYml.indexOf('\non:')
+  const concurrencyAt = releaseYml.indexOf('\nconcurrency:')
+  assert.ok(onAt > 0 && concurrencyAt > onAt, 'release.yml 的锚点漂了：找不到 on: / concurrency: 段')
+  const onBlock = releaseYml.slice(onAt, concurrencyAt)
+  assert.ok(onBlock.includes('workflow_dispatch:'), '正式发版必须由 workflow_dispatch 触发')
+  for (const auto of ['push:', 'schedule:', 'pull_request:']) {
+    assert.ok(
+      !onBlock.includes(auto),
+      `正式发版不得被 ${auto} 自动触发 —— 版本号必须由人显式给（否则标签与包内版本对不上）`
+    )
+  }
+
+  // ② ★★ 版本号必须真的传下去：`K12_VERSION` 是 build-version.mjs 里
+  //    「显式指定优先于 run number」的那一格。漏了它，打出来的还是 `<主>.<次>.<run>`，
+  //    而标签是 `v1.0.0` —— 包内版本、文件名、控制面板三处全部与标签不一致。
+  assert.match(
+    releaseYml,
+    /K12_VERSION:\s*\$\{\{\s*inputs\.version\s*\}\}/,
+    '正式版必须把 inputs.version 传给 K12_VERSION（唯一决定版本号的地方）'
+  )
+
+  // ③ 与 G21-7 同一条纪律：盖版本号必须在 electron-builder **之前**。
+  //    ⚠️ 所有命令锚点都打在**去注释后的正文**上：这份工作流的文件头注释里也逐字提到了
+  //        `check:server:packaged` / `gh release create` / `electron-builder`，
+  //        直接对整份文件 `indexOf` 会命中注释、把断言变成假绿（P-111 那个老病，
+  //        本条守卫第一版就是这么红的 —— 实测踩到）。
+  const releaseCode = releaseYml
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('#'))
+    .join('\n')
+  const stampAt = releaseCode.indexOf('npm run version:stamp')
+  const builderAt = releaseCode.indexOf('electron-builder --win')
+  assert.ok(
+    stampAt > 0 && builderAt > stampAt,
+    'version:stamp 必须排在 electron-builder 之前（包名与程序集版本取自那一刻的 package.json）'
+  )
+
+  // ④ 三个形态都要出（安装版 / 绿色包 / 便携版），且必须显式标成 Latest。
+  const builderLine = releaseCode
+    .split('\n')
+    .find((line) => line.includes('electron-builder --win')) ?? ''
+  for (const target of ['nsis', 'zip', 'portable']) {
+    assert.ok(builderLine.includes(target), `正式版必须打出 ${target} 目标（实际命令：${builderLine.trim()}）`)
+  }
+  assert.ok(releaseCode.includes('--latest'), '正式版必须显式标成 Latest')
+
+  // ⑤ ★★ 不许出现 `--prerelease`：带上它就不抢 Latest，正式版等于没发（退回 nightly 形态）。
+  //    注释里解释「为什么这里不是 prerelease」是正常的，所以只看上面那份去注释正文。
+  assert.ok(
+    !releaseCode.includes('--prerelease'),
+    '正式版的发布命令里不得出现 --prerelease（已排除注释行；若确实要发预发布，请用 nightly）'
+  )
+
+  // ⑥ 发布**之前**必须验包内后端（P-072）：装了旧后端的包发出去，新端点只会 404。
+  const checkAt = releaseCode.indexOf('run: npm run check:server:packaged')
+  const publishAt = releaseCode.indexOf('gh release create')
+  assert.ok(
+    checkAt > 0 && publishAt > checkAt,
+    'check:server:packaged 必须排在发布之前 —— 否则坏包先发出去了才发现'
+  )
+
+  // ⑦ 发布说明读最近 20 条提交标题：浅克隆会**静默**只剩一条。
+  assert.match(releaseYml, /fetch-depth:\s*30/, '正式发版的 checkout 必须加深 fetch-depth')
+
+  // ⑧ 模型缓存 key 与 nightly **逐字相同**：否则每次正式发版都要重下 90MB。
+  assert.match(
+    releaseYml,
+    /key:\s*embedding-model-\$\{\{\s*hashFiles\('server\/app\/config\.py'\)\s*\}\}/,
+    '嵌入模型缓存 key 必须与 nightly 一致（正式发版不该重新下 90MB）'
+  )
+
+  // ⑨ 建 Release 需要写权限：否则 `gh release create` 在最后一步 403，十几分钟构建全白跑。
+  assert.match(
+    releaseYml,
+    /permissions:\s*\n\s*contents:\s*write/,
+    'release.yml 必须有 permissions: contents: write'
   )
 })

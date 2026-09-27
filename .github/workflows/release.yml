@@ -1,0 +1,248 @@
+# 正式发版（**只能手动触发**）—— 与 `nightly.yml` 的分工别混（D-062 / D-067）：
+#
+#   | 工作流 | 触发 | 版本号 | 发到哪 |
+#   | --- | --- | --- | --- |
+#   | `nightly.yml` | 每天 UTC 18:00 + 手动 | `<主>.<次>.<构建序号>`（CI 派生） | **prerelease** `nightly-YYYYMMDD`，刻意不抢 Latest |
+#   | **本文件** | 只有手动 | **人填的那个**（`K12_VERSION`） | **正式 Release** `v<版本号>` → 自动成为 Latest |
+#
+# 为什么要分开而不是给 nightly 加分支：两者的**判据不同**。
+#   nightly 的语义是「一天一份、自动跑、随时可被明天的覆盖」，所以标签按日期、不抢 Latest；
+#   正式版的语义是「这一份就是交付物」，版本号必须由人**显式**给（`1.0.0` 不是算出来的），
+#   标签与包内版本、控制面板里显示的版本、文件名**四处严格一致**。
+#   合成一条工作流的话，「今天这个版本号是从哪来的」会变成一句需要解释的话。
+#
+# 跑法：Actions 页面 → Release → Run workflow → 填版本号（例：`1.0.0`）。
+#   ⚠️ 必须是**三段数字**：NSIS 的 `VIProductVersion` 只接受四段 16 位数字，带 `v` 前缀、
+#      带 `-rc.1` 后缀、某一段超过 65535 都会被 `scripts/build-version.mjs` **当场拒绝**
+#      （本文件第一步就验，秒级失败，不必等十几分钟后的 makensis —— 见 P-111 的同族教训）。
+#
+# ★★ 与 nightly 刻意相同的四处（少一处就发错包，守卫：`tests/installer-config.test.ts` 的 G21-9）：
+#   ① 嵌模型缓存用**同一个 key** —— 正式发版不该重新下 90MB；
+#   ② `version:stamp` 必须在 `electron-builder` **之前**（包名 / 程序集版本 / 控制面板版本都取自那一刻）；
+#   ③ `check:server:packaged` 必须在**发布之前**（P-072：装了旧后端的包不能发出去）；
+#   ④ 发布说明读**最近 20 条提交标题**，所以 checkout 的 `fetch-depth` 必须加深。
+name: Release
+
+on:
+  # 只有手动 —— 正式版的版本号是人决定的，不该被 push 或定时任务自动发出去。
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '正式版版本号（三段数字，例：1.0.0）'
+        required: true
+        type: string
+
+# ⚠️ 与 nightly 的 group **不同名**：两者都会写 Releases（标签互不相同，不会互相覆盖），
+#    但并发跑会同时吃 runner 与磁盘，没必要。
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# ★ 要**写**才建得了 Release：只读的话 `gh release create` 会被 403 挡在最后一步，
+#   前面十几分钟的构建全白跑（D-062 里记过这个坑）。
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: 正式版 安装包 + 绿色包 + 便携版
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    env:
+      NO_COLOR: '1'
+      PYTHONUNBUFFERED: '1'
+      # 告诉构建链「这是 CI」：`build-server.mjs` 的逃生舱在这里绝不能生效（P-072）。
+      K12_CI: '1'
+      # ★★ 唯一决定「这次打包是几号版本」的地方（D-067 表里的「手工发版」那一行）：
+      #    显式指定**压过** CI 的 run number，所以正式版是干净的 `1.0.0`，
+      #    而不是 nightly 那种 `1.0.<构建序号>`。
+      K12_VERSION: ${{ inputs.version }}
+
+    steps:
+      # ★ 发布说明要读最近 20 条提交标题：`actions/checkout` 默认只取 **1 条**，
+      #   默认值下 `git log -20` 只输出一条而且**不报错**（静默降级）。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 30
+
+      # 先验版本号再干重活：形状不对 / 某段越界 → 这里非零退出（几秒钟），
+      # 而不是等 PyInstaller 与 electron-builder 跑完才在 makensis 那里炸。
+      - name: 校验版本号（形状与 16 位上限）
+        working-directory: desktop
+        run: npm run version:show
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          enable-cache: true
+          cache-dependency-glob: server/uv.lock
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: 同步后端依赖
+        working-directory: server
+        run: uv sync --frozen
+
+      # ── 嵌入模型（约 90MB，不在 git 里）──────────────────────────────────
+      # ★ key 与 nightly **逐字相同**：模型是固定的 `BAAI/bge-small-zh-v1.5`，
+      #   换模型必须改 `server/app/config.py`（EMBEDDING_DIM）并重建索引，所以 key 带它的哈希。
+      #   同一个 key = 正式发版直接吃 nightly 已经下好的那份缓存，不必重新下 90MB。
+      - name: 缓存嵌入模型
+        uses: actions/cache@v4
+        id: model-cache
+        with:
+          path: server/resources/models/fastembed
+          key: embedding-model-${{ hashFiles('server/app/config.py') }}
+
+      - name: 获取嵌入模型（缓存未命中时联网下载）
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        working-directory: server
+        run: uv run python scripts/fetch_embedding_model.py
+
+      # 缓存命中时**也要验一次**：缓存可能是半截的，而「模型在但维度不对」不报任何错。
+      - name: 校验嵌入模型（幂等；装了就直接过）
+        working-directory: server
+        run: uv run python scripts/fetch_embedding_model.py
+
+      # ── 全量测试（带向量，比 CI 覆盖得更全）──────────────────────────────
+      - name: 建知识库（带向量）
+        working-directory: server
+        run: uv run python scripts/build_kb.py
+
+      - name: 后端测试（全量）
+        working-directory: server
+        run: uv run python -m unittest discover -s tests
+
+      - name: 安装前端依赖
+        working-directory: desktop
+        run: npm ci
+
+      - name: 前端测试与自检
+        working-directory: desktop
+        run: npm run typecheck && npm test
+
+      # ── 打包 ─────────────────────────────────────────────────────────────
+      # ★★ 必须在 electron-builder **之前**：安装包文件名、程序集版本、控制面板里显示的版本号，
+      #    全都取自此刻的 package.json。这里读的是 `K12_VERSION`（见 job env）。
+      - name: 定本次构建的版本号
+        working-directory: desktop
+        run: npm run version:stamp
+
+      - name: 构建前端 + 后端 sidecar
+        working-directory: desktop
+        run: npm run build
+
+      # 目标在命令行显式给（与 nightly 一致，不改 electron-builder.yml 的本地默认）
+      - name: 打安装版、绿色包与便携版
+        working-directory: desktop
+        run: npx electron-builder --win nsis zip portable
+
+      # ★★ 发布**之前**的关键断言：包里的后端必须是当前源码打的（P-072）。
+      #    失败则非零退出 → 后面的发布步骤整步跳过 → 坏包发不出去。
+      - name: 校验包里的后端是最新的源码打的
+        working-directory: desktop
+        run: npm run check:server:packaged
+
+      - name: 列出产物（排查用；顺带证明三个目标都真的产出了文件）
+        working-directory: desktop/dist
+        run: |
+          Get-ChildItem -File | Where-Object { $_.Extension -in '.exe', '.zip' } |
+            Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,1)}} | Format-Table -AutoSize
+
+      # ── 发布说明（正式版口径）────────────────────────────────────────────
+      - name: 生成发布说明
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 版本号取自**刚盖过章的** package.json —— 与安装包名、程序集版本完全同源。
+          APP_VERSION=$(node -p "require('./desktop/package.json').version")
+          {
+            echo "## 智团团 · 正式版 ${APP_VERSION}"
+            echo ""
+            echo "正式交付版（安装包 / 绿色压缩包 / 便携版三个形态，同一份代码）。"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| **版本号** | \`${APP_VERSION}\` |"
+            echo "| 构建时间 | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo "| 提交 | \`${GITHUB_SHA:0:7}\` |"
+            echo ""
+            echo "> 标签 \`v${APP_VERSION}\` 与包内版本号、安装包文件名、控制面板里显示的版本**四处一致**。"
+            echo ""
+            echo "### 本次包含的改动（最近 20 条提交）"
+            echo ""
+            git log -20 --pretty=format:'- %s'
+            echo ""
+            echo ""
+            echo "---"
+            echo ""
+            echo "**下载哪个？**"
+            echo ""
+            echo "| 文件 | 说明 |"
+            echo "| --- | --- |"
+            echo "| \`*-setup.exe\` | **安装版（NSIS）**：装一次，有桌面快捷方式与卸载项 |"
+            echo "| \`*-win-x64.zip\` | **绿色压缩包**：解压即用，数据落在解压目录 |"
+            echo "| \`*-portable.exe\` | **便携版**：单个 exe，数据落在 exe 同级 \`data/\` |"
+            echo ""
+            echo "> ⚠️ 升级装新版**不会**动你的学习数据（\`config.json\` / \`learning.db\` / 会话记录）。"
+          } > release-notes.md
+
+          # 自检：条目数够不够（浅克隆会让这里静默只剩一条）。
+          COUNT=$(grep -c '^- ' release-notes.md || true)
+          echo "版本号：$APP_VERSION"
+          echo "发布说明里的提交条数：$COUNT"
+          if [ "$COUNT" -lt 2 ]; then
+            echo "::warning::发布说明只列出 $COUNT 条提交 —— 检查 checkout 的 fetch-depth"
+          fi
+          echo "---- 发布说明 ----"
+          cat release-notes.md
+
+      # ── 发布到 Releases（**非 prerelease** → 自动成为 Latest）──────────
+      - name: 发布正式版到 Releases
+        shell: bash
+        env:
+          # `gh` 从环境变量读令牌（不要写进命令行参数 —— 那会进进程列表）
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          APP_VERSION=$(node -p "require('./desktop/package.json').version")
+          TAG="v${APP_VERSION}"
+          TITLE="智团团 ${APP_VERSION}"
+
+          # ⚠️ 用 nullglob：没有匹配时 bash 会把 `*-setup.exe` 原样当成一个文件名，
+          #    于是 `[ -f ]` 判假、FILES 里留下一个不存在的路径 ——
+          #    最后报的是「文件找不到」而不是「没构建出产物」。
+          shopt -s nullglob
+          FILES=(desktop/dist/*-setup.exe desktop/dist/*-win-x64.zip desktop/dist/*-portable.exe)
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "::error::没有任何可发布的产物（desktop/dist 下找不到 setup/zip/portable）"
+            exit 1
+          fi
+          echo "将发布 ${#FILES[@]} 个文件："
+          printf '  %s\n' "${FILES[@]}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 同一个版本号重跑（上一次可能中途失败）：覆盖资源 + 更新说明，
+            # 而不是报「标签已存在」把一次成功的构建浪费掉。
+            echo "标签 $TAG 已存在 → 覆盖资源并更新说明（同一版本号重跑）"
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file release-notes.md --latest
+          else
+            echo "创建正式 Release：$TAG"
+            # ★★ 这里**没有** `--prerelease`：带上它就退化成 nightly 那种「不抢 Latest」的形态，
+            #    正式版等于没发（守卫 G21-9 专门盯着这一条）。`--latest` 把它标成 Latest。
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --notes-file release-notes.md \
+              --latest \
+              "${FILES[@]}"
+          fi
+
+          echo "发布完成：$(gh release view "$TAG" --json url -q .url)"

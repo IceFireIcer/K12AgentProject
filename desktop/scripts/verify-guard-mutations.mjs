@@ -1213,6 +1213,31 @@ const MUTATIONS = [
     ].join('\n'),
     testFile: 'tests/demo-seed.test.ts',
     expect: '沙箱分支都早于 ensureChatRuntime'
+  },
+
+  /* ------------------------------------------------------------------ *
+   * 正式发版（2026-09-27 / D-062）—— 守卫在 tests/installer-config.test.ts 的 G21-9
+   * 这两条守的都是「**包发出去之后**才发现错了」的事：
+   * 包内版本与标签对不上、以及正式版退化成 prerelease（不抢 Latest → 等于没发）。
+   * ------------------------------------------------------------------ */
+  {
+    // 忘了把版本号传下去 → 打出来还是 CI 派生的 `<主>.<次>.<run>`，而标签是 `v1.0.0`：
+    // 包内版本、安装包文件名、控制面板里显示的版本三处与标签**全不一致**。
+    name: '123 正式发版：不把 inputs.version 传给 K12_VERSION',
+    testFile: 'tests/installer-config.test.ts',
+    file: '../.github/workflows/release.yml',
+    find: '      K12_VERSION: ${{ inputs.version }}',
+    replace: '      K12_VERSION: ""',
+    expect: 'G21-9'
+  },
+  {
+    // 正式版发成 prerelease：不抢 Latest，下载页仍把 nightly 当正式版 —— 等于没发。
+    name: '124 正式发版：把 --latest 换成 --prerelease',
+    testFile: 'tests/installer-config.test.ts',
+    file: '../.github/workflows/release.yml',
+    find: '              --latest \\',
+    replace: '              --prerelease \\',
+    expect: 'G21-9'
   }
 ]
 

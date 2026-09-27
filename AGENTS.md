@@ -120,6 +120,7 @@ npm run smoke:wire                 # 需 sidecar：--data-dir 必须显式且 �
 
 - `ci.yml`：push/PR 门禁 —— `build_kb --no-vectors` → 后端 unittest；桌面 `typecheck` + `npm test` + tokens diff。**不**下模型、不出包。
 - `nightly.yml`：真打包 + Release；push 触发的打包**不发 Release**。`fetch-depth: 30`、`permissions: contents: write`、`shell: bash` 有实义，勿改回默认。
+- `release.yml`：**正式发版**，只能 `workflow_dispatch` 手动触发（Actions 页填三段数字版本号，如 `1.0.0`）。它把版本号经 `K12_VERSION` 传给 `build-version.mjs`（显式指定压过 CI 的 run number），发**非 prerelease** 的 `v<版本号>` Release → 自动成为 Latest；nightly 的 `--prerelease` 刻意不抢 Latest，就是留给它的。守卫 `tests/installer-config.test.ts` G21-9 + 变异 123/124。
 - 日志里 **`Traceback` ≠ 失败**（故意失败用例）；只认 `Ran N tests` + `OK`/`FAILED`。同分支 cancel-in-progress 的 `X` = 上一轮被取消，不是新失败。
 
 ## Git
