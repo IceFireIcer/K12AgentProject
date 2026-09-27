@@ -1,63 +1,109 @@
 <script setup lang="ts">
 /**
- * 演示驾驶舱：把「一次提问背后发生了什么」摊开的那一页。
+ * 运行透视：把「一轮提问背后发生了什么」摊开的那一页。
  *
  * ══════════════════════════════════════════════════════════════════════════
- * 三栏的分工（与报告 §4.2 的布局一一对应）
+ * 两个子页（顶栏的分段切换；数据是同一份 `TurnDiagnostics`）
  * ══════════════════════════════════════════════════════════════════════════
- *   左：轮次时间轴（点节点 → 中栏定位到那一轮）
- *   中：十二个分块 + 三张卡（这一轮逐段的机制证据）
- *   右：原始信封（结构化数据，证明「这些都是运行时真的产生的」）
+ *   ① 分块总览（默认，三栏；与报告 §4.2 的布局一一对应）
+ *      左：轮次时间轴（点节点 → 中栏定位到那一轮）
+ *      中：十二个分块（这一轮逐段的运行时证据）
+ *      右：原始信封（结构化数据，证明「这些都是运行时真的产生的」）
+ *   ② 调用顺序（`components/diag/DiagSequence.vue`）
+ *      把这一轮**按真实发生的先后**一条横条一个步骤摊开：学生输入 → 入口预检 → 学段 →
+ *      提示词（逐段）→ 画像 → 组装完成 → 推理 → 工具（逐次）→ 检索（逐级）→ 输出 →
+ *      终审 → 拦截 → 结束。每条横条最前面是分类，右侧是这一步的数字。
+ *      ★ 它**不新增取数路径**：吃的还是本页选中的那一轮（`diagnostics.active`）。
  *
  * ★★ 数据只有一个来源：`stores/diagnostics.ts` 的 `TurnDiagnostics` 快照。
  *   浮窗读的是同一个 store、同一个 `DiagSummary` —— 两处显示同一份数（不做两套 UI）。
- * ★ 本页只在**演示 / 调试档**可达（`PAGES.demo.nav === 'debug'`），
- *   所以这里可以直说技术口径的话；技术词的原文集中在 `components/diag/evidence.ts`，
- *   由守卫按文件豁免（见那个文件头的说明）。
+ * ★ 本页在**教师档及以上**可达（`PAGES.demo.nav === 'teacher'`）：不载入任何预置数据、
+ *   普通运行态下，老师也能看「这一轮背后调用了什么、走了哪条链路」。
+ *   **学生档看不到它**（技术证据不进学生面）—— 守卫钉着这一条。
+ *   技术词的原文集中在 `components/diag/evidence.ts`（两个子页的名字也在那儿），
+ *   由守卫按文件豁免（见那个文件头）。
+ *   ⚠️ 这一段（含子页的标签）不许写死进本文件的模板：本页**不在**豁免名单里。
  *
  * ⚠️ 本页**不产生**任何运行时数据（不重算、不补数）：拿不到就如实显示空。
  */
-import { computed, ref } from 'vue'
-import { Eraser, Moon, RefreshCw, Sun, Download } from 'lucide-vue-next'
+import { computed, onActivated, onMounted, ref } from 'vue'
+import { Eraser, RefreshCw } from 'lucide-vue-next'
 import {
-  CONTRACT_CHAIN,
-  DEMO_HEADINGS,
   DIAG_BLOCKS,
-  GRADE_MATRIX_ROWS,
+  DIAG_VIEWS,
   GUARD_CATALOG,
-  HIDDEN_MECHANISM_CARDS,
-  MD_FENCE,
+  PAGE_HEADINGS,
   PROMPT_STAGE_LABELS,
   RETRIEVAL_LEVEL_LABELS,
   SAFETY_STAGE_LABELS
 } from '../components/diag/evidence'
+import DiagSequence from '../components/diag/DiagSequence.vue'
 import DiagSummary from '../components/diag/DiagSummary.vue'
 import { useDiagnosticsStore } from '../stores/diagnostics'
+import { useDemoSeedStore } from '../stores/demoSeed'
 import { useStudentStore } from '../stores/student'
 import { useSidecarStore } from '../stores/sidecar'
-import { resolveStudyBridge } from '../api/study'
-import { todayStamp } from '../study/export-naming'
-import { BRAND_NAME } from '@shared/brand'
+import { PAGES, useUiStore, type PageName } from '../stores/ui'
 
 const diagnostics = useDiagnosticsStore()
+const demoSeed = useDemoSeedStore()
 const student = useStudentStore()
 const sidecar = useSidecarStore()
+const ui = useUiStore()
 
-/** 实时 = 跟最新一轮；回放 = 停在选中的那一轮（演示时节奏可控）。 */
-const live = ref(true)
-const exporting = ref(false)
-const exportNotice = ref('')
+/**
+ * 顶栏的导航快捷按钮：不用回侧栏找，按讲解节奏直接切页。
+ *
+ * ★ 文案直接读 `PAGES[page].title`（页名的**唯一来源**）：页名改了这里跟着改，
+ *   不会在页面里长出第二个名字。所以这里只列 key，不写死中文。
+ */
+const SHORTCUT_PAGES: readonly PageName[] = ['chat', 'study', 'quiz', 'animation']
+
+const notice = ref('')
+
+// ★ 进入本页时问一次「现在是不是沙箱态」：那颗开关已经搬到设置页的「技术详情」里，
+//   但本页的「清空记录」在沙箱态下**要多做一件事**（把脚本进度归零，见 `clearAll`），
+//   判据就是 `demoSeed.seeded` —— 不读一次就会按旧值决定要不要归零。
+//   `onMounted` 与 `onActivated` 都挂：本页在 `<KeepAlive>` 里，切走再回来不会重挂 ——
+//   只挂 mounted 的话，别处切了档位再回来，这里读到的还是旧的那个状态。
+//   ⚠️ 首次进入两条都会触发、于是读两次：它是幂等的只读（代价一次 invoke），不值得加去重状态。
+onMounted(() => {
+  void demoSeed.refresh()
+})
+onActivated(() => {
+  void demoSeed.refresh()
+})
 
 const turn = computed(() => diagnostics.active)
 
-function pick(current: number): void {
-  live.value = false
-  diagnostics.select(current)
+/**
+ * 当前子页（`DIAG_VIEWS[].id`）。
+ *
+ * ★ 默认必须是「分块总览」：`scripts/ux-probe-demo.mjs` 与 `tests/probe-anchors.test.ts`
+ *   都钉着那一屏的三栏（`.cols` 下恰好三个子元素），探针跑的就是默认态。
+ *   ⚠️ 切换时是**整块换掉** `.cols`（`v-if` / `v-else`）—— 不要往里塞第四个兄弟。
+ */
+const view = ref<(typeof DIAG_VIEWS)[number]['id']>('blocks')
+
+function switchView(next: (typeof DIAG_VIEWS)[number]['id']): void {
+  view.value = next
 }
 
-function goLive(): void {
-  live.value = true
+/** 回到最新一轮（在时间轴上点过旧轮次之后，用它跳回跟随状态）。 */
+function backToLatest(): void {
   diagnostics.select(null)
+}
+
+/**
+ * 这一轮属于哪条会话（沙箱态下由 `demoSeed` 提供；普通运行态回空串）。
+ *
+ * ★ 时间轴上十二个节点只写「第 N 轮」的话，看不出哪几轮属于侧栏的哪条历史会话 ——
+ *   而这一屏要讲的正是「每条会话里它都做了什么」。映射是**只读**的：
+ *   `TurnDiagnostics` 的结构一个字没动（那是采集器与落盘剥离的公共契约）。
+ * ★ 拿不到就回空串，模板据此不渲染那一行（普通运行态下与改动前逐像素相同）。
+ */
+function sessionTitle(turn: number): string {
+  return demoSeed.titleOf(turn)
 }
 
 /** 沙箱那一块：主进程看不到这些事件，只有渲染进程能补（见 `stores/diagnostics.ts`）。 */
@@ -77,7 +123,7 @@ const sandboxText = computed(() => {
  *
  * ★ `restarts` 与 `ignoredStdoutLines` 是握手协议里早就有的诊断字段（票 02）：
  *   前者是「自上次就绪以来崩溃重启过几次」，后者应当恒为 0（stdout 是保留通道）。
- *   演示时这两个数比任何一句「我们做了进程管理」都有说服力。
+ *   这两个数比任何一句「我们做了进程管理」都有说服力。
  */
 const runtimeLines = computed(() => {
   const state = sidecar.state
@@ -91,75 +137,18 @@ const runtimeLines = computed(() => {
   return lines
 })
 
-/** 演示学生标识：读的是主进程定的那个身份（本页只展示，不做任何切换）。 */
+/** 当前学生标识：读的是主进程定的那个身份（本页只展示，不做任何切换）。 */
 const studentLabel = computed(() => {
   const id = student.student?.studentId ?? ''
   return id === '' ? '（还没取到）' : `${id}（昵称 ${student.nickname}）`
 })
 
-/**
- * 导出演示包（Markdown：脱敏信封 + 工具轨迹图 + 四学段对比）。
- *
- * ★ 走**既有**的 `file:export` 通道（保存对话框 + 文件名清理都在主进程），
- *   不新增后缀、不新增通道 —— 演示包是给人看的文档，不是机器接口。
- */
-async function exportPackage(): Promise<void> {
-  const current = turn.value
-  if (!current) {
-    exportNotice.value = '还没有可导出的轮次。'
-    return
-  }
-  const lookup = resolveStudyBridge()
-  if (!lookup.ready) {
-    exportNotice.value = lookup.message
-    return
-  }
-  exporting.value = true
-  try {
-    const nodes = current.tools
-      .map((tool) => `  C${tool.seq}["${tool.name}<br/>${tool.ok ? 'ok' : 'fail'} · ${Math.round(tool.latencyMs)}ms"]:::${tool.ok ? 'ok' : 'fail'}`)
-      .join('\n')
-    const lines = [
-      `# ${BRAND_NAME} 演示包（第 ${current.turn} 轮）`,
-      '',
-      `- 导出时间：${todayStamp()}`,
-      `- 轮次：第 ${current.turn} 轮（状态 ${current.done.status}，总耗时 ${current.done.totalMs}ms）`,
-      `- 学段：${current.grade.applied}（判定层 ${current.grade.decidedBy ?? '待判定'}）`,
-      `- 提示词体量：${current.prompt.chars} 字符 / 约 ${current.prompt.totalTokens} tok`,
-      `- 画像块指纹：${current.studentContext.byteHash || '本轮未注入'}`,
-      '',
-      '## 工具调用轨迹',
-      '',
-      MD_FENCE.mermaid,
-      'flowchart TD',
-      '  classDef ok fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20',
-      '  classDef fail fill:#ffebee,stroke:#c62828,color:#b71c1c',
-      `  T_START(["第 ${current.turn} 轮 · 学生提问"])`,
-      nodes,
-      nodes ? '  T_START --> C1' : '  T_START --> T_END(["本轮没有调用工具"])',
-      MD_FENCE.close,
-      '',
-      '## 脱敏后的轮次信封',
-      '',
-      MD_FENCE.json,
-      JSON.stringify(current, null, 2),
-      MD_FENCE.close,
-      ''
-    ]
-    const result = await lookup.bridge.exportMarkdown({
-      fileName: `${BRAND_NAME}-演示包-${todayStamp()}`,
-      content: lines.join('\n')
-    })
-    exportNotice.value = result.ok ? `已导出：${result.fileName}` : result.message
-  } finally {
-    exporting.value = false
-  }
-}
-
 async function clearAll(): Promise<void> {
+  // ★ 沙箱态下「清空记录」**额外**把脚本进度归零（顺带收掉正在放的那一轮）：
+  //   不清的话，下一次提问会从上一场停下的那半轮接着放 —— 看起来像卡带。
+  if (demoSeed.seeded) demoSeed.resetProgress()
   const result = await diagnostics.clear()
-  live.value = true
-  exportNotice.value = result.ok ? '已清空演示记录。' : result.message
+  notice.value = result.ok ? '已清空记录。' : result.message
 }
 </script>
 
@@ -167,46 +156,70 @@ async function clearAll(): Promise<void> {
   <section class="demo" data-testid="demo-view">
     <header class="bar">
       <div class="bar__lead">
-        <h1 class="bar__title">{{ DEMO_HEADINGS.title }}</h1>
-        <p class="bar__sub">{{ DEMO_HEADINGS.lead }}</p>
+        <h1 class="bar__title">{{ PAGE_HEADINGS.title }}</h1>
+        <p class="bar__sub">{{ PAGE_HEADINGS.lead }}</p>
+      </div>
+      <!-- 子页分段切换（手写，与右栏那组分页同一手法：`el-segmented` 的等分宽度
+           会把四字标签截成「分…」，而这里只有两个段，手写 8 行完全可预测）。
+           ★ 标签文案取自 evidence.ts 的 DIAG_VIEWS —— 本页不在技术词豁免名单里。 -->
+      <div class="views" role="tablist" aria-label="运行透视的两个子页" data-testid="demo-views">
+        <button
+          v-for="item in DIAG_VIEWS"
+          :key="item.id"
+          type="button"
+          role="tab"
+          class="views__tab"
+          :class="{ 'views__tab--on': view === item.id }"
+          :aria-selected="view === item.id"
+          :data-view="item.id"
+          :data-testid="`demo-views-${item.id}`"
+          :title="item.hint"
+          @click="switchView(item.id)"
+        >
+          {{ item.label }}
+        </button>
       </div>
       <div class="bar__tools">
         <span class="chip" data-testid="demo-student">{{ studentLabel }}</span>
-        <button type="button" class="btn" :data-on="String(live)" @click="goLive()">
-          <Sun :size="13" />实时
+        <button
+          v-for="page in SHORTCUT_PAGES"
+          :key="page"
+          type="button"
+          class="btn"
+          @click="ui.go(page)"
+        >
+          {{ PAGES[page].title }}
         </button>
-        <button type="button" class="btn" :data-on="String(!live)" @click="live = false">
-          <Moon :size="13" />回放
-        </button>
-        <button type="button" class="btn" :disabled="exporting" @click="exportPackage()">
-          <Download :size="13" />导出演示包
-        </button>
+        <span class="bar__sep" aria-hidden="true" />
         <button type="button" class="btn" data-testid="demo-refresh" @click="diagnostics.refresh()">
           <RefreshCw :size="13" />重新读取
         </button>
+        <button type="button" class="btn" @click="backToLatest()">回到最新一轮</button>
         <button type="button" class="btn btn--danger" data-testid="demo-clear" @click="clearAll()">
-          <Eraser :size="13" />一键清空
+          <Eraser :size="13" />清空记录
         </button>
       </div>
     </header>
 
-    <p v-if="exportNotice" class="notice" data-testid="demo-notice">{{ exportNotice }}</p>
+    <p v-if="notice" class="notice" data-testid="demo-notice">{{ notice }}</p>
     <p v-if="diagnostics.bridgeError" class="notice notice--warn">{{ diagnostics.bridgeError }}</p>
     <p v-if="diagnostics.fromDisk" class="notice" data-testid="demo-from-disk">
       下面这些是上一次运行留下的记录（落盘只留结构与结论，正文不落盘）。
     </p>
 
-    <div class="cols">
+    <!-- ⚠️ 两个子页**整块互斥**（`v-if` / `v-else`）：探针断言 `.cols` 下恰好三栏，
+         所以「调用顺序」不许作为第四栏插进 `.cols` 里。 -->
+    <div v-if="view === 'blocks'" class="cols">
       <aside class="col col--timeline">
         <h2 class="col__title">轮次时间轴</h2>
-        <p v-if="diagnostics.turns.length === 0" class="empty">{{ DEMO_HEADINGS.timelineEmpty }}</p>
+        <p v-if="diagnostics.turns.length === 0" class="empty">{{ PAGE_HEADINGS.timelineEmpty }}</p>
         <ol v-else class="timeline" data-testid="demo-timeline">
           <li v-for="item in diagnostics.turns" :key="item.turn">
             <button
               type="button"
               class="node"
               :data-on="String(item.turn === turn?.turn)"
-              @click="pick(item.turn)"
+              @click="diagnostics.select(item.turn)"
             >
               <span class="node__turn">第 {{ item.turn }} 轮</span>
               <span class="node__meta">
@@ -215,6 +228,10 @@ async function clearAll(): Promise<void> {
               </span>
               <span class="node__signal" :data-ok="String(item.done.ok)">
                 {{ item.done.ok ? '完成' : item.done.status }}
+              </span>
+              <!-- 这一轮属于哪条会话（历史轮次才有；跨整行，不挤那三列） -->
+              <span v-if="sessionTitle(item.turn)" class="node__session">
+                {{ sessionTitle(item.turn) }}
               </span>
             </button>
           </li>
@@ -362,7 +379,7 @@ async function clearAll(): Promise<void> {
           <h3 class="block__title">{{ DIAG_BLOCKS[9].title }}</h3>
           <p class="block__lead">{{ DIAG_BLOCKS[9].lead }}</p>
           <p v-if="diagnostics.interceptions.length === 0" class="empty">
-            还没有任何拦截记录。演示时先做一次「被拦下」的动作（例如被冷却挡下的学段变更）。
+            还没有任何拦截记录。先做一次会被拦下的动作（例如被冷却挡下的学段变更）。
           </p>
           <ul v-else class="blocks" data-testid="demo-interceptions">
             <li v-for="(item, index) in diagnostics.interceptions" :key="`${item.turn}-${index}`" class="blocked">
@@ -385,7 +402,6 @@ async function clearAll(): Promise<void> {
         <section class="block">
           <h3 class="block__title">{{ DIAG_BLOCKS[11].title }}</h3>
           <p class="block__lead">{{ DIAG_BLOCKS[11].lead }}</p>
-          <p class="kv">防漂移链：<span class="kv__v">{{ CONTRACT_CHAIN }}</span></p>
           <ul class="guards">
             <li v-for="row in GUARD_CATALOG" :key="row.id" class="guard">
               <span class="guard__id">{{ row.id }}</span>
@@ -393,42 +409,19 @@ async function clearAll(): Promise<void> {
             </li>
           </ul>
         </section>
-
-        <section class="block">
-          <h3 class="block__title">四学段横向对比</h3>
-          <p class="block__lead">同一句提问在四个学段下的语气与深度差异（演示时点学段指示器即可现场切换）。</p>
-          <table class="matrix">
-            <thead>
-              <tr><th>学段</th><th>语气</th><th>深度</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in GRADE_MATRIX_ROWS" :key="row.grade">
-                <td>{{ row.grade }}</td>
-                <td>{{ row.tone }}</td>
-                <td>{{ row.depth }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section class="block">
-          <h3 class="block__title">隐藏机制补充</h3>
-          <p class="block__lead">不属于某一轮，但属于「看不见的评分权重」那一批。</p>
-          <ul class="cards">
-            <li v-for="card in HIDDEN_MECHANISM_CARDS" :key="card.title" class="card">
-              <strong class="card__title">{{ card.title }}</strong>
-              <span class="card__body">{{ card.body }}</span>
-            </li>
-          </ul>
-        </section>
       </main>
 
       <aside class="col col--raw">
         <h2 class="col__title">原始信封</h2>
-        <p class="col__lead">{{ DEMO_HEADINGS.rawHint }}</p>
+        <p class="col__lead">{{ PAGE_HEADINGS.rawHint }}</p>
         <p v-if="!turn" class="empty">还没有数据。</p>
         <pre v-else class="pre pre--raw" data-testid="demo-raw">{{ JSON.stringify(turn, null, 2) }}</pre>
       </aside>
+    </div>
+
+    <!-- ② 调用顺序：同一轮信封的**时间读法**（组件自己负责滚动，见它的文件头）。 -->
+    <div v-else class="seqwrap" data-testid="demo-sequence">
+      <DiagSequence :turn="turn" />
     </div>
   </section>
 </template>
@@ -470,6 +463,49 @@ async function clearAll(): Promise<void> {
   gap: 6px;
   flex-wrap: wrap;
 }
+/* 分段切换：一条轨道 + 两段（选中那段是纸面 + 强调墨色边）。 */
+.views {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface-2);
+}
+.views__tab {
+  min-width: 76px;
+  min-height: 26px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--k12-r-sm);
+  background: transparent;
+  color: var(--k12-muted);
+  font-family: inherit;
+  font-size: var(--k12-fs-caption);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.views__tab[data-view='blocks'][aria-selected='true'],
+.views__tab[data-view='sequence'][aria-selected='true'] {
+  border-color: var(--k12-accent-border);
+  background: var(--k12-surface);
+  color: var(--k12-accent-ink);
+}
+@media (hover: hover) and (pointer: fine) {
+  .views__tab:hover:not([aria-selected='true']) {
+    color: var(--k12-fg-2);
+  }
+}
+/* 导航快捷按钮与「读写动作」之间的一道细分隔（只用既有令牌）。 */
+.bar__sep {
+  flex: none;
+  align-self: stretch;
+  width: 1px;
+  margin: 0 2px;
+  background: var(--k12-border);
+}
 .chip {
   padding: 4px 9px;
   border-radius: var(--k12-r-pill);
@@ -490,11 +526,6 @@ async function clearAll(): Promise<void> {
   font-size: var(--k12-fs-caption);
   font-weight: 600;
   cursor: pointer;
-}
-.btn[data-on='true'] {
-  border-color: var(--k12-accent-ink);
-  color: var(--k12-accent-ink);
-  background: var(--k12-accent-soft);
 }
 .btn--danger {
   color: var(--k12-warn);
@@ -517,6 +548,12 @@ async function clearAll(): Promise<void> {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr) 320px;
   gap: 12px;
+}
+/* 「调用顺序」子页的落点：与 `.cols` 同级、同高，内部由组件自己滚动。 */
+.seqwrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
 }
 .col {
   min-height: 0;
@@ -578,6 +615,15 @@ async function clearAll(): Promise<void> {
 .node__signal[data-ok='false'] {
   color: var(--k12-warn);
 }
+/* 会话标题：跨满整行（`.node` 是三列网格，多出来的这一行自己占一整行）。 */
+.node__session {
+  grid-column: 1 / -1;
+  font-size: var(--k12-fs-label);
+  color: var(--k12-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .blocks {
   list-style: none;
   margin: 0;
@@ -628,8 +674,7 @@ async function clearAll(): Promise<void> {
 .stages,
 .levels,
 .tools,
-.guards,
-.cards {
+.guards {
   list-style: none;
   margin: 6px 0 0;
   padding: 0;
@@ -640,8 +685,7 @@ async function clearAll(): Promise<void> {
 .stage,
 .level,
 .tool,
-.guard,
-.card {
+.guard {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -667,8 +711,7 @@ async function clearAll(): Promise<void> {
 }
 .stage__note,
 .level__note,
-.guard__what,
-.card__body {
+.guard__what {
   flex: 1;
   min-width: 0;
   color: var(--k12-muted);
@@ -733,28 +776,6 @@ async function clearAll(): Promise<void> {
   font-family: var(--k12-font-mono, monospace);
   font-weight: 650;
   color: var(--k12-accent-ink);
-}
-.card__title {
-  flex: none;
-  color: var(--k12-fg);
-}
-.matrix {
-  width: 100%;
-  margin-top: 6px;
-  border-collapse: collapse;
-  font-size: var(--k12-fs-caption);
-}
-.matrix th,
-.matrix td {
-  padding: 5px 7px;
-  border: 1px solid var(--k12-border);
-  text-align: left;
-  color: var(--k12-fg-2);
-}
-.matrix th {
-  background: var(--k12-surface-2);
-  color: var(--k12-muted);
-  font-weight: 650;
 }
 .seg {
   margin-top: 6px;

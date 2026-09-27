@@ -10,8 +10,8 @@
   --k12-fg-2: #3E4761;
   --k12-muted: #616A7A;
   --k12-muted-2: #8A93A3;
-  --k12-border: #E6EAF2;
-  --k12-border-strong: #D9DFEC;
+  --k12-border: #D1D5DB;
+  --k12-border-strong: #9CA3AF;
   --k12-good: #0B7A57;
   --k12-good-soft: #F0FAF5;
   --k12-good-border: #CDEEDF;
@@ -39,9 +39,9 @@
 }
 
 :root[data-grade="primary-low"][data-sat="soft"] {
-  --k12-page: #fff9f3;
+  --k12-page: #FAF5EF;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #fffcf8;
+  --k12-surface-2: #FAF8F4;
   --k12-accent: #F97316;
   --k12-accent-ink: #AB5720;
   --k12-accent-2: #FB7185;
@@ -52,11 +52,11 @@
 }
 
 :root[data-grade="primary-low"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #F97316;
-  --k12-accent-ink: #AE5720;
+  --k12-accent-ink: #AB5720;
   --k12-accent-2: #FB7185;
   --k12-accent-soft: #F1F5F9;
   --k12-accent-border: #E2E8F0;
@@ -78,9 +78,9 @@
 }
 
 :root[data-grade="primary-high"][data-sat="soft"] {
-  --k12-page: #f5fbff;
+  --k12-page: #F1F7FB;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #f9fdff;
+  --k12-surface-2: #F5F9FB;
   --k12-accent: #0EA5E9;
   --k12-accent-ink: #1375A6;
   --k12-accent-2: #22C55E;
@@ -91,11 +91,11 @@
 }
 
 :root[data-grade="primary-high"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #0EA5E9;
-  --k12-accent-ink: #1377A9;
+  --k12-accent-ink: #1375A6;
   --k12-accent-2: #22C55E;
   --k12-accent-soft: #F1F5F9;
   --k12-accent-border: #E2E8F0;
@@ -119,7 +119,7 @@
 :root[data-grade="junior"][data-sat="soft"] {
   --k12-page: #f6f7ff;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #fbfbff;
+  --k12-surface-2: #F2F2F7;
   --k12-accent: #4F46E5;
   --k12-accent-ink: #4F46E5;
   --k12-accent-2: #7C6CF0;
@@ -130,7 +130,7 @@
 }
 
 :root[data-grade="junior"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #4F46E5;
@@ -158,7 +158,7 @@
 :root[data-grade="senior"][data-sat="soft"] {
   --k12-page: #f5fbfa;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #fafdfc;
+  --k12-surface-2: #F6F9F8;
   --k12-accent: #0D9488;
   --k12-accent-ink: #107A74;
   --k12-accent-2: #0EA5E9;
@@ -169,11 +169,11 @@
 }
 
 :root[data-grade="senior"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #0D9488;
-  --k12-accent-ink: #107D77;
+  --k12-accent-ink: #107C76;
   --k12-accent-2: #0EA5E9;
   --k12-accent-soft: #F1F5F9;
   --k12-accent-border: #E2E8F0;
@@ -183,7 +183,7 @@
 
 :root,
 :root[data-grade="default"][data-sat="vivid"] {
-  --k12-page: #FFFFFF;
+  --k12-page: #EEF2FC;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F7F9FC;
   --k12-accent: #2563EB;
@@ -196,9 +196,9 @@
 }
 
 :root[data-grade="default"][data-sat="soft"] {
-  --k12-page: #FFFFFF;
+  --k12-page: #F5F8FD;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #F7F9FC;
+  --k12-surface-2: #F3F5F8;
   --k12-accent: #2563EB;
   --k12-accent-ink: #2563EB;
   --k12-accent-2: #EC4899;
@@ -209,7 +209,7 @@
 }
 
 :root[data-grade="default"][data-sat="mono"] {
-  --k12-page: #FFFFFF;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F7F9FC;
   --k12-accent: #2563EB;
@@ -224,7 +224,7 @@
 :root[data-grade="brand"][data-sat="vivid"] {
   --k12-page: #ECFDF5;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #F5FDF0;
+  --k12-surface-2: #F1F9EC;
   --k12-accent: #10B981;
   --k12-accent-ink: #147E63;
   --k12-accent-2: #84CC16;
@@ -235,9 +235,9 @@
 }
 
 :root[data-grade="brand"][data-sat="soft"] {
-  --k12-page: #f6fefb;
+  --k12-page: #F2FAF7;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #fafef8;
+  --k12-surface-2: #F1F5F0;
   --k12-accent: #10B981;
   --k12-accent-ink: #147E63;
   --k12-accent-2: #84CC16;
@@ -248,11 +248,11 @@
 }
 
 :root[data-grade="brand"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #10B981;
-  --k12-accent-ink: #147E63;
+  --k12-accent-ink: #147D62;
   --k12-accent-2: #84CC16;
   --k12-accent-soft: #F1F5F9;
   --k12-accent-border: #E2E8F0;
@@ -312,7 +312,7 @@
 :root[data-grade="brand"]:not([data-sat]) {
   --k12-page: #ECFDF5;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #F5FDF0;
+  --k12-surface-2: #F1F9EC;
   --k12-accent: #10B981;
   --k12-accent-ink: #147E63;
   --k12-accent-2: #84CC16;
@@ -322,9 +322,9 @@
   --k12-chip-fg: #0E7D5B;
 }
 :root[data-sat="soft"]:not([data-grade]) {
-  --k12-page: #FFFFFF;
+  --k12-page: #F5F8FD;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #F7F9FC;
+  --k12-surface-2: #F3F5F8;
   --k12-accent: #2563EB;
   --k12-accent-ink: #2563EB;
   --k12-accent-2: #EC4899;
@@ -334,7 +334,7 @@
   --k12-chip-fg: #1D4ED8;
 }
 :root[data-sat="mono"]:not([data-grade]) {
-  --k12-page: #FFFFFF;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F7F9FC;
   --k12-accent: #2563EB;
@@ -347,11 +347,13 @@
 }
 
 /* 由主色派生的合成分级（组件统一引用这些，不要各自 color-mix）
- * 只留两项：焦点环，以及**唯一**的浮层阴影。
- * 纸与桌面都不用阴影——层次靠底色差与 1px 细线，这是「书桌与纸」的材质规则。 */
+ * 只放**随学段变色**的东西：两支聚焦环。
+ * ⚠️ 投影不放这里 —— 它们定义在 base.css 的 `:root`（`--k12-shadow-*`）。
+ *   同一份文件里两处定义过 `--k12-shadow-float`，base.css 后加载把它覆盖掉，
+ *   于是「改 token 里的阴影」永远不生效（踩坑 P-157）。现已删掉重复定义。 */
 :root {
   --k12-accent-ring: color-mix(in srgb, var(--k12-accent) 34%, transparent);
-  --k12-shadow-float: 0 8px 28px -12px rgba(27, 34, 51, 0.22);
+  --k12-accent-ring-soft: color-mix(in srgb, var(--k12-accent) 16%, transparent);
 }
 
 /* 色板缩略：让单个元素自带某组主题（配色总览页用，组件内不硬编码色值） */
@@ -368,9 +370,9 @@
   --k12-chip-fg: #AE5214;
 }
 .k12-swatch[data-grade="primary-low"][data-sat="soft"] {
-  --k12-page: #fff9f3;
+  --k12-page: #FAF5EF;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #fffcf8;
+  --k12-surface-2: #FAF8F4;
   --k12-accent: #F97316;
   --k12-accent-ink: #AB5720;
   --k12-accent-2: #FB7185;
@@ -380,11 +382,11 @@
   --k12-chip-fg: #B85512;
 }
 .k12-swatch[data-grade="primary-low"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #F97316;
-  --k12-accent-ink: #AE5720;
+  --k12-accent-ink: #AB5720;
   --k12-accent-2: #FB7185;
   --k12-accent-soft: #F1F5F9;
   --k12-accent-border: #E2E8F0;
@@ -404,9 +406,9 @@
   --k12-chip-fg: #0D74A4;
 }
 .k12-swatch[data-grade="primary-high"][data-sat="soft"] {
-  --k12-page: #f5fbff;
+  --k12-page: #F1F7FB;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #f9fdff;
+  --k12-surface-2: #F5F9FB;
   --k12-accent: #0EA5E9;
   --k12-accent-ink: #1375A6;
   --k12-accent-2: #22C55E;
@@ -416,11 +418,11 @@
   --k12-chip-fg: #0C79AC;
 }
 .k12-swatch[data-grade="primary-high"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #0EA5E9;
-  --k12-accent-ink: #1377A9;
+  --k12-accent-ink: #1375A6;
   --k12-accent-2: #22C55E;
   --k12-accent-soft: #F1F5F9;
   --k12-accent-border: #E2E8F0;
@@ -442,7 +444,7 @@
 .k12-swatch[data-grade="junior"][data-sat="soft"] {
   --k12-page: #f6f7ff;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #fbfbff;
+  --k12-surface-2: #F2F2F7;
   --k12-accent: #4F46E5;
   --k12-accent-ink: #4F46E5;
   --k12-accent-2: #7C6CF0;
@@ -452,7 +454,7 @@
   --k12-chip-fg: #3C35AE;
 }
 .k12-swatch[data-grade="junior"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #4F46E5;
@@ -478,7 +480,7 @@
 .k12-swatch[data-grade="senior"][data-sat="soft"] {
   --k12-page: #f5fbfa;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #fafdfc;
+  --k12-surface-2: #F6F9F8;
   --k12-accent: #0D9488;
   --k12-accent-ink: #107A74;
   --k12-accent-2: #0EA5E9;
@@ -488,11 +490,11 @@
   --k12-chip-fg: #0A7067;
 }
 .k12-swatch[data-grade="senior"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #0D9488;
-  --k12-accent-ink: #107D77;
+  --k12-accent-ink: #107C76;
   --k12-accent-2: #0EA5E9;
   --k12-accent-soft: #F1F5F9;
   --k12-accent-border: #E2E8F0;
@@ -500,7 +502,7 @@
   --k12-chip-fg: #0F847C;
 }
 .k12-swatch[data-grade="default"][data-sat="vivid"] {
-  --k12-page: #FFFFFF;
+  --k12-page: #EEF2FC;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F7F9FC;
   --k12-accent: #2563EB;
@@ -512,9 +514,9 @@
   --k12-chip-fg: #1D4ED8;
 }
 .k12-swatch[data-grade="default"][data-sat="soft"] {
-  --k12-page: #FFFFFF;
+  --k12-page: #F5F8FD;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #F7F9FC;
+  --k12-surface-2: #F3F5F8;
   --k12-accent: #2563EB;
   --k12-accent-ink: #2563EB;
   --k12-accent-2: #EC4899;
@@ -524,7 +526,7 @@
   --k12-chip-fg: #1D4ED8;
 }
 .k12-swatch[data-grade="default"][data-sat="mono"] {
-  --k12-page: #FFFFFF;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F7F9FC;
   --k12-accent: #2563EB;
@@ -538,7 +540,7 @@
 .k12-swatch[data-grade="brand"][data-sat="vivid"] {
   --k12-page: #ECFDF5;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #F5FDF0;
+  --k12-surface-2: #F1F9EC;
   --k12-accent: #10B981;
   --k12-accent-ink: #147E63;
   --k12-accent-2: #84CC16;
@@ -548,9 +550,9 @@
   --k12-chip-fg: #0E7D5B;
 }
 .k12-swatch[data-grade="brand"][data-sat="soft"] {
-  --k12-page: #f6fefb;
+  --k12-page: #F2FAF7;
   --k12-surface: #FFFFFF;
-  --k12-surface-2: #fafef8;
+  --k12-surface-2: #F1F5F0;
   --k12-accent: #10B981;
   --k12-accent-ink: #147E63;
   --k12-accent-2: #84CC16;
@@ -560,11 +562,11 @@
   --k12-chip-fg: #0E815D;
 }
 .k12-swatch[data-grade="brand"][data-sat="mono"] {
-  --k12-page: #FAFAFB;
+  --k12-page: #F1F2F6;
   --k12-surface: #FFFFFF;
   --k12-surface-2: #F5F6F9;
   --k12-accent: #10B981;
-  --k12-accent-ink: #147E63;
+  --k12-accent-ink: #147D62;
   --k12-accent-2: #84CC16;
   --k12-accent-soft: #F1F5F9;
   --k12-accent-border: #E2E8F0;

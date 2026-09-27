@@ -15,7 +15,7 @@
 [![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](#技术栈)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](#技术栈)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#技术栈)
-[![Tests](https://img.shields.io/badge/回归测试-1872%20项%20全绿-2ea44f)](#测试与质量守卫)
+[![Tests](https://img.shields.io/badge/回归测试-2215%20项%20全绿-2ea44f)](#测试与质量守卫)
 [![Local](https://img.shields.io/badge/数据-本地优先%20·%20一人一库-8957e5)](#设计与取舍)
 
 </div>
@@ -118,7 +118,7 @@ npm run dev
 ```bash
 cd desktop
 npm run typecheck        # vue-tsc，契约漂移的第一道防线
-npm test                 # 815 项 node --test + check:api + check:tool-schema
+npm test                 # 1051 项 node --test + check:api + check:tool-schema + check:contrast
 npm run build            # 先确保 sidecar 最新（过期内自动重打）→ 再编主/渲染进程
 npm run build:unpack     # 免安装目录（★ 验证 esbuild 原生依赖是否解包、Pi 能否加载、后端是否最新）
 npm run build:win        # 出 .exe（NSIS 安装包 + 绿色便携版）
@@ -171,7 +171,7 @@ K12Agent/
 │  ├─ src/renderer/         Vue 3 界面：八页面 + 内联卡片
 │  ├─ src/shared/           跨进程类型 · 品牌名（唯一来源）· 供应商目录
 │  ├─ scripts/              构建联动（build-server.mjs）· 契约生成 · 各类冒烟与证据脚本
-│  ├─ tests/                815 项回归（含架构守卫 G1–G13 · G18–G23 组）
+│  ├─ tests/                1051 项回归（含架构守卫 G1–G13 · G18–G23 组）
 │  └─ build/ resources/     打包图标 · 学段 logo · Pyodide 运行时（本地自托管）
 ├─ server/                  Python sidecar
 │  ├─ app/                  FastAPI：contracts / routes / rag / safety / store / grade
@@ -179,7 +179,7 @@ K12Agent/
 │  ├─ knowledge-supplement/ 第 8 章「编程实践」（本项目自写，3 概念 × 四学段）——与用户源库分开存放
 │  ├─ resources/            题库（`quizbank/`，按章分片 ch01–ch08）· 动画模板 · 代码模板 · 敏感词表
 │  ├─ scripts/              导入教材 / 建库 / 取模型 / 导出 OpenAPI / 打包+指纹 / 生成品牌图标
-│  └─ tests/                1057 项回归
+│  └─ tests/                1164 项回归
 ├─ K12KnowledgeBase/        教材源库（用户提供，54 概念 × 四学段；本项目只读地用 import_knowledge.py 导入）
 ├─ docs/                    设计文档 · 任务票 · 决策与踩坑素材 · 界面版式契约 · 对标材料
 ├─ logos/                   品牌原图（2048²，不入包）
@@ -226,8 +226,8 @@ K12Agent/
 ## 测试与质量守卫
 
 ```bash
-cd server  && uv run python -m unittest discover -s tests   # 1057 项
-cd desktop && npm test                                      # 815 项 + 契约漂移比对 + Tool schema 一致性 + 文档数字自检
+cd server  && uv run python -m unittest discover -s tests   # 1164 项
+cd desktop && npm test                                      # 1051 项 + 契约漂移比对 + Tool schema 一致性 + 对比度 342 项 + 文档数字自检
 ```
 
 回归里有相当一部分是**架构守卫**，写成正向断言而不是「禁止某历史实现」：

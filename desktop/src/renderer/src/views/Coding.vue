@@ -60,6 +60,7 @@ import PageIdentity from '@/components/PageIdentity.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import TeacherGate from '@/components/TeacherGate.vue'
 import { useCodeStore, CODE_HINT_MAX } from '../stores/code'
+import { useFloatPanel } from '../stores/floatPanel'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { useQuizStore } from '../stores/quiz'
 import { useOnBackendReady } from '../composables/useOnBackendReady'
@@ -79,6 +80,22 @@ import { kpLabel, kpLabelResolved } from '../study/kp-label'
 
 const code = useCodeStore()
 const quiz = useQuizStore()
+const floatPanel = useFloatPanel()
+
+/**
+ * 「边写边问」—— 打开 / 收起悬浮追问窗。
+ * 与动画页同一个手法（`toggleFrom`：再点一次收起）。
+ * 标题复用本页已有的 `levelLabel()`（自带"拿不到中文名 → 未命名知识点"的兜底，
+ * 绝不把 `prog-loop-jr` 这种 slug 摆到窗口标题上）。
+ */
+function askAboutTask(event: MouseEvent): void {
+  const kpId = code.template?.kpId
+  floatPanel.toggleFrom(event.currentTarget as Element | null, {
+    kind: 'coding',
+    title: kpId ? levelLabel(kpId) : '这道编程题',
+    hint: '卡住的时候可以问，问题会带上这道题的上下文。'
+  })
+}
 const knowledge = useKnowledgeStore()
 
 /* ------------------------------------------------------------------ *
@@ -886,6 +903,18 @@ watch(editorVisible, (visible) => {
               {{ pyodideBadge.text }}
             </span>
             <span v-if="code.hintLoading" class="chip">正在取提示…</span>
+            <!-- 「边写边问」：打开悬浮追问窗（与动画页同一个入口形态）。
+                 它是**次要动作**，所以不进 `.code__actions` 那一行 ——
+                 那一行里的「运行」才是这一屏唯一的主色填充（一屏一个主行动）。 -->
+            <button
+              type="button"
+              class="chip code__ask"
+              data-testid="coding-view-ask"
+              title="打开追问窗，边写边问"
+              @click="askAboutTask"
+            >
+              边写边问
+            </button>
           </header>
 
           <!-- ★ 这里是 Monaco 的宿主（异步组件 `AsyncCodeEditor` 自己装配）。
@@ -1388,6 +1417,22 @@ watch(editorVisible, (visible) => {
 .chip[data-phase='loading'] {
   background: var(--k12-warn-soft);
   color: var(--k12-warn);
+}
+/* 「边写边问」：chip 形态的**按钮**（次要动作，与旁边的状态角标同一行）。
+ * ⚠️ 它是按钮不是角标：必须有 border + cursor + 够点的高度 —— 角标是只读记号，
+ *   这里要能按（`min-height` 不用写死：padding 撑出来的高度已 ≥28px，
+ *   由 `ux:pages` 的触控目标断言兜底）。 */
+.code__ask {
+  border: 1px solid var(--k12-border);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .code__ask:hover {
+    border-color: var(--k12-accent-ink);
+    color: var(--k12-accent-ink);
+  }
 }
 .chip[data-phase='failed'],
 .chip--warn {

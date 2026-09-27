@@ -219,18 +219,34 @@ const TERM_EXEMPT_FILES = new Set([
   // 教师专用的数据检视页（`PAGES.knowledge.nav === 'teacher'`，学生侧栏里进不去，守卫 ③ 钉着）
   'views/Knowledge.vue',
   /**
-   * ★★ 演示驾驶舱的技术口原文案（2026-09-26 演示模式）。
+   * ★★ 运行透视（2026-09-27 前叫「演示驾驶舱」）的技术口原文案。
    *
    * 那一页整页就是技术证据：提示词分段、四级降级链的逐级记录、沙箱隔离、契约防漂移链、
    * 架构守卫编号 —— `SQL` / `FTS5` / `Pyodide` / `nonce` / `契约` / `兜底` / `降级链`
    * 这些词**一个都不能删**（删了就没有可答辩的内容了）。处置与 `views/Knowledge.vue` 同一性质：
-   * 把技术原文集中到一个**只在演示 / 教师面渲染**的模块里。
+   * 把技术原文集中到一个**只在教师档及以上可达**的模块里。
    *
    * ⚠️ 这条例外的凭据在 `tests/demo-mode.test.ts`（「豁免必须名副其实」）：
-   *   它机械复核 —— 本模块**只被**演示页与机制浮窗 import，而演示页的 `PAGES.demo.nav`
-   *   是 `'debug'`（学生与教师档都进不去）。谁把它 import 进学生可见的组件，那条立刻红。
+   *   它机械复核 —— 本模块**只被** `views/Demo.vue` import，而那一页的 `PAGES.demo.nav`
+   *   是 `'teacher'`（**学生档**进不去：技术证据不进学生面）。谁把它 import 进学生可见的
+   *   组件，那条立刻红。
    */
   'components/diag/evidence.ts',
+  /**
+   * ★★ 「调用顺序」子页（2026-09-27 新增）：把这一轮的 `TurnDiagnostics` 一条横条
+   * 一个步骤摊开的那只组件。
+   *
+   * 它是运行透视**第三种读法**的落点（前两种是十二分块与原始信封），整份摊开的是
+   * **运行时技术原文**：提示词每个分段的原文、工具名与降级档位、检索逐级记录、
+   * 安全三阶段的结论。这些字段值今天都走插值（`{{ step.detail }}`），下一次谁在本文件里
+   * 写死一句技术口径的说明（例如给某一档检索加个静态标题），不应该在**教师面**上假红。
+   *
+   * ⚠️ 这条例外的凭据是**两环**，都写在 `tests/demo-mode.test.ts` 里：
+   *   ① 上一环：`views/Demo.vue` 是教师档专属页（`PAGES.demo.nav === 'teacher'`，学生档进不去侧栏）；
+   *   ② 本环：本组件**只被** `views/Demo.vue` import —— 谁把它搬进学生可见的组件，那条立刻红。
+   *   所以豁免不是后门：它的字要想到学生眼前，得先穿过两道被钉死的门。
+   */
+  'components/diag/DiagSequence.vue',
   // 取数层：只把契约字段搬进 store，自己一个字都不渲染
   'stores/knowledge.ts',
   'stores/settings.ts',
@@ -587,8 +603,9 @@ test('★★ 参考资料库是教师专属页：侧栏判定走唯一谓词，�
     /nav:\s*'teacher'/,
     "参考资料库必须标成教师专属：`PAGES.knowledge.nav = 'teacher'`（学生侧栏里进不去）"
   )
-  // ★ 2026-09-26：`nav` 扩成四态（true / 'teacher' / 'debug' / false）—— 演示驾驶舱
-  //   是第三档（比教师档更高）专属的页。断言按**前缀**匹配，新增档位不该让它变红。
+  // ★ 2026-09-26：`nav` 扩成四态（true / 'teacher' / 'debug' / false）—— 之后各页按
+  //   档位收口（「运行透视」是 `'teacher'`，学生档看不到）。断言按**前缀**匹配，
+  //   新增档位 / 页面换档不该让它变红。
   assert.match(
     ui,
     /nav:\s*boolean\s*\|\s*'teacher'/,
@@ -656,19 +673,20 @@ test('★★ 上面那些判据必须**真的按三态工作**（不是只看函
     '教师视角下「参考资料库」必须可见（功能没被删，只是默认不给学生看）'
   )
 
-  // ②' 演示档专属页（2026-09-26 起的第三档）：**只有最高档可见**，
-  //     且教师档看得到它 —— 反过来会让「进演示模式时知识库页突然消失」。
+  // ②' 技术证据页（2026-09-27 起 `nav: 'teacher'`）：**教师 / 答辩档及以上可达、学生档不可见**。
+  //     它原来只在最高档可达（那正是「专为演示做的页面」的来源）；换档之后真正要守的
+  //     仍然是**学生档看不到它**（技术证据不进学生面）。
   assert.equal(
     visibleInSidebar(PAGES.demo, 'student'),
     false,
-    '学生视角下「演示驾驶舱」不许进侧栏（那一页摊开的是提示词原文与原始信封）'
+    '学生视角下「运行透视」不许进侧栏（那一页摊开的是提示词原文与原始信封）'
   )
   assert.equal(
     visibleInSidebar(PAGES.demo, 'teacher'),
-    false,
-    '教师档也不给「演示驾驶舱」入口：它是答辩时自己讲的那一页，不是评委随手点的'
+    true,
+    '教师档必须看得到「运行透视」—— 普通运行态下也要能查「这一轮怎么跑出来的」'
   )
-  assert.equal(visibleInSidebar(PAGES.demo, 'debug'), true, '演示档必须看得到「演示驾驶舱」')
+  assert.equal(visibleInSidebar(PAGES.demo, 'debug'), true, '演示档是更高的一档，「运行透视」照旧可见')
   assert.equal(
     visibleInSidebar(PAGES.knowledge, 'debug'),
     true,
@@ -679,8 +697,16 @@ test('★★ 上面那些判据必须**真的按三态工作**（不是只看函
   assert.equal(isTeacherOnlyPage('knowledge'), true, 'knowledge 是教师专属页')
   assert.equal(isTeacherOnlyPage('chat'), false, 'chat 不是教师专属页')
   assert.equal(isTeacherOnlyPage('dependency'), false, '学习地图不是教师专属页（学生会用它）')
-  assert.equal(isTeacherOnlyPage('demo'), false, '演示页不是「教师专属页」——它比教师档更高（要求最低档位 debug）')
-  assert.equal(requiredViewFor('demo'), 'debug', '演示页要求的最低档位是 debug（App.vue 的迁移监听读它）')
+  assert.equal(
+    isTeacherOnlyPage('demo'),
+    true,
+    '「运行透视」是教师专属页（学生档被挡在侧栏外，切回学生档时也要把人带走）'
+  )
+  assert.equal(
+    requiredViewFor('demo'),
+    'teacher',
+    '「运行透视」要求的最低档位是 teacher（App.vue 的迁移监听读它）'
+  )
   assert.equal(requiredViewFor('knowledge'), 'teacher', '知识库页要求的最低档位是 teacher')
   assert.equal(requiredViewFor('chat'), null, '对话页对所有档位开放')
 

@@ -13,8 +13,12 @@
  */
 
 import type { components } from '@shared/api-types'
-import type { GradeLevel } from '@shared/ipc-events'
+import type { GradeLevel, PayloadKind } from '@shared/ipc-events'
 import type { DiagnosticsSnapshot } from '@shared/diagnostics'
+// 演示沙箱（预置数据）的跨边界类型：开关两态 + 脚本载荷 + 被拒提示语。
+// ★ 与 `shared/diagnostics.ts` 同一手法 —— 类型与运行期校验都住在 `shared/`，
+//   主进程与渲染进程 import 的是同一份，不各写一个副本。
+import type { DemoScriptPayload, DemoSeedState } from '@shared/demo-seed'
 // 导出物后缀的白名单类型（**纯类型 import，编译后擦除**）：定义在 `study/export-naming.ts`，
 // 那里同时是 `sanitizeFileName` 的实现处 —— 后缀集合只有一份，不会「契约里收 .csv、
 // 清理函数里只认 .md」这种分叉。
@@ -269,6 +273,30 @@ export const IPC = {
    */
   diagnosticsClear: 'diagnostics:clear',
 
+  // ── 演示沙箱：预置数据（三条 invoke）───────────────────────────────────
+  //
+  // ★★ 这一组与「演示模式」那三条是**两件事**，别混：
+  //    那三条管的是「把这一轮背后发生了什么摊开看」（信封的读/清/推）；
+  //    这三条管的是「把这个应用切成看起来像用了两个月的状态」（预置数据开关）。
+  // ★★ 三条都是 **invoke**（有回执），**都不进** `PUSH_CHANNELS`：
+  //    · 开关要回执 —— 学生点了必须知道「切没切成」（切成了就自动重载界面）；
+  //    · 脚本要回执 —— 渲染进程要在开演之前拿到三轮内容；
+  //    · 状态要回执 —— 渲染进程每次启动都要问一次「现在是不是沙箱态」。
+  //    它们不产生任何**流**，所以一条推送都不该有。
+  /** 渲染进程 → 主进程：切换沙箱档位（`inactive` / `seeded`）；值真变了才重载界面。 */
+  demoSeed: 'demo:seed',
+  /** 渲染进程 → 主进程：读当前沙箱档位（启动时问一次，决定 `send()` 走哪条路）。 */
+  demoState: 'demo:state',
+  /**
+   * 渲染进程 → 主进程：取**三轮脚本**（含引用 / 卡片 / 该轮诊断信封）。
+   *
+   * ★★ 脚本为什么住在主进程而不是渲染进程源码里：预置载荷带着 `kpId` 这类内部标识，
+   *   而渲染进程的每一个字符串字面量都会被 `student-view-discipline.test.ts` 的
+   *   kp slug 守卫扫到 —— 写在渲染侧等于为了让演示好看而给守卫开一个洞。
+   *   所以：**脚本在主进程，按需下发**（见 `main/demo/script.ts`）。
+   */
+  demoScript: 'demo:script',
+
   // ── 学生身份 ──────────────────────────────────────────────────────────
   /**
    * 渲染进程 → 主进程：读**当前学生**（昵称 / 学段 / 当前章节）。
@@ -516,6 +544,22 @@ export type DiagnosticsCallResult =
   | { ok: true; data: DiagnosticsSnapshot }
   | { ok: false; message: string }
 
+/**
+ * 沙箱开关两条通道（`demo:seed` / `demo:state`）的回执。
+ *
+ * ★ 回的是**生效后的档位**而不是「成功/失败」：界面据此决定按钮显示的是
+ *   「载入演示数据」还是「退出演示数据」—— 那正是这个动作的全部反馈。
+ * ★ 与 `SettingsCallResult` 同一条纪律：失败也带一句可读中文，绝不抛异常穿过 IPC。
+ */
+export type DemoSeedCallResult =
+  | { ok: true; state: DemoSeedState }
+  | { ok: false; message: string }
+
+/** `demo:script` 的回执（载荷形状见 `@shared/demo-seed`）。 */
+export type DemoScriptCallResult =
+  | { ok: true; data: DemoScriptPayload }
+  | { ok: false; message: string }
+
 /** 手动设定章节的回执（回的是**生效后的**章标题；空串 = 已清除）。 */
 export interface ChapterSetResult {
   chapterTitle: string
@@ -645,6 +689,28 @@ export interface SessionCurrent {
  *   属于上一条会话，必须整段换掉。分两次 IPC 拿（先切换、再取转录）会有一个中间态
  *   —— 界面已经切过去了、消息还是旧的，而流式期间学生完全可能正看着它。
  */
+/**
+ * 切换 / 新建回执里**恢复出来的那一条消息**。
+ *
+ * ★ 单独成名的理由有两条：① 它是「只读回看」那条路（`TranscriptMessage`）的子集，
+ *   两者必须一直是同一个形状；② 内联在下面那个联合里会让 `SessionStateResult`
+ *   的正文长到读不完 —— 而「这两个字段在外」恰好是守卫要守的东西。
+ */
+export interface SessionStateMessage {
+  role: 'user' | 'assistant'
+  text: string
+  at: number
+  /**
+   * ★★ 这条消息在会话文件里的**条目 id** —— 「从这里重新问」拿它去分叉。
+   *
+   * ⚠️ 不能用「第几条消息」当分支点：编号会漂（开场引导是一条 assistant
+   *   消息但不算一轮；失败/被拦下的轮次不留条目）。条目 id 是文件里的稳定标识。
+   */
+  entryId: string
+  /** ★ 只有预置内容会给（Pi 的会话条目里没有这个字段）。 */
+  cards?: Array<{ kind: PayloadKind; payload: unknown }>
+}
+
 export type SessionStateResult =
   | {
       ok: true
@@ -655,18 +721,7 @@ export type SessionStateResult =
        * 新会话时是空数组。界面把它铺成消息列表（流式卡片/引用不在里面 ——
        * 那些是**当时**的 UI 状态，重启后不再有意义，回看也不需要）。
        */
-      messages: Array<{
-        role: 'user' | 'assistant'
-        text: string
-        at: number
-        /**
-         * ★★ 这条消息在会话文件里的**条目 id** —— 「从这里重新问」拿它去分叉。
-         *
-         * ⚠️ 不能用「第几条消息」当分支点：编号会漂（开场引导是一条 assistant
-         *   消息但不算一轮；失败/被拦下的轮次不留条目）。条目 id 是文件里的稳定标识。
-         */
-        entryId: string
-      }>
+      messages: SessionStateMessage[]
       /**
        * ★★ **学生开口了没有** —— 「这段对话开始了没有」的唯一判据。
        *

@@ -16,6 +16,9 @@
 //    electron-vite 的产物是 ESM，ESM 不做扩展名补全；`node --test` / `scripts/*.mjs`
 //    直接 import 本文件时也走同一套解析规则。少了后缀就只有打包器能读懂，裸 Node 会 404。
 import { healthUrl } from '../sidecar/protocol.ts'
+// ★ 演示沙箱的覆盖层（未激活时严格 no-op）。它与本文件**没有**循环依赖：
+//   `demo/overlay.ts` 只 import 纯数据模块，不回头 import 这里。
+import { demoResponseFor } from '../demo/overlay.ts'
 
 /** `GET /health` 的响应体（§6.3）。 */
 export interface HealthPayload {
@@ -68,6 +71,15 @@ export const DEFAULT_API_TIMEOUT_MS = 8_000
  * 调用方（Tool / IPC 处理器）拿不到 token，也就不可能把它漏给渲染进程。
  */
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  // ★★ 演示沙箱的覆盖层 —— **必须在端点检查之前**（见 `demo/overlay.ts` 的说明）：
+  //    沙箱态下学生态的读请求根本不从服务端取，所以「有没有服务端」与它无关；
+  //    放到下面那行之后，断网 / 冷启动的现场演示会一条数据都出不来。
+  //    ⚠️ 未激活时它是**严格 no-op**（返回 `null`），普通态下这一层等于不存在。
+  //    ★ `await` 只为了「动画库取一条」那条要真渲染一次；未激活 / 未命中时它当场返回，
+  //      这一行对热路径只是多一个微任务，没有额外请求。
+  const intercepted = await demoResponseFor(path, init)
+  if (intercepted !== null) return intercepted
+
   if (endpoint === null) {
     // 还没有端点（sidecar 未启动/已停止）：直接失败，别让请求裸奔到 401
     throw new Error('sidecar 尚未就绪（无端口与 token），无法发起 /api 请求。')

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 设置：**学段 / 教材章节 / 外观主题**（学生视角）+ **高级设置（教师 / 答辩）**。
+ * 设置：**学段 / 教材章节 / 外观主题**（学生视角）+ **高级设置（教师 / 家长）**。
  *
  * ── 结构：左「章节索引」+ 右「单列字段」──────────────────────────────────
  * 左栏 180px 是可点跳转的章节索引，右栏是当前章节的字段。
@@ -77,6 +77,7 @@ import { GRADE_LEVELS } from '../api/grade'
 import { EMBEDDING_MODE_LABELS, MANUAL_PRESET_ID, type EmbeddingMode } from '../api/settings'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL, chapterLineLabel, gradeOriginLabel } from '../labels'
 import { useChatStore } from '../stores/chat'
+import { useDemoSeedStore } from '../stores/demoSeed'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { useSettingsStore } from '../stores/settings'
 import { useSidecarStore } from '../stores/sidecar'
@@ -95,6 +96,15 @@ import SurfacePanel from '../components/SurfacePanel.vue'
 import type { GradeLevel } from '@shared/ipc-events'
 
 const settings = useSettingsStore()
+/**
+ * 演示沙箱的开关（只读用）。
+ *
+ * ★★ 为什么设置页要读它：这一页有两个动作会**真的外呼**（连通性探测、拉取模型清单）。
+ *   沙箱态下它们必须**禁用**，而不是「点了之后失败」—— 失败也是"发生过一次外呼"，
+ *   而演示里绝不能出现任何没发生过的事（主进程的处理器层也会再拒一次，两层都要有）。
+ * ★ 模型配置本身是**显示态**：看起来早就配好了，而真实 Key 与配置文件全程不动。
+ */
+const demoSeed = useDemoSeedStore()
 const chat = useChatStore()
 const study = useStudyStore()
 const knowledge = useKnowledgeStore()
@@ -102,7 +112,7 @@ const sidecar = useSidecarStore()
 const theme = useThemeStore()
 /** 学生 / 教师视角（见文件头：这是**防误入**，不是权限）。 */
 const viewMode = useViewModeStore()
-/** 页面导航（演示驾驶舱的跳转入口用；导航唯一真相在 `stores/ui.ts` 的 `PAGES` + `go`）。 */
+/** 页面导航（运行透视的跳转入口用；导航唯一真相在 `stores/ui.ts` 的 `PAGES` + `go`）。 */
 const ui = useUiStore()
 
 /* ------------------------------------------------------------ 供应商 */
@@ -488,15 +498,55 @@ function closeAdvancedArea(): void {
 }
 
 /**
- * 进入演示驾驶舱：**先切到最高档，再跳页**。
+ * 进入运行透视：**先切到最高档，再跳页**。
  *
- * ★ 顺序不能反：演示页的 `nav` 是 `'debug'`，档位还是 teacher 时侧栏里没有那一项，
- *   `App.vue` 的档位迁移监听也会在**下一次档位变化时**把人带回对话页 ——
- *   先跳页再切档等于让他刚进去就被弹出来。两行代码的顺序就是这段注释的全部意义。
+ * ★ 顺序取「先升档、再跳页」：2026-09-27 之前这一页是 `nav: 'debug'`（只在最高档可达），
+ *   顺序反了会被 `App.vue` 的档位迁移监听弹回对话页；现在它在教师档就可达，那条约束不再
+ *   致命，但先升档永远不会出现「停在这一页、档位却够不到它」的中间态。
  */
 function enterDemo(): void {
   viewMode.setMode('debug')
   ui.go('demo')
+}
+
+/**
+ * 退出调试档：**切回教师档 + 一句反馈 + 收起高级区**。
+ *
+ * ★ 为什么光切档会像「点了没反应」（2026-09-27 实测）：`运行透视` 现在是 `nav: 'teacher'`
+ *   （教师档就可达），所以从调试档退回教师档之后，侧栏那一项还在、那一页照样进得去 ——
+ *   屏幕上唯一的动静就是这颗按钮自己消失。于是这里补两件事：
+ *   ① 一句 `ElMessage`（与本页 `runSave` 同一套提示写法）说明档位真的变了；
+ *   ② `closeAdvanced()` 复位「高级区被主动展开过」这个意图 —— 退出调试档的语义是
+ *      「回到日常」，技术区不该留着。⚠️ 教师档下高级区仍由 `isTeacher` 强制展开
+ *      （那是刻意的：它是答辩证据，见 `advancedVisible` 上方那段），所以真正的收起
+ *      发生在下一步降回学生档时；这里复位的是**用户意图**那个开关，不是当前视觉状态。
+ */
+function exitDemo(): void {
+  viewMode.setMode('teacher')
+  viewMode.closeAdvanced()
+  ElMessage({ message: '已退出调试档，回到教师视角。', type: 'success' })
+}
+
+/**
+ * 示例数据开关（2026-09-27 从**运行透视页顶栏移到本页**）。
+ *
+ * ★ 为什么搬：它是「非真实数据」的总闸，与设置页那几条「会真的外呼」的动作是同一族；
+ *   运行透视页现在只摊开运行时证据，不再承担开闸的职责。
+ * ★ 位置：`隐私与本地服务 → 技术详情` 折叠框的**内容区**里 —— 收起 / 展开由原生
+ *   `<details>` 天然负责，所以这里**不许**再叠 `v-if` / `v-show`（叠了会与折叠状态打架）。
+ * ★ 本地 `seeding` 而不是进 store：它只表达「点了之后到回执回来之前」的界面状态，
+ *   与沙箱档位的真值（住在主进程）无关 —— 抬进 store 会让每个消费方都要处理一个中间态。
+ */
+const seeding = ref(false)
+
+/** 那颗按钮的唯一动作：开着就退出、关着就载入（成功后主进程会重载窗口）。 */
+async function toggleSeed(): Promise<void> {
+  seeding.value = true
+  try {
+    await demoSeed.toggle()
+  } finally {
+    seeding.value = false
+  }
 }
 
 onBeforeUnmount(() => {
@@ -573,7 +623,7 @@ onBeforeUnmount(() => {
           :aria-expanded="advancedVisible"
           @click="openAdvancedArea"
         >
-          <span class="nav__advanced-text">高级设置（教师 / 答辩）</span>
+          <span class="nav__advanced-text">高级设置（教师 / 家长）</span>
           <ChevronRight :size="12" class="nav__advanced-ico" />
         </button>
       </nav>
@@ -815,7 +865,7 @@ onBeforeUnmount(() => {
           </div>
         </SurfacePanel>
 
-        <!-- ── 高级设置（教师 / 答辩）────────────────────────────────────────
+        <!-- ── 高级设置（教师 / 家长）────────────────────────────────────────
              ★ 学生视角下**整段不在 DOM 里**（`v-if`，不是 CSS 隐藏）：
                「供应商 / 嵌入模型 / 隐私」这三节是技术设置，学生日常用不到。
              ⚠️ 这不是权限：没有账号体系，开关可绕过（见 `stores/viewMode.ts`）。
@@ -823,7 +873,7 @@ onBeforeUnmount(() => {
         <section v-if="advancedVisible" class="adv" data-testid="settings-advanced">
           <header class="adv__head">
             <SlidersHorizontal :size="15" />
-            <h2 class="adv__title">高级设置（教师 / 答辩）</h2>
+            <h2 class="adv__title">高级设置（教师 / 家长）</h2>
             <button
               v-if="!viewMode.isTeacher"
               type="button"
@@ -836,9 +886,7 @@ onBeforeUnmount(() => {
           </header>
 
           <p class="adv__note">
-            这里是给老师 / 评委看的技术设置（供应商、嵌入模型、本地服务），学生日常不需要。
-            <strong>它不是权限开关</strong>：本应用没有账号体系，谁都能打开 ——
-            它只保证学生平时不会撞见端口号、BaseURL 这类术语。
+            这里是给老师 / 家长看的技术设置（供应商、嵌入模型、本地服务），学生日常不需要。
           </p>
 
           <!-- 教师视角开关：`viewMode.toggle()`（localStorage 持久化，重启照常保留） -->
@@ -864,18 +912,18 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <!-- ── 演示驾驶舱（第三档：学生 / 教师 / 演示）────────────────────────
+          <!-- ── 运行透视（页面在**教师档及以上**就可达；这颗按钮顺带切到最高档）──────
 
-               ★ 三档的分工：学生什么都不看；教师看摘要与右栏证据；**演示档**摊开
+               ★ 三档的分工：学生什么都不看；教师看摘要与右栏证据；**调试档**摊开
                  Prompt 原文、画像字节指纹、检索四级链的逐级记录与原始信封。
-               ★ 入口是那颗「进入演示驾驶舱」——它同时把档位切到最高档，
+               ★ 入口是那颗「进入运行透视」——它同时把档位切到最高档，
                  所以从这一页点过去一定能看到侧栏多出那一项（不需要再回来开开关）。
                ⚠️ 同样**不是权限**：它与教师视角是同一种「防误入」，不是安全边界。 -->
           <div class="adv__switch">
             <div class="adv__switch-text">
-              <p class="adv__switch-title">演示 / 调试档</p>
+              <p class="adv__switch-title">调试档</p>
               <p class="adv__switch-desc">
-                打开后，设置页会多出「演示驾驶舱」入口：一次提问背后的提示词拼装、画像指纹、
+                打开后，设置页会多出「运行透视」入口：一次提问背后的提示词拼装、画像指纹、
                 检索逐级记录、安全三阶段与拦截记录都摊在那里，供答辩讲解与回放。
               </p>
             </div>
@@ -887,16 +935,16 @@ onBeforeUnmount(() => {
                 @click="enterDemo()"
               >
                 <Radar :size="13" />
-                进入演示驾驶舱
+                进入运行透视
               </button>
               <button
                 v-if="viewMode.isDebug"
                 type="button"
                 class="adv__close"
                 data-testid="settings-demo-exit"
-                @click="viewMode.setMode('teacher')"
+                @click="exitDemo()"
               >
-                退出演示档
+                退出调试档
               </button>
             </div>
           </div>
@@ -977,12 +1025,15 @@ onBeforeUnmount(() => {
                     size="small"
                     data-testid="settings-fetch-models"
                     :loading="settings.fetching"
-                    :disabled="settings.busy"
+                    :disabled="settings.busy || demoSeed.seeded"
                     @click="runFetchModels"
                   >
                     拉取模型清单
                   </el-button>
                   <span class="cands__note">从当前端点实时拉取，并与 Pi 目录里的清单合并。</span>
+                  <span v-if="demoSeed.seeded" class="cands__note" data-testid="settings-outbound-off">
+                    当前状态下这一项先不用动。
+                  </span>
                 </div>
                 <p v-if="settings.fetched" class="hint" data-testid="settings-fetch-message">
                   {{ settings.fetched.message }}
@@ -1090,7 +1141,7 @@ onBeforeUnmount(() => {
             <el-button
               data-testid="settings-probe"
               :loading="settings.probing"
-              :disabled="settings.busy"
+              :disabled="settings.busy || demoSeed.seeded"
               @click="runProbe"
             >
               仅探测
@@ -1109,6 +1160,11 @@ onBeforeUnmount(() => {
               {{ settings.saving ? '正在保存…' : '保存并生效' }}
             </button>
           </div>
+          <!-- ★ 沙箱态：会外呼的那两个动作是**禁用**的，这里说明一句为什么 ——
+               按钮变灰而不给理由，学生会以为是坏了。 -->
+          <p v-if="demoSeed.seeded" class="hint" data-testid="settings-outbound-off-note">
+            当前状态下这一项先不用动，现在的配置照常能用。
+          </p>
         </SurfacePanel>
 
         <!-- ⑤ 嵌入模型（技术设置，与供应商同属高级区） -->
@@ -1257,7 +1313,7 @@ onBeforeUnmount(() => {
                端口 / 进程号是排障数字：留在 `<details>` 里，需要时才展开
                （`<details>` 是原生折叠，键盘与读屏都直接可用，不必自己写一个）。 -->
           <details class="tech">
-            <summary class="tech__sum">技术详情（端口 / 进程号）</summary>
+            <summary class="tech__sum">技术详情（端口 / 进程号 / 示例数据）</summary>
             <div class="sidecar" data-testid="settings-sidecar" :data-phase="sidecar.phase">
               <span class="k12-dot" />
               <span class="sidecar__text">本地数据服务：{{ sidecar.phaseText }}</span>
@@ -1267,6 +1323,27 @@ onBeforeUnmount(() => {
             <p v-if="sidecar.errorText" class="warn" data-testid="settings-sidecar-error">
               {{ sidecar.errorText }}
             </p>
+
+            <!-- ★ 示例数据开关（2026-09-27 从运行透视页顶栏**移到**这里）。
+                 ⚠️ 它天然随 `<details>` 折叠显隐：收起时不可见、展开才出现 ——
+                    不要再加 `v-if`/`v-show`（那会与折叠状态打架，见 `toggleSeed` 的说明）。
+                 ⚠️ `data-testid="demo-seed"` 是探针与守卫的锚点，改名等于把它们打断。 -->
+            <div class="seed">
+              <button
+                type="button"
+                class="seed__btn"
+                data-testid="demo-seed"
+                :data-on="String(demoSeed.seeded)"
+                :disabled="seeding || demoSeed.bridgeError !== null"
+                @click="toggleSeed()"
+              >
+                <Database :size="13" />
+                {{ demoSeed.seeded ? '退出示例数据' : '载入示例数据' }}
+              </button>
+              <p v-if="demoSeed.bridgeError" class="warn" data-testid="demo-seed-notice">
+                {{ demoSeed.bridgeError }}
+              </p>
+            </div>
           </details>
         </SurfacePanel>
         </section>
@@ -1369,11 +1446,11 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--k12-border);
 }
 
-/* 「高级设置（教师 / 答辩）」入口：quiet 的一条 —— 它在左栏底部，
+/* 「高级设置（教师 / 家长）」入口：quiet 的一条 —— 它在左栏底部，
  * 是**次级**入口而不是第四个设置项，所以不用 `.nav__item` 那套高亮语言。
  *
  * ★★ 这个串必须**一行放得下**（报告 1.9：180px 的左栏里它原来会折成两行）。
- *    按字宽算账（左栏 180px）：13px 字号下「高级设置（教师 / 答辩）」约 141px
+ *    按字宽算账（左栏 180px）：13px 字号下「高级设置（教师 / 家长）」约 141px
  *    （10 个全角 + ` / `），再加两个 13px 图标 + 两处 6px 间距 + 22px 内边距
  *    ≈ 203px > 180px —— 它折行不是窗口太窄，是这个串本身比左栏宽。
  *    所以三处一起收：字号降到最小的一档 `--k12-fs-micro`（12px）、内边距 11px → 9px、
@@ -1790,7 +1867,7 @@ onBeforeUnmount(() => {
   background: var(--k12-surface-2);
 }
 
-/* ── 高级设置（教师 / 答辩）──────────────────────────────────────────────
+/* ── 高级设置（教师 / 家长）──────────────────────────────────────────────
  * 它是右栏里的一段**说明 + 开关 + 三张技术卡片**的共同容器，不是第五张卡片。
  * 用虚线框圈起来：与「白卡片 = 内容面」区分开 —— 这一块本身没有字段，
  * 底色**保持透出页面底**（不新造第 5 种表面，见 base.css 的层次规则：
@@ -1834,7 +1911,7 @@ onBeforeUnmount(() => {
     color: var(--k12-accent-ink);
   }
 }
-/* 演示档那一行的动作区：主入口（进入驾驶舱）+ 次级出口（退出演示档）并排。
+/* 调试档那一行的动作区：主入口（进入运行透视）+ 次级出口（退出调试档）并排。
  * ★ 与 `.adv__close` 同一配方（`min-height: 28px` 是触控下限），用 accent 底色把它
  *   与「收起」这种次要动作区分开 —— 这一行里只有一个是主行动。 */
 .adv__actions {
@@ -1870,10 +1947,6 @@ onBeforeUnmount(() => {
   font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
-}
-.adv__note strong {
-  color: var(--k12-fg);
-  font-weight: 650;
 }
 .adv__switch {
   display: flex;
@@ -2092,6 +2165,22 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--k12-border);
   padding-top: 6px;
 }
+/**
+ * ★★ 折叠必须**真的**把内容收起来（2026-09-27 实测抓到的缺陷）。
+ *
+ * 根因：`<details>` 收起时由**浏览器默认样式**隐藏非 `summary` 的子元素，
+ * 而默认样式的优先级低于**作者样式** —— 下面那几条 `.tech .sidecar { display: flex }`
+ * 一类规则一旦落在直接子元素上，元素就照旧占位。实测量到：`details.open = false`
+ * 之后里面的状态块仍有 44px 高、按钮仍可点到 —— 也就是说这个「技术详情」
+ * **从加上那天起就没真正折叠过**，只是看起来像收起了（内容被推到下面）。
+ *
+ * 所以这条规则不是锦上添花：里面现在放着「示例数据」开关，它的**隐蔽性**
+ * （收起即不可见、展开才出现）完全依赖这条。
+ * ⚠️ `:not(summary)` 不能少 —— 少了它连那行可点的标题一起藏掉，框就再也打不开了。
+ */
+.tech:not([open]) > :not(summary) {
+  display: none;
+}
 .tech__sum {
   /* 可点目标：给足高度（原生 summary 默认约 20px） */
   min-height: 28px;
@@ -2112,6 +2201,40 @@ onBeforeUnmount(() => {
 }
 .tech .sidecar {
   margin-top: 6px;
+}
+/* 「技术详情」里那颗示例数据开关（与 `.sidecar` 同一档间距：折叠区里的一条内容）。
+ * ★ 外观与语义一并从运行透视页顶栏那颗搬过来：关闭 = 普通按钮、打开 = accent 底色 + accent 字
+ *   （「现在跑的是示例数据」要一眼看得出来）；只取既有设计令牌，不引入裸色值 / 字号。 */
+.tech .seed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.tech .seed__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-flat);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-family: inherit;
+  font-size: var(--k12-fs-caption);
+  font-weight: 600;
+  cursor: pointer;
+}
+.tech .seed__btn[data-on='true'] {
+  border-color: var(--k12-accent-ink);
+  background: var(--k12-accent-soft);
+  color: var(--k12-accent-ink);
+}
+.tech .seed__btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 /* 探测结果里的时刻：它是时间戳不是标题，比主句轻一档 */
 .probe__at {

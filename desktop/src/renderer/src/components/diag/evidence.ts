@@ -1,25 +1,25 @@
 /**
- * 演示驾驶舱的**技术口原文案**（唯一集中处）。
+ * 运行透视的**技术口原文案**（唯一集中处）。
  *
  * ★ 为什么单独成文件：`student-view-discipline.test.ts` 对每个渲染进程文件做零豁免扫描
- *   （SQL / FTS5 / Pyodide / nonce / 契约 / 兜底 / 降级链 …），而演示驾驶舱恰恰要把这些词
+ *   （SQL / FTS5 / Pyodide / nonce / 契约 / 兜底 / 降级链 …），而这一页恰恰要把这些词
  *   一个不少地摊开。处置与 `components/rail-evidence.ts`（右栏证据）同一手法：
- *   把技术原文集中到一个**只在演示 / 教师面渲染**的模块，守卫按文件豁免它。
+ *   把技术原文集中到一个**只在教师档及以上可达**的模块，守卫按文件豁免它。
  *
  * ⚠️ 本文件里的字不许流到学生面前：谁把它 import 进学生可见的组件，守卫会立刻红
  *   （那条凭证读的就是「谁 import 了它」，见 `tests/demo-mode.test.ts`）。
  */
 
-/** 一个分块的静态说明（标题 + 一句话「为什么要展示它」）。 */
+/** 一个分块的静态说明（标题 + 一句话「这一块看的是什么」）。 */
 export interface DiagBlockCopy {
   id: string
   /** 序号 + 标题（左上角那行）。 */
   title: string
-  /** 一句话说明它的演示价值（答辩时照着念）。 */
+  /** 一句话说明它对应哪些运行时字段。 */
   lead: string
 }
 
-/** 十二个分块（顺序 = 演示时从上到下讲的顺序）。数据全部来自 `TurnDiagnostics`。 */
+/** 十二个分块（顺序 = 从上到下阅读的顺序）。数据全部来自 `TurnDiagnostics`。 */
 export const DIAG_BLOCKS: readonly DiagBlockCopy[] = [
   {
     id: 'input',
@@ -83,7 +83,7 @@ export const DIAG_BLOCKS: readonly DiagBlockCopy[] = [
   }
 ]
 
-/** 降级链四档的**技术口径**名字（答辩要的就是这四个词）。 */
+/** 降级链四档的**技术口径**名字（四级链的档位名就是这四个词）。 */
 export const RETRIEVAL_LEVEL_LABELS: Record<string, string> = {
   vector: '向量检索（本地嵌入模型）',
   cloud: '云端嵌入',
@@ -98,6 +98,26 @@ export const SAFETY_STAGE_LABELS: Record<string, string> = {
   final: '整段终审（生成结束之后）'
 }
 
+/**
+ * 第二层（模型复核）的**八个状态**各自是什么意思。
+ *
+ * ★ 取值集合来自主进程 `agent/extensions/grade.ts` 的 `Layer2Status`（`not_due` /
+ *   `due` / `used` / `no_llm` / `judge_error` / `retry` / `insufficient_evidence` /
+ *   `already_proposed`）。它们是**运行时原值**，界面上要能分辨「还没到轮次」与
+ *   「到了但没模型可用」——那两件事对答辩的含义完全不同，不能都写成「未复核」。
+ * ★ 一个字都不许改成技术名词（`layer2` / `LAYER2` 这类实现词不上面）。
+ */
+export const LAYER2_LABELS: Record<string, string> = {
+  not_due: '还没到复核的轮次',
+  due: '到轮次了，等复核',
+  used: '复核跑过，结论用上了',
+  retry: '复核要再试一次',
+  insufficient_evidence: '证据还不够，先不下结论',
+  already_proposed: '已经提过同样的结论',
+  no_llm: '没有可用的模型，复核跳过了',
+  judge_error: '复核出错，这一轮按原学段走'
+}
+
 /** 三道运行时注入的名字（Prompt 那一块用）。 */
 export const PROMPT_STAGE_LABELS: Record<string, string> = {
   override: '建会话时整段替换默认提示词',
@@ -105,52 +125,18 @@ export const PROMPT_STAGE_LABELS: Record<string, string> = {
   authority: '权威段恒追加（学段指令离生成最近）'
 }
 
-/** 四学段横向对比卡：同一句提问在四档下的语气与深度差异。 */
-export interface GradeMatrixRow {
-  grade: string
-  tone: string
-  depth: string
-}
-
-export const GRADE_MATRIX_ROWS: readonly GradeMatrixRow[] = [
-  { grade: '小学低年级', tone: '童话化、拟人化，句子短', depth: '一次只讲一个点，多用生活类比' },
-  { grade: '小学高年级', tone: '重因果与「为什么」', depth: '可以引入术语，但必须当场解释' },
-  { grade: '初中', tone: '逻辑链条完整', depth: '给出推理过程与反例，允许公式' },
-  { grade: '高中', tone: '严谨、可推导', depth: '允许专业名词与公式推导，讲清边界条件' }
-]
-
-/** 隐藏机制补充卡（不属于某一轮，但属于「隐藏机制」这条主线）。 */
-export interface HiddenMechanismCard {
-  title: string
-  body: string
-}
-
-export const HIDDEN_MECHANISM_CARDS: readonly HiddenMechanismCard[] = [
-  {
-    title: '掌握度限幅有上限',
-    body: '一次答题对掌握度的推动有上限，避免一题就把画像推歪；连续作答才会累积。'
-  },
-  {
-    title: '安全闸门两处强制',
-    body: '入口预检与生成侧终审都在代码层调用判定服务，模型改不了它们要不要跑。'
-  },
-  {
-    title: '工具由模型自主路由',
-    body: '检索、出题、判分、动画、编程、画像各是一个独立工具，由模型按需选，编排层不预先规定顺序。'
-  },
-  {
-    title: '学段过滤写在 SQL 层',
-    body: '每一条检索语句都带学段白名单，命中更低学段时标出来源。模型无法改 WHERE。'
-  }
-]
-
 /** 契约与守卫静态卡的一行。 */
 export interface GuardCatalogRow {
   id: string
   what: string
 }
 
-/** 架构守卫的编号清单（由 `tests/demo-mode.test.ts` 断言与守卫文件的编号集合一致）。 */
+/**
+ * 架构守卫的编号清单（由 `tests/demo-mode.test.ts` 断言与守卫文件的编号集合一致）。
+ *
+ * ★ 这不是讲解稿：每一条都是仓库里**真实存在**的守卫（`tests/architecture-guards.test.ts`
+ *   里按同一个编号写着），所以它留在这里当「这一轮跑在什么约束之下」的清单。
+ */
 export const GUARD_CATALOG: readonly GuardCatalogRow[] = [
   { id: 'G1', what: 'Electron 侧不引入任何原生数据库模块（数据域只在 Python）' },
   { id: 'G2', what: '渲染进程不 import 任何 Node 内置模块' },
@@ -172,28 +158,24 @@ export const GUARD_CATALOG: readonly GuardCatalogRow[] = [
   { id: 'G13', what: '明文模型配置只有主进程能取' }
 ]
 
-/** 契约防漂移链的三步（静态卡的那一行箭头）。 */
-export const CONTRACT_CHAIN = 'pydantic（contracts.py）到 OpenAPI（export_openapi.py）到 TypeScript（gen:api）'
-
 /**
- * 导出演示包时用的**文档标记**（Markdown 围栏）。
+ * 运行透视的**两个子页**（顶栏分段切换的文案；顺序 = 从左到右）。
  *
- * ★ 为什么这些字面量住在这个模块里：`tests/student-view-discipline.test.ts` 会扫**渲染进程
- *   源码里的字符串字面量**（反引号是它盯的标记之一 —— 裸插值渲染出来的内容会变成字面反引号）。
- *   这三行是**导出文档正文**，既不上屏也不走任何渲染通路；本模块已是「技术口原文案的唯一
- *   集中处」且被守卫按文件豁免，所以它们的正确归属是这里 —— 放在 `views/Demo.vue` 里会让
- *   那条守卫为一份**导出的文档**变红，而那正是「用改豁免代替改源码」的反面。
+ * ★ 为什么这两句放在这里而不是直接写进 `views/Demo.vue` 的模板：
+ *   本文件是运行透视技术口原文案的**唯一集中处**，由守卫按文件豁免；而 `views/Demo.vue`
+ *   **不在**豁免名单里（它的可见文案必须干净）。子页名字里就有技术词（「分块总览」），
+ *   写进模板会当场把那条守卫变红 —— 所以和 `DIAG_BLOCKS` / `PAGE_HEADINGS` 一样收在这里。
+ * ★ `id` 就是切换的取值（`views/Demo.vue` 的 `view` 状态），`hint` 只进 `title` 属性。
  */
-export const MD_FENCE = {
-  mermaid: '```mermaid',
-  json: '```json',
-  close: '```'
-} as const
+export const DIAG_VIEWS: readonly { id: 'blocks' | 'sequence'; label: string; hint: string }[] = [
+  { id: 'blocks', label: '分块总览', hint: '按主题看这一轮：时间轴 / 十二个分块 / 原始信封' },
+  { id: 'sequence', label: '调用顺序', hint: '按真实发生的先后，把这一轮一条横条一个步骤摊开' }
+]
 
-/** 演示驾驶舱的标题与空态文案。 */
-export const DEMO_HEADINGS = {
-  title: '演示驾驶舱',
-  lead: '这一页把一次提问背后发生了什么摊开：谁拦下了什么、降级到了哪一级、画像块为什么逐字节稳定。',
+/** 运行透视的标题与空态文案。 */
+export const PAGE_HEADINGS = {
+  title: '运行透视',
+  lead: '这一页摊开每一轮的运行时证据：输入被怎么判、提示词怎么拼、检索走到哪一级、安全在哪一步拦下。',
   timelineEmpty: '还没有轮次记录。先回对话页问一句，再回来。',
   rawHint: '下面是这一轮的原始信封（脱敏后的结构化数据）。'
 } as const

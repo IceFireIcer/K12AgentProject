@@ -68,7 +68,7 @@
  *     （「断网也能演示」这条技术事实仍然完整地留在下面的 `<TeacherGate>` 里，评委看得到。）
  */
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
-import { Library, Pause, Play, RotateCcw, Trash2, Wand2 } from 'lucide-vue-next'
+import { Library, MessageCircleQuestion, Pause, Play, RotateCcw, Trash2, Wand2 } from 'lucide-vue-next'
 import SurfacePanel from '@/components/SurfacePanel.vue'
 import PageIdentity from '@/components/PageIdentity.vue'
 import TeacherGate from '@/components/TeacherGate.vue'
@@ -83,6 +83,7 @@ import {
 } from '../stores/animation'
 import { useChatStore } from '../stores/chat'
 import { useConfirm } from '../stores/confirm'
+import { useFloatPanel } from '../stores/floatPanel'
 import { GRADE_AXIS_OF, GRADE_LEVEL_OF, useThemeStore } from '../stores/theme'
 import {
   AnimationSandboxHost,
@@ -96,6 +97,7 @@ const anim = useAnimationStore()
 const chat = useChatStore()
 const theme = useThemeStore()
 const confirm = useConfirm()
+const floatPanel = useFloatPanel()
 
 /* ------------------------------------------------------------------ *
  * 分页（内置模板 / 我的动画）
@@ -406,6 +408,29 @@ function replay(): void {
   if (sandboxPhase.value !== 'ready') return
   progress.value = 0
   if (postToSandbox('replay')) playing.value = true
+}
+
+/**
+ * 「边看边问」—— 打开 / 收起悬浮追问窗（`components/FloatPanel.vue`）。
+ *
+ * ★★ 这只窗此前**没有入口**：store 里的 `openFrom` 一个调用者都没有，
+ *   于是它只在被直接触发时才出得来（走查发现）。它是按「边看动画边问」
+ *   设计的（见 `stores/floatPanel.ts` 的文件头），所以入口落在**舞台卡头** ——
+ *   学生正盯着这段动画、想说点什么的那一刻，按钮就在手边。
+ *
+ * ★ 用 `toggleFrom` 而不是 `openFrom`：按钮看起来就是个开关，点第二次必须能收起
+ *   （此前只开不关，用户实测「再点一次悬浮窗居然关不掉」）。换关联对象时它会
+ *   复用同一个窗并换内容，而不是关掉 —— 那条判断在 store 里。
+ *
+ * 为什么带上舞台标题：窗里那句提示与后续提问都要编进**正文**
+ * （`ChatSendRequest` 字段恰好只有 `text`，见 G6c），标题是那份上下文的来源。
+ */
+function askAboutStage(event: MouseEvent): void {
+  floatPanel.toggleFrom(event.currentTarget as Element | null, {
+    kind: 'animation',
+    title: stageTitle.value,
+    hint: '看着这段动画问，问题会带上它的上下文。'
+  })
 }
 
 /** 沙箱 → 宿主：来源与 `payload_id` 的校验都在宿主里（多卡串台防线）。 */
@@ -779,6 +804,18 @@ onDeactivated(() => {
             <RotateCcw :size="15" />
           </button>
         </template>
+        <!-- 「边看边问」：打开悬浮追问窗（学生看着这段动画、想说点什么的那一刻）。
+             它是**次要动作**（描边幽灵键），不与「开始播放 / 按当前学段重画」争主色 ——
+             这一屏的主行动是播放，不是提问。 -->
+        <button
+          type="button"
+          class="anim__ghost"
+          data-testid="animation-view-ask"
+          title="打开追问窗，看着这段动画问"
+          @click="askAboutStage"
+        >
+          <MessageCircleQuestion :size="14" /><span>边看边问</span>
+        </button>
         <button
           type="button"
           class="anim__ghost"

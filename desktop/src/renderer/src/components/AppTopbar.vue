@@ -142,8 +142,12 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
   gap: 16px;
   padding: 0 24px;
   background: var(--k12-surface);
-  /* chrome 与内容的分隔用**强边框**（优化报告 §2.1：顶栏加底部 border 增强分隔）。 */
+  /* chrome 与内容的分隔用**强边框**（优化报告 §2.1：顶栏加底部 border 增强分隔）。
+   * ★ 2026-09-27（D-105）：再加一条**单侧投影**。顶栏是白纸面，而 `default` 档的
+   *   桌面底色（page）也是白 —— 只靠 1px 线还不足以说清「chrome 到此为止」；
+   *   投影是那三个信号里的第三个（底色差 / 线 / 单侧投影），补上它边界才立住。 */
   border-bottom: 1px solid var(--k12-border-strong);
+  box-shadow: var(--k12-shadow-edge-bottom);
   position: relative;
   z-index: 2;
   color: var(--k12-fg);

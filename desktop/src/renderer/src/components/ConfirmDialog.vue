@@ -123,6 +123,12 @@ useFocusReturn(panelRef, () => props.open, {
   /* 遮罩：把背景推远，让"现在要做一个决定"这件事成立 */
   background: color-mix(in srgb, var(--k12-fg) 34%, transparent);
 }
+/* 浮层 = **毛玻璃**（半透明白 + blur）。它背后**真的有东西**：整页内容 + 遮罩，
+ * 模糊才有意义；对话框只是「要你决定一件事」，不该把背后的世界变成一堵实墙。
+ * ⚠️ 为什么不用 base.css 里那个全局毛玻璃类：scoped 选择器带 `[data-v-x]`，
+ *   优先级高于单个全局类 —— 这里必须自己给「兜底 → 半透明」两条，
+ *   否则两套机制会打架（谁盖住谁取决于注入顺序，是那种"改一行别处就变色"的坑）。
+ *  兜底：不支持 backdrop-filter 的环境保持实色白（半透明底会让下层文字透上来）。 */
 .cd__box {
   width: 100%;
   max-width: 420px;
@@ -130,6 +136,13 @@ useFocusReturn(panelRef, () => props.open, {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  background: var(--k12-surface);
+}
+@supports (backdrop-filter: blur(1px)) {
+  .cd__box {
+    background: color-mix(in srgb, var(--k12-surface) 88%, transparent);
+    backdrop-filter: blur(12px) saturate(1.4);
+  }
 }
 .cd__head {
   display: flex;

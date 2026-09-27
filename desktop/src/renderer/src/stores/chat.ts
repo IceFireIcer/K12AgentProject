@@ -25,7 +25,7 @@
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { CitationDetail, Degraded, GradeLevel } from '@shared/ipc-events'
+import type { CitationDetail, Degraded, GradeLevel, IpcEvent } from '@shared/ipc-events'
 import { GRADE_LABELS, chapterLineLabel, gradeAdaptNotice, gradeManualNotice } from '../labels'
 import {
   GRADE_SET_MISSING_HINT,
@@ -58,6 +58,9 @@ import {
 } from '../api/events'
 import { resolveSessionBridge } from '../api/sessions'
 import { warnWiring } from '../api/wiring-notice'
+// ★ 演示沙箱（预置数据）的脚本回放：只有 `send()` 里那一个分支用它（**取用在动作内部**，
+//   不在这里 const 一个实例 —— 两个 store 互相 import，顶层取会落在模块求值的循环上）。
+import { useDemoSeedStore } from './demoSeed'
 
 export const useChatStore = defineStore('chat', () => {
   const conversation = ref<ConversationState>(emptyConversation())
@@ -1043,6 +1046,28 @@ export const useChatStore = defineStore('chat', () => {
     const outgoing =
       explicitWire !== undefined && explicitWire.length > 0 ? explicitWire : wireTextFor(text)
 
+    // ★★ 演示沙箱：这一句**不进主进程**，由本机脚本接手（见 `stores/demoSeed.ts`）。
+    //    学生打什么都会被「吃掉」，屏幕上出现的是脚本里那句 —— 现场演示不可能每次都把
+    //    三句话原样打对，而脚本必须稳定（这是「像真的用过」与「像在放录像」的分界）。
+    //
+    //    ⚠️⚠️ 位置必须在下面那个 `if (streaming.value)` **之前**（实测踩到）：
+    //       放到它之后的话，脚本一轮还在放时按发送会走「忙时排队」分支 ——
+    //       而脚本轮次的事件**不经过 IPC 订阅**，那条排队永远不会被自动发出，
+    //       屏上会一直挂着一条「待发送」并且**显示的是演示者打的字**（不是脚本那句）。
+    //       放在前面：脚本态下一律吃掉，正在放时就只是吸收掉这一次按键（不打断这一轮）。
+    //    ⚠️ 分支里**不写**「清空本地提示」那一行：`ux-queue-and-scroll` 的源码切片
+    //       以它为终点，在本分支里再出现一次会把切片切空（**这里连它的字面量都不能写**，
+    //       因为那条切片取的是全文第一处出现）。
+    //    ⚠️ store **懒取**（不在文件顶层拿一次）：`demoSeed.ts` 也要取本 store
+    //       （回放时往对话里投事件），两处互相引用时在动作内部再取一次是 Pinia
+    //       允许的安全做法 —— 顶层拿会落在两个模块求值的循环上。
+    if (useDemoSeedStore().seeded) {
+      // 返回 `false` = 这一轮脚本正在放（`advance()` 自己会拒绝重入），那就只吸收这次按键
+      useDemoSeedStore().advance()
+      draft.value = ''
+      return
+    }
+
     // ★ 正在回答：**排队**而不是丢掉。旧实现这里直接 `return` —— 学生按了回车却什么都没发生，
     //   只会以为键盘坏了（`scripts/ux-probe-busy-send.mjs` 实测）。
     if (streaming.value) {
@@ -1071,6 +1096,7 @@ export const useChatStore = defineStore('chat', () => {
     //   收起（而不是删除）是刻意的：那段文本已经写进 Pi 会话，删掉本地这一份会让
     //   界面与历史记录不一致（重启后它又冒出来）。
     openingDismissed.value = true
+
     if (typeof window === 'undefined' || typeof window.api === 'undefined') {
       bridgeReady.value = false
       // 同 `connect()`：屏幕学生话 + 控制台接线细节（这条是「发送」那条线缺了）
@@ -1107,6 +1133,33 @@ export const useChatStore = defineStore('chat', () => {
     } catch (error) {
       localNotice.value = `发送失败：${error instanceof Error ? error.message : String(error)}`
     }
+  }
+
+  /* ------------------------------------------------------------ 演示沙箱（脚本轮次） */
+
+  /**
+   * 演示沙箱：开一轮（学生那条 + 一个空的助手气泡）。`requestId` 由 `stores/demoSeed.ts` 生成。
+   *
+   * ★ 与真实轮次**共用同一个建轮出口**（`startTurn`）：气泡样式、滚动、「正在回答」的
+   *   判定都只看 `ChatTurn`，所以本机脚本造出来的这一轮与真的那轮在界面上完全同形。
+   * ★ 三种 id（`entryId` / `userEntryId` / `messageId`）**恒为空**：脚本轮次一个字节都没写进
+   *   会话文件，因此它**不能**作为分叉点、也不该被当成一条真实记录 ——
+   *   与历史回看用 `restored-` 前缀是同一条纪律（见 `api/events.ts` 的说明）。
+   */
+  function beginScriptedTurn(requestId: string, studentText: string): void {
+    conversation.value = startTurn(conversation.value, requestId, studentText, currentGrade.value)
+  }
+
+  /**
+   * 演示沙箱：把一条事件投进对话状态（复用真实的事件折叠，不另写一套）。
+   *
+   * ★★ 走的是 {@link applyChatEvent} —— 与 live 路径**同一批** reducer：正文逐字、引用与
+   *   降级档位、卡片、`done` 的收尾全部在这里折叠。于是卡片 / 引用 / 正文的渲染路径与
+   *   真实轮次**完全相同**（不存在「预置内容的卡片长得不一样」这种事）。
+   * ★ 调用方（`stores/demoSeed.ts`）只负责「什么时候投哪条」，投进去之后怎么折叠归这里。
+   */
+  function pushScriptedEvent(event: IpcEvent): void {
+    conversation.value = applyChatEvent(conversation.value, event)
   }
 
   /**
@@ -1217,6 +1270,11 @@ export const useChatStore = defineStore('chat', () => {
     /** 重新读一次当前章节（学段变化后由 store 自己调；不抛异常）。 */
     refreshChapter,
     send,
+    /* ── 演示沙箱（本机脚本轮次；见 stores/demoSeed.ts）────────────────── */
+    /** ★ 开一轮脚本轮次（学生那条 + 助手气泡；三种 id 恒空，不能当分叉点）。 */
+    beginScriptedTurn,
+    /** ★ 把一条脚本事件投进对话状态（复用真实的事件折叠，不另写一套）。 */
+    pushScriptedEvent,
     submitQuizAnswer,
     /* ── 回看历史的译文（**唯一的实现**，别再写第二份）────────────────── */
     /**

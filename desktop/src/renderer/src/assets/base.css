@@ -9,18 +9,31 @@
  * 恢复它之后，边界不靠加粗描边就有了。四层：
  *
  *   page     页面底色（画布原 bg：初中 #ECEDFE、小学低 #FFF2E4…）带学段色
- *   surface  白卡片（#FFFFFF）+ 1px 边框 + 浅投影        ← 浮在 page 上
- *   inset    卡片内的嵌入块（画布原 surface-2，带学段色） ← 沉在 surface 里
+ *   surface  纸面（#FFFFFF）+ 1px 边框 + 浅投影        ← 浮在 page 上
+ *   inset    纸上的嵌入块（画布原 surface-2，带学段色） ← 沉在 surface 里
  *   float    浮层（白 + 更强投影 + 深边框）              ← 浮在所有东西上
  *
  * **规则**：任何"一块内容"都必须是这四层之一，不许出现第 5 种自定义表面。
  * 这条规则是上一版 16 处手写卡片、10 种表面配方混在一起的解药。
  *
+ * ── 2026-09-27：边界信号的**三件套**（D-105）───────────────────────────
+ * 上一次恢复底色只解决了一半：`default` 档（**开机默认**）的 page 还是纯白，
+ * 5 个学段的 mono 档 page（#FAFAFB）比纸上的嵌入块还亮 —— 层次顺序倒挂。
+ * 于是"白底白线"恰好在用户第一眼看到的那个界面上出现。
+ *
+ * 现在边界由三件事共同承担，**任何一件都不能单独被拿掉**：
+ *   ① 底色差  桌面（带学段色）vs 纸面（纯白）—— 主信号
+ *   ② 线      发丝线 1.50:1（卡片）/ 强线 2.35:1（结构分面）—— 副信号
+ *   ③ 单侧投影 结构分面（侧栏右缘 / 顶栏下缘 / 右栏左缘）朝"桌面"一侧投 3px
+ * 三者都**不到 WCAG 图形 3:1**，这是有意的取舍：3:1 的线（≈#86909F）会让整个
+ * 界面变成线框风，与"给孩子的浅色纸面"冲突。判据是**走查能不能一眼读出边界**，
+ * 而不是线本身达不达标（对比度口径见 base.css 顶部的 check:contrast 注释）。
+ *
  * ── 两支学段色 ──────────────────────────────────────────────────────────
  *   accent      画布原值 → 边框、浅底、大片装饰（"被看"的东西）
  *   accent-ink  压深版   → 文字、按钮填充、进度、节点（"被读"的东西）
  * 都是画布的色相，只差明度：明快感在 accent，可读性在 ink。
- * 对比度由 `node scripts/check-contrast.mjs --strict` 机器校验（234 项全过）。
+ * 对比度由 `node scripts/design/check-contrast.mjs --strict` 机器校验（300 项全过）。
  * ========================================================================== */
 
 /* ── 字体：本地自托管，禁 CDN（断网演示硬约束）──────────────────────────── */
@@ -103,7 +116,7 @@
    * ★★ 2026-09-20 上调（inset 6→8 / card 10→14 / control 12→14）：
    *   界面走查的结论是「偏极客、像开发者后台、缺亲和力」，而**圆角**是
    *   成本最低、观感最直接的那一档 —— 它不需要新素材、不动配色、
-   *   也不影响任何对比度（改色才会碰到 234 项对比度校验）。
+   *   也不影响任何对比度（改色才会碰到 342 项对比度校验）。
    *   使用者是 K12 学生：直角 + 细线是「工程软件」的语言，
    *   圆角是「给孩子的软件」的语言。
    * ⚠️ card 与 control 现在同值，这是**有意的**：此前 card(10) < control(12) 的
@@ -219,12 +232,20 @@
   --k12-bp-h-md: 768px;
   --k12-bp-h-lg: 900px;
 
-  /* ── 投影：两档 ────────────────────────────────────────────────────────
-   * 投影是"边界"的第二个信号（第一个是底色差）。卡片用近距离的，
-   * 浮层用范围更大的。两者都带一点扩散，让边缘有柔和的过渡而不是硬切。      */
+  /* ── 投影：三档 + 单侧（2026-09-27，D-105）────────────────────────────
+   * 投影是"边界"的第二个信号（第一个是底色差，第三个是线）。
+   *   card  近距离：日常卡片，落一点点就够
+   *   raise 抬升一档：聚焦/悬停这类瞬时状态
+   *   float 大范围：浮层，离得最远
+   *   edge  单侧：结构分面（侧栏右缘 / 顶栏下缘 / 右栏左缘）朝"桌面"一侧投 3px
+   *
+   * ★ card 带一点**学段色**（accent 12%）而不是纯灰：投影落在带学段色的桌面上，
+   *   纯灰的影会把桌面"弄脏"，同色相的影才读成"这张纸浮在这张桌子上"。
+   * ★ edge 的模糊半径 3px、负扩散 1px：够看出"这块面浮起来"，又不会在
+   *   相邻面上晕出一圈灰边（正扩散会让接缝处发脏）。                        */
   --k12-shadow-card:
     0 1px 2px color-mix(in srgb, var(--k12-fg) 6%, transparent),
-    0 1px 8px -2px color-mix(in srgb, var(--k12-fg) 8%, transparent);
+    0 1px 8px -2px color-mix(in srgb, var(--k12-accent) 12%, transparent);
   --k12-shadow-float:
     0 4px 12px -2px color-mix(in srgb, var(--k12-fg) 14%, transparent),
     0 12px 32px -8px color-mix(in srgb, var(--k12-fg) 20%, transparent);
@@ -234,6 +255,13 @@
   --k12-shadow-raise:
     0 2px 4px color-mix(in srgb, var(--k12-fg) 8%, transparent),
     0 6px 16px -4px color-mix(in srgb, var(--k12-fg) 16%, transparent);
+  /* ── 单侧投影：结构分面的"浮起"（D-105）────────────────────────────────
+   * 用法：侧栏 `edge-right`、顶栏 `edge-bottom`、右栏 `edge-left`。
+   * 只给**结构分面**（贴着窗口边缘的那几块），日常卡片不用 ——
+   * 否则整个界面会浮成一片，反而没有层级。                                */
+  --k12-shadow-edge-right: 1px 0 3px -1px color-mix(in srgb, var(--k12-fg) 10%, transparent);
+  --k12-shadow-edge-left: -1px 0 3px -1px color-mix(in srgb, var(--k12-fg) 10%, transparent);
+  --k12-shadow-edge-bottom: 0 1px 3px -1px color-mix(in srgb, var(--k12-fg) 10%, transparent);
 
   /* ── 状态过渡：**唯一**的时长与曲线 ────────────────────────────────────
    * 全站不做装饰性动效（见下方「动效：本版无」）；只允许状态本身有过渡，
@@ -316,7 +344,7 @@ a {
 
 /* ── 四层材质：组件只允许用这四个类 ────────────────────────────────────── */
 
-/* E2 卡片：白面 + 可见边框 + 浅投影。**这是绝大多数"一块内容"的形态。** */
+/* E2 纸面：白底 + 可见边框 + 浅投影。**这是绝大多数"一块内容"的形态。** */
 .k12-card {
   background: var(--k12-surface);
   border: 1px solid var(--k12-border);
@@ -325,9 +353,13 @@ a {
   /* 卡片常落在 flex 行里，少了这行不会收缩、会把父容器撑破 */
   min-width: 0;
 }
-/* E3 嵌入块：卡片内部的次级块。带学段色的浅底，压在白面上自然分得开。 */
+/* E3 嵌入块：纸面内部的次级块。带学段色的浅底 + 一条更淡的线。
+ * ★ 2026-09-27（D-105）：补上 1px 细线。此前只有底色 —— 当页面底色（page）
+ *   也带学段色时，"浅底压浅底"分不开；一条 70% 的线给出的正是那句
+ *   「这里是一个独立的块」，而不用加重底色（加重会让嵌入块抢纸面的层级）。 */
 .k12-inset {
   background: var(--k12-surface-2);
+  border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
   border-radius: var(--k12-r-inset);
 }
 /* E4 浮层：对话框 / 菜单 / 悬浮窗。 */
@@ -337,6 +369,19 @@ a {
   /* 浮层走最大档（报告 §1.3：模态/浮层 = xl 16）。 */
   border-radius: var(--k12-r-float);
   box-shadow: var(--k12-shadow-float);
+}
+
+/* 毛玻璃：只给**真正浮在内容之上、背后有东西经过**的表面
+ * （吸顶操作栏、悬浮追问窗、对话框、右栏抽屉）。
+ * ★ 不给侧栏 / 顶栏：它们背后是平板色的桌面，blur 在数学上等于没效果，
+ *   只多一份合成层的开销（走查实测：换成半透明后观感无差别）。
+ * ⚠️ 必须包在 @supports 里 —— 不支持 backdrop-filter 的环境要退回实色，
+ *   否则半透明底会让下层文字透上来（可读性事故，不是审美问题）。 */
+@supports (backdrop-filter: blur(1px)) {
+  .k12-glass {
+    background: color-mix(in srgb, var(--k12-surface) 88%, transparent);
+    backdrop-filter: blur(12px) saturate(1.4);
+  }
 }
 
 /* 卡片头：**统一的分隔** —— 底色带一档 + 下边框。
@@ -413,9 +458,12 @@ a {
  * 与它自己（`.pa`）—— 在 scoped 里写成 `:global(...) .pa` 会被 SFC 编译器
  * 产出成 `.shell__content.is-scrolled{...}`（`.pa` 被丢掉，规则失效）。
  * 所以它必须住在全局样式里。
- * `.is-scrolled` 由 AppShell 挂在滚动容器上（纯 CSS 判断不了 sticky 是否已吸住）。 */
+ * `.is-scrolled` 由 AppShell 挂在滚动容器上（纯 CSS 判断不了 sticky 是否已吸住）。
+ * ★ 2026-09-27（D-105）：线从 `--k12-border` 提到 `--k12-border-strong` ——
+ *   它与顶栏下线、对话条下线、侧栏竖线是**同一批"窗口级"分面线**，
+ *   四条必须同深浅，否则它滚动时会明显比上面那条顶栏线淡一档。 */
 .shell__content.is-scrolled .pa {
-  border-bottom-color: var(--k12-border);
+  border-bottom-color: var(--k12-border-strong);
 }
 
 /* ── 排版细节 ────────────────────────────────────────────────────────────
@@ -798,7 +846,9 @@ a {
     0 0 0 2px var(--k12-bad) inset,
     0 0 0 3px var(--k12-bad-soft);
 }
-/* ── 卡片 hover 抬升（报告 §3.2；减动效下退化为"只换阴影不位移"）────────── */
+/* ── 卡片 hover 抬升（报告 §3.2；减动效下退化为"只换阴影不位移"）──────────
+ * ★ 2026-09-27（D-105）：hover 的投影走到 `shadow-raise` 并带学段色同相投影 ——
+ *   原来只换到 float 档，在带学段色的桌面上几乎看不出"这张纸被拿起来了"。 */
 @media (hover: hover) and (pointer: fine) {
   .k12-card {
     transition:
@@ -806,7 +856,7 @@ a {
       transform var(--k12-dur-state) var(--k12-ease-state);
   }
   .k12-card:hover {
-    box-shadow: var(--k12-shadow-float);
+    box-shadow: var(--k12-shadow-raise);
     transform: translateY(-1px);
   }
 }

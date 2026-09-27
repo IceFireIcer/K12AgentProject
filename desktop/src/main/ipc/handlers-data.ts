@@ -17,6 +17,11 @@
  */
 
 import { DEFAULT_GRADE_LEVEL } from '../agent/prompts/grade.ts'
+// ★ 演示沙箱：写操作在**处理器层**一律拒绝（回一句可读中文，绝不让状态码上屏）。
+import { isDemoSeeded } from '../demo/state.ts'
+// ⚠️ 相对路径 + `.ts` 后缀，**不用 `@shared/*` 别名**：本文件会被若干 node 单测直接加载
+//    （它们没有别名的解析钩子），写成别名会让那些用例当场 `Cannot find package`。
+import { DEMO_BLOCKED_MESSAGE } from '../../shared/demo-seed.ts'
 import { ipcMain, type WebContents } from 'electron'
 import {
   IPC,
@@ -172,6 +177,18 @@ export function registerDataHandlers(options: {
   const req = options.requests ?? dataRequests
   const animationCompleter = options.animationCompleter ?? ((): TextCompleter | null => null)
 
+  /**
+   * 沙箱态下拒绝一次**写操作**（回一句统一的、学生能读懂的中文）。
+   *
+   * ★★ 为什么拒绝在这里而不是 HTTP 层：走到 HTTP 层的话学生会看到
+   *   「操作失败（HTTP 409）」这类**状态码**，而界面上每一句话都必须是中文。
+   * ★ 被拒的这六条是**唯一会写学生数据 / 写随包资产**的读之外通道：
+   *   判分写掌握度、求助写学习记录、存/删动画写动画库、导入与重建写知识库。
+   *   沙箱态下它们**一个都不许真的落下去** —— 那正是「真实数据一字未动」的判据。
+   */
+  const demoBlocked = (): { ok: false; message: string } | null =>
+    isDemoSeeded() ? { ok: false, message: DEMO_BLOCKED_MESSAGE } : null
+
   /* ---------------------------------------------------------------- *
    * 学生身份：读当前学生；**库里没有就把它建出来**
    *
@@ -257,6 +274,9 @@ export function registerDataHandlers(options: {
   })
 
   ipcMain.handle(IPC.quizGrade, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    // ★ 沙箱态：拒绝判分（它会写掌握度 / 学习记录 / 闯关进度三处）
+    const blocked = demoBlocked()
+    if (blocked !== null) return blocked
     const request = (payload ?? {}) as Partial<QuizGradeRequest>
     const qid = readText(request.qid, 128)
     if (!qid) return { ok: false, message: '提交失败：题目 id 不合法。' }
@@ -318,6 +338,9 @@ export function registerDataHandlers(options: {
   })
 
   ipcMain.handle(IPC.codeRunHint, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    // ★ 沙箱态：拒绝（它会写学习记录，并据库里状态算下一级提示）
+    const blocked = demoBlocked()
+    if (blocked !== null) return blocked
     const request = (payload ?? {}) as Partial<CodeRunHintRequest>
     const kpId = readText(request.kpId, 64)
     if (!kpId) return { ok: false, message: '分析失败：知识点 id 不合法。' }
@@ -448,6 +471,9 @@ export function registerDataHandlers(options: {
   })
 
   ipcMain.handle(IPC.animationSavedSave, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    // ★ 沙箱态：拒绝（它会往该学生的动画库里写一份产物）
+    const blocked = demoBlocked()
+    if (blocked !== null) return blocked
     const request = (payload ?? {}) as Partial<AnimationSavedSaveRequest>
     const kpId = readText(request.kpId, 64)
     if (!kpId || !ANIMATION_KP_ID_RE.test(kpId)) {
@@ -488,6 +514,10 @@ export function registerDataHandlers(options: {
   })
 
   ipcMain.handle(IPC.animationSavedDelete, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    // ★★ 沙箱态：**必须**拒绝（它是删除操作；预置动画库里那两条在磁盘上不存在，
+    //    真删只会删到同名记录上 —— 与 `session:delete` 同一条理由）
+    const blocked = demoBlocked()
+    if (blocked !== null) return blocked
     const request = (payload ?? {}) as Partial<AnimationSavedDeleteRequest>
     const savedId = typeof request.savedId === 'string' ? request.savedId.trim() : ''
     if (!ANIMATION_SAVED_ID_RE.test(savedId)) {
@@ -654,6 +684,9 @@ export function registerDataHandlers(options: {
   })
 
   ipcMain.handle(IPC.knowledgeImport, async (_event, payload: unknown): Promise<StudyCallResult> => {
+    // ★ 沙箱态：拒绝（它会往随包知识库写一份教材并重建索引）
+    const blocked = demoBlocked()
+    if (blocked !== null) return blocked
     const request = (payload ?? {}) as Partial<KnowledgeImportIpcRequest>
     const fileName = readText(request.fileName, 200)
     if (!fileName) return { ok: false, message: '导入失败：文件名不合法。' }
@@ -677,7 +710,12 @@ export function registerDataHandlers(options: {
     return await req.knowledgeImport(body)
   })
 
-  ipcMain.handle(IPC.knowledgeRebuild, async (): Promise<StudyCallResult> => await req.knowledgeRebuild())
+  ipcMain.handle(IPC.knowledgeRebuild, async (): Promise<StudyCallResult> => {
+    // ★ 沙箱态：拒绝（重建索引会真的重写随包知识库）
+    const blocked = demoBlocked()
+    if (blocked !== null) return blocked
+    return await req.knowledgeRebuild()
+  })
 }
 
 /**

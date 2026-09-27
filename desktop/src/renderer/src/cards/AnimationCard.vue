@@ -32,6 +32,8 @@
  *
  * 展开/全屏：内联卡片受对话框宽度限制，全屏用 fixed 覆盖层（同一个 iframe 元素**移动**过去，
  * 不重建 —— 重建会让动画从头开始播，学生看到的是「一按全屏就重播」这种莫名其妙的行为）。
+ * ⚠️ 2026-09-27 补：**窄卡片**里本来就没有 iframe（见 `narrow`），全屏是它第一次挂上，
+ *    动画从那一刻开始播 —— 那不是"重播"，是它之前根本没播过（学生点的是「全屏看动画」）。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { InlineCard } from '../api/events'
@@ -57,6 +59,10 @@ import {
  *   是不会重渲染的。所以「换一份来播」这件事必须靠**重建组件**完成 ——
  *   父组件按来源给它换 `:key`，实例重建，载荷被重新读一遍。
  *   本组件因此只做两件事：把当前来源显示出来、把学生的点击**报上去**。
+ *
+ * ★ 2026-09-27（窄容器改动）**没有**动这条约定：挂载/卸载只决定沙箱元素的去留
+ *   （`mountStage` / `unmountStage`），`view` 仍旧只读一次、也**不允许**在这里改读成响应式 ——
+ *   换一份来播还是靠父组件换 `:key` 重建。别把「按需挂载」理解成「按需重读载荷」。
  *
  * ★ 学生看到的三个动作：
  *   · 「内置 / 我的」两态切换：内置 = 这张卡片带来的那一份；我的 = 动画库里存过的。
@@ -136,6 +142,18 @@ const payloadId = ref<string>(
 /**
  * 挂 iframe 的条件：**载荷里有 HTML**（`shouldMountIframe`），否则直接进降级视图。
  *
+ * ★★ 2026-09-27：判据补上了**容器侧**那一半（见下面 `roomForStage` / `narrow`）。
+ *   缺陷现场：学生在对话页把左右两个侧栏都打开（窗口 1024）—— 固定列吃掉 800px，
+ *   主列只剩 224px、卡片 136px、iframe 104px。那种宽度下舞台里一个字都读不出来
+ *   （宽度轴上画布已经没地方了），所以**窄容器不挂 iframe**，改「文字要点 + 全屏入口」。
+ *   ⚠️ 不是断点的锅：1024 档保留三栏是**刻意的设计决策**（报告 §2.2，
+ *      `tests/breakpoints.test.ts` 钉着），该改的是「卡片在窄容器里挂什么」，不是布局档位。
+ *
+ * ⚠️ 这一行的**字面写法**被两处钉着：`tests/animation-extension.test.ts`（②「挂载条件
+ *   仍然只认 html」）与 `scripts/verify-guard-mutations.mjs`（变异 60）—— 它是「一次性
+ *   nonce 地址不许绑回 iframe」那条纪律的抓手。扩展判据时**这一行必须原样保留**：
+ *   载荷里有 HTML 仍然是前提，容器宽度只是加在上面的第二半。
+ *
  * ★★ 为什么本卡片**只用内联 `srcdoc`，绝不把托管地址放进 `<iframe src>`**（2026-09-23 修复）：
  *
  * 旧实现「托管优先、失败再回退内联」有两处硬伤，实测都被用户撞到：
@@ -164,6 +182,58 @@ const payloadId = ref<string>(
  */
 const mountIframe = ref<boolean>(shouldMountIframe(view.html))
 
+/* ------------------------------------------------------------------ *
+ * 容器侧判据：卡片自己有多宽（**不是窗口有多宽**）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 舞台的**宽度**下限（px）：`.anim` 的内联宽度低于它就不挂 iframe，改「文字要点 + 全屏入口」。
+ *
+ * ★ 这个数怎么来的（不是拍的）：iframe 里是**外壳 + 画布**两段，宽度这条轴上：
+ *   · **外壳**（标题 20px / 字幕 15px / 步骤条）自己要 ~340px 才放得下 —— 低于 340px
+ *     外壳就被裁，画布拿到 0 高 → **白屏**（本仓明令禁止的那一种）；
+ *   · **画布**（`flex: 1 1 auto`）宽度掉到 480px 以下时已经小到读不清
+ *     （节点标签落到 10px 上下，与 P2-3 修掉的「肉眼 7–8px」是同一类毛病）。
+ *   340 是「不许再窄」的硬底、480 是「还读得清」的下限 —— 取 480。
+ * ⚠️ 量的是**卡片**（`.anim`）而不是 iframe：卡身还有内边距，iframe 实际比它再窄三十来像素，
+ *   所以这条判据**偏保守**。保守是对的方向：宁可早一步换成文字要点，
+ *   也不给学生一个字小到读不了的舞台。
+ * ⚠️ 与 `--k12-anim-min: 480px` **同值但不是同一个数**：那是舞台的**高度**下限
+ *   （缩放刚好触到宽度上限的那一档），这是**宽度**下限。改一条别顺手同步另一条。
+ */
+const STAGE_MIN_WIDTH_PX = 480
+
+/**
+ * `.anim` 当前的内联宽度（px；0 = 还没量到过）。
+ *
+ * 只用于 `data-*` 读数（排障时能一眼看出「当时卡片多宽」），判据本身在 {@link roomForStage}。
+ */
+const containerWidth = ref<number>(0)
+
+/**
+ * 容器放不放得下舞台。
+ *
+ * ★ **初始为 `true`**：还没量到时按「放得下」处理 —— 那正是本次改动之前的行为。
+ *   量不到（卡片还没上屏 / 被 KeepAlive 摘走 / 祖先隐藏）不该把动画变成文字。
+ *   量到了才按 {@link STAGE_MIN_WIDTH_PX} 判。
+ */
+const roomForStage = ref<boolean>(true)
+
+/**
+ * ★★ 窄容器态：载荷本来能播（`html` 非空），但卡片太窄 —— **不挂 iframe**，
+ *    改「文字要点 + 全屏看动画」。全屏后容器变宽，会自动把 iframe 重新挂上
+ *    （见 {@link mountStage}，**不能因为窄就不给出口**）。
+ */
+const narrow = computed<boolean>(() => mountIframe.value && !roomForStage.value)
+
+/**
+ * 真的挂 iframe：载荷有 HTML **且**容器放得下。
+ *
+ * ★ 模板的 `v-if` 与挂载/卸载路径**共用这一个判据** —— 两处各判一次的话，
+ *   「界面上显示的」与「宿主以为的」迟早会对不上（那正是白屏与空转的温床）。
+ */
+const stageVisible = computed<boolean>(() => mountIframe.value && roomForStage.value)
+
 /** 是否已进入降级视图（文字讲解）。 */
 const degraded = ref<boolean>(false)
 /** 演示模式的沙箱事件（渲染进程独有；主进程看不到 iframe 与 Worker）。 */
@@ -184,6 +254,18 @@ const degradeReason = ref<string>('')
 //   是本卡片降级态**唯一**的下一步。两处**不是**同一个组件的两份实现，别顺手统一 ——
 //   统一之后卡片会变成「只说坏消息、不给下一步」。
 const DEGRADED_NOTICE_TEXT = '这段动画这次没能播出来，下面这段文字已经把要点讲清楚了；想换个说法就问智团团。'
+/**
+ * **窄容器态**给学生看的那句（与上面那句是两回事，别合并）。
+ *
+ * 判据不同：上面那句是「动画没播出来」（真的没播成），这句是「这里放不下」
+ * （动画好好的，只是这块地方太窄）—— 说成"没播出来"会让学生以为动画坏了，
+ * 而它点一下全屏就能看。
+ * ★ 先给**出口**再给解释：这句的落点是下面那颗「全屏看动画」，
+ *   两个词（窄 / 全屏）学生都读得懂，不带任何内部说法。
+ * ⚠️ 不用破折号连接句子（`student-view-discipline.test.ts` 的「破折号专项」盯着）：
+ *   两句短句，各自说完一件事。
+ */
+const NARROW_NOTICE_TEXT = '这里太窄了，动画放不下。点下面的按钮，全屏看动画。'
 /** 沙箱阶段（`loading` 时显示加载提示，而不是一块空白）。 */
 const phase = ref<'loading' | 'ready' | 'degraded'>('loading')
 const progress = ref<number>(0)
@@ -194,9 +276,16 @@ const host = ref<AnimationSandboxHost | null>(null)
 
 const iframeAttrs = buildIframeAttributes()
 
-/** 卡片上的状态文案（学生看到的）。 */
+/**
+ * 卡片上的状态文案（学生看到的）。
+ *
+ * ★ 窄容器态单列一句：那时**没有**沙箱在跑，说「动画加载中…」是在骗人
+ *   （而且它会一直停在这句上 —— iframe 根本没挂）。它也不是「降级」：
+ *   动画没坏，只是这块地方放不下。
+ */
 const statusText = computed(() => {
   if (degraded.value) return '已切换为文字讲解'
+  if (narrow.value) return '这里放不下动画'
   if (phase.value === 'ready') return '动画已就绪'
   return '动画加载中…'
 })
@@ -226,9 +315,12 @@ function goDegraded(reason: string): void {
   // ★ 演示模式的沙箱事件（渲染进程独有）：5 秒没就绪 / 沙箱自报错误 → 整段降级为文字。
   //   这一条正是「绝不白屏」那条纪律的可观测证据。
   diagnostics.noteSandbox({ animationReadyTimeout: /5 秒内没有就绪/.test(reason) })
-  // 拆掉 iframe：它已经不可用了，留着只会占内存（也可能继续发消息）
+  // 拆掉 iframe：它已经不可用了，留着只会占内存（也可能继续发消息）。
+  // ★ `mountIframe = false` 之后 `stageVisible` 也是 false —— 卸载走**同一条**路径
+  //   （`unmountStage` 会把 window 监听与宿主一起收走），这里不再自己写一遍。
+  //   降级是**终态**：`mountIframe` 一旦置 false，后续容器变宽也不会把沙箱挂回来。
   mountIframe.value = false
-  host.value?.dispose()
+  unmountStage()
 }
 
 /**
@@ -264,6 +356,96 @@ function buildHost(): AnimationSandboxHost {
   return instance
 }
 
+/* ------------------------------------------------------------------ *
+ * 挂载 / 卸载：**按需**，不是 `onMounted` 里的一次性动作
+ * ------------------------------------------------------------------ */
+
+/** `.anim` 的根元素（ResizeObserver 观测它 —— 宽度判据量的是**卡片自己**）。 */
+const rootEl = ref<HTMLElement | null>(null)
+/** 容器宽度观测器（`onBeforeUnmount` 里 `disconnect`，不留下观测）。 */
+let resizeObserver: ResizeObserver | null = null
+/** 待办的那次「重新量一次」（同一轮里的多次触发合并成一次；卸载时清掉）。 */
+let measureHandle: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * 量一次 `.anim` 的宽度，更新容器侧判据。
+ *
+ * ★★ 为什么不看 `window.innerWidth`：这个缺陷的形态正是「窗口够宽、卡片被挤窄」——
+ *   实测 1024 窗口 + 左右两个侧栏都开时，固定列吃掉 800px，主列只剩 224px、卡片 136px，
+ *   而**窗口宽度一点问题都没有**。会不会被挤坏只取决于卡片自己的宽度，所以量它。
+ *
+ * ★ 宽度**只有这一个来源**：`onMounted` 先量一次，之后每次 ResizeObserver 回调都走这里
+ *   （两处各量各的，迟早会分叉）。量的是边框盒，与 CSS 容器查询的 `100cqw` 差 1–2px
+ *   边框，对阈值判据没有影响。
+ */
+function measureStageRoom(): void {
+  const width = rootEl.value?.getBoundingClientRect().width ?? 0
+  // ★ 量不到（还没上屏 / 被 KeepAlive 摘走 / 祖先 display:none）→ **保持上一次的判定**。
+  //   把 0 当成「窄」的后果是：切到设置页再回来，动画被判成窄而不挂 ——
+  //   而本卡片留在 KeepAlive 里的意义恰恰是「切走再回来，进度还在」。
+  if (!(width > 0)) return
+  containerWidth.value = Math.round(width)
+  roomForStage.value = width >= STAGE_MIN_WIDTH_PX
+}
+
+/**
+ * 把 {@link measureStageRoom} 排到**本轮渲染之后**再跑（同一轮的多次触发合并成一次）。
+ *
+ * ★ 为什么不在 ResizeObserver 的回调里直接量、直接改判据（真机探针实测）：
+ *   改判据会让卡片在**同一个交付周期**里换高度（舞台 ≈658px ↔ 文字要点 ≈544px），
+ *   而被观测的就是这个元素 —— Chromium 判定成「回调里又改了被观测元素的尺寸」，
+ *   控制台记一条 `ResizeObserver loop completed with undelivered notifications`（实测 3 条）。
+ *   挪到一个宏任务里，尺寸变化就落到下一次交付，通知按正常路径送达。
+ * ⚠️ 这条计时器也要在卸载时清掉（与宿主的 ready 计时器同样对待）。
+ */
+function scheduleMeasureStageRoom(): void {
+  if (measureHandle !== null) return
+  measureHandle = setTimeout(() => {
+    measureHandle = null
+    measureStageRoom()
+  }, 0)
+}
+
+/**
+ * 挂上沙箱（**幂等**）：建宿主 + 收窗口消息 + `attach`（`attach` 才起 5 秒计时）。
+ *
+ * ★★ 为什么挂载要收敛成这一条路径，而不是 `onMounted` 里做完就算：
+ *   卡片会在**两种容器宽度**之间来回 —— 侧栏开合、点「全屏看」、收起全屏。
+ *   窄容器不挂 iframe，那么"后来变宽了"就必须**补挂**；而变宽这件事只发生在挂载之后
+ *   （ResizeObserver 报出来的），`onMounted` 那个时机早过去了 —— 不改的话，
+ *   全屏后容器明明够宽，学生看到的还是一片文字要点（本 bug 的关键就在这）。
+ *   所以判据是 {@link stageVisible}，由下面的 `watch` 驱动；`onMounted` 只负责**首次**。
+ */
+function mountStage(): void {
+  if (host.value || !stageVisible.value) return
+  // 新建的沙箱要从「加载中」重新走一遍：进度归零、阶段归 loading
+  //（窄 → 宽 时 iframe 元素已经不在 DOM 里，动画本来就得从头播）。
+  progress.value = 0
+  phase.value = 'loading'
+  host.value = buildHost()
+  window.addEventListener('message', onWindowMessage)
+  if (iframeEl.value) host.value.attach(iframeEl.value)
+}
+
+/**
+ * 拆掉沙箱（**幂等**）：移监听 + `dispose()`（清掉 ready 计时器）。
+ *
+ * ★★ 必须成对，否则会出一个很难查的假降级：iframe 从 DOM 里摘掉之后，宿主的 5 秒计时器
+ *   还在跑 —— 时间一到它会走 `onTimeout` → `goDegraded`，于是卡片明明只是**变窄了**，
+ *   学生却看到「已切换为文字讲解」，而且再也回不来（降级是终态）。
+ *   `dispose()` 是沙箱宿主自带的清理口（`sandbox/iframe-host.ts`），本层只管调它。
+ * ⚠️ 代价（明说）：窄回去再变宽，动画是**从头**播的 —— iframe 元素已经不在了，进度留不住。
+ *   要"进度不丢"就只能留一个看不见的 iframe 在后台跑，那正是本改动要避免的。
+ */
+function unmountStage(): void {
+  window.removeEventListener('message', onWindowMessage)
+  host.value?.dispose()
+  host.value = null
+  // 没有沙箱在跑了：阶段退回「加载中」（下次挂上会重新走到 ready）。
+  // ⚠️ 降级是终态：那时上面已经写着 'degraded'，不许被这里覆盖。
+  if (!degraded.value) phase.value = 'loading'
+}
+
 /** iframe 的 `load`：交给宿主（载入 ≠ 就绪，就绪由 `ready` 消息定义）。 */
 function onIframeLoad(): void {
   host.value?.handleLoad()
@@ -291,6 +473,8 @@ function toggleExpand(): void {
   expanded.value = !expanded.value
   // 全屏只是换容器：同一个 iframe 元素被 Vue 移动过去（`<Teleport>` 用了同一个 vnode，
   // 不会重建），所以动画不会从头开始。
+  // ★ 容器侧的判据不用在这里手动改：全屏后 `.anim` 变成 `position: fixed; inset: 24px`
+  //   （宽度 = 视口宽 - 48），ResizeObserver 下一帧就会报一次 → 判据跟着变。
 }
 
 onMounted(() => {
@@ -301,24 +485,54 @@ onMounted(() => {
     degradeReason.value = view.degradeReason ?? '这次没有可播放的动画（已用文字讲解顶上）'
     return
   }
-  host.value = buildHost()
-  window.addEventListener('message', onWindowMessage)
-  if (iframeEl.value) host.value.attach(iframeEl.value)
+  // ★ 先**量一次**再决定挂不挂：`onMounted` 跑在「打完补丁、还没上屏」那一刻，
+  //   所以窄卡片第一次上屏就是文字要点，不会先闪一个被挤扁的 iframe。
+  measureStageRoom()
+  // 之后交给 ResizeObserver：侧栏开合 / 点全屏（`inset: 24px`）/ 窗口缩放都会报一次。
+  resizeObserver = new ResizeObserver(() => scheduleMeasureStageRoom())
+  if (rootEl.value) resizeObserver.observe(rootEl.value)
+  // 首次挂载（容器够宽时）：与后面每次"变宽"走同一条路径（幂等）
+  mountStage()
 })
 
 /**
- * 卸载：移除 window 监听并拆掉宿主（**成对清理**，不留监听器与计时器）。
+ * 卸载：移除 window 监听、拆掉宿主、停止观测（**成对清理**，不留监听器与计时器）。
  *
  * ★ 本卡片处在 `App.vue` 的 `<KeepAlive>` 里（切到设置页再回来不该丢掉动画进度）：
  *   切走触发的是 `onDeactivated`，这里**不处理**它 —— 正因为监听器与宿主一直活着，
  *   切回来时进度与 ready 状态才还在；`onMounted` 也只跑一次，所以监听器不会重复注册。
  *   真正的卸载（卡片被移除 / 应用退出）仍会走到这里。
+ *   ⚠️ KeepAlive 摘走时元素是 detach 的，ResizeObserver 可能报一个 0 宽 ——
+ *      `measureStageRoom()` 会**忽略**它（保持原判据），所以切走再回来不会把动画拆掉。
  */
 onBeforeUnmount(() => {
-  window.removeEventListener('message', onWindowMessage)
-  host.value?.dispose()
-  host.value = null
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  if (measureHandle !== null) clearTimeout(measureHandle)
+  measureHandle = null
+  unmountStage()
 })
+
+/**
+ * ★★ 挂载/卸载的**唯一驱动**：`stageVisible`（载荷有 HTML 且容器放得下）。
+ *
+ *   变宽（侧栏收起 / 点全屏 / 窗口拉大）→ 补挂：iframe 重新挂上，动画可播；
+ *   变窄（侧栏打开 / 收起全屏）→ 拆掉：`dispose()` 收走 5 秒计时器
+ *   （不收的话它迟早在窄卡片上报一次超时，把卡片打成降级）。
+ *
+ *   `flush: 'post'`：等 DOM 补丁打完再动 —— 那时 `iframeEl` 已经指向真的 iframe 元素，
+ *   `attach()` 当场起计时；拆的时候也保证元素已经摘掉。
+ *   ⚠️ 降级态不会被它复活：`goDegraded` 把 `mountIframe` 置成 false，`stageVisible`
+ *     就一直是 false（`mountStage` 里还有一道 `stageVisible` 守卫）。
+ */
+watch(
+  stageVisible,
+  (visible) => {
+    if (visible) mountStage()
+    else unmountStage()
+  },
+  { flush: 'post' }
+)
 
 // iframe 元素在「收起 → 全屏」时会被移动，但 `ref` 指向的还是同一个元素；
 // 这里只在挂载时机变化时重新 attach（保证超时计时器一定被起上）。
@@ -329,11 +543,13 @@ watch(iframeEl, (element) => {
 
 <template>
   <article
+    ref="rootEl"
     class="k12-card anim"
     :class="{ 'anim--expanded': expanded, 'anim--degraded': degraded }"
     data-testid="animation-card"
     :data-degraded="String(degraded)"
     :data-phase="phase"
+    :data-narrow="narrow ? '1' : null"
     :data-payload-id="payloadId"
   >
     <CardHeader>
@@ -415,8 +631,10 @@ watch(iframeEl, (element) => {
            内部原因（哪个环节失败）留在控制台，不摆在这里。 -->
       <p v-if="notice" class="anim__notice" data-testid="animation-notice">{{ notice }}</p>
 
-      <!-- ── 可播放的沙箱 ─────────────────────────────────────────── -->
-      <div v-if="mountIframe" class="anim__stage">
+      <!-- ── 可播放的沙箱 ───────────────────────────────────────────
+           `stageVisible` = 载荷有 HTML **且** 容器放得下（判据见 script 里同名 computed）。
+           窄容器走下面的文字要点 —— 全屏后容器变宽，ResizeObserver 报一次就会挂回来。 -->
+      <div v-if="stageVisible" class="anim__stage">
       <!-- ── 可播放的沙箱（**只用内联 `srcdoc`**，理由见 script 里 mountIframe 的注释）──
          ⚠️ 不要给 `:src` 或把一次性 nonce 地址绑上来：载荷里的地址是**持久化的**，
          而 nonce 单次消费 + TTL 120s，任何第二次加载都会拿到 403 JSON 被渲染给学生。
@@ -449,7 +667,11 @@ watch(iframeEl, (element) => {
       </div>
     </div>
 
-      <!-- ── 降级视图：文字讲解（**这条分支的存在就是为了不白屏**） ── -->
+      <!-- ── 文字要点（**不挂 iframe 的两条路共用这一块**）──────────────────
+           · `degraded`：真的没能播（载荷本身没有 HTML / 沙箱 5 秒没就绪 / 沙箱自报错误）；
+           · `narrow`：动画好好的，只是这块地方**放不下**（卡片被两个侧栏挤窄）。
+           两条都**绝不白屏**，都在这里给出「要点 + 下一步」——
+           区别只在下面那句说明与有没有「全屏看动画」这颗出口。 -->
       <div v-else class="anim__fallback" data-testid="animation-fallback">
         <p class="anim__fallback-text" data-testid="animation-fallback-text">{{ view.fallbackText }}</p>
         <!-- ★ 这里原来还有一张 `<img class="anim__fallback-img">`：主进程按**同一段文案**
@@ -457,14 +679,33 @@ watch(iframeEl, (element) => {
              `buildInlineFallbackImage`）。它与上面那段完整文案说的是同一件事，现在整段删掉 ——
              降级说明只留一处（报告 1.8 / 4.3）。主进程那段生成照旧保留：载荷契约那一侧
              还有别的消费者，要删得先确认；本卡片只是不再引用 `view.fallbackImage`。 -->
+        <!-- 说明这一块为什么在放文字而不是动画：文案随状态变，节点只有一个
+             （`data-degrade-reason` 老实留空，只有真降级才写内部原因；
+              窄容器态把当时的宽度记在 `data-narrow-width` 上，排障时一眼能看出量到了多少）。 -->
         <p
-          v-if="degraded"
           class="anim__reason"
           data-testid="animation-degrade-reason"
-          :data-degrade-reason="degradeReason || null"
+          :data-degrade-reason="degraded ? degradeReason || null : null"
+          :data-narrow-width="narrow ? containerWidth : null"
         >
-          {{ DEGRADED_NOTICE_TEXT }}
+          {{ degraded ? DEGRADED_NOTICE_TEXT : NARROW_NOTICE_TEXT }}
         </p>
+        <!-- ★★ **窄容器态的出口**（本改动的关键，不能省）：全屏后 `.anim` 变成
+             `position: fixed; inset: 24px`（宽度 = 视口宽 - 48），ResizeObserver 报一次
+             → 判据翻过阈值 → iframe 自动挂上、动画当场可播。
+             卡头那颗「全屏看」在窄卡片里可能已经被挤到第二行，学生不一定扫得到 ——
+             所以要点下面再给一颗（同一件事两个入口）。
+             `degraded` 时**不给**：那种卡片本来就没有能播的动画，摆一颗「全屏看动画」
+             等于把学生支到空处（与上面 `DEGRADED_NOTICE_TEXT` 的口径一致）。 -->
+        <button
+          v-if="narrow"
+          type="button"
+          class="btn btn--primary anim__expand-cta"
+          data-testid="animation-expand-inline"
+          @click="toggleExpand"
+        >
+          {{ expanded ? '收起' : '全屏看动画' }}
+        </button>
       </div>
     </CardBody>
   </article>
@@ -475,6 +716,11 @@ watch(iframeEl, (element) => {
   /* 卡片皮肤（白面 / 边框 / 圆角 / 投影）唯一来源 = base.css 的 `.k12-card`；
    * 三段结构的内边距与底色 = `.k12-card-head/-body/-foot`。 */
   min-width: 0;
+  /* ★ 本卡片自己当**容器查询的容器**（下面 `.anim__frame` 之后那段 `@container` 要用）：
+   *   会不会被挤成"竖直细条"只取决于**卡片自己的宽度** —— 同一个 1024 窗口里，
+   *   两个侧栏都开时卡片是 136px、都收起时是 612px，视口宽度分不开这两种情况。
+   *   `inline-size` 只把行内轴从内容里摘出来，卡片高度照旧由内容决定。 */
+  container-type: inline-size;
   /**
    * ★★ 舞台高度 = **按比例 + 下限 + 上限**，不是定值。
    *
@@ -633,6 +879,24 @@ watch(iframeEl, (element) => {
   font-weight: 650;
 }
 
+/* ── 卡头不许被挤爆（窄卡片里的第二处挤压）─────────────────────────────
+ * `.k12-card-head`（base.css）是**不换行**的 flex 行：`[title] [meta…] [actions]`。
+ * 本卡片的 meta 槽里有 5–6 段 chip（概念 / 内置·我的 / 学段 / 状态 / 时长），
+ * 窄卡片下这一行放不下就整体向右溢出去 —— 被推出卡片的是**右端的对象级动作**，
+ * 里面就有「全屏看」：卡片窄到看不清动画时，唯一的出路反而先被挤出可视区。
+ * ★ 只覆盖**本卡片**（`.anim` 前缀 + `:deep`），不动全局 `.k12-card-head`：
+ *   CardHeader 是四张卡片共用的三段结构（`tests/card-structure.test.ts` 钉着），
+ *   在那里加换行等于替所有卡片改版式。宽卡片一行放得下时不产生第二行，观感不变。
+ * ★ 只加**布局保护**（换行），不重写卡头的皮肤（底色 / 描边 / 内边距仍在 base.css）。 */
+.anim :deep(.k12-card-head) {
+  flex-wrap: wrap;
+}
+/* 动作组自己也要能换行：最窄档（实测 136px）连三个按钮一行都放不下，
+ * 不换行就还是会横向溢出卡片（`margin-left: auto` 的右端对齐在换行后照旧生效）。 */
+.anim :deep(.k12-card-head__actions) {
+  flex-wrap: wrap;
+}
+
 .tool {
   font-family: var(--k12-font-mono);
   /* 时长读数这类等宽小字：meta 档（不是 ≤4 字角标，角标另走 .chip） */
@@ -706,6 +970,49 @@ watch(iframeEl, (element) => {
   /* iframe 里的动画 HTML 按白底绘制 → 必须给**不透明**的 paper 白。
    * `--k12-surface` 在全部 18 组主题里都是 #FFFFFF，是白底的唯一来源。 */
   background: var(--k12-surface);
+}
+
+/* ── 窄容器兜底（容器查询）────────────────────────────────────────────
+ * 缺陷现场（真机 + 逐宽度量测）：上面那条 `min-height: 480px` 只在**宽卡片**里成立。
+ * 卡片一旦窄于约 823px（阅读栏封顶 880px，所以"卡片够宽"这件事从来不会自动成立），
+ * 480 就赢过 `aspect-ratio`，盒子随宽度变小而越来越"高"——
+ * 实测 136px 宽 → **136×480**（比例 0.28，学生看到的是一根竖直白条）；
+ * 393px 宽（1280 窗口 + 两栏全开）→ 393×480（比例 0.82，同样是立着的）。
+ *
+ * ★★ 为什么不能直接写 `min-height: 0`（第一直觉，但实测是错的）：
+ *   iframe 里不是"一整块画布"，而是**外壳 + 画布**：外壳（标题 20px / 字幕 15px /
+ *   步骤条）是定高的 HTML，实测吃掉 129px（卡片 ≥300px 宽）、180px（224px 宽）、
+ *   232px（136px 宽，标题字幕换行更多）；画布拿不到高度，`xMidYMid meet` 就改按
+ *   高度侧缩放。实测（Electron 44 逐宽度量测，见提交说明）：
+ *     宽 136 → 画布 103×0   ⇒ 缩放 0  → **动画整个消失**（外壳把高度吃光，还被 overflow 裁掉）
+ *     宽 393 → 画布 359×100 ⇒ 缩放 0.24× → 节点字 3.8px
+ *     宽 552 → 画布 519×193 ⇒ 缩放 0.46× → 节点字 7.3px
+ *   而今天的 480 下限在同样宽度下是 0.143 / 0.498 / 0.72 ⇒ 节点字 2.3 / 8.0 / 11.5px。
+ *   也就是说：把下限归零**不是免费的形状修复，它把字号一起换掉了** ——
+ *   552px 那档正好落回 `animation-card-stage.test.ts` 说的"肉眼 7–8px"。
+ *
+ * ★ 所以窄档只把"固定下限"换成"按舞台比例 + 外壳开销"，并且**不超过原来的 480**：
+ *     height = min(480px, 容器宽 × 420/720 + 340px)
+ *   340px = 实测最坏的**外壳**开销（334px @136px 宽，用的是库里最长的标题 30 字 +
+ *   最长字幕 23 字；短文案那一档只要 232px）+ 余量。逐宽度量测（短/长两版文案）的结果：
+ *   · 盒子不再随变窄而越来越"高"：136px 下 480 → 419（比例 0.28 → 0.32）、224px 下 480 → 471；
+ *     且**任何宽度都不会比今天的 480 更高**（算式 ≥480 时不生效：≥240px 宽完全等同今天）；
+ *   · 字号一分不降：136px 及以上，画布高度都 ≥ 按比例所需（长短文案都验过），
+ *     缩放与今天**逐点相等**（136 → 0.143、224 → 0.265、300 → 0.37、520 → 0.676）。
+ *     `meet` 是等比缩放，画面在两种方案下**同一个尺寸**，差别只是白边变少。
+ *   ⚠️ 已知代价（量过，不藏着）：容器窄到 ~104px 且碰到**最长**标题那一档时，
+ *     外壳自己就要 480px —— 那时任何"把盒子变矮"的规则都会切到外壳文字（动画本来就已
+ *     完全看不见，画布 0）。真正该修的是**卡片宽度**（1024 窗口 + 两个侧栏都开时，
+ *     主列只剩 176px）；本卡片这一层只能做到"不把盒子拉长"。
+ *
+ * ⚠️ 为什么是容器查询而不是 `@media`：见 `.anim` 里 `container-type` 那段 ——
+ *   同一个窗口宽度下卡片宽度可以差 4 倍多，媒体查询分不开。
+ *   容器查询在 Chromium ≥105 支持（本应用 Electron 44）；万一不支持，
+ *   整块规则被忽略 = 退回今天的 480 下限（不会更糟）。 */
+@container (max-width: 560px) {
+  .anim__frame {
+    min-height: min(var(--k12-anim-min), calc(100cqw * 420 / 720 + 340px));
+  }
 }
 
 /* 全屏：舞台要大（这个模式的目的就是看动画），所以这里**放开对话栏那个上限**；
@@ -782,5 +1089,12 @@ watch(iframeEl, (element) => {
   font-size: var(--k12-fs-caption);
   line-height: 1.6;
   color: var(--k12-muted-2);
+}
+
+/* ── 窄容器态里的出口按钮 ──────────────────────────────────────────────
+ * 它是这一态**唯一的出路**（也是主要动作）→ 与「播放」同一支配方（accent-ink 填充），
+ * 不跟卡头那颗次要动作的描边样式混。与上面那段说明留出间距（`.btn` 自己只有内边距）。 */
+.anim__expand-cta {
+  margin-top: 10px;
 }
 </style>

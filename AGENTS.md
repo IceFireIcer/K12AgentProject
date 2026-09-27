@@ -42,6 +42,8 @@
 - **RAG 学段隔离必须在 SQL 层**；向上兼容标 `compat`；知识库源：`K12KnowledgeBase/` → `import_knowledge.py --write` → `build_kb`。**不要手改 `server/knowledge/`**（下次导入覆盖）；改概念须同步 `SLUGS`。
 - **无 vue-router**：导航唯一真相 `stores/ui.ts` 的 `PAGES` + `go(page)`。
 - **设计令牌** `--k12-*`：改 `scripts/design/tokens.source.json` → `npm run gen:tokens`；**勿手改** `tokens.generated.css`（CI 查 diff）。字号走 `base.css` `:root` 阶梯，**页面不写死 `font-size: Npx`**。
+- **视觉边界 = 三件套（D-106）**：底色差（主）+ 两支线（副）+ **只给结构分面**的单侧投影（副）。**任何一条都不能单独拿掉**：`page`/`surface-2` 的不塌陷下限由 `author-tokens.mjs` 派生（对白纸 ≥1.045、两者差 ≥1.01，18 组配色逐组保证）；`border` 1.47:1 / `border-strong` 2.54:1 **都不到 WCAG 3:1**，这是有意的（3:1 会让浅色界面变线框风）。改动前先读 `base.css` 文件头的三件套口径。守卫：`tests/visual-edges.test.ts`（6 条）+ 变异 107–112 + `scripts/design/check-contrast.mjs --strict`（342 项）。**改令牌色值必须同步重建后端动画皮肤**：`cd server && uv run python scripts/build_animation_skins.py`（它读同一份 `tokens.source.json`，漏了红 `test_sandbox_palette`）。
+- **阴影只有一处定义**：`--k12-shadow-*` 全在 `base.css` 的 `:root`（`gen-tokens.mjs` 只管两支聚焦环）。**同一个自定义属性出现两处定义时，后加载的静默覆盖前者**（P-158）。
 - **品牌**：真源 `src/shared/brand.ts`；`index.html` title 与 `electron-builder.yml` `productName` **须手工同步**。**userData slug 钉死**（`applyStableUserDataSlug`），改名不迁数据。
 - **双视角（D-063）**：技术证据进 `<TeacherGate>`；学生面禁技术词/内部 id/kp slug（用 `kpLabel()`）；承诺文案不得超出该路径实际行为。守卫：`student-view-discipline.test.ts` + `npm run ux:student`。
 - **三档视角（D-094，2026-09-26）**：`student < teacher < debug`，判据只有「当前档位 ≥ 该页要求的档位」（`stores/ui.ts` 的 `VIEW_MODE_ORDER` / `viewModeAllows` / `requiredViewFor`）。**演示驾驶舱**（`PAGES.demo.nav === 'debug'`）摊开后端隐藏机制，入口在设置页高级区（先切档再跳页）；技术口原文案集中在 `components/diag/evidence.ts`（守卫按文件豁免，凭据在 `tests/demo-mode.test.ts`）。

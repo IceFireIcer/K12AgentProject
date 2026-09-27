@@ -26,7 +26,8 @@
  *        因为那正是「设计合理性」25% 的材料。
  *    ⚠️ 分层只改「默认给谁看」，**不改任何数据通路**：降级档位仍原样读 Python。
  *
- * 响应式：≥1280px 是常驻栏（`open` 控制显隐）；<1280px 变成浮层面板 + 遮罩，
+ * 响应式：≥1024px 是常驻栏（`open` 控制显隐）；窗口更窄（媒体查询 1023px 及以下）
+ * 变成浮层面板 + 遮罩 —— 1024–1279 这一档**仍是常驻栏**（优化报告 §2.2，旧口径 <1280 已废），
  * 点遮罩即关。判断放在 CSS 里，`open` 由 ChatView 持有 —— 组件自己不去监听窗口，
  * 免得同一份断点逻辑在两个地方各写一遍。
  *
@@ -399,11 +400,12 @@ watch(tab, () => {
             <Info :size="14" />
             <h3 class="sec__title">这段回答的依据</h3>
           </div>
-          <!-- 学生视角：这次回答**参考了什么**（一句人话，取代原来的四级链） -->
-          <p class="basis" data-testid="answer-basis">{{ basisSentence }}</p>
+          <!-- 学生视角：这次回答**参考了什么**（一句人话，取代原来的四级链）
+               `k12-inset` = 纸面内部的嵌入块（底色 + 细线都归它，见 base.css 的材质模型） -->
+          <p class="basis k12-inset" data-testid="answer-basis">{{ basisSentence }}</p>
 
           <!-- 学段隔离：学生看到的是「不会超纲」；SQL 那句话在下面的教师视角里 -->
-          <p v-if="isolationNotice" class="isolation" data-testid="isolation-notice">
+          <p v-if="isolationNotice" class="isolation k12-inset" data-testid="isolation-notice">
             <Info :size="13" />
             <span>{{ isolationNotice.studentText }}</span>
           </p>
@@ -472,7 +474,7 @@ watch(tab, () => {
                ★ 两行各说一件事，不是复读：标题给**是哪个知识点**，正文给**为什么是它**
                  （服务端的 `reason`，如「这个知识点还没练熟，我们把刚才卡住的地方再过一遍。」）。
                  所以这里不做合并 —— 合并会把「在哪儿」或「为什么」丢掉一个。 -->
-          <div v-if="insight.recommended" class="reco" data-testid="rail-recommendation">
+          <div v-if="insight.recommended" class="reco k12-inset" data-testid="rail-recommendation">
             <div class="reco__text">
               <p class="reco__title">建议下一步：{{ recommendedName }}</p>
               <p class="reco__desc">{{ insight.recommended.reason }}</p>
@@ -512,7 +514,7 @@ watch(tab, () => {
           <!-- 学生视角：一句人话（取代毫秒耗时 / degraded 原值 / 参数摘要）。
                ★ 用 `traceGroups.length > 0` 而不是 `v-else`：`bridgeError` 那条分支下
                  可能一条轨迹都没有，那时渲染一个空盒子会像「内容没加载出来」。 -->
-          <p v-else-if="traceGroups.length > 0" class="trace-summary" data-testid="trace-summary">
+          <p v-else-if="traceGroups.length > 0" class="trace-summary k12-inset" data-testid="trace-summary">
             {{ traceSummary }}
           </p>
 
@@ -633,7 +635,9 @@ watch(tab, () => {
     <!-- 知识点详情抽屉（二级界面） -->
     <Teleport to="body">
       <div v-if="kpRow" class="kpd" role="dialog" aria-modal="true" @click.self="kpDetail = null">
-        <aside class="kpd__panel" data-testid="kp-detail">
+        <!-- 二级抽屉是**浮层**：它背后是整页正文（有东西经过），所以底色走毛玻璃 —— 
+             抽屉不该把下面的内容彻底糊掉，读者要能感到自己还站在那一页上。 -->
+        <aside class="kpd__panel k12-glass" data-testid="kp-detail">
           <header class="kpd__head">
             <div class="kpd__head-text">
               <p class="kpd__title">{{ kpRow.name }}</p>
@@ -701,7 +705,12 @@ watch(tab, () => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--k12-border);
+  /* 右栏与内容区之间是**结构分面**（白纸面 vs 带学段色的桌面）：
+   * 线的档位与侧栏、顶栏一致（strong），三条边界的深浅才读成同一套语言；
+   * 再加一条朝桌面一侧的单侧投影 —— 三个信号齐了，右栏才是「立在那儿的一栏」，
+   * 而不是和内容区糊在同一张纸上。 */
+  border-left: 1px solid var(--k12-border-strong);
+  box-shadow: var(--k12-shadow-edge-left);
   background: var(--k12-surface);
 }
 .rail__head {
@@ -710,10 +719,16 @@ watch(tab, () => {
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--k12-border);
+  /* 区块头带一档底色 + 强线：与卡头（`.k12-card-head`）同一套语言 ——
+   * 读者在整站看到的「一块内容的最上面那一条」永远是同一个形态。 */
+  border-bottom: 1px solid var(--k12-border-strong);
+  background: var(--k12-surface-2);
 }
 /* 页签轨道：三段等分。`min-width: 0` 是让 `flex: 1 1 0` 真的能压到等分的关键 ——
- * 少了它，`flex-basis: 0` 会被内容的 min-content 宽度顶开，三段就不等了。 */
+ * 少了它，`flex-basis: 0` 会被内容的 min-content 宽度顶开，三段就不等了。
+ * ★ 轨道**不再自带底色**：它所在的 `.rail__head` 已是一条带底色的条带（surface-2），
+ *   轨道再铺一次 surface-2 就与条带融成一片、分段控件失去"轨道"的形态。
+ *   现在的读法是「条带即轨道，选中的那一段是白药丸」——对比反而更强。 */
 .rail__tabs {
   flex: 1;
   min-width: 0;
@@ -721,7 +736,7 @@ watch(tab, () => {
   gap: 2px;
   padding: 2px;
   border-radius: var(--k12-r-control);
-  background: var(--k12-surface-2);
+  background: transparent;
 }
 .rail__tab {
   flex: 1 1 0;
@@ -779,6 +794,15 @@ watch(tab, () => {
   flex-direction: column;
   gap: 10px;
 }
+/* 面板之间（必要时）的分隔：三段各自是一整块内容，之间只靠 10px 的 gap 相撞时
+ * 「上一块的尾巴」与「下一块的开头」会连成一片。分隔线用**淡一半的 border**，
+ * 它只是把两块切开，不该自己成为一条结构分面线（那是顶栏/侧栏/右栏的档位）。
+ * ⚠️ 写在 section 自己身上（而不是给父级加 margin）：`.rail__body` 是纯块级容器，
+ * 分隔线随 section 走才不会有「谁负责留白」的第二处真相。 */
+.sec + .sec {
+  border-top: 1px solid color-mix(in srgb, var(--k12-border) 60%, transparent);
+  padding-top: var(--k12-sp-4);
+}
 .sec__head {
   display: flex;
   align-items: center;
@@ -800,12 +824,12 @@ watch(tab, () => {
 }
 /* ★★ 学生视角的两句人话（「本次参考了…」/「智团团这轮做了：…」）。
  * 它们取代了降级链与毫秒轨迹，所以在这一栏里是**正文**（`sm` 14px），
- * 不再是那一堆 `xs` 的运维小字 —— 这两句是学生唯一要读的东西。 */
+ * 不再是那一堆 `xs` 的运维小字 —— 这两句是学生唯一要读的东西。
+ * ★ 皮肤（底色 + 细线 + 圆角）归全局的 `k12-inset`：这里只留**排版与内边距**。
+ *   底色与线的配方一旦在本文件里再抄一份，就会与其余嵌入块各自漂移。 */
 .basis,
 .trace-summary {
   padding: 10px 11px;
-  border-radius: var(--k12-r-inset);
-  background: var(--k12-surface-2);
   font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-ui);
   color: var(--k12-fg-2);
@@ -878,13 +902,13 @@ watch(tab, () => {
   color: var(--k12-muted);
 }
 
+/* 「不会超纲」这条保证也放在纸上的嵌入块里（`k12-inset` 给底色与线）：
+ * 它与「这段回答的依据」是同一档东西 —— 都是这一栏里学生要读的一句话。 */
 .isolation {
   display: flex;
   align-items: flex-start;
   gap: 7px;
   padding: 9px 10px;
-  border-radius: var(--k12-r-inset);
-  background: var(--k12-surface-2);
   font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
@@ -933,13 +957,13 @@ watch(tab, () => {
   color: var(--k12-muted);
 }
 
+/* 推荐下一步也是一块嵌入块（`k12-inset`）：它与「这段回答的依据」「智团团这轮做了什么」
+ * 并列，都是这一栏里的一句话块 —— 三者共用同一档材质，读者不必每块重新学一遍。 */
 .reco {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 11px 12px;
-  border-radius: var(--k12-r-inset);
-  background: var(--k12-surface-2);
 }
 .reco__text {
   flex: 1;
@@ -1120,14 +1144,25 @@ watch(tab, () => {
   justify-content: flex-end;
   background: color-mix(in srgb, var(--k12-fg) 30%, transparent);
 }
+/* 皮肤（半透明底 + 模糊）归全局的 `k12-glass`（见 base.css 的材质模型）：
+ * 抽屉是浮层，且它背后**真的有内容经过**（整页正文），毛玻璃才有意义。
+ * ⚠️ 这里**不能**再写一条无条件的 `background` 当兜底：scoped 选择器带
+ *   `[data-v-x]`，优先级高于单个全局类，那条实色白会把 `.k12-glass` 的半透明底
+ *   整个盖住（实测：抽屉会变成一块不透明的白，模糊也就无从谈起）。
+ *   所以兜底只在**不支持 backdrop-filter 时**生效（`@supports not`）——
+ *   不支持的环境里 `.k12-glass` 整条失效，此时由下面这条给出实色白。 */
 .kpd__panel {
   width: min(420px, 94vw);
   height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--k12-surface);
   border-left: 1px solid var(--k12-border-strong);
   box-shadow: var(--k12-shadow-float);
+}
+@supports not (backdrop-filter: blur(1px)) {
+  .kpd__panel {
+    background: var(--k12-surface);
+  }
 }
 .kpd__head {
   display: flex;

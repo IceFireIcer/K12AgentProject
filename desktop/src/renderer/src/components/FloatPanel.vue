@@ -28,7 +28,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useEscape } from '../composables/useEscape'
 import { useFocusReturn } from '../composables/useFocusReturn'
-import { GripHorizontal, Minus, MessageCircleQuestion, X, Sparkles } from 'lucide-vue-next'
+import { ChevronUp, GripHorizontal, Minus, MessageCircleQuestion, X, Sparkles } from 'lucide-vue-next'
 import { useFloatPanel } from '../stores/floatPanel'
 import { useChatStore } from '../stores/chat'
 import type { ChatTurn } from '../api/events'
@@ -55,15 +55,20 @@ interface Ask {
 let seq = 0
 const asks = ref<Ask[]>([])
 
+/**
+ * 换关联对象就清空上一轮的追问，避免串场。
+ * ★ 判据必须带上 `kind`（与 store 的 `toggleFrom` 同一条理由）：
+ *   三页的入口常常指向**同一个知识点**，只比 title 时"换了页却不清空"，
+ *   学生会在编程页的窗里读到刚才动画页的问法。
+ */
 watch(
-  () => floatPanel.subject?.title,
-  (title, prev) => {
-    // 换关联对象：清空上一轮的追问，避免串场
-    if (title !== prev) asks.value = []
+  () => `${floatPanel.subject?.kind ?? ''}\u0000${floatPanel.subject?.title ?? ''}`,
+  (now, prev) => {
+    if (now !== prev) asks.value = []
   }
 )
 
-/** 视口坐标。首次打开落在右下角。 */
+/** 视口坐标。首次打开落在内容区右下角（`defaultPos` 按围栏算）。 */
 const position = computed(() => floatPanel.pos ?? floatPanel.defaultPos())
 
 /** 出场锚点：把 transform-origin 指向触发按钮（相对窗口左上角） */
@@ -80,14 +85,32 @@ const style = computed(() => ({
   left: `${position.value.x}px`,
   top: `${position.value.y}px`,
   width: `${floatPanel.size.w}px`,
+  // ★★ 高度**必须显式给**（2026-09-27 走查）：此前只给了 width，
+  //   于是窗高完全由内容决定 —— 追问几轮后它自己长到出屏。
+  //   折叠态走 `.fp--collapsed` 的 `height: auto`（那一档就是要贴着标题栏收起来）。
+  ...(floatPanel.collapsed ? {} : { height: `${floatPanel.size.h}px` }),
   ...originStyle.value
 }))
 
 // ── 拖拽 ────────────────────────────────────────────────────────────────
 let drag: { pointerId: number; dx: number; dy: number } | null = null
 
+/**
+ * 在标题栏上按下时开始拖动。
+ *
+ * ★★ 必须**放过可交互子元素**（2026-09-27 走查的真 bug）：标题栏里有关闭 / 折叠两个按钮，
+ *   而 `setPointerCapture` 会把后续指针事件**全部重定向到捕获元素**（标题栏），
+ *   于是按钮上的 `click` 永远不触发 —— 表现就是「X 点不动、最小化没反应」。
+ *   `.stop` 修饰符挡不住它：那是**点击**事件的冒泡，不是指针捕获的重定向。
+ *   → 判据放在这里：从按钮（或任何表单控件）上按下的，不进入拖拽路径，也不捕获指针。
+ */
+function isInteractive(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('button, input, textarea, select, a[href]') !== null
+}
+
 function onPointerDown(e: PointerEvent) {
   if (e.button !== 0) return
+  if (isInteractive(e.target)) return
   const rect = rootRef.value?.getBoundingClientRect()
   if (!rect) return
   // 保留抓取点偏移：从哪儿按下的，就从哪儿拖
@@ -98,13 +121,10 @@ function onPointerDown(e: PointerEvent) {
 
 function onPointerMove(e: PointerEvent) {
   if (!drag || e.pointerId !== drag.pointerId) return
-  const { w } = floatPanel.size
-  const h = rootRef.value?.offsetHeight ?? floatPanel.size.h
-  const m = floatPanel.margin
-  // 限制在视口内；到边就停住（不回弹——这是精确摆放，不是甩动）
-  const x = Math.min(Math.max(e.clientX - drag.dx, m), window.innerWidth - w - m)
-  const y = Math.min(Math.max(e.clientY - drag.dy, m), window.innerHeight - h - m)
-  floatPanel.moveTo(x, y)
+  // ★ 夹紧交给 store（`moveTo`）：围栏是"内容区"而不是视口 —— 这样窗永远不会
+  //   压到顶栏的窗口按钮或侧栏导航上（用户要求"不能拖到外面或者挡住按钮"）。
+  //   组件只负责把指针位置换算成窗的左上角。
+  floatPanel.moveTo(e.clientX - drag.dx, e.clientY - drag.dy)
 }
 
 function onPointerUp(e: PointerEvent) {
@@ -112,20 +132,55 @@ function onPointerUp(e: PointerEvent) {
   drag = null
 }
 
-/** 视口变化时把窗口拉回可见区域（否则缩放后可能跑到屏幕外） */
+/** 视口变化时把窗拉回围栏内（否则缩放窗口后它可能跑到围栏外 / 比围栏还大）。 */
 function clampToViewport() {
-  if (!floatPanel.open || !floatPanel.pos) return
-  const { w } = floatPanel.size
-  const h = rootRef.value?.offsetHeight ?? floatPanel.size.h
-  const m = floatPanel.margin
-  floatPanel.moveTo(
-    Math.min(Math.max(floatPanel.pos.x, m), window.innerWidth - w - m),
-    Math.min(Math.max(floatPanel.pos.y, m), window.innerHeight - h - m)
-  )
+  if (!floatPanel.open) return
+  // 交给 store：它会按当前围栏重算尺寸与位置（含面积比例与围栏上限）。
+  floatPanel.reclamp()
 }
 
-onMounted(() => window.addEventListener('resize', clampToViewport))
+onMounted(() => {
+  window.addEventListener('resize', clampToViewport)
+  // ★ 「只在动手试试三页存在」：这只窗挂在外壳上（换页不卸载，追问连续性靠它），
+  //   所以必须**主动**在离开那三页时关掉 —— 否则它会跟着学生跑到对话页。
+  floatPanel.initPageFence()
+  // 首次打开就按当前窗口/围栏校正一次尺寸（默认值是名义尺寸，不是最终值）。
+  floatPanel.setSize(floatPanel.size.w, floatPanel.size.h)
+})
 onBeforeUnmount(() => window.removeEventListener('resize', clampToViewport))
+
+// ── 改大小（右下角手柄）─────────────────────────────────────────────────
+/*
+ * 为什么要有这个：窗的内容是**对话**，而对话长度不可预知 ——
+ * 固定尺寸会让长回答只能在小窗里滚动，短回答又留着大片空白。
+ * 让学生自己拉一把是最省事也最符合直觉的解法（窗本来就是他的）。
+ * 上限夹紧放在 store 里（`setSize`），组件只负责把指针位移换算成尺寸。
+ */
+let resizing: { pointerId: number; startW: number; startH: number; x: number; y: number } | null = null
+
+function onResizeDown(e: PointerEvent) {
+  if (e.button !== 0) return
+  resizing = {
+    pointerId: e.pointerId,
+    startW: floatPanel.size.w,
+    startH: floatPanel.size.h,
+    x: e.clientX,
+    y: e.clientY
+  }
+  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  e.preventDefault()
+  e.stopPropagation()
+}
+
+function onResizeMove(e: PointerEvent) {
+  if (!resizing || e.pointerId !== resizing.pointerId) return
+  floatPanel.setSize(resizing.startW + (e.clientX - resizing.x), resizing.startH + (e.clientY - resizing.y))
+}
+
+function onResizeUp(e: PointerEvent) {
+  if (!resizing || e.pointerId !== resizing.pointerId) return
+  resizing = null
+}
 
 // ── 追问 ────────────────────────────────────────────────────────────────
 /**
@@ -245,12 +300,21 @@ useFocusReturn(rootRef, () => floatPanel.open, { trap: false })
           <button
             type="button"
             class="fp__btn"
-            :title="floatPanel.collapsed ? '展开' : '折叠'"
+            :title="floatPanel.collapsed ? '展开' : '折叠（只留标题栏）'"
+            data-testid="float-panel-toggle"
             @click.stop="floatPanel.toggleCollapsed()"
           >
-            <Minus :size="14" />
+            <!-- 图标随状态换，不原地留着减号：折叠后点"减号"来放大读不出来
+                 （走查问过"最小化以后在哪儿点回来"）。 -->
+            <component :is="floatPanel.collapsed ? ChevronUp : Minus" :size="14" />
           </button>
-          <button type="button" class="fp__btn" title="关闭" @click.stop="floatPanel.close()">
+          <button
+            type="button"
+            class="fp__btn"
+            title="关闭"
+            data-testid="float-panel-close"
+            @click.stop="floatPanel.close()"
+          >
             <X :size="14" />
           </button>
         </header>
@@ -282,6 +346,19 @@ useFocusReturn(rootRef, () => floatPanel.open, { trap: false })
           <div class="fp__foot">
             <MessageComposer ref="composerRef" compact @send="onSend" />
           </div>
+
+          <!-- 右下角改大小手柄：对话长度不可预知，让窗能跟着学生的需要变。
+               尺寸上下限在 store 的 `setSize` 里夹紧（含视口约束）。 -->
+          <span
+            class="fp__resize"
+            data-testid="float-panel-resize"
+            title="拖动改变窗口大小"
+            aria-hidden="true"
+            @pointerdown="onResizeDown"
+            @pointermove="onResizeMove"
+            @pointerup="onResizeUp"
+            @pointercancel="onResizeUp"
+          />
         </template>
       </section>
     </Transition>
@@ -289,6 +366,13 @@ useFocusReturn(rootRef, () => floatPanel.open, { trap: false })
 </template>
 
 <style scoped>
+/* 浮层 = **毛玻璃**（半透明白 + blur）。
+ * ★ 这个窗是「边看动画边问」的那只 —— 它背后**真的有内容经过**（动画舞台、
+ *   正文），毛玻璃在这里不是装饰：它让学生能感到"舞台还在我身后"，
+ *   而不是被一块实心白板挡住（浮层一旦读起来像墙，就不敢一边看一边问了）。
+ * ⚠️ 为什么不用全局的 `.k12-glass` 类：scoped 选择器带 `[data-v-x]`，优先级高于
+ *   单个全局类 —— 这里必须自己给「兜底 → 半透明」两条，两套机制并存会打架。
+ *   兜底：不支持 backdrop-filter 的环境保持实色白（半透明底会让下层文字透上来）。 */
 .fp {
   position: fixed;
   z-index: 60;
@@ -297,6 +381,7 @@ useFocusReturn(rootRef, () => floatPanel.open, { trap: false })
   border-radius: var(--k12-r-card);
   overflow: hidden;
   /* 出场/退场：从锚点长出来、沿同路径返回 */
+  background: var(--k12-surface);
 }
 .fp--collapsed {
   /* 折叠态高度自适应 */
@@ -448,10 +533,65 @@ useFocusReturn(rootRef, () => floatPanel.open, { trap: false })
   padding: 8px 10px 10px;
 }
 
+/* ── 改大小手柄（右下角）────────────────────────────────────────────────
+ * ⚠️ 尺寸必须够点：18px 的可点区对 K12 学生偏小（图标按钮的下限是 28px，
+ *   而它是**拖拽**目标而不是点击目标 —— 拖拽对准要求更低，18 是折中：
+ *   再大就会盖住输入框右下角的发送键）。命中区用 padding 撑，视觉仍是一条细纹。 */
+.fp__resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  touch-action: none;
+  /* 斜纹（两道）用渐变画，不引图：零 CDN 纪律同样适用于装饰 */
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 3px,
+    color-mix(in srgb, var(--k12-muted-2) 55%, transparent) 3px 5px
+  );
+  border-bottom-right-radius: var(--k12-r-card);
+}
+
 /* ── 出场 / 退场 ──────────────────────────────────────────────────────── */
 .float-enter-from,
 .float-leave-to {
   opacity: 0;
   transform: scale(0.96);
+}
+
+/* ── 毛玻璃（必须放在本文件**末尾**，见下面的顺序说明）────────────────────
+ * ⚠️⚠️ 顺序是硬要求：这几条与被覆盖的规则**优先级完全相同**（都是
+ *   `.fp__x[data-v-xxx]`，0-2-0）—— 同优先级下**源序靠后者胜**。
+ *   把这块放在文件前面时实测：只有 `.fp` 生效（它的基础规则在它之前），
+ *   `.fp__bar/__body/__foot` 三条全被后面各自的基础规则盖回去（面板仍是实心白）。
+ *   所以这块**只能贴在文件末尾**，且新增 `.fp*` 背景时不要写到它之后。
+ *
+ * ⚠️ 玻璃化必须落在**真正铺底的那一层**（实测：父容器铺不透明白底时，
+ *   子元素的 backdrop-filter 只会采到那层白，"模糊"等于没发生）。这个窗的
+ *   三层内部块原本都自铺不透明底，会把根的玻璃整个盖死 —— 所以：
+ *     · 根 = 唯一的玻璃面（一次 backdrop-filter，不是三层各糊一次）；
+ *     · 正文 / 输入区 → 透明（它们铺的本来就是与根同色的 surface）；
+ *     · 标题栏 → 半透明学段浅底，**保留"这是能抓的把手"那点底色**，
+ *       只是不再是一块实心板。
+ *   兜底：不支持 backdrop-filter 的环境，上面那些基础规则里的实色底原样生效
+ *   （半透明底会让下层文字透上来，可读性是事故不是审美）。 */
+@supports (backdrop-filter: blur(1px)) {
+  .fp {
+    /* ⚠️ 94% 而不是更低：这个窗**压在动画舞台上**，而舞台是高对比的图形 ——
+     *   真机实测 88% 时背后的节点文字（"第 4 段""流经"）会透上来，
+     *   与窗里的回答正文抢读（学生要读的是窗里的字）。
+     *   模糊负责"透出背景的存在感"，不透明度的下限由**可读性**决定。 */
+    background: color-mix(in srgb, var(--k12-surface) 94%, transparent);
+    backdrop-filter: blur(12px) saturate(1.4);
+  }
+  .fp__bar {
+    background: color-mix(in srgb, var(--k12-surface-2) 80%, transparent);
+  }
+  .fp__body,
+  .fp__foot {
+    background: transparent;
+  }
 }
 </style>

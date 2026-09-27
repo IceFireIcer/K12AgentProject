@@ -49,6 +49,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { Trophy, Circle, PlayCircle, CheckCircle2, History, X, Info, RotateCcw } from 'lucide-vue-next'
 import { useQuizStore, type QuizAttempt } from '../stores/quiz'
 import { useQuizLayoutStore, type QuizLayout } from '../stores/quizLayout'
+import { useFloatPanel } from '../stores/floatPanel'
 import TeacherGate from '../components/TeacherGate.vue'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { QUIZ_TYPE_LABELS, SCORED_BY_LABELS, formatMasteryDelta } from '../labels'
@@ -59,6 +60,20 @@ import { useFocusReturn } from '../composables/useFocusReturn'
 import { scrollIntoViewRespectingMotion } from '../composables/useReducedMotion'
 
 const quiz = useQuizStore()
+const floatPanel = useFloatPanel()
+
+/**
+ * 「边做边问」—— 打开 / 收起悬浮追问窗（与动画页、编程页同一个入口形态）。
+ * 标题取当前关卡的学生话名字；还没选关卡时给中性说法（不摆 kpId）。
+ */
+function askAboutLevel(event: MouseEvent): void {
+  const kpId = quiz.activeKpId
+  floatPanel.toggleFrom(event.currentTarget as Element | null, {
+    kind: 'quiz',
+    title: kpId ? nameOf(kpId) : '这几道题',
+    hint: '做题卡住时可以问，问题会带上这一关的上下文。'
+  })
+}
 const knowledge = useKnowledgeStore()
 const layoutStore = useQuizLayoutStore()
 
@@ -676,6 +691,18 @@ onMounted(() => {
         <Trophy :size="14" class="stages__ico" />
         <span class="stages__label">关卡</span>
         <span v-if="quiz.progressLoading && levels.length === 0" class="stages__state">读取中…</span>
+        <!-- 「边做边问」：打开悬浮追问窗（与动画页 / 编程页同一个入口形态）。
+             它是**次要动作**，所以走 chip 形态而不是 `.k12-cta` ——
+             这一屏的主色填充属于提交 / 下一题那个主行动。 -->
+        <button
+          type="button"
+          class="stages__ask"
+          data-testid="quiz-view-ask"
+          title="打开追问窗，边做边问"
+          @click="askAboutLevel"
+        >
+          边做边问
+        </button>
       </header>
 
       <div v-if="levels.length > 0" class="stages__track" data-testid="quiz-levels">
@@ -1204,6 +1231,26 @@ onMounted(() => {
 .stages__state {
   font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
+}
+/* 「边做边问」：与关卡标签同一行的**次要动作**（描边 chip 形态）。
+ * `margin-left: auto` 把它推到右端 —— 它是页面级动作，不该挤在「关卡」标签旁边。 */
+.stages__ask {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-family: inherit;
+  font-size: var(--k12-fs-caption);
+  font-weight: 600;
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .stages__ask:hover {
+    border-color: var(--k12-accent-ink);
+    color: var(--k12-accent-ink);
+  }
 }
 /* 横向排开：窄屏靠横向滚动兜住，不换行挤压（卡片是「图标 + 关卡名 + 状态词」三件套，
  * 没有百分比 —— 见报告 2.3） */

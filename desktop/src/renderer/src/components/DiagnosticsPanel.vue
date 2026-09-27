@@ -8,7 +8,7 @@
  * 两只窗都挂在 `App.vue` 的 `#overlay` 上、都用同一份拖拽逻辑
  * （`composables/useDraggablePanel.ts`），但**是两只独立实例**：
  *   · 追问窗是**可交互**的（学生写问题、看回答）；
- *   · 这只窗**只读** —— 它一个可写控件都没有（只有「展开详情 / 在演示页打开 / 固定 / 关闭」），
+ *   · 这只窗**只读** —— 它一个可写控件都没有（只有「展开详情 / 在运行透视里打开 / 固定 / 关闭」），
  *     也**不接受任何指向运行时的参数**。演示时最怕手滑把状态改了，所以从结构上让它改不了。
  *
  * ══════════════════════════════════════════════════════════════════════════
@@ -19,8 +19,8 @@
  *     当前轮的摘要上，不随新轮次跳走）；
  *   · 内容**不进 6 事件流**（它不是对话的一部分，是这一轮的旁路证据）。
  *
- * ★ 数据源是 `stores/diagnostics.ts` 的**同一个 store**：与演示页共用一份快照、共用
- *   `DiagSummary` 组件 —— 浮窗说 3 次调用，演示页就是 3 次。
+ * ★ 数据源是 `stores/diagnostics.ts` 的**同一个 store**：与运行透视页共用一份快照、共用
+ *   `DiagSummary` 组件 —— 浮窗说 3 次调用，运行透视页就是 3 次。
  */
 import { computed, nextTick, ref, watch } from 'vue'
 import { GripHorizontal, Maximize2, Minus, Pin, X } from 'lucide-vue-next'
@@ -82,7 +82,7 @@ const drag = useDraggablePanel({
   isOpen: () => panel.open
 })
 
-/** 跳到演示页并定位到这一轮（讲解从「就地说一句」升级成「摊开讲」）。 */
+/** 跳到运行透视并定位到这一轮（讲解从「就地说一句」升级成「摊开讲」）。 */
 function openInDemo(): void {
   const turn = shown.value
   if (turn) diagnostics.select(turn.turn)
@@ -167,7 +167,7 @@ useFocusReturn(rootRef, () => panel.open, { trap: false })
           <footer class="dp__foot">
             <button type="button" class="dp__cta" data-testid="diag-open-demo" @click="openInDemo()">
               <Maximize2 :size="13" />
-              在演示页打开
+              在运行透视里打开
             </button>
           </footer>
         </template>

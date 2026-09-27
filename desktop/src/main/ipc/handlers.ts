@@ -29,7 +29,29 @@ import { bindCodeRunner, createRendererCodeRunner } from '../agent/extensions/co
 import { builtinCatalog } from '../agent/pi-bootstrap.ts'
 import { assertStudentId, isInside, resolveStudentPiPaths } from '../agent/pi-paths.ts'
 import { DiagnosticsStore, DIAGNOSTICS_FILE_NAME } from '../agent/diagnostics.ts'
-import type { DiagnosticsSnapshot } from '@shared/diagnostics'
+import { emptyDiagnosticsSnapshot, type DiagnosticsSnapshot } from '@shared/diagnostics'
+// ── 演示沙箱（预置数据）─────────────────────────────────────────────────
+//   ★ 开关是内存态（`demo/state.ts`），覆盖层在 `bridge/client.ts`，
+//     脚本与预置会话正文在 `demo/script.ts`，端点响应体在 `demo/data.ts`。
+//   ★★ 本文件只做三件事：注册三条 invoke、在四个处理器里插**装配防护**、
+//      在写操作的处理器里拒绝。**绝不**在这里拼预置内容。
+import { demoSeedState, isDemoSeeded, setDemoSeeded } from '../demo/state.ts'
+import {
+  buildDemoScript,
+  buildDemoSessionMessages,
+  DEMO_CURRENT_SESSION_ID
+} from '../demo/script.ts'
+import {
+  DEMO_CHAPTER_TITLE,
+  DEMO_GRADE_LEVEL,
+  demoOpeningBody,
+  demoSessionListBody
+} from '../demo/data.ts'
+import {
+  DEMO_BLOCKED_MESSAGE,
+  readDemoSeedState,
+  type DemoScriptPayload
+} from '@shared/demo-seed'
 import type { ChatRuntime, ChatSessionSource } from '../agent/runtime.ts'
 import { createChatRuntime } from '../agent/runtime.ts'
 import {
@@ -47,6 +69,8 @@ import {
   type ChatSendResult,
   type CodeExecuteRequest,
   type CodeExecuteResult,
+  type DemoScriptCallResult,
+  type DemoSeedCallResult,
   type DiagnosticsCallResult,
   type FetchModelsResult,
   type FileExportRequest,
@@ -618,6 +642,15 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   ipcMain.handle(IPC.sidecarGetInfo, (): SidecarState => sidecar.getState())
 
   ipcMain.handle(IPC.chatSend, (event, payload: unknown): ChatSendResult => {
+    /**
+     * ★★ 沙箱态 fail-safe 回绝。
+     *
+     * 正常情况下这条通道**根本不会被走到**：渲染层的 `send()` 已经在沙箱分支里
+     * 把这一句吃掉、换成脚本里的原话（见 `stores/chat.ts`）。这里是第二道 ——
+     * 一旦有人绕过渲染层（界面之外的调用、将来新增的发送入口），
+     * 也绝不让它落进真实轮次：那会拉起 Pi 并往会话 JSONL 里写东西。
+     */
+    if (isDemoSeeded()) return { ok: false, requestId: null, message: DEMO_BLOCKED_MESSAGE }
     const parsed = parseChatSendRequest(payload)
     if (!parsed.ok) return { ok: false, requestId: null, message: parsed.message }
 
@@ -649,6 +682,10 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   //     （渲染进程指定不了「读谁的」）。
   registerDiagnosticsHandlers()
 
+  // ── 演示沙箱：预置数据（三条 invoke）────────────────────────────────────
+  //   ★ 覆盖层在 `bridge/client.ts`（读），这里只注册开关与脚本下发。
+  registerDemoHandlers()
+
   // ── 设置域（票 07：渲染进程 → IPC → 主进程 → sidecar，渲染进程永远看不到 token）──
   //
   // 三条都是 **invoke**（有回执），所以**不登记**进 `PUSH_CHANNELS`。
@@ -678,6 +715,11 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   ipcMain.handle(
     IPC.settingsSave,
     async (_event, payload: unknown): Promise<SettingsCallResult<SettingsSnapshot>> => {
+      // ★ 沙箱态：拒绝保存。**`config.json` / `auth.json` 一个字节都不动** ——
+      //   演示里那套「早就配好的 Key」只是显示态，绝不许写回真实配置
+      //   （写回了，下一次真跑对话用的就是演示里那个假端点了）。
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
       // 入参形状不合法（被篡改 / 渲染进程 bug）：给可读回执，别让 body 变成 "undefined"
       if (typeof payload !== 'object' || payload === null) {
         return { ok: false, message: '保存设置失败：请求体不是对象（渲染进程传参有误）。' }
@@ -719,6 +761,12 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
     async (_event, payload: unknown): Promise<SettingsCallResult<ProbeResult>> => {
       // 探测要真的发一次外呼（DNS + TLS + 首字节），所以超时给得比读写宽：
       // 15s 是「校园网慢但能用」与「不把设置页吊死」的折中。
+      //
+      // ★★ 沙箱态**一律拒绝**：这条通道会真的发一次外呼。
+      //   演示里绝不能出现「探测成功」这种没发生过的事 —— 界面侧那颗按钮同时是禁用的
+      //   （两层都要有：按钮禁用管界面，这里管「有没有真的发出去」）。
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
       if (typeof payload !== 'object' || payload === null) {
         return { ok: false, message: '探测失败：请求体不是对象（渲染进程传参有误）。' }
       }
@@ -786,6 +834,9 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   ipcMain.handle(
     IPC.settingsFetchModels,
     async (_event, payload: unknown): Promise<SettingsCallResult<FetchModelsResult>> => {
+      // ★ 沙箱态一样拒绝：它也会真的外呼（见 `settings:probe` 那条的说明）。
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
       if (typeof payload !== 'object' || payload === null) {
         return { ok: false, message: '拉取模型失败：请求体不是对象（渲染进程传参有误）。' }
       }
@@ -853,6 +904,30 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   //   那个请求的字段集合被守卫 G6c 钉死为 `['text']`，学段一旦混进去，
   //   每轮对话都会顺带写一次学段，「发消息」与「改学段」两件事就再也分不开了。
   ipcMain.handle(IPC.gradeGet, async (): Promise<GradeCallResult<GradeState>> => {
+    /**
+     * ★★ 沙箱分支必须在 `ensureChatRuntime()` **之前**，且**不写** `currentGrade` 缓存。
+     *
+     * 两个理由，缺一个都会出真故障：
+     *   ① 放到 `ensureChatRuntime()` 之后 → 「进沙箱」这个动作会**真的把 Pi 会话拉起来**，
+     *      而装配会往学生的会话 JSONL 里写东西 —— 那就不是「一个字节都不落盘」了；
+     *   ② 顺手写 `currentGrade` 缓存 → 退出沙箱后指示器会停在预置学段上
+     *      （缓存只为「值没变就不推送」，它一旦被预置值污染，真实值反而推不出去）。
+     */
+    // ★★ 三个字段与 `demo/data.ts` 的 `demoGradeStateBody()` **必须同源**：
+    //   顶栏 chip 与「我选年级」走的是**这条**分支（沙箱态不装配会话、也就没有推送），
+    //   而运行透视页与学习报告读的是那份响应体。两处不一致的表现是
+    //   「顶栏说本地规则判定、报告页说 AI 引擎判定」，同一次演示里两个答案。
+    if (isDemoSeeded()) {
+      return {
+        ok: true,
+        data: {
+          gradeLevel: DEMO_GRADE_LEVEL,
+          origin: 'llm',
+          source: 'inferred',
+          decidedBy: 'llm'
+        }
+      }
+    }
     let instance: ChatRuntime
     try {
       instance = await ensureChatRuntime()
@@ -882,6 +957,9 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   ipcMain.handle(
     IPC.gradeSet,
     async (_event, payload: unknown): Promise<GradeCallResult<GradeSetResult>> => {
+      // ★ 沙箱态：拒绝写入（真实 `learning.db` 的学段一个字节都不动）
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
       const level = readGradeLevel((payload as { gradeLevel?: unknown } | undefined)?.gradeLevel)
       if (level === null) {
         return { ok: false, message: '设定学段失败：学段取值不合法（只接受四个学段之一）。' }
@@ -918,6 +996,16 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   //   与 Pi 会话无关（拉 Pi 进来还会让「刚启动就点章节」受装配竞态牵连）。
 
   ipcMain.handle(IPC.chapterGet, async (): Promise<ChapterCallResult<ChapterState>> => {
+    /**
+     * ★★ 沙箱分支（`ensureChatRuntime()` 的防护见 `grade:get` 那条）——
+     * 这一条本来就不走装配，但它**必须**在 `fetchChapterState()` 之前：
+     * 否则沙箱态下指示器读的是真实学生的章节，与预置画像对不上。
+     * ★ 同样**不写** `currentChapter` 缓存：它一旦被预置值污染，
+     *   退出沙箱后「值没变就不推送」会让真实章节推不出去。
+     */
+    if (isDemoSeeded()) {
+      return { ok: true, data: { gradeLevel: DEMO_GRADE_LEVEL, chapterTitle: DEMO_CHAPTER_TITLE } }
+    }
     // ★ 学生身份由**主进程**决定（渲染进程递来的身份一律不信，见 DEFAULT_STUDENT_ID）
     const result = await fetchChapterState(resolveActiveStudentId())
     if (!result.ok) return { ok: false, message: result.message }
@@ -940,6 +1028,9 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   ipcMain.handle(
     IPC.chapterSet,
     async (_event, payload: unknown): Promise<ChapterCallResult<ChapterSetResult>> => {
+      // ★ 沙箱态：拒绝写入（与 `grade:set` 同一条纪律）
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
       const title = readChapterTitle((payload as { chapterTitle?: unknown } | undefined)?.chapterTitle)
       if (title === null) {
         return {
@@ -1051,7 +1142,22 @@ export const pushDiagnosticsTurn = (snapshot: DiagnosticsSnapshot): void => {
 
 /** 两条 invoke 通道：读取与清空。**失败也给一句可读中文**，绝不抛过 IPC。 */
 function registerDiagnosticsHandlers(): void {
+  /**
+   * ★★ 沙箱态：信封一律从**空**开始，且**绝不读落盘的 JSONL**。
+   *
+   * 两个理由：
+   *   ① 盘上那份是**真实学生**上一轮跑出来的（含真实学段、真实拦截记录）——
+   *      把它端到演示屏幕上，就是「预置数据」这套东西最不该出的那种错；
+   *   ② 「轮次时间轴只显示**已放过的**轮次」：真相在渲染进程那边（它知道放过几轮），
+   *      主进程这里没有可回的东西，老实地回空快照。
+   *
+   * ★ 往后的信封由渲染进程在每轮脚本收尾时**累加**进诊断 store（与真实轮次
+   *   共用同一个 `applySnapshot` 入口）—— 所以浮窗与驾驶舱看到的仍是同一份数据。
+   */
+  const blocked = (): DiagnosticsCallResult => ({ ok: true, data: emptyDiagnosticsSnapshot() })
+
   ipcMain.handle(IPC.diagnosticsRead, (): DiagnosticsCallResult => {
+    if (isDemoSeeded()) return blocked()
     try {
       return { ok: true, data: diagnosticsStoreFor(resolveActiveStudentId()).snapshot() }
     } catch (error) {
@@ -1060,11 +1166,99 @@ function registerDiagnosticsHandlers(): void {
   })
 
   ipcMain.handle(IPC.diagnosticsClear, (): DiagnosticsCallResult => {
+    // ★ 沙箱态：只清**眼前那份**，**不碰磁盘** —— 盘上那份是真实学生的记录，
+    //   演示前后都不该因为「一键清空」而少一行（那正是「一字未动」的一部分）。
+    if (isDemoSeeded()) return blocked()
     try {
       // ★ 清空是**幂等**的：没有记录时也返回空快照（界面要的是「现在是空的」这个结论）
       return { ok: true, data: diagnosticsStoreFor(resolveActiveStudentId()).clear() }
     } catch (error) {
       return { ok: false, message: `清空演示数据失败：${error instanceof Error ? error.message : String(error)}` }
+    }
+  })
+}
+
+/* ------------------------------------------------------------------ *
+ * 演示沙箱：预置数据的三条 invoke
+ *
+ * ★ 覆盖层（`bridge/client.ts`）负责**读**，这里负责**开关**与**脚本下发**。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 切换档位之后多久重载界面。
+ *
+ * ★ 80ms 是「回执已经发出去」与「界面还没被刷掉」之间的余量：重载会把渲染进程
+ *   整个换掉，回执要是在重载之后才发，学生会看到按钮点了没反应（回执丢了）。
+ */
+const DEMO_RELOAD_DELAY_MS = 80
+
+/**
+ * 沙箱态下拒绝一次**写操作**。
+ *
+ * @returns 沙箱态 → 一句统一的回绝；普通态 → `null`（调用方继续走原路径）。
+ *
+ * ★★ 为什么拒绝放在**处理器层**而不是 HTTP 层：
+ *   走到 HTTP 层的话，学生会看到「操作失败（HTTP 409）」这类**状态码**——
+ *   而界面上的每一句话都必须是学生能读懂的中文（守卫明确禁止状态码上屏）。
+ * ★★ 回绝文案是 {@link DEMO_BLOCKED_MESSAGE} 一个常量，**不出现**
+ *   「演示 / 回放 / 预置 / 假数据」字样，也不出现任何内部机制名 ——
+ *   界面里除了那颗按钮本身，不出现任何标注（无痕口径）。
+ */
+function demoBlocked(): { ok: false; message: string } | null {
+  return isDemoSeeded() ? { ok: false, message: DEMO_BLOCKED_MESSAGE } : null
+}
+
+/**
+ * 三条 invoke：档位读取 / 档位切换 / 脚本下发。
+ *
+ * ★ 三条都**不进** `PUSH_CHANNELS`：它们不产生任何流，只有回执。
+ * ★ 一律不抛异常：失败回一句可读中文（与设置域三条同一纪律）。
+ */
+function registerDemoHandlers(): void {
+  ipcMain.handle(IPC.demoState, (): DemoSeedCallResult => ({ ok: true, state: demoSeedState() }))
+
+  ipcMain.handle(IPC.demoSeed, (_event, payload: unknown): DemoSeedCallResult => {
+    // ★ 渲染进程递来的值**一律不当真**（与 `grade:set` / `chapter:set` 同一条纪律）：
+    //   认不出就拒，**不兜底成其中一个** —— 兜底会让一个拼错的枚举值静默地切换档位。
+    const next = readDemoSeedState(payload)
+    if (next === null) return { ok: false, message: DEMO_BLOCKED_MESSAGE }
+
+    // ★ 值没变 = 什么都不做、**也不重载**：连点两次按钮不该让界面闪两下。
+    const changed = setDemoSeeded(next)
+    const state = demoSeedState()
+    if (!changed) return { ok: true, state }
+
+    // ★★ 顺序不能反：**先回执、后重载**。反过来的话回执会随渲染进程一起被换掉，
+    //    现场看到的是「按钮点了没反应，界面自己刷新了」。
+    setTimeout(() => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        const webContents = window.webContents
+        if (webContents.isDestroyed()) continue
+        webContents.reload()
+      }
+    }, DEMO_RELOAD_DELAY_MS)
+
+    return { ok: true, state }
+  })
+
+  /**
+   * 下发三轮脚本。
+   *
+   * ★ 为什么要经主进程：预置载荷带着知识点标识，而渲染进程的每一个字符串字面量
+   *   都会被学生面纪律守卫扫到 —— 写在渲染侧等于给守卫开一个洞（见 `demo/script.ts`）。
+   * ★ 内容态（动画 HTML / 编程脚手架 / 题目）在 `buildDemoScript()` 里**实时取真值**，
+   *   取不到就按既有降级路径走，**不编一份顶上**。
+   */
+  ipcMain.handle(IPC.demoScript, async (): Promise<DemoScriptCallResult> => {
+    if (!isDemoSeeded()) return { ok: false, message: DEMO_BLOCKED_MESSAGE }
+    try {
+      const data: DemoScriptPayload = await buildDemoScript()
+      return { ok: true, data }
+    } catch (error) {
+      return {
+        ok: false,
+        message: `这一轮的内容这次没取到，稍后再试一次。（${error instanceof Error ? error.message : String(error)}）`
+      }
     }
   })
 }
@@ -1123,6 +1317,132 @@ function registerStudyHandlers(): void {
  *    ① 渲染进程只能递**会话 id**（`findSessionById` 做白名单对齐，path 由 Pi 给）；
  *    ② 会话目录必须显式指向该学生（`listStudentSessions` / `createChatRuntime` 各自负责）。
  * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ * 演示沙箱：会话那几条通道的预置内容
+ *
+ * ★★ 这四个函数的共同契约：**只读预置常量**。
+ *   它们绝不碰 `students/<id>/pi-agent/sessions/`，也绝不装配 Pi ——
+ *   「点开历史对话看一眼」是现场最常见的动作，而它必须满足
+ *   「真实会话、真实进度一字未动」这条验收口径。
+ * ------------------------------------------------------------------ */
+
+/** 侧栏那三条预置会话的摘要（按 id 取一条；认不出回 `null`）。 */
+function demoSessionSummary(id: string): Record<string, unknown> | null {
+  return demoSessionListBody().find((item) => item.id === id) ?? null
+}
+
+/**
+ * 沙箱态下的「只读回看」正文。
+ *
+ * ★ 与 `session:state` 的区别是**不带卡片**：这条通道对应的是「回看时的纯文本投影」，
+ *   而带卡片的那条是 `session:state`（见它的注释）。两者不合并是刻意的 ——
+ *   合并会让真实历史也走上带卡片那条路，而 Pi 的会话条目里根本没有这个字段。
+ */
+async function demoTranscriptFor(id: string): Promise<SessionTranscript | null> {
+  const messages = await buildDemoSessionMessages(id)
+  if (messages.length === 0) return null
+  const summary = demoSessionSummary(id)
+  return {
+    id,
+    title: typeof summary?.title === 'string' ? summary.title : '',
+    messages: messages.map((message) => ({
+      role: message.role,
+      text: message.text,
+      at: message.at,
+      entryId: message.entryId,
+      // ★ 「只有 `message` 能当分支点」这条判据在回看链路上也要如实标注：
+      //   预置轮次的分叉是**被拒的**（见 `session:branch` 的沙箱分支），
+      //   所以这里把条目类型标成 `custom_message` —— 界面对它**不给**分叉按钮，
+      //   与「点了会得到一句回绝」相比，不给按钮才是诚实的做法。
+      entryType: 'custom_message'
+    })),
+    truncated: 0
+  }
+}
+
+/**
+ * 沙箱态下的搜索：在**预置**的正文里找（命中处给一段上下文）。
+ *
+ * ★ 与 `study/sessions.ts` 的 `searchSessions` 同一口径（命中标题或全文、
+ *   附近片段、按修改时间倒序），只是数据源换成了预置常量。
+ */
+async function demoSearchSessions(query: string): Promise<
+  Array<{ id: string; title: string; snippet: string; modifiedAt: number }>
+> {
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return []
+  const hits: Array<{ id: string; title: string; snippet: string; modifiedAt: number }> = []
+  for (const item of demoSessionListBody()) {
+    const id = typeof item.id === 'string' ? item.id : ''
+    if (id === '') continue
+    const messages = await buildDemoSessionMessages(id)
+    const haystack = messages.map((message) => message.text).join('\n')
+    const at = haystack.toLowerCase().indexOf(needle)
+    const title = typeof item.title === 'string' ? item.title : ''
+    if (at < 0) continue
+    const start = Math.max(0, at - 30)
+    const snippet = haystack.slice(start, at + needle.length + 30).replace(/\s+/g, ' ').trim()
+    hits.push({
+      id,
+      title,
+      snippet,
+      modifiedAt: typeof item.modifiedAt === 'number' ? item.modifiedAt : 0
+    })
+  }
+  return hits.sort((a, b) => b.modifiedAt - a.modifiedAt || a.id.localeCompare(b.id))
+}
+
+/**
+ * 沙箱态下「点开一条预置会话」的回执（**带卡片**）。
+ *
+ * ★★ `cards` 只挂在那条**助手消息**上：学生那条本来就没有卡片。
+ * ★ `started: true`：预置会话是「已经聊过的」，界面据此铺消息、不给开场引导。
+ */
+async function demoSessionStateFor(sessionId: string): Promise<SessionStateResult> {
+  const messages = await buildDemoSessionMessages(sessionId)
+  if (messages.length === 0) return { ok: false, message: '这条对话读不出来，换一条试试。' }
+  const summary = demoSessionSummary(sessionId)
+  return {
+    ok: true,
+    current: {
+      sessionId,
+      title: typeof summary?.title === 'string' ? summary.title : '',
+      messageCount: messages.length
+    },
+    messages: messages.map((message) => ({
+      role: message.role,
+      text: message.text,
+      at: message.at,
+      entryId: message.entryId,
+      ...(message.cards ? { cards: message.cards } : {})
+    })),
+    started: true,
+    opening: '',
+    openingKpId: '',
+    openingKpName: ''
+  }
+}
+
+/**
+ * 沙箱态下「当前会话」的回执：**一份全新的空会话 + 开场引导**。
+ *
+ * ★ 开场引导的三个字段（文本 / 知识点 id / 中文名）**来自同一个响应体**
+ *   （`demoOpeningBody()`）而不是各写一份 —— 三处不一致会让「好啊，就从这里开始」
+ *   这个动作指向一个界面没提过的知识点（D-074 修的就是这类反查落空）。
+ */
+function demoFreshSessionState(): SessionStateResult {
+  const body = demoOpeningBody() as { text?: unknown; kpId?: unknown; kpName?: unknown }
+  return {
+    ok: true,
+    current: { sessionId: DEMO_CURRENT_SESSION_ID, title: '', messageCount: 0 },
+    messages: [],
+    started: false,
+    opening: typeof body.text === 'string' ? body.text : '',
+    openingKpId: typeof body.kpId === 'string' ? body.kpId : '',
+    openingKpName: typeof body.kpName === 'string' ? body.kpName : ''
+  }
+}
+
 function registerSessionHandlers(): void {
   /**
    * ★ 列出历史会话（**带分支关系**）。
@@ -1135,6 +1455,15 @@ function registerSessionHandlers(): void {
    *   不猜 Pi 的文件命名规则、也不读文件头 —— 那份对应关系 Pi 已经给出来了。
    */
   ipcMain.handle(IPC.sessionList, async (): Promise<StudyCallResult> => {
+    /**
+     * ★★ 沙箱分支：回**预置的三条会话**，绝不列真实会话目录。
+     *
+     * 两个作用，第二个才是关键：
+     *   ① 侧栏看起来像「一个用了一阵子的学生」；
+     *   ② **不泄露真实会话标题** —— 那是最容易被现场投影仪照到的一类内容
+     *      （`listSessions()` 会读遍该学生的全部会话文件）。
+     */
+    if (isDemoSeeded()) return { ok: true, data: demoSessionListBody() }
     const loaded = await loadSessions()
     if (!loaded.ok) return { ok: false, message: loaded.message }
     const summaries = projectSessionList(loaded.infos)
@@ -1155,6 +1484,12 @@ function registerSessionHandlers(): void {
   ipcMain.handle(IPC.sessionTranscript, async (_event, payload: unknown): Promise<StudyCallResult> => {
     const id = typeof payload === 'string' ? payload : ''
     if (!id) return { ok: false, message: '读会话失败：没有给出会话 id。' }
+    // ★ 沙箱态：只回预置正文，**绝不读真实会话文件**（理由同 `session:list`）
+    if (isDemoSeeded()) {
+      const transcript = await demoTranscriptFor(id)
+      if (transcript === null) return { ok: false, message: '这条对话读不出来，换一条试试。' }
+      return { ok: true, data: transcript }
+    }
     const loaded = await loadSessions()
     if (!loaded.ok) return { ok: false, message: loaded.message }
     // ★★ 安全约束：id 必须先在**白名单**（Pi 自己列出来的会话）里对齐，
@@ -1168,6 +1503,8 @@ function registerSessionHandlers(): void {
     const query = typeof (payload as SessionSearchRequest | undefined)?.query === 'string'
       ? (payload as SessionSearchRequest).query
       : ''
+    // ★ 沙箱态：在预置的三条会话里搜（**不碰真实会话文件**）。
+    if (isDemoSeeded()) return { ok: true, data: await demoSearchSessions(query) }
     const loaded = await loadSessions()
     if (!loaded.ok) return { ok: false, message: loaded.message }
     return { ok: true, data: searchSessions(loaded.infos, query) }
@@ -1186,6 +1523,18 @@ function registerSessionHandlers(): void {
    *    没有 Key / sidecar 没起来时应用**仍然要能用**（降级永不白屏）。
    */
   ipcMain.handle(IPC.sessionState, async (): Promise<SessionStateResult> => {
+    /**
+     * ★★ 沙箱分支必须在 `ensureChatRuntime()` **之前**（这条最关键）。
+     *
+     * 下面那段会**组装 Pi 会话**，而「帮学生把开场引导写进会话文件」正是它的一步 ——
+     * 放到它之后，一进沙箱就会往会话 JSONL 里写一条开场白，
+     * 「一个字节都不落盘」当场作废。所以这里直接回一份**全新的空会话 + 开场引导**。
+     *
+     * ★ 回的是**空会话**（`started: false`）而不是那三条预置历史之一：对话页要停在
+     *   空态（开场卡 + 四张能力入口），演示者接着打三句话就是脚本的三轮；
+     *   要看历史就点侧栏那三条（走 `session:open` 的沙箱分支）。
+     */
+    if (isDemoSeeded()) return demoFreshSessionState()
     let instance: ChatRuntime
     try {
       instance = await ensureChatRuntime()
@@ -1213,11 +1562,28 @@ function registerSessionHandlers(): void {
 
   ipcMain.handle(
     IPC.sessionOpen,
-    async (_event, payload: unknown): Promise<SessionOpenResult> =>
-      await openSessionById(typeof payload === 'string' ? payload : '')
+    async (_event, payload: unknown): Promise<SessionOpenResult> => {
+      /**
+       * ★★ 沙箱态下**允许**「点开一条历史会话」，但回的**全是预置内容**：
+       *   `buildDemoSessionMessages()` 只读预置常量，**绝不读会话文件、绝不装配 Pi**。
+       *
+       * ★ 为什么它不像别的写通道那样一刀拒掉：**回看历史对话是现场最常见的演示动作**
+       *   （用户点名要求「对话里面也要体现动画」正是指这一下）。把它拒掉，
+       *   那三条预置历史就永远点不开，B′ 那条要求就落空了。
+       *   而它在本态下**不写任何东西** —— 真实会话文件一个字节都不动。
+       */
+      if (isDemoSeeded()) {
+        return await demoSessionStateFor(typeof payload === 'string' ? payload : '')
+      }
+      return await openSessionById(typeof payload === 'string' ? payload : '')
+    }
   )
 
   ipcMain.handle(IPC.sessionNew, async (): Promise<SessionOpenResult> => {
+    // ★ 沙箱态：拒绝。它会**开一个新的会话文件**（真实落盘），
+    //   而沙箱态下当前会话只是一份内存里的预置状态。
+    const blocked = demoBlocked()
+    if (blocked !== null) return blocked
     // 「新会话」= 开一个**全新的 JSONL 文件**（`sessionSource: 'new'`）。
     // ★ 旧会话**不删**（它仍在列表里，随时可切回去）；要删走 `session:delete` 那条独立通道。
     return await swapToSession({ kind: 'new' })
@@ -1225,13 +1591,22 @@ function registerSessionHandlers(): void {
 
   ipcMain.handle(
     IPC.sessionDelete,
-    async (_event, payload: unknown): Promise<SessionDeleteResult> =>
-      await deleteSessionById(typeof payload === 'string' ? payload : '')
+    async (_event, payload: unknown): Promise<SessionDeleteResult> => {
+      // ★★ 沙箱态：**必须**拒绝 —— 这是全项目唯一的破坏性文件操作，
+      //    而预置会话在磁盘上根本不存在，真删会删到**同名**的真实会话上（如果恰好有）。
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
+      return await deleteSessionById(typeof payload === 'string' ? payload : '')
+    }
   )
 
   ipcMain.handle(
     IPC.sessionBranch,
     async (_event, payload: unknown): Promise<SessionBranchResult> => {
+      // ★ 沙箱态：拒绝。分叉会写一个新的会话文件；而预置轮次的条目 id 是编的，
+      //   走到 `branchFromMessage` 只会得到一句「那条消息不属于这条会话」。
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
       const request = payload as SessionBranchRequest | undefined
       const sessionId = typeof request?.sessionId === 'string' ? request.sessionId : ''
       const entryId = typeof request?.entryId === 'string' ? request.entryId : ''

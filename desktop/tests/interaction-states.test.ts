@@ -1,8 +1,8 @@
 /**
  * 交互态守卫：优化报告 §4.3（对比度守卫扩展到**所有交互态** + 交互态色差 ≥10%）。
  *
- * 背景：`scripts/design/check-contrast.mjs` 只校验 tokens.source.json 里的**静态**色对
- * （234 项）。而按钮的 hover / active / disabled 是 `color-mix()` 派生的**动态**色 ——
+ * 背景：`scripts/design/check-contrast.mjs` 只校验 tokens.source.json 里的**静态**色对。
+ * 而按钮的 hover / active / disabled 是 `color-mix()` 派生的**动态**色 ——
  * 它们不在那份表里，也就是说：一套学段配色可以把静态色做到 100% 达标、却在 hover 时
  * 掉到读不清。这个守卫就是补这一格：把 color-mix 在 sRGB 里算出来，再算对比度。
  *

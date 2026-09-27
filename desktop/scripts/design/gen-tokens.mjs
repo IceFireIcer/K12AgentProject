@@ -7,12 +7,18 @@
  *   :root[data-grade="junior"][data-sat="vivid"] { --k12-accent: #4338CA; ... }
  * 改一个轴不会重写另一个轴。
  *
- * 材质模型（「书桌与纸」）：
- *   desk     = 桌面：应用底色 + 侧栏 / 顶栏 / 右栏等结构面
- *   paper    = 纸面：对话回答卡、内联卡、输入条等**内容**面（恒为白，不随学段着色）
- *   paper-2  = 纸上的嵌入块（hover 底、内嵌小块）
- *   accent   = 学段墨：链接 / 当前项 / 主按钮 / 进度
- *   accent-2 = 仅数据可视化用的第二色相（图表分段），不进 UI 骨架
+ * 材质模型（「书桌与纸」，四层，见 base.css 文件头）：
+ *   page      = 桌面：带学段色的页面底色（内容区/外壳底）
+ *   surface   = 纸面：白卡片、对话回答卡、侧栏 / 顶栏 / 右栏等结构面
+ *   surface-2 = 纸上的嵌入块（卡内块、hover 底、卡头卡脚）
+ *   float     = 浮层：白面 + 最深边框 + 最强投影（模态 / 菜单 / 抽屉）
+ *   accent    = 学段墨：链接 / 当前项 / 主按钮 / 进度
+ *   accent-2  = 仅数据可视化用的第二色相（图表分段），不进 UI 骨架
+ *
+ * 2026-09-27（D-105）：**结构分面允许一条单侧投影**（侧栏右缘 / 顶栏下缘 /
+ * 右栏左缘），用来表达「这块纸面浮在桌面上」。此前「纸与桌面都不用阴影」的
+ * 口径导致的后果是：边框一浅，整块面就"飘"在空中没有边界。
+ * 日常内容卡片仍然只用近景投影（`--k12-shadow-card`），不用深投影。
  *
  * 数值请改 scripts/design/tokens.source.json（那才是一处来源），不要在此脚本里硬编码颜色。
  */
@@ -99,11 +105,13 @@ for (const sat of sats) {
 /** 4. 派生合成分级变量（由主色推导，避免在组件里重复写 color-mix） */
 lines.push('')
 lines.push('/* 由主色派生的合成分级（组件统一引用这些，不要各自 color-mix）')
-lines.push(' * 只留两项：焦点环，以及**唯一**的浮层阴影。')
-lines.push(' * 纸与桌面都不用阴影——层次靠底色差与 1px 细线，这是「书桌与纸」的材质规则。 */')
+lines.push(' * 只放**随学段变色**的东西：两支聚焦环。')
+lines.push(' * ⚠️ 投影不放这里 —— 它们定义在 base.css 的 `:root`（`--k12-shadow-*`）。')
+lines.push(' *   同一份文件里两处定义过 `--k12-shadow-float`，base.css 后加载把它覆盖掉，')
+lines.push(' *   于是「改 token 里的阴影」永远不生效（踩坑 P-157）。现已删掉重复定义。 */')
 lines.push(':root {')
 lines.push('  --k12-accent-ring: color-mix(in srgb, var(--k12-accent) 34%, transparent);')
-lines.push('  --k12-shadow-float: 0 8px 28px -12px rgba(27, 34, 51, 0.22);')
+lines.push('  --k12-accent-ring-soft: color-mix(in srgb, var(--k12-accent) 16%, transparent);')
 lines.push('}')
 
 /**

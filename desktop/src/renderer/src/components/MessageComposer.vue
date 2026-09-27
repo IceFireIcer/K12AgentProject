@@ -215,7 +215,10 @@ defineExpose({ fill, focus })
 }
 .cp__box {
   background: var(--k12-surface);
-  border: 1px solid var(--k12-border);
+  /* 静息线走 strong 档：输入条是这一屏里**唯一可以打字**的地方，
+   * 它的边界要在一眼扫过时就认出来（1.50:1 的 border 对「一块内容」够用，
+   * 对「一处入口」偏弱）。旁边四张能力卡的线仍归 border 档，层次不冲突。 */
+  border: 1px solid var(--k12-border-strong);
   box-shadow: var(--k12-shadow-card);
   border-radius: var(--k12-r-card);
 
@@ -224,12 +227,18 @@ defineExpose({ fill, focus })
   gap: 8px;
   padding: 12px 14px 10px;
 }
-/* 聚焦：墨线出现 + 纸被「拿起来」一点。键盘与鼠标用户都能看见「现在在这里」。 */
+/* 聚焦：墨线出现 + 纸被「拿起来」一点。键盘与鼠标用户都能看见「现在在这里」。
+ * ★ 光环从 34%（`--k12-accent-ring`）减淡到 16%（`--k12-accent-ring-soft`），
+ *   投影从 float 降一档到 raise：本应用**开机即聚焦**输入条（那是功能，
+ *   ux-audit 的 A1 与键盘可访问性都依赖它），34% 的光环会让首屏出现
+ *   「全页面唯一一处强对比元素」，把注意力从内容上拽走。
+ *   ⚠️ 那 3px 的环宽**不许减**：它是键盘焦点可见性（≥3:1 非文本对比）的载体，
+ *      淡的是颜色强度，不是尺寸。 */
 .cp__box:focus-within {
   border-color: var(--k12-accent-ink);
   box-shadow:
-    var(--k12-shadow-float),
-    0 0 0 3px var(--k12-accent-ring);
+    var(--k12-shadow-raise),
+    0 0 0 3px var(--k12-accent-ring-soft);
 }
 .cp__input {
   width: 100%;

@@ -1,11 +1,9 @@
 flowchart TD
   %% 由 desktop/src/main/agent/trace.ts 自动生成，请勿手改
-  %% 生成时间：2026-09-26T17:55:53.693Z｜轮数：1｜调用：1 次
+  %% 生成时间：2026-09-27T10:05:55.468Z｜轮数：0｜调用：0 次
   %% 参数只记摘要（不含原文 / 密钥 / 学生个人信息）
   classDef turn fill:#e3f2fd,stroke:#1565c0,stroke-width:1px,color:#0d47a1
   classDef ok fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px,color:#1b5e20
   classDef fail fill:#ffebee,stroke:#c62828,stroke-width:1px,color:#b71c1c
   classDef blocked fill:#fff8e1,stroke:#f9a825,stroke-width:1px,color:#795548
-  T1_START(["第 1 轮 · 学生提问"]):::turn
-  T1_START --> T1_C_1["generate_animation<br/>ok · 249ms<br/>caption=«文本 22 字», concept=«文本 8 字», gradeLevel=primary_high, kpId=training-inference-ph"]:::ok
-  T1_C_1 --> T1_END(["第 1 轮 · 回复学生"]):::turn
+  EMPTY["尚无工具调用<br/>（跑一轮含 rag_search / generate_quiz 的对话后重新导出）"]:::turn

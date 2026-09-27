@@ -20,9 +20,12 @@
  *   默认 `main.png`，判出学段之后随学段换图（`theme.displayGrade` → 四学段四张）。
  *   素材由 `server/scripts/make_brand_icons.py` 从仓库根 `logos/` 生成，改了 logo 重跑脚本。
  *
- * **窄窗口（<1280px）收成 64px 图标条 —— 只有这一档隐藏文字**：导航项名、分组标题、
- * 品牌名与学生昵称都折掉，靠 `title` 提示。≥1280px 是完整的 248px 栏（目标窗口
- * 1440×900），文字全在；截图里「图标旁边没有文字」就是 1080px 宽时落在了这一档。
+ * **窄窗口（媒体查询落在 1023px 及以下）收成 68px 图标条 —— 只有这一档隐藏文字**：
+ * 导航项名、分组标题、品牌名与学生昵称都折掉，靠 `title` 提示。≥1024px 是完整的 264px 栏
+ * （目标窗口 1440×900），文字全在。
+ * ★ 1024–1279 是**「平板 / 小笔记本」档：保留完整栏**（优化报告 §2.2 —— 原先是 <1280
+ *   就收成图标条，那个口径已废）；收拢档只到窗口下限 1024 以下，`tests/breakpoints.test.ts`
+ *   与 `tests/session-tree.test.ts` 都钉着这一点，别按旧注释里的 1280 改回去。
  *
  * 三处刻意去掉的东西：
  *   1. 学生卡上的 `ChevronsUpDown` —— 它暗示「可以切换学生」，但本项目是一人一库
@@ -253,11 +256,25 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   display: flex;
   flex-direction: column;
   /* 实色桌面：侧栏是"桌上的工具架"，不该透出正文工作面的格子。
-   * ★★ 2026-09-22（报告 4.1）：这里原来还有一条 `border-right`。
-   *  窗口级分割线当时有四条（侧栏竖线 + 顶栏下线 + 章节条下线 + 「本轮对话」条下线），
-   *  而侧栏与内容区**本来就有材质差**（surface vs 带学段色的 page）—— 竖线是重复的一条。
-   *  ⚠️ 别加回来：这会与「边框 = 层级」的口径打架（见报告 0.1 / 4.2）。 */
+   * ★★ 2026-09-22 曾删掉下面这条竖线，理由是「侧栏白面 vs 带学段色内容底本来就有
+   *  材质差，竖线是重复的」。2026-09-27 走查发现那个前提在**两个档位不成立**：
+   *  `default` 档（开机默认，学段还没判定出来时全站都用它）的 page 是纯白，
+   *  5 个学段的 `mono` 档 page 比纸上的嵌入块还亮 —— 材质差归零，于是「侧栏像飘在空中」。
+   *  底色差已在令牌层补齐（见 `author-tokens.mjs` 与 D-105），这里再把线补回来：
+   *  **底色差是主信号，线是副信号，两者都要**。
+   * ★ 上实下虚：竖线的上端接着顶栏下线（窗口顶部那道结构分面），越往下越淡 ——
+   *  一条通体等深的线会让侧栏底部比它自己的内容还重。
+   *  `.sb` 没有 border-radius，所以 `border-image` 不会吃掉圆角。 */
   background: var(--k12-surface);
+  border-right: 1px solid var(--k12-border-strong);
+  border-image: linear-gradient(
+    to bottom,
+    var(--k12-border-strong),
+    color-mix(in srgb, var(--k12-border-strong) 35%, transparent)
+  ) 1;
+  /* 单侧投影：贴在窗口边缘的**结构分面**才用这一档浮起（侧栏/顶栏/右栏同一套语言），
+   * 日常卡片不用 —— 否则整个界面会浮成一片，反而没有层级。 */
+  box-shadow: var(--k12-shadow-edge-right);
   position: relative;
   z-index: 2;
   color: var(--k12-fg);
@@ -421,7 +438,9 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
 }
 @media (hover: hover) and (pointer: fine) {
   .sb__item:hover {
-    background: var(--k12-surface-2);
+    /* 悬停 = 学段淡染（而不是再加一档灰底）：侧栏项被指到时，读者该看到的是
+     * 「这一项属于当前学段的界面」，而不是「这一项是纸上的一块嵌入块」。 */
+    background: color-mix(in srgb, var(--k12-accent) 6%, transparent);
     color: var(--k12-fg);
   }
   .sb__item:hover .sb__icon {
@@ -430,9 +449,13 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
 }
 /* 当前页：浅底 + 强调色文字 + 左侧竖条。
  * ★ 用 `box-shadow: inset` 画那条竖条，而不是 `border-left` ——
- *   加一条左边框会把内容整体右推 3px，选中项的图标与标题跟邻居对不齐。 */
+ *   加一条左边框会把内容整体右推 3px，选中项的图标与标题跟邻居对不齐。
+ * ★ 再加一圈**学段淡描边**：底座（`accent-soft`）与侧栏白面的对比只有一档，
+ *   单靠底色在浅学段色下会读成「这里有一块浅色」而不是「这里是当前页」；
+ *   描边补上完整轮廓 —— 而宽度不变（基态已有 1px 透明描边），左缘因此不会跳动。 */
 .sb__item--active {
   background: var(--k12-accent-soft);
+  border-color: color-mix(in srgb, var(--k12-accent) 22%, transparent);
   color: var(--k12-accent-ink);
   font-weight: 600;
   box-shadow: inset 3px 0 0 var(--k12-accent-ink);
@@ -502,8 +525,9 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
   word-break: break-word;
 }
 
-/* ── 窄窗口：收成图标条（断点 1280，同时右栏在 ChatView 里改浮层）─────────
- * ★ 只有这一档隐藏文字；≥1280px 是完整的 248px 栏（目标窗口 1440×900）。 */
+/* ── 窄窗口：收成图标条（断点 1024；同一档里右栏在 ChatView 里改浮层）────
+ * ★ 只有这一档隐藏文字；≥1024px 是完整的 264px 栏（目标窗口 1440×900）。
+ *   ⚠️ 1024–1279 保留完整布局（优化报告 §2.2）—— 别照旧注释写过的 1280 改。 */
 @media (max-width: 1023px) {
   .sb {
     width: var(--k12-w-sidebar-narrow);

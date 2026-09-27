@@ -6,6 +6,10 @@
  * 它退到背景；内容区的卡片是**纸面**（`--k12-surface` 恒为白）压在桌面上。
  * 明暗对比是这个界面建立层次的主要手段（见 `assets/base.css` 的材质模型）。
  *
+ * 外壳的边界由三者**共同**承担：桌面底色（主）+ 顶栏下线 `--k12-border-strong`（副）
+ * + 单侧投影 `--k12-shadow-edge-bottom`（副）。只有底色差、没有线时，
+ * 白纸顶栏压在白纸内容区的起点上就分不出缝（这正是「顶栏边界不明显」的成因）。
+ *
  * 尺寸策略：**真响应式断点**，不做整体等比缩放。
  *   - ≥1440：外壳铺满，阅读栏弹性；
  *   - 1280–1439：右栏可折叠（在对话页内）；
@@ -161,6 +165,14 @@ defineExpose({ scrollToTop: resetScroll })
   gap: 0;
   min-width: 0;
   height: var(--k12-h-topbar);
+  /* ★ 单侧投影挂在**这一行**上：顶栏与右侧动作条共用同一条下边线，而动作条那一段
+   *   自己没有投影 —— 不在这里画一遍，边界就只覆盖左边一半，接缝处会断开。
+   *   ⚠️ 它要能画在内容区之上，靠的是下面这两条定位与层级：投影（外阴影）与背景
+   *   同属一个绘制阶段，而 `.shell__content` 在文档流里排在它后面、又是不透明的
+   *   桌面色 —— 不给层级，这 3px 的投影会被整条盖掉（实测确认）。 */
+  box-shadow: var(--k12-shadow-edge-bottom);
+  position: relative;
+  z-index: 1;
   -webkit-app-region: drag;
 }
 .shell__head > :first-child {
@@ -179,7 +191,9 @@ defineExpose({ scrollToTop: resetScroll })
   /* 右侧不留 padding-right：`WindowControls` 的三个键各自 44px 宽、贴到窗口右上角
    * （Windows 原生就是贴边的）。留白会让「关闭」离屏幕角差一截，看着像浮在中间。 */
   background: var(--k12-surface);
-  border-bottom: 1px solid var(--k12-border);
+  /* chrome 与内容的分隔用**结构分面线**（strong 档）：外壳这一行是整块结构的分面，
+   * 它与左侧顶栏共用同一条下边线 —— 两边只有**同档**时才读成一条线（见 AppTopbar）。 */
+  border-bottom: 1px solid var(--k12-border-strong);
   -webkit-app-region: no-drag;
 }
 
@@ -190,6 +204,15 @@ defineExpose({ scrollToTop: resetScroll })
   overflow-x: hidden;
   /* 内容区透出桌面底色：纸面卡片浮在它上面 */
   background: var(--k12-page);
+  /* ★ 桌面从「纸的起点」往下略沉一点点：桌面是整块的一层，越往下越退，
+   *   读者才会觉得内容浮在**桌面上**，而不是贴在同一个平面上。
+   *   ⚠️ 加成 background-image（而不是改 background-color）：吸顶的 `PageActions`
+   *   与设置页的色板预览都直接读 `--k12-page`，底色一旦被换掉，那两处就跟着变。 */
+  background-image: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in srgb, var(--k12-fg) 3%, transparent) 100%
+  );
 }
 
 /* 换页：瞬时切换，无过渡。

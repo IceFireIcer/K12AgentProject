@@ -150,6 +150,26 @@ export function emptyConversation(): ConversationState {
 }
 
 /**
+ * 把「预置内容带来的卡片」转成内联卡片（`restoredTurn` 用）。
+ *
+ * ★ `id` 用 `restored-${index}#${i}`：与实时轮次的 `${requestId}#${i}` 同一形态、
+ *   不同前缀（稳定 key 只要求本轮内唯一）；`i` 取**入参里的位置**（丢掉的卡不影响后面的 id）。
+ * ★ `tool` 恒为 `null` —— 历史里没有记 Tool 名（实时轮次才有）。
+ */
+function restoredCards(
+  index: number,
+  cards: ReadonlyArray<{ kind: string; payload: unknown }>
+): InlineCard[] {
+  const out: InlineCard[] = []
+  for (const [position, card] of cards.entries()) {
+    const kind = readPayloadKind(card.kind)
+    if (kind === null) continue
+    out.push({ id: `restored-${index}#${position}`, kind, tool: null, payload: card.payload })
+  }
+  return out
+}
+
+/**
  * ★ 一条**恢复出来的历史消息**（打开历史会话时由主进程投影后回传）。
  *
  * ★★ 为什么历史消息**必须是 `ChatTurn`**（而不是另建一个「历史消息列表」）：
@@ -160,6 +180,10 @@ export function emptyConversation(): ConversationState {
  * ★ 为什么**不**恢复当时的卡片 / 引用 / 降级档位：那些是**当时那一次交互**的产物
  *    （动画 iframe 的 nonce 早已过期、题库卡片也要重新取题），恢复它们等于伪造
  *    一次并未发生的交互。回看只需要「他问了什么、AI 答了什么」。
+ * ★★ 2026-09-27 补充（演示沙箱）：上面那条决策**没有被推翻**，只是在数据口上变得显式 ——
+ *    真实会话文件里**根本没有** `cards` 这个字段，所以从会话恢复出来的回看**仍然是纯文本**；
+ *    只有**预置内容**（演示沙箱的预置历史会话）会在消息上带 `cards`，回看时也看得见动画。
+ *    判据是「这条消息自己带没带」，而不是「谁在读它」—— 两条路从此不会互相串味。
  * ★ `requestId` 用 `restored-` 前缀：它与 `turn_` 前缀的**真实轮次**区分开 ——
  *    任何按 requestId 认领轮次的逻辑（如悬浮追问窗）都不会误认一条历史消息。
  */
@@ -172,7 +196,18 @@ export function restoredTurn(
    * ★★ 这条消息在会话文件里的条目 id —— 「从这里重新问」拿它去分叉。
    * 空串 = 认不出（老会话 / 别处造的状态），那条消息**不给**分叉按钮。
    */
-  entryId = ''
+  entryId = '',
+  /**
+   * ★★ 这条消息当时带来的卡片（**可选，只有预置内容会给**，见上面那段说明）。
+   *
+   * ★ 只落在**助手那条**上：卡片是回答的一部分，挂在学生气泡上只会让界面多出一张
+   *   无所属的卡片。转成 `InlineCard[]` 之后走的是与实时轮次**同一套**渲染。
+   * ★ `kind` 按 `string` 收、在边界上过一次 {@link readPayloadKind}：它来自主进程的
+   *   会话投影（那边标的就是 `string`），而本模块的纪律是**认不出的整条丢掉**
+   *   （与 live 路径的 `payload` 事件同一个口径）—— 宁可少一张卡，
+   *   也不要往界面塞一张渲染不出来的空卡。
+   */
+  cards: ReadonlyArray<{ kind: string; payload: unknown }> = []
 ): ChatTurn {
   const base = createTurn(`restored-${index}`, role === 'user' ? text : '', gradeLevel)
   if (role === 'assistant') {
@@ -182,7 +217,8 @@ export function restoredTurn(
       text,
       status: 'done',
       entryId: entryId || null,
-      userEntryId: null
+      userEntryId: null,
+      cards: restoredCards(index, cards)
     }
   }
   // 学生那条：`userText` 承载正文（由 createTurn 传入），`entryId` 留空 ——
@@ -228,6 +264,13 @@ export function restoreConversation(
     at?: number
     /** 条目 id（分叉点）；缺 = 那条消息不给分叉按钮。 */
     entryId?: string
+    /**
+     * ★★ 这条消息当时带来的卡片（**可选，只有预置内容会给**）。
+     * 真实会话文件里根本没有这个字段 —— 所以真实历史的回看**仍然是纯文本**，
+     * 那条「不恢复当时的卡片/引用/降级档位」的决策不变（本条只给一个显式的数据口）。
+     * ★ `kind` 按 `string` 收（与主进程的会话投影同形），认不出的由 `restoredCards` 丢掉。
+     */
+    cards?: ReadonlyArray<{ kind: string; payload: unknown }>
   }>,
   gradeLevel: GradeLevel | null = null
 ): ConversationState {
@@ -254,12 +297,17 @@ export function restoreConversation(
         'assistant',
         message.text,
         gradeLevel,
-        entryId
+        entryId,
+        // ★ 卡片挂在**助手那条**上（配对时跟着 `withAnswer` 一起进这一轮）：
+        //   学生那条从不带 cards —— 卡片是回答的一部分。
+        message.cards
       )
       turns[turns.length - 1] = { ...withAnswer, userText: last.userText, userEntryId: last.userEntryId }
       continue
     }
-    turns.push(restoredTurn(turns.length, 'assistant', message.text, gradeLevel, entryId))
+    turns.push(
+      restoredTurn(turns.length, 'assistant', message.text, gradeLevel, entryId, message.cards)
+    )
   }
   return { turns, pending: {}, ignoredEvents: 0 }
 }

@@ -47,6 +47,7 @@ import DiagnosticsPanel from './components/DiagnosticsPanel.vue'
 import ModelPicker from './components/ModelPicker.vue'
 import { useOnBackendReady } from './composables/useOnBackendReady'
 import { useChatStore } from './stores/chat'
+import { useDemoSeedStore } from './stores/demoSeed'
 import { useConfirm } from './stores/confirm'
 import { useSettingsStore } from './stores/settings'
 import { useSidecarStore } from './stores/sidecar'
@@ -59,6 +60,7 @@ import { useDiagnosticsStore } from './stores/diagnostics'
 const ui = useUiStore()
 const viewMode = useViewModeStore()
 const chat = useChatStore()
+const demoSeed = useDemoSeedStore()
 const sidecar = useSidecarStore()
 const student = useStudentStore()
 const trace = useTraceStore()
@@ -123,6 +125,10 @@ function loadInitialData(): void {
 onMounted(() => {
   sidecar.connect()
   chat.connect()
+  // 演示沙箱：问一次「现在是不是沙箱态」（顶栏那颗按钮的状态据此对齐）。
+  // ★ 预置开关住在主进程，窗口重载后渲染进程什么都不记得 —— 不问就会显示成错的那个状态。
+  //   读不到（桥缺失 / 还没接上）只写一句说明，不影响任何一条真实通路。
+  void demoSeed.refresh()
   // 工具调用轨迹（独立于 6 事件的通道；右栏据此显示「本轮调了什么」）
   trace.connect()
   // ★ 轮次诊断信封（演示驾驶舱 + 机制浮窗的共同数据源）。

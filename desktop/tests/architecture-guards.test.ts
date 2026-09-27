@@ -667,6 +667,13 @@ const EXPECTED_API_METHODS = [
   'readDiagnostics',
   'clearDiagnostics',
   'onDiagnosticsChanged',
+  // ★ 演示沙箱：预置数据的开关 / 状态 / 脚本（三条 invoke + **零推送**）。
+  //   ⚠️ 与上面那三条是**两件事**：那三条管「把这一轮背后发生了什么摊开看」，
+  //     这三条管「把这个应用切成看起来像用了两个月的状态」。
+  //   ★ 三条都**不进** `PUSH_CHANNELS`：它们不产生任何流，只有回执。
+  'readDemoState',
+  'seedDemo',
+  'readDemoScript',
   // 工具调用轨迹（**推送**；快照语义）。★ 它不是 6 事件之一：
   //   轨迹是工程证据（哪次调了什么 Tool、多快、有没有降级），与对话状态机不是一回事。
   'onTraceChanged',

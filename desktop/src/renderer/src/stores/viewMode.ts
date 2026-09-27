@@ -108,7 +108,7 @@ export const useViewModeStore = defineStore('viewMode', () => {
    */
   const isDebug = computed(() => mode.value === 'debug')
 
-  /** 「高级设置（教师 / 答辩）」区是否已展开（**纯内存**，不持久化）。 */
+  /** 「高级设置（教师 / 家长）」区是否已展开（**纯内存**，不持久化）。 */
   const advancedOpen = ref(false)
 
   function set(next: ViewMode): void {

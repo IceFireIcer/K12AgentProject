@@ -254,7 +254,7 @@ export function llmDisplayLabel(llm: LlmReadiness | null | undefined): string {
  * ★ 与「换模型请去设置里的高级设置」同一口径：学生视角下模型弹层是只读的，
  *   所以未配置时给他的说明是「请老师或家长去设置」，而不是「去填 API Key」——
  *   后者既是技术词，又指向一个学生自己不会去动的地方（配置入口在设置页的
- *   「高级设置（教师 / 答辩）」里）。
+ *   「高级设置（教师 / 家长）」里）。
  */
 export function llmChipTitle(llm: LlmReadiness | null | undefined, isTeacher: boolean): string {
   const state = llmReadyState(llm)

@@ -31,8 +31,11 @@
  * 不在这里复读，只在侧栏身份卡一处（2026-09-22 报告 2.1；见模板里 `.chat__hello-grade` 的说明）。
  *
  * ── 右栏折叠 ──────────────────────────────────────────────────────────────
- * ≥1280 常驻（可收），<1280 变浮层（进入该区间自动收起）。断点判断写在 CSS 里，
- * 只在这里维护**一套**媒体查询监听（进窄屏自动收起、离开窄屏还原，
+ * ≥1024 常驻（可收），窗口更窄时（媒体查询落在 1023px 及以下）变浮层、进入该区间自动收起。
+ * ★ 1024–1279 是**「平板 / 小笔记本」档：保留完整布局**（优化报告 §2.2 的明确决定，
+ *   原先是 <1280 就收成图标条）。别把这里改回 1280 —— 收拢档只到窗口下限 1024，
+ *   `tests/breakpoints.test.ts` 与 `tests/session-tree.test.ts` 都钉着这一点。
+ * 断点判断写在 CSS 里，只在这里维护**一套**媒体查询监听（进窄屏自动收起、离开窄屏还原，
  * 但不覆盖学生自己主动关掉的选择）。
  */
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -279,6 +282,9 @@ const panels = usePanelsStore()
 const diagnosticsPanel = useDiagnosticsPanel()
 const historyOpen = computed(() => panels.historyOpen)
 const railOpen = computed(() => panels.railOpen)
+/** ★ 必须与 `ContextRail.vue` / `SessionList.vue` / `AppSidebar.vue` 的媒体查询同档：
+ *  **1023px 及以下 = 收拢档**（窗口下限是 1024，所以这一档只在极端情况下命中）。
+ *  1024–1279 不在此列 —— 那一档保留完整布局，见文件头「右栏折叠」。 */
 const NARROW = '(max-width: 1023px)'
 let mql: MediaQueryList | null = null
 /** 记录「这次收起是断点自动做的」—— 离开窄屏时才还原，不覆盖学生主动关掉的选择。 */
@@ -771,7 +777,7 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
                 v-for="e in entries"
                 :key="e.key"
                 type="button"
-                class="chat__entry"
+                class="k12-card chat__entry"
                 @click="onEntry(e.to)"
               >
                 <span class="chat__entry-ico"><component :is="e.icon" :size="16" /></span>
@@ -945,7 +951,12 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   gap: 12px;
   padding: 8px 24px 9px;
   /* 工具条属于桌面层，不铺纸 —— 它是「桌上的工具」，不是内容 */
-  border-bottom: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
+  /* ★ 2026-09-27：这条线下线（分隔「工具栏 / 内容」的窗口级横线）统一到
+   *   `--k12-border-strong` 档。站点里有四条**窗口级**的分面线（侧栏竖线、
+   *   顶栏下线、本条、右栏竖线），此前深浅不一（有的 70% 淡线、有的实线）——
+   *   读起来像四张不同图纸拼的。本轮四条统一：结构分面走 strong（2.35:1），
+   *   卡片发丝线才走 `--k12-border`（1.50:1）。 */
+  border-bottom: 1px solid var(--k12-border-strong);
 }
 .chat__bar-left {
   /* `none` 而不是 `flex: 1`：让出中段给章节指示器 —— 章节名可以截断，
@@ -1242,6 +1253,10 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
 .chat__llm-note {
   background: var(--k12-warn-soft);
   border: 1px solid color-mix(in srgb, var(--k12-warn) 30%, transparent);
+  /* 左侧强调条：这是**要动手的一条提示**（去配模型），不是一屏普通文字。
+   * 3px 的实色只加在左边一条上 —— 底色仍是 warn-soft，四边线仍然很淡，
+   * 所以它读起来是「强调」而不是「报错」（红与满框实线都会读成故障）。 */
+  border-left: 3px solid var(--k12-warn);
   border-radius: var(--k12-r-inset);
 
   display: flex;
@@ -1282,11 +1297,15 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
+/* 能力卡 = **纸面**：皮肤（白底 + 1px 线 + 圆角 + shadow-card）唯一来源是
+ * base.css 的 `.k12-card`（根元素已挂该类），这里不再自写第二份。
+ * ★ 本组件只覆盖**线的颜色**：纸与桌面之间那条边界走「学段色淡边框」——
+ *   四张卡并排时属于同一组入口，一条比 `--k12-border` 暖一点点的线就够把它们
+ *   与普通内容块分开，不需要更重的底色或投影。 */
 .chat__entry {
-  background: var(--k12-surface);
-  border: 1px solid var(--k12-border);
-  box-shadow: var(--k12-shadow-card);
-  border-radius: var(--k12-r-card);
+  /* hover 微光（::before）的定位容器 */
+  position: relative;
+  border-color: color-mix(in srgb, var(--k12-accent) 14%, var(--k12-border));
 
   display: flex;
   flex-direction: column;
@@ -1296,13 +1315,38 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   cursor: pointer;
   text-align: left;
 }
+/* hover 微光：从左上角落下的一抹极淡学段色（5%）。
+ * ★ 为什么改掉「整块换浅紫」：一屏四张卡，指针扫过时四块纸轮流变色太吵；
+ *   微光把「指针在这张纸上」说清楚，颜色仍然归纸自己所有。
+ * ★ 只动 opacity（不引入 transform）—— 所以不需要另写一份减动效替代表达：
+ *   系统偏好 reduce / 用户选「开启」时，全局那条把时长压到 0.01ms，
+ *   终态（opacity 0/1）与常态一字不差。 */
+.chat__entry::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--k12-accent) 5%, transparent), transparent 70%);
+  opacity: 0;
+  transition: opacity var(--k12-dur-state) var(--k12-ease-state);
+  /* 微光只是皮肤：它盖在纸与字**之间**，不参与命中（点它等于点这张卡） */
+  pointer-events: none;
+}
 @media (hover: hover) and (pointer: fine) {
   .chat__entry:hover {
-    border-color: var(--k12-accent-ink);
-    background: var(--k12-accent-soft);
+    border-color: var(--k12-accent-border);
+    /* 4% 的学段色打在白纸上：hover 仍有底色反馈，但不再把整块纸染成浅紫 */
+    background: color-mix(in srgb, var(--k12-accent) 4%, var(--k12-surface));
+  }
+  .chat__entry:hover::before {
+    opacity: 1;
   }
 }
 .chat__entry-ico {
+  /* ⚠️ 必须给内部内容一条定位：定位伪元素（z-index: auto）在层叠里**画在
+   *   普通流内容之上**，不加这行微光会罩住图标与文字（实测：伪元素先于
+   *   定位后的内容绘制，同层按树序 → 内容在上）。 */
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1313,6 +1357,8 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   color: var(--k12-accent-ink);
 }
 .chat__entry-text {
+  /* 理由同上：文字要在微光之上 */
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 2px;

@@ -16,12 +16,15 @@
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+// ⚠️ 相对路径 + `.ts` 后缀，**不用 `@shared/*` 别名**：本模块现在会被 `stores/chat.ts`
+//    经 `stores/demoSeed.ts` 间接拉进若干 node 单测的模块图，而那些用例没有别名的解析钩子
+//    （写成别名会让它们当场 `Cannot find package '@shared/diagnostics'`，实测踩到）。
 import {
   emptyDiagnosticsSnapshot,
   type DiagSandbox,
   type DiagnosticsSnapshot,
   type TurnDiagnostics
-} from '@shared/diagnostics'
+} from '../../../shared/diagnostics'
 import { resolveDiagnosticsBridge, type DiagnosticsCallResult } from '../api/diagnostics'
 
 export const useDiagnosticsStore = defineStore('diagnostics', () => {

@@ -34,6 +34,8 @@ import {
   type CodeHintRequest,
   type CodeRunHintRequest,
   type CodeTemplateRequest,
+  type DemoScriptCallResult,
+  type DemoSeedCallResult,
   type DiagnosticsCallResult,
   type FetchModelsResult,
   type FileExportRequest,
@@ -65,6 +67,7 @@ import {
   type StudyReportRequest
 } from '../main/ipc/channels'
 import type { SidecarState } from '../main/sidecar/protocol'
+import { DEMO_BLOCKED_MESSAGE, isDemoScriptPayload, readDemoSeedState, type DemoSeedState } from '../shared/demo-seed'
 import type { GradeLevel, TraceSnapshot } from '../shared/ipc-events'
 import { IPC_EVENT_NAMES, type IpcEvent } from '../shared/ipc-events'
 
@@ -98,6 +101,30 @@ export interface K12Api {
   clearDiagnostics(): Promise<DiagnosticsCallResult>
   /** 演示模式：订阅每轮结束推送的诊断信封快照，返回取消订阅函数。 */
   onDiagnosticsChanged(listener: (snapshot: DiagnosticsSnapshot) => void): () => void
+  /**
+   * ★★ **演示沙箱**（预置数据）—— 与上面三条「演示模式」是**两件事**，别混：
+   *   那三条管的是「把这一轮背后发生了什么摊开看」（诊断信封的读 / 清 / 推）；
+   *   这三条管的是「把这个应用切成看起来像用了两个月的状态」（学生态的预置开关）。
+   *
+   * ★ 三条都是 **invoke**（有回执），**都不进** `PUSH_CHANNELS`：它们不产生任何事件流。
+   *   · 开关要回执 —— 点了必须知道「切没切成」（切成了就自动重载界面）；
+   *   · 脚本要回执 —— 渲染进程要在开演之前拿到三轮内容；
+   *   · 状态要回执 —— 渲染进程每次启动都要问一次「现在是不是沙箱态」。
+   */
+  readDemoState(): Promise<DemoSeedCallResult>
+  /**
+   * 演示沙箱：切换档位（`inactive` / `seeded`）。
+   * ★ 入参只认那两个冻结字面量（preload 先过一遍 `readDemoSeedState`），
+   *   主进程侧还会再校验一次 —— 渲染进程递来的值一律不当真。
+   */
+  seedDemo(state: DemoSeedState): Promise<DemoSeedCallResult>
+  /**
+   * 演示沙箱：取**三轮脚本**（含引用 / 卡片 / 该轮的诊断信封）。
+   * ★ 脚本住在**主进程**（`main/demo/script.ts`）：预置载荷带着 `kpId` 这类内部标识，
+   *   写进渲染进程源码会被学生面纪律守卫扫到，所以按需下发。
+   * ★ 回执在边界上过 `isDemoScriptPayload`：半截脚本直接丢掉，绝不递给界面。
+   */
+  readDemoScript(): Promise<DemoScriptCallResult>
   /** 读当前 sidecar 状态（不含 token）。 */
   getSidecarInfo(): Promise<SidecarState>
   /** 订阅 sidecar 状态变化，返回取消订阅函数。 */
@@ -392,6 +419,30 @@ const api: K12Api = {
       ipcRenderer.removeListener(IPC.diagnosticsChanged, handler)
     }
   },
+
+  // ── 演示沙箱：预置数据（三条 invoke；★ 与上面那三条「诊断」不是一回事）─────
+  // ★ 三条都不进 `PUSH_CHANNELS`：它们要的是回执，不产生任何事件流。
+  readDemoState: (): Promise<DemoSeedCallResult> =>
+    ipcRenderer.invoke(IPC.demoState) as Promise<DemoSeedCallResult>,
+
+  // ★ 白名单入参：只递 `readDemoSeedState` 认得出的两个字面量之一，认不出就递 `''`。
+  //   为什么是 `''` 而不是原样递：渲染进程递来的值一律不当真 —— 原样递等于把一个
+  //   任意对象送过边界；递 `''` 则保证过边界的**永远是字符串**，再由主进程拒一次
+  //   （回执 `{ok:false}`）。为什么不兜底成 `inactive`：兜底会让一个拼错的枚举值
+  //   **静默地退出沙箱** —— 界面上只是按钮状态变了，学生不知道发生过什么。
+  seedDemo: (state): Promise<DemoSeedCallResult> =>
+    ipcRenderer.invoke(IPC.demoSeed, readDemoSeedState(state) ?? '') as Promise<DemoSeedCallResult>,
+
+  // ★ 边界处过滤：`data` 必须是一份**完整的**脚本载荷（三轮都在、原话与正文非空）。
+  //   半截脚本直接丢掉（回一句现成的兜底话术）—— 宁可按钮点了没反应，
+  //   也不要在学生面前放一段缺字的回答（判据见 `shared/demo-seed.ts`）。
+  readDemoScript: (): Promise<DemoScriptCallResult> =>
+    ipcRenderer.invoke(IPC.demoScript).then((receipt: DemoScriptCallResult) => {
+      if (receipt.ok && !isDemoScriptPayload(receipt.data)) {
+        return { ok: false, message: DEMO_BLOCKED_MESSAGE }
+      }
+      return receipt
+    }),
 
   getSidecarInfo: (): Promise<SidecarState> =>
     ipcRenderer.invoke(IPC.sidecarGetInfo) as Promise<SidecarState>,
@@ -824,6 +875,13 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.diagnosticsChanged,
   IPC.diagnosticsRead,
   IPC.diagnosticsClear,
+  // 演示沙箱：预置数据（三条 invoke）。
+  // ★★ 与上面那三条「演示模式」是两件事：那三条是信封的读/清/推，
+  //    这三条是学生态的开关（切换 / 读档位 / 取三轮脚本）。
+  //    三条都**不是推送**（都要回执），所以不进 `PUSH_CHANNELS`。
+  IPC.demoSeed,
+  IPC.demoState,
+  IPC.demoScript,
   // 学生身份 / 画像 / 学段证据（invoke；身份由主进程决定）
   IPC.studentGet,
   IPC.profileRead,

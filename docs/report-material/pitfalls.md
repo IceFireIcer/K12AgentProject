@@ -3796,3 +3796,107 @@ CSSOM     : sheet 59  .code__editor[data-v-9ff63819]{height:420px}
 
 **相关**：`desktop/src/renderer/src/components/CodeEditor.vue`（只负责 100% 撑满）、
 `views/Coding.vue`、`cards/CodingCard.vue`、守卫 `tests/code-editor-mount.test.ts`（变异 105/106）、决策 D-105。
+
+## P-158 ★★ 「改令牌里的阴影」永远不生效：同一份生成物里两处定义，后者覆盖前者（2026-09-27）
+
+**现象**：`--k12-shadow-float` 在 `tokens.generated.css` 里有一条定义
+（`gen-tokens.mjs` 第 4 步推出来的 `0 8px 28px -12px rgba(27,34,51,0.22)`），
+而 `base.css` 的 `:root` 也定义了同名变量。**改生成器里那个值、重新生成、刷新界面 —— 什么都没变。**
+
+**根因**：`base.css` 里 `@import './tokens.generated.css'` 在最前，`base.css` 自己的 `:root` 在后。
+两层都是 `:root` 单类选择器、权重相同，**后加载者赢** —— 于是生成物里那份是**死值**。
+更麻烦的是它读起来完全合理：生成器里有、生成物里也有、文档里还写着"唯一" —— 只有对着
+computed style 看才会发现生效的是另一份。
+
+**改法**：删掉生成器里的重复定义（`gen-tokens.mjs` 只留两支聚焦环），并在注释里写明"投影定义在 base.css"。
+**铁律**：一个 CSS 自定义属性只能有一处定义；`gen-tokens.mjs` 与 `base.css` 的分工是
+"随学段变的色值走生成器，结构与阴影走 base.css"。
+
+**为什么值得记**：这类缺陷**不会红任何测试**。`check-contrast` 只看色值、守卫只看 DOM 与文件内容，
+没有任何一条会把"生成物覆盖了手写值"当成问题。它们只有两种发现方式：
+① 改了却看不出变化（本轮就是这样发现"改阴影没反应"的）；② 对着 computed style 逐条核对。
+与 P-155（`typecheck:web` 漏掉 tests）同族：**判据覆盖不到的地方，改动会是"静默无效"的。**
+
+**相关**：`desktop/scripts/design/gen-tokens.mjs`（第 4 步）、`desktop/src/renderer/src/assets/base.css`（`:root` 投影段）。
+
+## P-159 ★★ `.shell__head` 的投影被内容区盖住：外阴影与背景同属一个绘制阶段（2026-09-27）
+
+**现象**：按 D-106 给顶栏那一条（`.shell__head`）加 `box-shadow: var(--k12-shadow-edge-bottom)` 之后，
+**真机上看不到任何阴影**。用强红色探针（把 shadow 临时改成纯红）实测：`y=72..76` 全无色。
+
+**根因**：`box-shadow` 的外阴影画在元素**自己的背景层**上，而 `.shell__content`
+（`background: var(--k12-page)`，不透明）在 DOM 里**排在它后面**、又没有任何层级关系 ——
+于是内容区直接盖住了投影带。加 `position: relative; z-index: 1` 之后立刻可见
+（红色探针实测 `rgb(245,57,58)` → `rgb(246,206,210)`）。
+
+**改法**：`.shell__head { position: relative; z-index: 1 }`（**不改任何几何尺寸**）。
+⚠️ 但 `.pa`（吸顶操作栏，`z-index: 5`）会正面遮住这条投影带 —— 用了 `PageActions`
+的页面上那 3px 投影会被吃掉（顶栏线本身、侧栏竖线、右栏左线都不受影响）。
+这是**已知的、可接受的取舍**：吸顶栏本来就该压在顶栏下方滚动，为一条 3px 投影去抬 z-index
+会牵动弹层层级。下次若真要修，要从"吸顶栏的 z-index 与 chrome 的关系"整体考虑。
+
+**为什么值得记**：`box-shadow` 的可见性依赖**绘制顺序**，而这一点在源码里完全看不出来 ——
+写了、值也对、测试全绿、界面却没变化。与 P-158 是同一类"静默无效"，
+区别是这条的判据是**几何位置与层级**（要用强色探针或像素采样才能确证）。
+
+**相关**：`desktop/src/renderer/src/layouts/AppShell.vue`（`.shell__head`）、`components/PageActions.vue`、D-106。
+
+## P-160 ★★ 组件、样式、测试全绿，但功能**没有入口**：`openFrom` 零调用者（2026-09-27）
+
+**现象**：悬浮追问窗（`components/FloatPanel.vue`）做得完整 —— 拖拽、折叠、关闭、
+接真实对话链路、`role="dialog"` + Esc + 焦点归还全都在，`npm test` 一直绿。
+**但学生打不开它**：store 里的 `openFrom` / `openPanel` 在整个渲染层**一个调用者都没有**。
+用户走查时看到这只窗后问的第一句就是「这个窗口有启动的按钮么」——他是在问我手动触发 store
+打开的那一刻看到的窗，而**正常使用路径下它永远不出现**。
+
+**根因**：这类缺陷不属于"逻辑错"，属于**接线漏了**。而仓库里的守卫全都是"逻辑断言"：
+- `probe-anchors` / `probe-structure`：查 `data-testid` 与探针脚本的**存在性**（窗里有、通过）；
+- `student-view-discipline` / `demo-mode`：查文案与档位（不涉及"谁打开它"）；
+- `ux:pages`：逐页查内容与溢出（窗没打开时它不在 DOM 里，探针看不见）。
+**没有一条断言问「这个功能有入口吗」** —— 于是"做完了却够不着"可以一直绿。
+
+**改法**：① 在动画讲解页的舞台卡头补「边看边问」按钮（`animation-view-ask`）——
+这只窗本来就是按「边看动画边问」设计的，入口落在学生正盯着动画的那一刻；
+② 新增 `tests/float-panel.test.ts`：**接线断言** —— 至少有一个 `.vue` 真的调用
+`floatPanel.openFrom/openPanel`（且排除 store 自身与面板自身）；折叠与关闭控件在位；
+**折叠后必须换图标**（原地留减号的话，学生找不到"放大回来"的地方）。
+
+**为什么值得记**：这是"绿"的第四种形态（前三种见 `tests/ux-*` 与 P-155）——
+不是假绿、不是覆盖不到、不是环境问题，而是**根本没有断言在管这件事**。
+判据应该按"用户能不能走到"来写，而不是按"代码在位不在位"来写。
+同类隐患：任何"定义了 API 但没人调用"的能力（本仓还有：`tone="inset"` 曾零消费者，见 D-106）。
+
+**相关**：`desktop/src/renderer/src/components/FloatPanel.vue`、`stores/floatPanel.ts`、
+`views/Animation.vue`（入口）、守卫 `tests/float-panel.test.ts`。
+
+## P-161 ★★ 我用 `element.click()` 验完"全通过"，真机上手点不动：程序化点击绕过指针事件（2026-09-27）
+
+**现象**：补完追问窗入口后我写了个 CDP 探针验「打开 → 折叠 → 展开 → 关闭」，
+**12 项全绿**，于是报给用户"链路全通"。用户实测第一句就是：
+「点了一次边看边问弹出来了，**再点一次悬浮窗居然关不掉，我点悬浮窗的 X 也关不掉，
+最小化也没有效果**」。
+
+**根因**：标题栏上的 `onPointerDown` 调了 `setPointerCapture(e.pointerId)` ——
+指针捕获会把后续指针事件**全部重定向到捕获元素**（标题栏），
+于是子按钮（X / 折叠）上的 `click` 永不触发。
+而我的探针用 `document.querySelector(...).click()`：那是**程序化派发 click**，
+**完全不走指针事件路径**，所以捕获与否它都成功 → 探针全绿、真机全坏。
+（`.stop` 修饰符也挡不住它：那管的是**点击**冒泡，不是指针重定向。）
+
+**改法**：① `onPointerDown` 先判 `isInteractive(e.target)`（`closest('button, input, ...')`），
+是可交互子元素就直接返回、不进拖拽也不捕获指针；
+② 探针改用 `Input.dispatchMouseEvent`（move → press → release 三步，
+与用户操作同一条路径）—— 这是**唯一能测出这类缺陷**的方式；
+③ 顺带发现 `style` 里**从来没给过 height**（`DEFAULT_SIZE.h` 是死值）：
+窗高一直由内容决定，追问几轮就长到出屏 —— 一并改成显式高度 + 正文内部滚动 + 尺寸上下限。
+
+**为什么值得记**：这是"探针全绿"最阴的一种形态 —— **测试手段本身走的是另一条路径**。
+同类陷阱：用 `el.value = x` 代替真实输入（绕过 IME/输入法事件）、
+用 `dispatchEvent(new Event('click'))` 代替真实点击（绕过命中测试与指针捕获）、
+用 `CSS.forcePseudoState` 读 `::before` 的 computed opacity（读到的是假象，P-085 已记过）。
+**判据应当是「用户怎么操作，我就怎么操作」**，而不是"能不能把状态改过去"。
+
+**相关**：`desktop/src/renderer/src/components/FloatPanel.vue`、
+`stores/floatPanel.ts`（`MIN_SIZE` / `MAX_SIZE` / `setSize`）、
+守卫 `tests/float-panel.test.ts`（6 条）+ 变异 113–116、
+真鼠标探针 `.probe-artifacts/float-real-mouse.mjs`。

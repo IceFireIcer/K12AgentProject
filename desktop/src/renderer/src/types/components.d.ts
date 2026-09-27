@@ -29,6 +29,7 @@ declare module 'vue' {
     DegradedNotice: typeof import('./../components/DegradedNotice.vue')['default']
     DiagnosticsPanel: typeof import('./../components/DiagnosticsPanel.vue')['default']
     DiagPeekButton: typeof import('./../components/diag/DiagPeekButton.vue')['default']
+    DiagSequence: typeof import('./../components/diag/DiagSequence.vue')['default']
     DiagSummary: typeof import('./../components/diag/DiagSummary.vue')['default']
     ElButton: typeof import('element-plus/es')['ElButton']
     ElCollapse: typeof import('element-plus/es')['ElCollapse']

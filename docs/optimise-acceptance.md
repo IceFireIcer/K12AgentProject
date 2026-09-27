@@ -30,10 +30,11 @@
 | 门禁 | 结果 |
 | --- | --- |
 | `npm run typecheck` | ✅ 通过 |
-| `npm test` | ✅ **1034 条全绿**（含 check:api / check:tool-schema / check:docs） |
-| 对比度（静态） | ✅ 234 项全过 |
+| `npm test` | ✅ **1042 条全绿**（含 check:api / check:tool-schema / check:docs） |
+| 对比度（静态） | ✅ **342 项全过**（含边框可见性下限 4 条与"落在桌面上的 meta" 2 条） |
 | 对比度（交互态） | ✅ 18 套配色 × hover/active/disabled 全达标（新增守卫） |
-| 变异验证 | ✅ 新增 **70–103 共 34 条**逐条变红；仓库总条目 68 → **103** |
+| 视觉边界（2026-09-27 深夜，D-105） | ✅ `tests/visual-edges.test.ts` **6/6**：18 组配色的"桌面 vs 纸面"色差 ≥1.045、两支边框达标、侧栏/顶栏/右栏的线+单侧投影在位、`.k12-inset` 有真实消费者 |
+| 变异验证 | ✅ 新增 **70–103 共 34 条**逐条变红；仓库总条目 68 → **103** →（D-105）**112** |
 | 门禁覆盖面（2026-09-27 补记） | `npm test` 现在同时是**探针锚点自检**的执行入口（`tests/probe-anchors.test.ts`）—— 报告 §5.3 要求的"CI 添加探针验证步骤"因此由 CI 既有的 `npm test` 步骤满足，无需改 `ci.yml` |
 | 新增守卫测试文件（16 个） | 批次 A/B 的 10 个 + 本轮 6 个：`card-single-question` · `monaco-bundle` · `reduced-motion-mode` · `component-api` · `map-performance` · `probe-structure` |
 | 新增探针脚本 | `scripts/ux-keyboard.mjs`（真机键盘：不掉焦点 / 第一站跳转链接 / Esc 后焦点仍在文档内）· `scripts/ux-probe-reduced-motion.mjs`（`ux:motion`）· `scripts/ux-probe-perf.mjs`（`ux:perf`）· `scripts/probe-lib.mjs`（结构化锚点 / 隔离 / 截图 / axe 类规则） |

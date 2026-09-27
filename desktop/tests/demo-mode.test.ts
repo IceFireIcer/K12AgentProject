@@ -1,5 +1,5 @@
 /**
- * 演示模式（轮次诊断信封 + 演示驾驶舱 + 只读机制浮窗 + 三档视角）的守卫与单测。
+ * 演示模式（轮次诊断信封 + 运行透视 + 只读机制浮窗 + 三档视角）的守卫与单测。
  *
  * ══════════════════════════════════════════════════════════════════════════
  * 这一组测试守的是什么
@@ -9,7 +9,7 @@
  *   · 「落盘只留结构」→ 其实把学生正文也写进 JSONL 了；
  *   · 「四级链逐级可见」→ 其实老后端没给 `attempts`，界面却自己编了三档；
  *   · 「这条旁路坏了不影响对话」→ 其实 bridge 缺失时把整块数据面判成不可用；
- *   · 「演示页只在最高档可达」→ 其实教师档侧栏里就摆着它。
+ *   · 「证据页学生档看不到」→ 其实学生侧栏里就摆着它。
  * 所以下面每条都落在**可机械复核的判据**上（行为、字段集合、import 关系、通道归属）。
  *
  * ★ 与 `student-view-discipline.test.ts` 的分工：那个管「学生看得到什么」，
@@ -352,7 +352,7 @@ test('★★ 诊断是**可选旁路**：不并进数据面必需方法，推送
     assert.ok(!requiredBlock.includes(method), `${method} 不许进数据面的必需方法（它只是演示旁路）`)
   }
 
-  // ② 旁路自己有独立的探测入口（缺方法时只让演示页显示一句学生话）
+  // ② 旁路自己有独立的探测入口（缺方法时只让运行透视页显示一句学生话）
   assert.match(bridge, /export function resolveDiagnosticsBridge/, '诊断桥要有自己的探测函数')
   //    方法名（渲染进程）↔ 通道键名（channels.ts）↔ 线上通道名，三者逐一核对
   const THREE = [
@@ -378,43 +378,109 @@ test('★★ 诊断是**可选旁路**：不并进数据面必需方法，推送
 })
 
 /* ================================================================== *
- * ⑥ 演示页的豁免必须名副其实（技术口原文案只喂给最高档）
+ * ⑥ 证据页的豁免必须名副其实（技术口原文案只喂给教师档及以上可达的页面）
  * ================================================================== */
 
-test('★★ 演示证据模块（components/diag/evidence.ts）只被演示面 import，且演示页要求最高档', async () => {
+test('★★ 演示证据模块（components/diag/evidence.ts）只被教师 / 演示档可达的页 import，学生档看不到那一页', async () => {
   const { PAGES, visibleInSidebar, requiredViewFor } = await import('../src/renderer/src/stores/ui.ts')
 
-  // ① 页面归属：演示页要求最高档；学生与教师**都**进不去侧栏
-  assert.equal(PAGES.demo.nav, 'debug', '演示页必须是 debug 档专属')
-  assert.equal(requiredViewFor('demo'), 'debug')
-  assert.equal(visibleInSidebar(PAGES.demo, 'student'), false)
-  assert.equal(visibleInSidebar(PAGES.demo, 'teacher'), false)
+  // ① 页面归属（2026-09-27 口径变更）：**教师 / 答辩档及以上**可达 ——
+  //    普通运行态下老师也要能查「这一轮怎么跑出来的」；但**学生档仍然进不去侧栏**，
+  //    这才是这条断言真正要守的东西（技术证据不进学生面）。
+  assert.equal(PAGES.demo.nav, 'teacher', '运行透视必须是教师档专属（学生档看不到这一页）')
+  assert.equal(requiredViewFor('demo'), 'teacher')
+  assert.equal(
+    visibleInSidebar(PAGES.demo, 'student'),
+    false,
+    '学生档不许看到运行透视（那一页摊开的是 Prompt 原文与原始信封）'
+  )
+  assert.equal(
+    visibleInSidebar(PAGES.demo, 'teacher'),
+    true,
+    '教师档要能看到运行透视 —— 它不再只在最高档可达'
+  )
   assert.equal(visibleInSidebar(PAGES.demo, 'debug'), true)
 
   // ② import 关系（这就是那条例外的凭据）：
-  //    技术口原文案只许被演示页消费 —— 一旦有学生可见的组件 import 它，这条立刻红。
-  const ALLOWED = new Set(['views/Demo.vue'])
+  //    技术口原文案只许被运行透视页**以及它自己的子页组件**消费 ——
+  //    一旦有学生可见的组件 import 它，这条立刻红。
+  //    ⚠️ 2026-09-27（新增「调用顺序」子页时实测到的漏洞）：判据原来只认
+  //      `diag/evidence` 这种**带目录**的路径，而同目录的消费者按惯例写 `from './evidence'`
+  //      —— 那等于给「同一目录下的新组件」开了一条不记账的路。这里把简写一并收进来，
+  //      下一次谁在 `components/diag/` 里加消费者，也必须先来这条断言上「上户口」。
+  const ALLOWED = new Set(['views/Demo.vue', 'components/diag/DiagSequence.vue'])
   const consumers: string[] = []
   for (const file of rendererFiles()) {
     const name = rel(file)
     if (name === 'components/diag/evidence.ts') continue
     const source = readFileSync(file, 'utf8')
-    if (/from\s+'[^']*diag\/evidence'/.test(source)) consumers.push(name)
+    const imports =
+      /from\s+'[^']*diag\/evidence'/.test(source) || /from\s+'\.\/evidence'/.test(source)
+    if (imports) consumers.push(name)
   }
   assert.deepEqual(
     consumers.sort(),
     [...ALLOWED].sort(),
-    '演示证据模块的消费者变了 —— 它整份都是技术原文，只许喂给「演示 / 调试档」才可达的那一页'
+    '演示证据模块的消费者变了 —— 它整份都是技术原文，只许喂给「教师档及以上」才可达的那一页'
   )
 
-  // ③ 演示页必须真的用上那些分块（只定义不渲染 = 做了却看不到）
+  // ③ 证据页必须真的用上那些文案（只定义不渲染 = 做了却看不到）
   const demo = read('src/renderer/src/views/Demo.vue')
-  for (const token of ['DIAG_BLOCKS', 'GUARD_CATALOG', 'GRADE_MATRIX_ROWS', 'HIDDEN_MECHANISM_CARDS']) {
-    assert.ok(demo.includes(token), `演示页要渲染 ${token}`)
+  for (const token of [
+    'DIAG_BLOCKS',
+    'GUARD_CATALOG',
+    'PAGE_HEADINGS',
+    'PROMPT_STAGE_LABELS',
+    'RETRIEVAL_LEVEL_LABELS',
+    'SAFETY_STAGE_LABELS'
+  ]) {
+    assert.ok(demo.includes(token), `运行透视要渲染 ${token}`)
   }
-  // ④ 驾驶舱最要紧的两个动作必须在（导出演示包 / 一键清空）
-  assert.match(demo, /exportPackage/, '演示包导出必须在')
-  assert.match(demo, /diagnostics\.clear\(\)/, '一键清空必须在')
+  // ④ 页面最要紧的两个动作必须在（重新读取 / 清空记录）
+  assert.match(demo, /diagnostics\.refresh\(\)/, '重新读取必须在')
+  assert.match(demo, /diagnostics\.clear\(\)/, '清空记录必须在')
+  // ★ 2026-09-27 决策：导出演示包、四学段横向对比、隐藏机制补充三块已删 ——
+  //   它们零运行时数据（是「为了演示而演示」的讲解稿）。删掉的东西不许悄悄回来。
+  assert.ok(!demo.includes('exportPackage'), '导出演示包已删（零运行时数据）')
+  assert.ok(
+    !demo.includes('GRADE_MATRIX_ROWS') && !demo.includes('HIDDEN_MECHANISM_CARDS'),
+    '两张纯静态讲解卡（四学段横向对比 / 隐藏机制补充）已删'
+  )
+})
+
+test('★★ 「调用顺序」子页组件（components/diag/DiagSequence.vue）只被运行透视页 import', () => {
+  // ══════════════════════════════════════════════════════════════════════
+  // 为什么必须有这一条（与上一条同一精神，别删）
+  // ══════════════════════════════════════════════════════════════════════
+  // `student-view-discipline.test.ts` 按**整文件**豁免了 `components/diag/DiagSequence.vue`
+  // （它整份摊开的是运行时技术原文：提示词分段原文、工具名、逐级检索记录、安全结论）。
+  // 按本仓纪律，那样一条豁免必须被机械兑现 —— 否则它就是一个后门。
+  // 兑现方式与上一条同源，只是换了一环：
+  //   · 上游：`views/Demo.vue` 是**教师档专属页**（上一条已钉住 `PAGES.demo.nav === 'teacher'`）；
+  //   · 本环：这个子页组件**只被** `views/Demo.vue` import —— 谁把它搬进学生可见的组件，
+  //     或者新写一个消费者，这条立刻红。
+  // ⚠️ 判据必须是**import 关系**（谁 from 了它），不是「文件里出现过 DiagSequence」——
+  //   后者会被注释与字符串喂饱（本仓在注释上踩过不止一次）。
+  const ALLOWED = new Set(['views/Demo.vue'])
+  const consumers: string[] = []
+  for (const file of rendererFiles()) {
+    const name = rel(file)
+    if (name === 'components/diag/DiagSequence.vue') continue
+    if (/from\s+'[^']*DiagSequence\.vue'/.test(readFileSync(file, 'utf8'))) consumers.push(name)
+  }
+  assert.deepEqual(
+    consumers.sort(),
+    [...ALLOWED].sort(),
+    '「调用顺序」子页的消费者变了 —— 它摊开的是提示词原文与工具名，只许喂给教师档及以上才可达的那一页'
+  )
+
+  // 反向对照：页面必须**真的渲染**它（只 import 不渲染 = 做了却看不到，D-040 那个坑）。
+  // 判据落在模板上的 `<DiagSequence :turn="turn" />`，而且它吃的必须是本页选中的那一轮。
+  assert.match(
+    read('src/renderer/src/views/Demo.vue'),
+    /<DiagSequence :turn="turn" \/>/,
+    '运行透视页必须把「调用顺序」子页挂上去，并把当前选中的那一轮交给它'
+  )
 })
 
 test('★★ 浮窗是只读的：不出现任何写运行时状态的控件', () => {
@@ -422,7 +488,7 @@ test('★★ 浮窗是只读的：不出现任何写运行时状态的控件', (
   // 只允许这四个动作按钮（拖拽手柄不是按钮）；出现输入类控件即违反「只读」纪律
   assert.ok(!/<input|<select|<textarea/.test(panel), '只读浮窗里不许有输入控件')
   assert.ok(!/MessageComposer/.test(panel), '只读浮窗里不许挂输入条（那是追问窗的事）')
-  assert.match(panel, /diag-open-demo/, '必须有「在演示页打开」的出口')
+  assert.match(panel, /diag-open-demo/, '必须有「在运行透视里打开」的出口')
   // ★ 「默认关闭」是安全底线（防止演示手滑、投屏意外）：store 的初始值必须是 false
   const panelStore = read('src/renderer/src/stores/diagnosticsPanel.ts')
   assert.match(panelStore, /const open = ref\(false\)/, '浮窗默认必须是关闭的')

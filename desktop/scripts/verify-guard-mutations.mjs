@@ -681,9 +681,13 @@ const MUTATIONS = [
     expect: 'G-P2-3a'
   },
   {
-    name: '65 演示驾驶舱：把页面放回学生侧栏（nav 改成恒可见）',
+    name: '65 运行透视：把页面放回学生侧栏（nav 改成恒可见）',
     file: 'src/renderer/src/stores/ui.ts',
-    find: "    nav: 'debug',",
+    // ⚠️ 锚点必须**唯一**：2026-09-27 这一页从 `'debug'` 换到 `'teacher'` 之后，
+    //    单拎 `    nav: 'teacher',` 会先命中 knowledge 那一项（变异 ④ 守的就是它），
+    //    于是这条变异改错页面、静默失效（脚本会报「守卫仍然是绿的」）。
+    //    带上紧随其后的 `icon` 行，锚点才落在 demo 这一项上。
+    find: "    nav: 'teacher',\n    icon: 'Radar'",
     replace: '    nav: true,',
     testFile: 'tests/demo-mode.test.ts',
     expect: '演示证据模块'
@@ -1023,6 +1027,192 @@ const MUTATIONS = [
     replace: '            class="coding__editor"\n            data-testid="coding-editor"',
     testFile: 'tests/code-editor-mount.test.ts',
     expect: '不挂在异步组件上'
+  },
+  /* ------------------------------------------------------------------ *
+   * 视觉边界守卫（2026-09-27，D-105）
+   * —— 守卫在 `tests/visual-edges.test.ts`；口径见 check-contrast.mjs 顶部注释。
+   * ⚠️ 锚点全部单行（工作区 CRLF）。
+   * ------------------------------------------------------------------ */
+  {
+    // 本次事故的原形态：1.21:1 的"看不见的线"。
+    // ⚠️ 变异打在**生成物**上：守卫读的是生效值（tokens.generated.css），
+    //    改源 JSON 而没重新生成时界面也不会变 —— 那样变异等于没生效。
+    //    源 → 生成物 的一致性由 CI 的 `gen:tokens + git diff --exit-code` 管。
+    name: '107 边界：把卡片发丝线改回旧值 #E6EAF2（1.21:1，读不出边界）',
+    file: 'src/renderer/src/assets/tokens.generated.css',
+    find: '  --k12-border: #D1D5DB;',
+    replace: '  --k12-border: #E6EAF2;',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '边框两支'
+  },
+  {
+    name: '108 边界：把结构强线改回旧值 #D9DFEC（1.34:1，结构分面又糊在一起）',
+    file: 'src/renderer/src/assets/tokens.generated.css',
+    find: '  --k12-border-strong: #9CA3AF;',
+    replace: '  --k12-border-strong: #D9DFEC;',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '边框两支'
+  },
+  {
+    // 最隐蔽的一条：default 档（开机默认）回到纯白 —— 白纸压在白桌面上
+    name: '109 层次：把 default 档桌面改回纯白（白底白线的原形态）',
+    file: 'src/renderer/src/assets/tokens.generated.css',
+    find: '  --k12-page: #EEF2FC;',
+    replace: '  --k12-page: #FFFFFF;',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '18 组配色'
+  },
+  {
+    name: '110 用法：侧栏去掉右缘强线（回到"飘在空中"）',
+    file: 'src/renderer/src/components/AppSidebar.vue',
+    find: '  border-right: 1px solid var(--k12-border-strong);',
+    replace: '  border-right: none;',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '结构分面'
+  },
+  {
+    name: '111 用法：右栏左线降档为发丝线（与内容区又分不开）',
+    file: 'src/renderer/src/components/ContextRail.vue',
+    find: '  border-left: 1px solid var(--k12-border-strong);',
+    replace: '  border-left: 1px solid var(--k12-border);',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '结构分面'
+  },
+  {
+    name: '112 用法：嵌入块去掉细线（page 也带色后，浅底压浅底分不开）',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);',
+    replace: '  border: none;',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '嵌入块皮肤'
+  },
+  /* ------------------------------------------------------------------ *
+   * 悬浮追问窗（2026-09-27 走查抓到的三个真缺陷）
+   * —— 守卫在 `tests/float-panel.test.ts`
+   * ------------------------------------------------------------------ */
+  {
+    // 真机上表现为「X 点不动、最小化没反应」：指针捕获把 click 重定向到标题栏
+    name: '113 追问窗：标题栏拖动不再放过可交互子元素（X / 折叠键被指针捕获吃掉）',
+    file: 'src/renderer/src/components/FloatPanel.vue',
+    find: '  if (isInteractive(e.target)) return',
+    replace: '  if (false) return',
+    testFile: 'tests/float-panel.test.ts',
+    expect: '标题栏拖动必须放过可交互子元素'
+  },
+  {
+    // 真机上表现为「问几句就把窗顶破」：高度由内容决定
+    name: '114 追问窗：把显式高度摘掉（窗高重新由内容决定，几轮追问就长到出屏）',
+    file: 'src/renderer/src/components/FloatPanel.vue',
+    find: '  ...(floatPanel.collapsed ? {} : { height: `${floatPanel.size.h}px` }),',
+    replace: '  ...(floatPanel.collapsed ? {} : {}),',
+    testFile: 'tests/float-panel.test.ts',
+    expect: '窗高必须与内容脱钩'
+  },
+  {
+    name: '115 追问窗：面积上限放到 400%（拖一下就把窗拉到铺满）',
+    file: 'src/renderer/src/stores/floatPanel.ts',
+    find: 'const MAX_AREA_RATIO = 0.45',
+    replace: 'const MAX_AREA_RATIO = 4',
+    testFile: 'tests/float-panel.test.ts',
+    // ⚠️ `expect` 匹配的是**测试名**（runner 用 --test-name-pattern），
+    //    不是断言消息 —— 填成断言消息会 0 个测试跑到底、永远是绿的（这条踩过）。
+    expect: '缩放面积按主窗口取比例'
+  },
+  {
+    name: '116 追问窗：入口改回只开不关（按钮看起来是开关，点第二次没有反应）',
+    file: 'src/renderer/src/views/Animation.vue',
+    find: '  floatPanel.toggleFrom(event.currentTarget as Element | null, {',
+    replace: '  floatPanel.openFrom(event.currentTarget as Element | null, {',
+    testFile: 'tests/float-panel.test.ts',
+    expect: '入口按钮是'
+  },
+  {
+    name: '117 追问窗：位置夹紧退回 `if (pos.value)`（没拖过的窗一拉大就出围栏）',
+    file: 'src/renderer/src/stores/floatPanel.ts',
+    find: '    const base = pos.value ?? defaultPos()',
+    replace: '    const base = pos.value ?? { x: 0, y: 0 }',
+    testFile: 'tests/float-panel.test.ts',
+    expect: '窗高必须与内容脱钩'
+  },
+  {
+    // 用户裁决：这只窗不许跟着学生跑到对话页
+    name: '118 追问窗：离开「动手试试」三页不关窗（切到对话页它还盖在上面）',
+    file: 'src/renderer/src/stores/floatPanel.ts',
+    find: '    if (!(FLOAT_PANEL_PAGES as readonly string[]).includes(page)) close()',
+    replace: '    if (page.length > 0) void page',
+    testFile: 'tests/float-panel.test.ts',
+    expect: '只在「动手试试」三页存在'
+  },
+  {
+    // 围栏退化成整个视口（窗就能被拖到顶栏的窗口按钮上）
+    name: '119 追问窗：围栏退化成整个视口（能拖到顶栏上挡住窗口按钮）',
+    file: 'src/renderer/src/stores/floatPanel.ts',
+    find: "    const el = document.querySelector('.shell__content')",
+    replace: "    const el = document.querySelector('.shell__main')",
+    testFile: 'tests/float-panel.test.ts',
+    expect: '围栏 = 内容区'
+  },
+  {
+    // 覆盖层在**未激活时**也作答 —— 普通态下它会开始篡改真实数据，
+    // 而「未激活 = 严格 no-op」正是这一层唯一的安全性判据。
+    name: '120 演示沙箱：覆盖层在未激活时也返回预置载荷',
+    file: 'src/main/demo/overlay.ts',
+    find: '  if (!isDemoSeeded()) return null',
+    replace: '  if (false && !isDemoSeeded()) return null',
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '覆盖层未激活时严格 no-op'
+  },
+  {
+    // 往脚本正文里塞一句带禁词的话 —— 学生会当场读到「（演示）」。
+    name: '121 演示沙箱：脚本正文里出现「演示」字样',
+    file: 'src/main/demo/script.ts',
+    find: '    studentText: \'老师，列表里的数是怎么排好顺序的？\',',
+    replace: '    studentText: \'老师，列表里的数是怎么排好顺序的？（演示）\',',
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '预置文本不含技术词'
+  },
+  {
+    // 沙箱分支挪到 ensureChatRuntime() 之后 —— 进沙箱会真的拉起 Pi 会话、
+    // 往会话 JSONL 里写开场白，「一个字节都不落盘」当场作废。
+    name: '122 演示沙箱：学段的沙箱分支挪到 ensureChatRuntime() 之后',
+    file: 'src/main/ipc/handlers.ts',
+    find: [
+      '    if (isDemoSeeded()) {',
+      '      return {',
+      '        ok: true,',
+      '        data: {',
+      '          gradeLevel: DEMO_GRADE_LEVEL,',
+      "          origin: 'llm',",
+      "          source: 'inferred',",
+      "          decidedBy: 'llm'",
+      '        }',
+      '      }',
+      '    }',
+      '    let instance: ChatRuntime',
+      '    try {',
+      '      instance = await ensureChatRuntime()'
+    ].join('\n'),
+    replace: [
+      '    let instance: ChatRuntime',
+      '    try {',
+      '      instance = await ensureChatRuntime()',
+      '    } catch (error) {',
+      '      return { ok: false, message: `读学段失败：对话运行时尚未就绪（${describeRuntimeFailure(error)}）` }',
+      '    }',
+      '    if (isDemoSeeded()) {',
+      '      return {',
+      '        ok: true,',
+      '        data: {',
+      '          gradeLevel: DEMO_GRADE_LEVEL,',
+      "          origin: 'llm',",
+      "          source: 'inferred',",
+      "          decidedBy: 'llm'",
+      '        }',
+      '      }',
+      '    }'
+    ].join('\n'),
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '沙箱分支都早于 ensureChatRuntime'
   }
 ]
 

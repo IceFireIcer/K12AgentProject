@@ -68,7 +68,10 @@ const PADDING_TOKENS: Record<SurfacePadding, string> = {
   border: 1px solid var(--k12-border);
   box-shadow: var(--k12-shadow-card);
 }
-/* E3 嵌入块：卡中卡用它。有学段浅底，压在白面上分得开。 */
+/* E3 嵌入块：卡中卡用它。有学段浅底，压在白面上分得开。
+ * ★ 那条线**与 base.css 的 `.k12-inset` 同值**（逐字一致），两处必须一起改：
+ *   页面底色也带学段色时，「浅底压浅底」分不开，一条 70% 的线才是
+ *   「这里是一个独立的块」的边界信号（D-105）。 */
 .sf--inset {
   background: var(--k12-surface-2);
   border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
