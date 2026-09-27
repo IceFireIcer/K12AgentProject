@@ -13,7 +13,7 @@ from pathlib import Path
 
 APP_NAME = "k12-agent-server"
 APP_TITLE = "智团团 · sidecar"
-APP_VERSION = "0.1.0"
+APP_VERSION = "1.0.0"
 
 # ---------------------------------------------------------------- 契约常量 --
 # ★ 嵌入模型契约：512 维。改动必须连带 vec0 维度 + 重建索引（执行文档 §8.4）。

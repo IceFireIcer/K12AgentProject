@@ -1,6 +1,6 @@
 [project]
 name = "k12-agent-server"
-version = "0.1.0"
+version = "1.0.0"
 description = "智团团 · Python sidecar（数据 / RAG / 嵌入 / 判分服务）"
 requires-python = ">=3.12,<3.13"
 

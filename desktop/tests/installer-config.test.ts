@@ -57,7 +57,7 @@ function runVersionScript(env: Record<string, string>): { stdout: string; failed
   }
 }
 
-/** 从脚本输出里取版本号（`[build-version] 0.1.42　（来源：...）`）。 */
+/** 从脚本输出里取版本号（`[build-version] 1.0.42　（来源：...）`）。 */
 function versionFrom(stdout: string): string {
   const matched = /\[build-version\]\s+(\d+\.\d+\.\d+)/.exec(stdout)
   assert.ok(matched, `脚本输出里读不到版本号：${stdout.slice(0, 200)}`)
@@ -149,13 +149,13 @@ test('G21-6 ★ 版本号派生：本地保持基线、CI 递增、非法输入�
   // ① 本地（无 CI 环境变量）：**不动**基线版本，本地构建不冒充某个 nightly
   const local = runVersionScript({})
   assert.equal(local.failed, false, `本地跑不应失败：${local.stdout.slice(0, 200)}`)
-  assert.equal(versionFrom(local.stdout), '0.1.0', '本地构建保持 package.json 的基线版本')
+  assert.equal(versionFrom(local.stdout), '1.0.0', '本地构建保持 package.json 的基线版本')
 
   // ② CI：第三段 = run number（**单调递增** —— 「版本号高」才有判据）
   const run42 = versionFrom(runVersionScript({ GITHUB_RUN_NUMBER: '42' }).stdout)
   const run43 = versionFrom(runVersionScript({ GITHUB_RUN_NUMBER: '43' }).stdout)
-  assert.equal(run42, '0.1.42')
-  assert.equal(run43, '0.1.43')
+  assert.equal(run42, '1.0.42')
+  assert.equal(run43, '1.0.43')
   assert.ok(run43 > run42, 'run number 变大 → 版本号必须变大（字符串比较在这个形状下等价于数值比较）')
 
   // ③ 显式指定优先（手工发版用）
@@ -183,7 +183,7 @@ test('G21-6 ★ 版本号派生：本地保持基线、CI 递增、非法输入�
   //    少了它就分不清「挡得准」和「挡得过猛」）。
   assert.equal(
     versionFrom(runVersionScript({ K12_VERSION: '   ' }).stdout),
-    '0.1.0',
+    '1.0.0',
     '空白 K12_VERSION 按「没设置」处理（退回基线），不是非法输入'
   )
 })
