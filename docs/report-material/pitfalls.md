@@ -3900,3 +3900,167 @@ computed style 看才会发现生效的是另一份。
 `stores/floatPanel.ts`（`MIN_SIZE` / `MAX_SIZE` / `setSize`）、
 守卫 `tests/float-panel.test.ts`（6 条）+ 变异 113–116、
 真鼠标探针 `.probe-artifacts/float-real-mouse.mjs`。
+
+## P-162 ★★ 黑名单过滤「换个说法就绕过」：白名单才是唯一不漏的做法（2026-09-28）
+
+**现象**：v2 的方案是在发给模型之前用 `sanitizePii` 正则过滤敏感文本。写了「我叫X」「XX 学校」
+「1[3-9]xxxxxxxxx」这些模式，看起来挡住了直白的 PII。但「小明，五年级，我在 XX 小学二班」里
+「XX 小学二班」**不命中任何一条正则** —— 而它恰恰是学生没同意外传的东西。
+
+**根因**：黑名单只能挡「已经想到要挡的模式」。学生换一个说法、或者信息以「不常见但真实」的形态出现，
+过滤就漏。更糟的是，漏不漏**不可枚举**：你没有一张表能证明「所有该挡的都在里面」。
+而这类漏网一旦发生，是未成年人真实信息出网，不可撤回。
+
+**改法**：把安全边界换成正向的**白名单投影** —— 模型只能看到 `LLM_VISIBLE_TAGS` 里的结构化标签，
+原始 Q&A 根本不经过模型。`sanitizePii` 仍然保留，但职责缩小成「守住本地」（写 `identity_local` 前丢弃命中内容），
+出网保护交给白名单全权负责（D-108）。守卫形态：G-A（键 ∈ 白名单）+ G-C（prompt 只读投影）+ G-B（身份列零重叠）。
+
+**为什么值得记**：这不是「过滤得更严一点」的问题，是**思路换了**。黑名单的安全性是「你想到多少」，
+白名单的安全性是「你显式允许多少」—— 前者随攻击者知识增长而失效，后者不。
+同类陷阱在 agent 系统里到处都是：工具白名单、通道白名单、字段白名单，都该是正向的。
+
+**相关**：`desktop/src/shared/profile-tags.ts`（白名单真源）、`server/app/store/migrations.py`（Python 镜像）、
+守卫 `tests/onboarding-guards.test.ts`（G-A / G-B / G-C）、D-108。
+
+## P-163 ★★ 画像块里放时间戳/相对时间，会毁掉 system prompt 的前缀缓存（2026-09-28）
+
+**现象**：`profile_tags` 每行都有 `ts`，很自然会想「注入画像块时带上『3 天前更新』更有人情味」。
+但前缀缓存是**逐字节比对**的：一旦画像块里含 `ts`、「刚刚」「昨天」这类随轮次变化的量，
+整个 system prompt 从那一块开始每轮都不同，缓存在画像块之后全部失效 —— 而画像块通常排在 prompt 靠前的位置。
+
+**根因**：前缀缓存命中要求「本轮 prompt 的前缀与上一轮**逐字节相同**」（本仓 D-032 已经把这条当硬约束，
+演示页的 `studentContext.sameAsPrev` / 字节指纹就是它的判据）。任何时间类、进度类、随机类的量放进去，
+都会把「同一段前缀」变成「每轮不同的前缀」。
+
+**改法**：`ts` **只用于服务端 TTL 过滤**（读的时候判断是否过期），**绝不注入 prompt**；
+画像块的字段顺序固定（D-032）、错题只注入名+次、TTL 轮次口径由服务端的 `turn_mark` 算，不进模型可见面。
+这也正是「白名单投影」比「把表行直接扔给模型」更安全的另一个理由：投影层可以**决定不带 ts**。
+
+**为什么值得记**：这是「功能性正确、但把另一条不变量悄悄打破」的典型 —— 界面上多一句「3 天前更新」
+不会红任何测试，代价（缓存全失效、成本上升、响应变慢）要过很久才被注意到。
+同类：任何「把运行期状态渲染进 system prompt」的冲动，先问一句「它每轮会变吗」。
+
+**相关**：D-032（注入块字节稳定）、`desktop/src/main/agent/extensions/profile.ts`（画像块拼装）、
+`server/app/store/learning.py`（TTL 读时过滤）、演示页字节指纹 `studentContext.sameAsPrev`。
+
+## P-164 ★★ `memory_switch=0` 若只在前端拦，就等于没关（2026-09-28）
+
+**现象**：设置页有一个「记住我的学习情况」开关。如果实现成「前端 store 里改个布尔、顺手把界面上的
+标签卡清空」，看起来关掉了：学生看到标签没了。但写标签的路径在**后端**（`PUT /api/profile/{sid}/tags/{key}`），
+它不知道前端刚才关了开关 —— 下一轮抽取照写，库里照长，重启后标签又回来了。
+
+**根因**：**闸的判据必须在写原语那一层**。UI 只是入口；真正的边界是「这条数据能不能落库 / 能不能出栈」，
+那两件事都发生在后端。把闸放在前端，等于把一个安全判断交给一个可被绕过（甚至只是刷新）的层。
+
+**改法**：`memory_switch` 与 `parent_consent` 是 `identity_local` 的列，**后端写原语读它们决定行为**：
+`memory_switch=0` → 不写任何 `profile_tags` 行（G-F）；`parent_consent=0` → `ProfileTagsOut.tags` 回空数组，
+任何画像都不外发（G-G）。前端回显的是这两个布尔，不是自己维护的第二份真相。
+
+**为什么值得记**：这是「看起来生效了」的第四种形态（P-160 同族）—— 界面立刻给了正反馈，
+数据层却完全没参与。判断的办法很简单：**问一句「关掉之后，是哪个进程拒绝写这条数据」**。
+如果答案是「前端」，那就没关。
+
+**相关**：`server/app/routes/profile.py`、`server/app/store/learning.py`、`desktop/src/main/agent/extensions/profile.ts`、
+守卫 G-F / G-G、D-111（三道闸）。
+
+## P-165 ★ 读 Python 源码的守卫用换行匹配：CRLF 工作区里静默失配，假警报盖住真问题（2026-09-28）
+
+**现象**：守卫要抽 `contracts.py` 里的类，跨行正则写成「类名 + 非贪婪任意字符 + 冒号换行」（冒号后只认 `\n`）。
+测试报「找不到 class OnboardingAnswerRequest」—— 看起来像 A 还没落盘，但文件里**明明有**这个类。
+直接 `indexOf` 打印上下文才发现：实际是 `:\r\n`，而正则要的是 `:\n` —— `\r` 卡在中间，永远不匹配。
+
+**根因**：工作区文件不一定是 LF。`.gitattributes` 只在**提交**时强制 LF，Windows 上检出/新建的文件仍可能是 CRLF。
+正则里写死 `\n` 的跨行匹配于是对 CRLF 文件整块失配。危险的是它的**失败形态**：
+报的不是「换行符不对」，而是「找不到这个类」—— 于是把「守卫自己的 bug」误读成「队友没干活」，
+排查方向从第一秒就是错的。
+
+**改法**：所有跨行正则用 `\r?\n`；行级提取器对 `\r` 宽容（`trim` 或 `\s*` 收尾）。
+另加一条经验：抽取器断言「找不到 X」时，顺手把 `source.indexOf` 的上下文带进失败信息 ——
+定位问题从「猜」变成「看」。
+
+**为什么值得记**：与 P-158 / P-159 同族 —— **判据覆盖不到的地方，失败会长成另一个样子**。
+守卫报的错误信息本身也可能误导（这里就差点让我去改 A 的写域）。
+
+**相关**：`desktop/tests/onboarding-guards.test.ts` 的 `pyClassBody` / `findPyCollection`、D-114。
+
+## P-166 ★★ 路径视图渲染整张进度表：学段换过的学生看到「同一个概念出现三次」（2026-09-30）
+
+- **现象**（用户截图）：智码工坊的一个模块里「人工智能的定义」出现三次 —— 名字一字不差，
+  内容按学段不同；课程总览写着「已通关 2 / 171」，而该生本学段只有 57 关。其他大章节同样。
+- **根因**：`learning.db` 是**按学生长期保留**的，学段换过（小学低 → 小学高 → 初中）之后，
+  三个学段的关卡行同时留在 `progress` 表里。前端把 `GET /api/quiz/progress` 的 `levels`
+  （= **整张表**）当成「学习路径」渲染 —— 而 P-085 定的口径是「**关卡路径 = 本学段**，
+  取题 / 检索 = 兼容学段」。服务端当时只在**排序**上区分了这两件事（`order` / `fallback_order`），
+  没有在**数据上**表态，于是「哪些行是路径、哪些只是历史记录」只能靠消费方猜 —— 前端猜成了「都是路径」。
+- **解决**：服务端逐行标 `inPath`（`progress_snapshot(path_kp_ids=…)`，判据就是
+  `_default_level_order` 的产物），前端**路径视图**（智码工坊 / 闯关 / 学习记录的逐关进度）
+  只渲染 `inPath !== false`（纯函数 `pathLevelsOf`）。旧记录**不删**（P-086）、仍参与掌握度与
+  取题兼容，只是不再冒充「这一关」。`order` 为空（知识库缺失的冷启动兜底）时传 `None` **不判断** ——
+  拿空集合当判据会把兜底关卡全标成路径外，界面反而空了。
+- **报告用法**：① P-085 是同一根因的**上半段**（排序），这条是下半段（表态）—— 一个口径要在
+  **判定处 + 数据里**都落地才算真的落地；② 「一张表里同时装着两种语义的行」时，**别让消费方去猜**：
+  服务端判得出来的事，就在服务端逐行标出来。
+- **相关**：`server/app/routes/quiz.py` 的 `progress_snapshot` / `read_progress`、
+  `desktop/src/renderer/src/study/workshop-path.ts` 的 `pathLevelsOf`、
+  `desktop/tests/workshop-path.test.ts`、`server/tests/test_quiz_loop.py`（`test_in_path_*` 三条）。
+
+## P-167 ★★ 五问的回答被记到**上一问**头上：fire-and-forget 落库 与 立刻重读状态 的竞态（2026-09-30）
+
+- **现象**（真机复现）：连着答五问，界面在第 2 条回答之后**退回上一问**重问；走完只剩 3 条回答，
+  而且学生第 2 句原话被第 3 句**覆盖**（`onboarding_qa` 里 q3 出现两次、q2 少了）。
+- **根因**：两端都「按设计」——
+  ① `service.answer()` 是 **fire-and-forget**（票 31 守卫 G-J：写库与概括都进后台队列，
+     学生答完立刻能继续），IPC 立刻回 `accepted:true`；
+  ② 渲染层随后调的 `IPC.onboardingState` → `service.start()` 是**重新读服务端**。
+  于是这次读完全可能早于刚才那条回答落库 —— 回来的 `nextQuestionId` 就是**刚答过的那一问**。
+  渲染层 `apply()` 照单全收 → 待答问次回退 → 下一条消息挂到上一问头上。
+  ⚠️ 这是**旧实现里就有的**竞态（问句也会退回去重问），只是那时回答同时进对话、
+  症状被聊天气泡盖住；改成「引导期只收集答案」之后它直接表现为**回答丢失**。
+- **解决**：渲染层把问句做成**只许往前走**（`stores/onboarding.ts` 的 `apply()`）：
+  本地已交回的问次并进权威集合，再取「后端给的 next」与「本地第一问没答的」里**更靠后**的那个。
+  后端更靠后 = 它知道得更多，照它走；后端更旧 = 不采纳，绝不回退重问。
+- **报告用法**：① 「fire-and-forget 写 + 立刻读同一份状态」是**成对的陷阱** —— 只做前一半（很常见的性能优化）
+  就必须在读的那一侧做**单调性**保护，否则渲染层会把旧快照当成新事实；
+  ② 竞态用例写成确定性单测（夹具回一份旧快照）比真机连点复现可靠得多：
+  `tests/renderer-onboarding.test.ts` 的「后端这次读还停在上一问时，界面不许往回退」。
+- **相关**：`desktop/src/renderer/src/stores/onboarding.ts`、`desktop/tests/renderer-onboarding.test.ts`、
+  `desktop/src/main/agent/onboarding/service.ts`（fire-and-forget 队列）、`desktop/src/main/ipc/handlers-data.ts`（`service.start()`）。
+
+
+## P-168 ★★ 底部那条「白条」不是删码残渣，是 flex 列把最后一块**压扁**了（2026-09-30）
+
+- **现象**（用户报）：个性化学习页底部横着一条**没有任何字的白条**，看起来像删代码时漏删的元素；
+  用户原话「是不是删东西时候你没有删干净」。
+- **根因**：那条白条是**真卡片** —— 「判分与掌握度说明」（`Quiz.vue` 里 `SurfacePanel.howto`）。
+  `.quiz__main` 是 `display:flex; flex-direction:column; overflow-y:auto`，而 flex 子项默认
+  `flex-shrink: 1`：内容比容器高时，浏览器**先压缩子项**而不是让它溢出滚动。
+  实测最后一块被从 **56px 压成 21px**，卡内折叠标题仍有 48px 且被卡片圆角裁掉 ⇒
+  屏幕上只剩一条空白条（`scrollHeight 56 / 高度 21`）。
+  同一个容器 `scrollHeight === clientHeight` —— 因为子项被压到刚好塞满，**滚动条根本不会出现**，
+  于是那张卡既显示不全也滚不到。
+- **解决**：`Quiz.vue` 里 `.quiz__main > * { flex: none }` —— 空间不够时**滚动**，
+  不许改写子项的高度（`.howto` 恢复 57px，容器 `scrollHeight 866 > clientHeight 828`，可滚动）。
+- **报告用法**：① 界面上出现「一条没有任何内容的色块」时，先量**该元素自己的**
+  `getBoundingClientRect().height` 与 `scrollHeight` 的差，再往上找「flex 列 + overflow 滚动」的祖先 ——
+  这类缺陷的共同签名是「子项被压缩 + 容器不滚动」，与「残留元素」的签名（元素本身没有内容/尺寸）**不同**；
+  ② 全站扫描口径：找 `display:flex/flex-direction:column/overflow-y:auto` 的容器，
+  逐个检查子项 `scrollHeight - height > 2` 且 `flex-shrink !== 0`（本次扫了 10 个页面，只有这一处命中）。
+- **相关**：`desktop/src/renderer/src/views/Quiz.vue`（`.quiz__main`）、
+  `desktop/tests/quiz-layout-mode.test.ts`（「主列不许压扁子项」）。
+
+## P-169 ★★ wire 文本的**第三条出口**：会话列表标题把内部指令印给了学生（2026-09-30）
+
+- **现象**（真机实测，点「开始学习」之后）：侧栏历史对话的标题显示成「【学习计划】kp_i…」——
+  发给模型的内部指令（带 `kp_id=` 与结构要求的那段）**原样出现在学生眼前**。同一机制对 `【编程求助】`/`【练习检验】` 同样成立。
+- **根因**：Pi 的会话在没有 LLM 标题时，列表用 `info.firstMessage`（= 首条 user 消息 = **wire 原文**）兜底：
+  `study/sessions.ts` 的 :131（snippet）与 :535（title）都走 `info.name || info.firstMessage`，
+  `agent/runtime.ts:1710` 的「LLM 标题失败」兜底也用首条 user 消息。
+  ⚠️ 这条文本一共有**三个出口**：① 实时气泡（`send(显示, wire)` 已分开）② 重启回看（`studentFacingUserText` 分发链已翻译）
+  ③ **会话列表标题 / 摘要**（这一条一直没人管）——前两条修好之后，泄漏从第三条冒出来。
+- **解决**：`study/sessions.ts` 新增 `wireLabelOf(text)` + `sessionTitleFrom(name, firstMessage)`，三处调用点统一走它。
+  判据**只认形状、不认语义**（首行 `【X】`、X 1~12 字、且该行含 `kp_id=`/`kpId=` → 标题取 X；其余一个字不改）：
+  这样主进程不必 import 渲染层的 wire 前缀常量（架构边界），且学生自己打的「【重要】记得复习」不会被改写。
+- **报告用法**：① 新增任何 wire 前缀时，先**列出这条文本的全部出口**（气泡 / 回看 / 列表标题 / 复制 / 诊断面板）再动手 ——
+  「分离了显示与 wire」只是修好第一个出口；② 兜底路径（LLM 失败、没有名字、空态）是泄漏的高发区，因为它读的是**原始数据**；
+  ③ 真机验收要看**侧栏**，不能只看对话区（这次就是在验收截图里发现的）。
+- **相关**：`desktop/src/main/study/sessions.ts`、`desktop/src/main/agent/runtime.ts`、`desktop/tests/session-title.test.ts`、`docs/report-material/decisions.md` 的 D-119。
