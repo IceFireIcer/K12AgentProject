@@ -26,15 +26,38 @@
 import { computed } from 'vue'
 import { GRADE_LABELS, GRADE_ORIGIN_LABELS, GRADE_UNKNOWN_LABEL } from '../../labels'
 import { LAYER2_LABELS, RETRIEVAL_LEVEL_LABELS, SAFETY_STAGE_LABELS } from './evidence'
-import type { TurnDiagnostics } from '@shared/diagnostics'
+// ★ RuntimeSpan 由 V1（task-49）落在 @shared/diagnostics；这里**只 import 不另声明**
+//   （两份形状迟早漂，而这一页要按它画子代理泳道）。
+import type { RuntimeSpan, TurnDiagnostics } from '@shared/diagnostics'
+// ★ 零轮次时轮外 span 只存在于快照级（没有轮可挂）—— 组件因此要读一次 store，
+//   而不只是读 props 里那一轮（见下面 offTurnSpans 的说明）。
+import { useDiagnosticsStore } from '../../stores/diagnostics'
 
 const props = defineProps<{
   /** 要摊开的那一轮（`null` = 还没有任何一轮 / 还没选中）。 */
   turn: TurnDiagnostics | null
 }>()
 
-/** 八个分类（左列文案的**唯一来源**）。 */
-type DiagCategory = 'user' | 'safety' | 'grade' | 'prompt' | 'retrieval' | 'tool' | 'model' | 'wrap'
+const diagnostics = useDiagnosticsStore()
+
+/**
+ * 九个分类（泳道文案的**唯一来源**）。
+ *
+ * ★★ 2026-10-01 加第九类 `subagent`：子代理（五问概括 / 画像刷新 / 画像小结这些
+ *   **旁路模型调用**）不经过 Pi，只在主进程唯一的出网口打点（V1 的 `spans`），
+ *   但在「这一轮到底发生了什么」这件事上，它们和主轮步骤是同一层事实 ——
+ *   所以给它们自己一条泳道，而不是塞进「模型」里冒充主轮调用。
+ */
+type DiagCategory =
+  | 'user'
+  | 'safety'
+  | 'grade'
+  | 'prompt'
+  | 'retrieval'
+  | 'tool'
+  | 'model'
+  | 'subagent'
+  | 'wrap'
 
 const CATEGORY_LABELS: Record<DiagCategory, string> = {
   user: '用户',
@@ -44,10 +67,11 @@ const CATEGORY_LABELS: Record<DiagCategory, string> = {
   retrieval: '检索',
   tool: '工具',
   model: '模型',
+  subagent: '子代理',
   wrap: '收尾'
 }
 
-/** 图例的顺序（= 分类的固定顺序，与横条流无关）。 */
+/** 图例与泳道的顺序（= 分类的固定顺序，与块在时间轴上的先后无关）。 */
 const CATEGORY_ORDER: readonly DiagCategory[] = [
   'user',
   'safety',
@@ -56,6 +80,7 @@ const CATEGORY_ORDER: readonly DiagCategory[] = [
   'retrieval',
   'tool',
   'model',
+  'subagent',
   'wrap'
 ]
 
@@ -78,6 +103,14 @@ interface DiagStep {
   textLabel?: string
   /** 展示的原文被截断过（原文更长，界面上要看得出来）。 */
   cut?: boolean
+  /**
+   * 这一步**记录到的耗时**（毫秒）。
+   *
+   * ★ 只有拿得到才填：工具调用有 `latencyMs`、模型输出有整轮 `totalMs`、
+   *   子代理有 `ms`。**没有就不填** —— 时间轴上按最小宽度画并标「没记耗时」，
+   *   绝不用一个猜出来的数字冒充真实耗时（这一页是证据页）。
+   */
+  ms?: number
 }
 
 /** 把多行文本压成一行要点（全文仍在 `text` 里，一个字都没丢）。 */
@@ -249,7 +282,9 @@ function buildSteps(turn: TurnDiagnostics): DiagStep[] {
       detail: `第 ${tool.seq} 次调用 · ${tool.ok ? '成功' : '失败'}`,
       metric: ms(tool.latencyMs),
       note: tool.degraded === undefined ? undefined : `降级档位：${tool.degraded}`,
-      state: tool.ok ? 'ok' : 'failed'
+      state: tool.ok ? 'ok' : 'failed',
+      // 工具调用是**唯一天然带耗时**的主轮步骤（别的步骤只有字符数）
+      ms: tool.latencyMs
     })
   }
 
@@ -296,7 +331,9 @@ function buildSteps(turn: TurnDiagnostics): DiagStep[] {
           ? '首字延迟没记到。'
           : `首字延迟 ${ms(turn.done.firstTokenMs)}，全程 ${ms(turn.done.totalMs)}。`,
       metric: ms(turn.done.totalMs),
-      state: turn.done.ok ? 'ok' : 'failed'
+      state: turn.done.ok ? 'ok' : 'failed',
+      // 整轮耗时挂在「模型输出」这一步上（它就是这一轮里最长的那一段）
+      ms: turn.done.totalMs
     })
   }
 
@@ -360,6 +397,207 @@ function buildSteps(turn: TurnDiagnostics): DiagStep[] {
 }
 
 const steps = computed<DiagStep[]>(() => (props.turn === null ? [] : buildSteps(props.turn)))
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 时间轴模型（2026-10-01 用户裁决：竖向列表 → 横向时间线 + 子代理泳道）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 三条口径，别改（这一页是证据页，画出来的每一个宽度都要有出处）：
+ *   ① **块宽 ∝ 记录到的耗时**：工具调用有 `latencyMs`、模型输出有整轮 `totalMs`、
+ *      子代理有 `ms`；**没有记录耗时的步骤按最小宽度画**，并在提示里标「没记耗时」——
+ *      绝不用猜出来的数字冒充真实耗时。
+ *   ② **主轮步骤的横向位置 = 前面各步已知耗时的累加**：这条流水线本身是串行的
+ *      （输入 → 预检 → 学段 → 拼接 → 推理 → 工具 → 检索 → 终审），
+ *      信封里没有逐步的开始时刻，累加是唯一不编数字的定位法。
+ *      没记耗时的步骤按 {@link MIN_SLOT_MS} 占一格，否则它们会叠在同一像素上。
+ *   ③ **子代理块用真实发生时刻**：`spans[].startedAt` 是主进程出网口记的真时间戳，
+ *      相对本轮开始就是它的真实横向位置 —— 这一条与上面那条不是一个来源，别混。
+ *
+ * ★ offTurn=true 的 span（启动补跑，不属于任何一轮）**不进本轮轴**：
+ *   它们另起一段，并标「轮外」（见模板里的 `.tl--offturn`）。
+ */
+
+/** 没记耗时的一步在轴上占的最小推进量（ms）。 */
+const MIN_SLOT_MS = 120
+/** 块的最小可见宽度（px）：宽度是 0 的块也得看得见、点得到。 */
+const MIN_BLOCK_PX = 8
+/** 时间轴刻度条数（0 与总时长必在各一端）。 */
+const AXIS_TICKS = 5
+
+/** 时间轴上的一块：`DiagStep` 加上位置与宽度。 */
+interface TimelineBlock extends DiagStep {
+  /** 相对本轮开始的起始位置（ms）。 */
+  startMs: number
+  /** 块宽对应的耗时（ms）。 */
+  ms: number
+  /** 这个耗时**是记录到的**（false = 按最小宽度画的占位）。 */
+  timed: boolean
+}
+
+/**
+ * 这一轮信封里带的子代理 span。
+ *
+ * ★ 用可选链读 `turn.spans`（V1 之前 / 落盘回放的那份可能没有这个字段）：
+ *   缺失就是空数组 —— 时间轴上就不出子代理泳道，而不是渲染一条空泳道。
+ */
+function spansOf(turn: TurnDiagnostics | null): RuntimeSpan[] {
+  if (turn === null) return []
+  const raw = (turn as TurnDiagnostics & { spans?: unknown }).spans
+  return Array.isArray(raw) ? (raw as RuntimeSpan[]) : []
+}
+
+/** 属于**本轮**的子代理调用（真实发生在本轮时间窗内）。 */
+const inTurnSpans = computed<RuntimeSpan[]>(() => spansOf(props.turn).filter((span) => !span.offTurn))
+
+/**
+ * 轮外（启动补跑）的子代理调用：不进本轮轴，另起一段。
+ *
+ * ★★ 零轮次时**回落到快照级的那一份**（`diagnostics.offTurnSpans`）：
+ *   主进程的规则是「轮外 span 要么挂在快照的 `offTurnSpans`（**还没有轮次可挂**），
+ *   要么已迁移进最新一轮的 `spans`」—— 学生首次启动答完五问、一次没聊过，
+ *   正是前者。只读 `props.turn` 会让主进程即时推来的那几次调用白推（V5 修的就是这一条）。
+ * ★ 有轮次时**只**读这一轮（迁移后的那份）：两处都读会在同一屏出现两份。
+ */
+const offTurnSpans = computed<RuntimeSpan[]>(() =>
+  props.turn === null
+    ? diagnostics.offTurnSpans
+    : spansOf(props.turn).filter((span) => span.offTurn)
+)
+
+/** 把一条 span 变成时间轴上的一块（`baseMs` = 这一段的零点）。 */
+function spanBlock(span: RuntimeSpan, baseMs: number): TimelineBlock {
+  const facts = [
+    span.model === null ? '模型没有记录' : `模型 ${span.model}`,
+    `提示词 ${span.promptChars} 字符 · 约 ${span.promptTokEst} tok`,
+    span.offTurn ? '轮外（启动补跑）' : `第 ${span.turnIndex ?? '—'} 轮`
+  ]
+  return {
+    key: `span-${span.id}`,
+    category: 'subagent',
+    title: span.label,
+    detail: span.purpose,
+    metric: ms(span.ms),
+    note: facts.join(' · '),
+    state: span.ok ? 'ok' : 'failed',
+    // 失败原因（已脱敏）只有拿得到时才给展开，避免一个点了没反应的空开关
+    text: span.note === null || span.note === '' ? undefined : span.note,
+    textLabel: '看这次调用的问题',
+    startMs: Math.max(0, span.startedAt - baseMs),
+    ms: span.ms,
+    timed: true
+  }
+}
+
+/** 主轮步骤按顺序累加定位 —— 见文件头口径 ②。 */
+const laid = computed<TimelineBlock[]>(() => {
+  const out: TimelineBlock[] = []
+  let cursor = 0
+  for (const step of steps.value) {
+    const duration = step.ms ?? 0
+    const timed = step.ms !== undefined
+    out.push({ ...step, startMs: cursor, ms: duration, timed })
+    cursor += Math.max(duration, MIN_SLOT_MS)
+  }
+  return out
+})
+
+/** 本轮子代理块（真实时刻定位）。 */
+const spanBlocks = computed<TimelineBlock[]>(() => {
+  const base = props.turn?.at ?? 0
+  return inTurnSpans.value.map((span) => spanBlock(span, base))
+})
+
+/** 主轴上的全部块（主轮 + 本轮子代理）。 */
+const blocks = computed<TimelineBlock[]>(() => [...laid.value, ...spanBlocks.value])
+
+/** 轴长：取「累加到哪、子代理到哪、整轮花了多久」三者里的最大值。 */
+const axisMs = computed(() => {
+  let end = 0
+  for (const block of blocks.value) end = Math.max(end, block.startMs + block.ms)
+  const total = props.turn?.done.totalMs ?? 0
+  return Math.max(end, total, 1)
+})
+
+/** 只渲染**有块**的泳道：没发生的分类不摆一条空泳道（那正是「一横条一横条」要避免的）。 */
+const lanes = computed(() => {
+  const grouped = CATEGORY_ORDER.map((category) => ({
+    category,
+    label: CATEGORY_LABELS[category],
+    blocks: blocks.value.filter((block) => block.category === category)
+  }))
+  return grouped.filter((lane) => lane.blocks.length > 0)
+})
+
+/** 轮外那一段自己的零点（最早的一次启动补跑）。 */
+const offTurnBaseMs = computed(() =>
+  offTurnSpans.value.reduce((min, span) => Math.min(min, span.startedAt), Number.POSITIVE_INFINITY)
+)
+const offTurnBlocks = computed<TimelineBlock[]>(() =>
+  offTurnBaseMs.value === Number.POSITIVE_INFINITY
+    ? []
+    : offTurnSpans.value.map((span) => spanBlock(span, offTurnBaseMs.value))
+)
+const offTurnAxisMs = computed(() => {
+  let end = 0
+  for (const block of offTurnBlocks.value) end = Math.max(end, block.startMs + block.ms)
+  return Math.max(end, 1)
+})
+
+/** 点开的块（点第二下收起）。 */
+const selectedKey = ref('')
+
+/**
+ * 点开的块 **同时**在主轴与轮外段里找。
+ *
+ * ★ 轮外段的块不在主轴 `blocks` 里（它有自己的零点），只查主轴会让
+ *   「轮外那一条点不开」—— 而零轮次时它恰恰是**唯一**能点的东西。
+ */
+const selected = computed<TimelineBlock | null>(
+  () =>
+    blocks.value.find((block) => block.key === selectedKey.value) ??
+    offTurnBlocks.value.find((block) => block.key === selectedKey.value) ??
+    null
+)
+
+function toggleBlock(key: string): void {
+  selectedKey.value = selectedKey.value === key ? '' : key
+}
+
+/** 百分比定位（末尾的块夹在 99%：再往右就出框了）。 */
+function leftOf(block: TimelineBlock): string {
+  const pct = (block.startMs / axisMs.value) * 100
+  return `${Math.min(pct, 99).toFixed(2)}%`
+}
+
+function widthOf(block: TimelineBlock): string {
+  const pct = (block.ms / axisMs.value) * 100
+  return block.timed && pct > 0 ? `max(${pct.toFixed(2)}%, ${MIN_BLOCK_PX}px)` : `${MIN_BLOCK_PX}px`
+}
+
+function offLeftOf(block: TimelineBlock): string {
+  return `${Math.min((block.startMs / offTurnAxisMs.value) * 100, 99).toFixed(2)}%`
+}
+
+function offWidthOf(block: TimelineBlock): string {
+  return `max(${((block.ms / offTurnAxisMs.value) * 100).toFixed(2)}%, ${MIN_BLOCK_PX}px)`
+}
+
+/** 轴上的读数：1 秒以内按毫秒，超过按秒（一位小数；10 秒以上不要小数）。 */
+function tickLabel(value: number): string {
+  if (value >= 1000) return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}s`
+  return `${Math.round(value)}ms`
+}
+
+const ticks = computed(() =>
+  Array.from({ length: AXIS_TICKS }, (_, index) => {
+    const ratio = index / (AXIS_TICKS - 1)
+    return { key: `tick-${index}`, left: `${(ratio * 100).toFixed(2)}%`, label: tickLabel(axisMs.value * ratio) }
+  })
+)
+
+/** 块上的悬停说明（块本身可能只有 8px 宽，文字放不下）。 */
+function blockTitle(block: TimelineBlock): string {
+  return [block.title, block.metric, block.timed ? '' : '没记耗时'].filter((part) => part !== '').join(' · ')
+}
 </script>
 
 <template>
@@ -368,10 +606,13 @@ const steps = computed<DiagStep[]>(() => (props.turn === null ? [] : buildSteps(
       还没有轮次记录。先在左边点一轮，或回对话页问一句再回来。
     </p>
 
-    <template v-else>
-      <header class="seq__head">
+      <header v-if="turn" class="seq__head">
         <h2 class="seq__title">第 {{ turn.turn }} 轮真实发生的先后</h2>
-        <p class="seq__lead">自上而下就是它的真实顺序。每条横条最前面是分类，右侧是这一步的数字。</p>
+        <!-- ⚠️ 这一段是**上屏文案**：不许出现星号标记（渲染层不解析 Markdown，会原样显示）。 -->
+        <p class="seq__lead">
+          横向是时间：块的宽度按记录的耗时画，位置按前面各步的耗时依次累加（这条流水线本身就是串行的）。
+          没记耗时的步骤按最小宽度排在轴上。点子代理泳道的块看旁路调用，点任意块看这一步的全文。
+        </p>
         <ol class="legend" data-testid="diag-sequence-legend">
           <li v-for="cat in CATEGORY_ORDER" :key="cat" class="legend__item" :data-cat="cat">
             <span class="legend__dot" aria-hidden="true" />{{ CATEGORY_LABELS[cat] }}
@@ -379,42 +620,139 @@ const steps = computed<DiagStep[]>(() => (props.turn === null ? [] : buildSteps(
         </ol>
       </header>
 
-      <ol class="seq__list" data-testid="diag-sequence-steps">
-        <li v-for="step in steps" :key="step.key" class="seq__item">
-          <!-- ★ 可展开的横条用**原生 `<details>`**（与三栏视图里的 Prompt 分段折叠同一套）；
-               没有原文可看的横条就是一只普通 div —— 不留一个点了没反应的开关。
-               两者共用同一段行内结构，所以这里用 `<component :is>` 换外壳。 -->
-          <component
-            :is="step.text ? 'details' : 'div'"
-            class="step"
-            :data-cat="step.category"
-            :data-state="step.state ?? ''"
-          >
-            <component :is="step.text ? 'summary' : 'div'" class="step__row">
-              <span class="step__cat">
-                <span class="step__bar" aria-hidden="true" />{{ CATEGORY_LABELS[step.category] }}
-              </span>
-              <span class="step__body">
-                <span class="step__title">{{ step.title }}</span>
-                <span class="step__detail">{{ step.detail }}</span>
-                <span v-if="step.note" class="step__note">{{ step.note }}</span>
-              </span>
-              <span class="step__right">
-                <span v-if="step.metric" class="step__metric k12-num">{{ step.metric }}</span>
-                <span v-if="step.text" class="step__more">可展开</span>
-              </span>
+      <!-- ── 时间轴（主视图，2026-10-01 用户裁决：竖向列表 → 横向时间线）────
+           横向是时间：块宽 ∝ 记录的耗时；主轮步骤的位置按前面各步耗时累加
+           （这条流水线是串行的），子代理块用它**真实的发生时刻**（见 script 里三条口径）。
+           点任意块看这一步的全文（既有详情内容与文案口径一字未改）。 -->
+      <div v-if="turn" class="tl" data-testid="diag-sequence-timeline">
+        <div class="tl__axis" aria-hidden="true">
+          <span v-for="tick in ticks" :key="tick.key" class="tl__tick" :style="{ left: tick.left }">
+            {{ tick.label }}
+          </span>
+        </div>
+
+        <div
+          v-for="lane in lanes"
+          :key="lane.category"
+          class="tl__lane"
+          :data-cat="lane.category"
+          :data-testid="`diag-sequence-lane-${lane.category}`"
+        >
+          <span class="tl__cat">
+            <span class="tl__dot" aria-hidden="true" />{{ lane.label }}
+          </span>
+          <div class="tl__track">
+            <button
+              v-for="block in lane.blocks"
+              :key="block.key"
+              type="button"
+              class="blk"
+              :data-state="block.state ?? ''"
+              :data-timed="String(block.timed)"
+              :data-on="String(block.key === selectedKey)"
+              :style="{ left: leftOf(block), width: widthOf(block) }"
+              :title="blockTitle(block)"
+              @click="toggleBlock(block.key)"
+            >
+              <span class="blk__label">{{ block.title }}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 轮外（启动补跑）──────────────────────────────────────────
+           这些调用发生在某轮对话之外（`offTurn`），不属于任何一轮 —— 所以另起一段、自带零点。
+           ★★ 这一段**两个分支都要渲染**：学生首次启动答完五问、一次还没聊过时，
+              轮次是空的，而轮外的子代理调用**已经发生**（主进程即时推在快照的
+              `offTurnSpans` 上）—— 放进「有轮次」那个分支里就等于把那段数据白推了（V5）。
+           ★ 有轮次时这些 span 已被**迁移**进那一轮的 `spans`（主进程保证两处不会同时有），
+              所以不会出现两份。 -->
+      <section v-if="offTurnBlocks.length > 0" class="tl tl--offturn" data-testid="diag-sequence-offturn">
+        <p class="tl__offhead">
+          轮外（启动补跑）：这些调用不在某轮对话里<template v-if="turn">，所以不在上面那条轴上</template>。
+        </p>
+        <div class="tl__lane" data-cat="subagent">
+          <span class="tl__cat"><span class="tl__dot" aria-hidden="true" />子代理</span>
+          <div class="tl__track">
+            <button
+              v-for="block in offTurnBlocks"
+              :key="block.key"
+              type="button"
+              class="blk"
+              :data-state="block.state ?? ''"
+              :data-on="String(block.key === selectedKey)"
+              :style="{ left: offLeftOf(block), width: offWidthOf(block) }"
+              :title="blockTitle(block)"
+              @click="toggleBlock(block.key)"
+            >
+              <span class="blk__label">{{ block.title }}</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── 点开的详情（复用既有详情内容与文案口径）────────────────── -->
+      <div v-if="selected" class="detail" data-testid="diag-sequence-detail">
+        <p class="detail__head">
+          <span class="detail__cat">{{ CATEGORY_LABELS[selected.category] }}</span>
+          <span class="detail__title">{{ selected.title }}</span>
+          <span v-if="selected.metric" class="detail__metric k12-num">{{ selected.metric }}</span>
+        </p>
+        <p class="detail__line">{{ selected.detail }}</p>
+        <p v-if="selected.note" class="detail__note">{{ selected.note }}</p>
+        <p v-if="!selected.timed" class="detail__note">
+          这一步没有记录耗时，所以它在轴上只占最小宽度（不用猜出来的数字冒充耗时）。
+        </p>
+        <div v-if="selected.text" class="step__full">
+          <p class="step__fullhead">
+            {{ selected.textLabel ?? '原文' }}
+            <span v-if="selected.cut" class="step__cut">（展示已截断，原文更长）</span>
+          </p>
+          <pre class="step__pre">{{ selected.text }}</pre>
+        </div>
+      </div>
+
+      <!-- ── 完整清单（原竖向读法，默认折叠）──────────────────────────
+           时间轴答「先后与耗时」，清单答「每一步的全文」——同一份数据两种读法，
+           所以一条都没删，只是不再默认占满这一屏。 -->
+      <details v-if="turn" class="list">
+        <summary class="list__sum">完整清单（{{ steps.length }} 步）</summary>
+        <ol class="seq__list" data-testid="diag-sequence-steps">
+          <li v-for="step in steps" :key="step.key" class="seq__item">
+            <!-- ★ 可展开的横条用**原生 `<details>`**（与三栏视图里的 Prompt 分段折叠同一套）；
+                 没有原文可看的横条就是一只普通 div —— 不留一个点了没反应的开关。
+                 两者共用同一段行内结构，所以这里用 `<component :is>` 换外壳。 -->
+            <component
+              :is="step.text ? 'details' : 'div'"
+              class="step"
+              :data-cat="step.category"
+              :data-state="step.state ?? ''"
+            >
+              <component :is="step.text ? 'summary' : 'div'" class="step__row">
+                <span class="step__cat">
+                  <span class="step__bar" aria-hidden="true" />{{ CATEGORY_LABELS[step.category] }}
+                </span>
+                <span class="step__body">
+                  <span class="step__title">{{ step.title }}</span>
+                  <span class="step__detail">{{ step.detail }}</span>
+                  <span v-if="step.note" class="step__note">{{ step.note }}</span>
+                </span>
+                <span class="step__right">
+                  <span v-if="step.metric" class="step__metric k12-num">{{ step.metric }}</span>
+                  <span v-if="step.text" class="step__more">可展开</span>
+                </span>
+              </component>
+              <div v-if="step.text" class="step__full">
+                <p class="step__fullhead">
+                  {{ step.textLabel ?? '原文' }}
+                  <span v-if="step.cut" class="step__cut">（展示已截断，原文更长）</span>
+                </p>
+                <pre class="step__pre">{{ step.text }}</pre>
+              </div>
             </component>
-            <div v-if="step.text" class="step__full">
-              <p class="step__fullhead">
-                {{ step.textLabel ?? '原文' }}
-                <span v-if="step.cut" class="step__cut">（展示已截断，原文更长）</span>
-              </p>
-              <pre class="step__pre">{{ step.text }}</pre>
-            </div>
-          </component>
-        </li>
-      </ol>
-    </template>
+          </li>
+        </ol>
+      </details>
   </section>
 </template>
 
@@ -630,45 +968,240 @@ summary.step__row::-webkit-details-marker {
   color: var(--k12-bad);
   font-weight: 650;
 }
-/* ── 八个分类的配色（只用既有令牌；文字色都是能读的深色，底是它自己的浅底）*/
+/* ── 九个分类的配色（只用既有令牌；文字色都是能读的深色，底是它自己的浅底）
+ * 泳道、块、图例、清单行**共用这一份映射**：新增分类只改这里一处，
+ * 四处各写一遍必然漂（第 3 个消费者就是这次的时间轴）。
+ *
+ * ★ 子代理为什么复用「模型」那对令牌：它本质就是一次**旁路模型调用**
+ *   （五问概括 / 画像刷新 / 画像小结都打在主进程唯一的模型出网口上）。
+ *   不新造色系（这一页只允许既有分类令牌），与主轮模型步骤的区分交给
+ *   **虚线边 + 独立泳道**（见 .blk[data-cat='subagent']）——形状而不是颜色，
+ *   色觉障碍下也读得出来。 */
 .step[data-cat='user'],
+.tl__lane[data-cat='user'],
 .legend__item[data-cat='user'] {
   --cat-ink: var(--k12-accent-ink);
   --cat-soft: var(--k12-accent-soft);
 }
 .step[data-cat='safety'],
+.tl__lane[data-cat='safety'],
 .legend__item[data-cat='safety'] {
   --cat-ink: var(--k12-bad);
   --cat-soft: var(--k12-bad-soft);
 }
 .step[data-cat='grade'],
+.tl__lane[data-cat='grade'],
 .legend__item[data-cat='grade'] {
   --cat-ink: var(--k12-warn);
   --cat-soft: var(--k12-warn-soft);
 }
 .step[data-cat='prompt'],
+.tl__lane[data-cat='prompt'],
 .legend__item[data-cat='prompt'] {
   --cat-ink: var(--k12-cyan);
   --cat-soft: var(--k12-cyan-soft);
 }
 .step[data-cat='retrieval'],
+.tl__lane[data-cat='retrieval'],
 .legend__item[data-cat='retrieval'] {
   --cat-ink: var(--k12-good);
   --cat-soft: var(--k12-good-soft);
 }
 .step[data-cat='tool'],
+.tl__lane[data-cat='tool'],
 .legend__item[data-cat='tool'] {
   --cat-ink: var(--k12-fg-2);
   --cat-soft: var(--k12-surface-2);
 }
 .step[data-cat='model'],
+.tl__lane[data-cat='model'],
 .legend__item[data-cat='model'] {
   --cat-ink: var(--k12-chip-fg);
   --cat-soft: var(--k12-chip-bg);
 }
+.step[data-cat='subagent'],
+.tl__lane[data-cat='subagent'],
+.legend__item[data-cat='subagent'] {
+  --cat-ink: var(--k12-chip-fg);
+  --cat-soft: var(--k12-chip-bg);
+}
 .step[data-cat='wrap'],
+.tl__lane[data-cat='wrap'],
 .legend__item[data-cat='wrap'] {
   --cat-ink: var(--k12-muted);
   --cat-soft: var(--k12-surface-2);
+}
+/* ══ 时间轴（2026-10-01 用户裁决：竖向列表 → 横向时间线）══════════════════
+ * 一条泳道一个分类：左边固定宽的分类名，右边轨道；块在轨道里**绝对定位**。
+ * 位置与宽度都是轴的百分比 ⇒ 泳道之间天然对齐，一眼看出「检索与工具是不是
+ * 同一段时间里的事」。轨道铺一层浅底：这一段就是这一轮的时间范围。 */
+.tl {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+/* 轴刻度：与轨道的起点对齐（分类列 70px + gap 6px），下缘一条线就是时间轴 */
+.tl__axis {
+  position: relative;
+  height: 16px;
+  margin-left: 76px;
+  border-bottom: 1px solid var(--k12-border);
+}
+.tl__tick {
+  position: absolute;
+  bottom: 1px;
+  transform: translateX(-50%);
+  font-size: var(--k12-fs-label);
+  color: var(--k12-muted-2);
+  white-space: nowrap;
+}
+.tl__lane {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+}
+.tl__cat {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: 70px;
+  padding: 1px 6px;
+  border-radius: var(--k12-r-pill);
+  background: var(--cat-soft);
+  color: var(--cat-ink);
+  font-size: var(--k12-fs-label);
+  font-weight: 650;
+  white-space: nowrap;
+}
+.tl__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--k12-r-pill);
+  background: var(--cat-ink);
+}
+.tl__track {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface-2);
+}
+/* 块：颜色走分类令牌（.tl__lane[data-cat] 给的 --cat-*），宽高由模板的 style 给 */
+.blk {
+  position: absolute;
+  top: 3px;
+  height: 14px;
+  padding: 0 4px;
+  border: 1px solid var(--cat-ink);
+  border-radius: var(--k12-r-control);
+  background: var(--cat-soft);
+  color: var(--cat-ink);
+  font-family: inherit;
+  font-size: var(--k12-fs-label);
+  line-height: 1;
+  text-align: left;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.blk__label {
+  pointer-events: none;
+}
+.blk[data-on='true'] {
+  outline: 2px solid var(--k12-accent);
+  outline-offset: 1px;
+}
+/* ★ 没记耗时：**虚线边 + 透明底** —— 形状上就说明「这一块的宽度不是量出来的」，
+ *   不靠颜色（色觉障碍下也读得出来），也不给它一个假数字。 */
+.blk[data-timed='false'] {
+  border-style: dashed;
+  background: transparent;
+}
+/* ★ 子代理：虚线边与主轮步骤区分（颜色复用「模型」那对令牌，理由见配色段） */
+.blk[data-cat='subagent'] {
+  border-style: dashed;
+}
+.blk[data-state='blocked'],
+.blk[data-state='failed'] {
+  border-color: var(--k12-bad);
+  background: var(--k12-bad-soft);
+  color: var(--k12-bad);
+}
+@media (hover: hover) and (pointer: fine) {
+  .blk:hover {
+    border-color: var(--k12-accent-ink);
+  }
+}
+
+/* ── 轮外（启动补跑）：另起一段、自带零点，与主轴用一条竖线分开 ────────── */
+.tl--offturn {
+  margin-top: 4px;
+  padding-left: 8px;
+  border-left: 2px solid var(--k12-border);
+}
+.tl__offhead {
+  margin: 0 0 2px;
+  font-size: var(--k12-fs-label);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
+}
+
+/* ── 点开的详情（内容与文案口径与清单行完全相同）────────────────────── */
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
+}
+.detail__head {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.detail__cat {
+  font-size: var(--k12-fs-label);
+  color: var(--k12-muted);
+}
+.detail__title {
+  font-size: var(--k12-fs-caption);
+  font-weight: 650;
+  color: var(--k12-fg);
+}
+.detail__metric {
+  margin-left: auto;
+  font-size: var(--k12-fs-label);
+  color: var(--k12-muted);
+}
+.detail__line {
+  margin: 0;
+  font-size: var(--k12-fs-caption);
+  color: var(--k12-fg-2);
+}
+.detail__note {
+  margin: 0;
+  font-size: var(--k12-fs-label);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
+}
+
+/* ── 完整清单（原来的竖向读法，默认折叠）────────────────────────────── */
+.list {
+  margin-top: 2px;
+}
+.list__sum {
+  padding: 4px 0;
+  font-size: var(--k12-fs-label);
+  color: var(--k12-muted);
+  cursor: pointer;
 }
 </style>

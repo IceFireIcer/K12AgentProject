@@ -57,6 +57,7 @@ declare module 'vue' {
     MascotMark: typeof import('./../components/MascotMark.vue')['default']
     MessageComposer: typeof import('./../components/MessageComposer.vue')['default']
     ModelPicker: typeof import('./../components/ModelPicker.vue')['default']
+    ModelSetup: typeof import('./../components/ModelSetup.vue')['default']
     OpLogPanel: typeof import('./../components/OpLogPanel.vue')['default']
     PageActions: typeof import('./../components/PageActions.vue')['default']
     PageIdentity: typeof import('./../components/PageIdentity.vue')['default']

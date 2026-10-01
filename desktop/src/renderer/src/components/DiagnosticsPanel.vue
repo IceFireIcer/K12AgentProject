@@ -24,6 +24,8 @@
  */
 import { computed, nextTick, ref, watch } from 'vue'
 import { GripHorizontal, Maximize2, Minus, Pin, X } from 'lucide-vue-next'
+// ★ 子代理 span 的形状由 V1 落在 @shared/diagnostics；这里只 import 不另声明。
+import type { RuntimeSpan, TurnDiagnostics } from '@shared/diagnostics'
 import { useDiagnosticsPanel } from '../stores/diagnosticsPanel'
 import { useDiagnosticsStore } from '../stores/diagnostics'
 import { useUiStore } from '../stores/ui'
@@ -54,6 +56,50 @@ const shown = computed(() => {
 function togglePin(): void {
   pinnedTurn.value = pinnedTurn.value === null ? (diagnostics.latest?.turn ?? null) : null
 }
+
+/**
+ * 这一轮的**子代理调用**（旁路模型调用：五问概括 / 画像刷新 / 画像小结…）。
+ *
+ * ★ 缺失就是空数组：V1 之前 / 落盘回放的那份信封可能没有 `spans`，
+ *   浮窗如实不显示这一行，而不是渲染一个「0 次」的假读数。
+ */
+function spansOf(turn: TurnDiagnostics | null): RuntimeSpan[] {
+  if (turn === null) return []
+  const raw = (turn as TurnDiagnostics & { spans?: unknown }).spans
+  return Array.isArray(raw) ? (raw as RuntimeSpan[]) : []
+}
+
+/**
+ * 浮窗只报**计数**，细节在运行透视的时间轴里（那里有子代理泳道与真实时刻）。
+ * ★ 为什么不并进 `DiagSummary`：那一份讲的是**主轮的分块**，子代理是旁路 ——
+ *   混进去会让「这一轮几次工具调用」这类读数对不上（浮窗与运行透视共用那份摘要）。
+ */
+/**
+ * 这一屏该显示的 span。
+ *
+ * ★★ 有轮次：取这一轮的（轮外那些已被主进程**迁移**进来）；
+ *   **零轮次：取快照级的那一份**（`diagnostics.offTurnSpans`）——
+ *   学生首次启动答完五问、一次还没聊过就是这一档，而那些旁路调用已经发生了。
+ *   不读它，主进程即时推来的数据就白推了（V5）。
+ */
+const spansForPanel = computed<RuntimeSpan[]>(() =>
+  shown.value === null ? diagnostics.offTurnSpans : spansOf(shown.value)
+)
+
+/**
+ * 计数行的**唯一**文案来源。
+ *
+ * ★ 三种情形分开说，别让一句话绕圈：零轮次时「N 次」全是轮外，
+ *   写成「子代理调用 N 次（其中轮外 N 次）」既啰嗦又像在强调一个恒等式。
+ */
+const spanLine = computed(() => {
+  const all = spansForPanel.value
+  if (all.length === 0) return ''
+  const offTurn = all.filter((span) => span.offTurn).length
+  if (offTurn === 0) return `子代理调用 ${all.length} 次`
+  if (offTurn === all.length) return `轮外子代理调用 ${all.length} 次`
+  return `子代理调用 ${all.length} 次（其中轮外 ${offTurn} 次）`
+})
 
 const position = computed(() => panel.pos ?? panel.defaultPos())
 
@@ -162,6 +208,9 @@ useFocusReturn(rootRef, () => panel.open, { trap: false })
           <div ref="bodyRef" class="dp__body">
             <p v-if="!shown" class="dp__empty">还没有轮次记录。先问一句，再打开这里。</p>
             <DiagSummary v-else :turn="shown" />
+            <!-- 子代理（旁路模型调用）：只报计数，细节在运行透视的时间轴里。
+                 ★ 零轮次时这一行照样在（数据源是快照级的 offTurnSpans，见 spanLine 的说明）。 -->
+            <p v-if="spanLine" class="dp__spans" data-testid="diag-panel-spans">{{ spanLine }}</p>
             <p v-if="diagnostics.bridgeError" class="dp__warn">{{ diagnostics.bridgeError }}</p>
           </div>
           <footer class="dp__foot">
@@ -259,6 +308,13 @@ useFocusReturn(rootRef, () => panel.open, { trap: false })
   margin: 0;
   padding: 18px 12px;
   text-align: center;
+  font-size: var(--k12-fs-caption);
+  color: var(--k12-muted);
+}
+/* 子代理计数：与摘要同为「读数」，所以同档字号与弱色 —— 它不抢主读数。 */
+.dp__spans {
+  margin: 0;
+  padding: 0 12px 10px;
   font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
 }

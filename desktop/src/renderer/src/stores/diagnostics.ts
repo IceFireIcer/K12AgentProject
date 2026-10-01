@@ -23,6 +23,7 @@ import {
   emptyDiagnosticsSnapshot,
   type DiagSandbox,
   type DiagnosticsSnapshot,
+  type RuntimeSpan,
   type TurnDiagnostics
 } from '../../../shared/diagnostics'
 import { resolveDiagnosticsBridge, type DiagnosticsCallResult } from '../api/diagnostics'
@@ -42,6 +43,22 @@ export const useDiagnosticsStore = defineStore('diagnostics', () => {
   const turns = computed<TurnDiagnostics[]>(() => snapshot.value.turns)
   /** 最后一轮（浮窗的默认展示对象）。 */
   const latest = computed<TurnDiagnostics | null>(() => turns.value[turns.value.length - 1] ?? null)
+  /**
+   * **还没有归属到任何一轮**的子代理 span —— 轮外段（启动补跑）的数据源。
+   *
+   * ★★ 为什么它不能从 `turns` 里取：五问概括这类旁路模型调用发生在
+   *   **学生还没聊过的时候**，而子代理泳道是挂在某一轮信封上的 —— 没有轮就无处挂。
+   *   主进程为此单开了一个容器，规则是「轮外 span 要么在 `offTurnSpans`（还没有轮次可挂），
+   *   要么已迁移进最新一轮的 `spans`」——所以两处不会同时有。
+   * ★ 零轮次时（首次启动答完五问、一次没聊）**只有这一份**能拿到数据；
+   *   不读它，主进程即时推来的那几次调用就白推了。
+   * ★ 老信封没有这个字段 ⇒ 空数组（绝不渲染一条空泳道）。
+   */
+  const offTurnSpans = computed<RuntimeSpan[]>(() => {
+    const raw = snapshot.value.offTurnSpans
+    return Array.isArray(raw) ? raw : []
+  })
+
   /** 这一份是不是从落盘记录暖机来的（重启前的记录）。 */
   const fromDisk = computed(() => snapshot.value.persisted && turns.value.length > 0)
   /** 跨轮累计的拦截记录（演示模式的高潮：被拦下了什么）。 */
@@ -155,6 +172,7 @@ export const useDiagnosticsStore = defineStore('diagnostics', () => {
     turns,
     latest,
     active,
+    offTurnSpans,
     fromDisk,
     interceptions,
     select,

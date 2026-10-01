@@ -43,7 +43,11 @@ import {
   type DemoSeedCard,
   type DemoSeedState
 } from '../../../shared/demo-seed'
-import { DIAGNOSTICS_TURN_LIMIT, type TurnDiagnostics } from '../../../shared/diagnostics'
+import {
+  DIAGNOSTICS_TURN_LIMIT,
+  type RuntimeSpan,
+  type TurnDiagnostics
+} from '../../../shared/diagnostics'
 import { useDiagnosticsStore } from './diagnostics'
 import type { K12Api } from '../../../preload/index'
 import { warnWiring } from '../api/wiring-notice'
@@ -60,6 +64,72 @@ const DEMO_REQUEST_PREFIX = 'script-'
 
 /** 逐字回放的速度：每 18ms 一个字（150~200 字的正文 ≈ 3s，落在 3–5 秒的口径里）。 */
 const DEMO_DELTA_INTERVAL_MS = 18
+
+/**
+ * 演示沙箱里的一轮信封**补上子代理 span**（V1 的 `spans`）。
+ *
+ * ★ 为什么必须补：子代理的真实 span 由主进程**唯一的模型出网口**采集（V1），
+ *   而演示沙箱放的是**预置脚本轮次** —— 它们不经过真实出网口，信封里天然没有 spans。
+ *   而演示最该被看见的恰恰是「学生看不见的那几次旁路调用」（五问概括 / 画像刷新 /
+ *   画像小结），所以演示数据自带三条：两条在本轮内、一条轮外（启动补跑），
+ *   时间轴上的**子代理泳道**与**轮外那一段**因此都能在演示里被看到。
+ * ★ 只作用于演示沙箱这两个调用点（`seedHistory` / `publishEnvelope`）——
+ *   真实运行那一侧的信封一个字节都不补。
+ * ★ 已经带了 spans 的信封**原样返回**：真数据永远优先于演示数据。
+ */
+function withDemoSpans(turn: TurnDiagnostics): TurnDiagnostics {
+  const existing = (turn as TurnDiagnostics & { spans?: unknown }).spans
+  if (Array.isArray(existing) && existing.length > 0) return turn
+  const spans: RuntimeSpan[] = [
+    {
+      id: `demo-span-${turn.turn}-a`,
+      kind: 'subagent',
+      purpose: '五问概括',
+      label: '五问概括',
+      startedAt: turn.at + 600,
+      ms: 1_800,
+      model: 'demo-model',
+      promptChars: 640,
+      promptTokEst: 320,
+      ok: true,
+      note: null,
+      offTurn: false,
+      turnIndex: turn.turn
+    },
+    {
+      id: `demo-span-${turn.turn}-b`,
+      kind: 'subagent',
+      purpose: '画像刷新',
+      label: '画像刷新',
+      startedAt: turn.at + 3_200,
+      ms: 900,
+      model: 'demo-model',
+      promptChars: 410,
+      promptTokEst: 205,
+      ok: true,
+      note: null,
+      offTurn: false,
+      turnIndex: turn.turn
+    },
+    {
+      id: `demo-span-${turn.turn}-c`,
+      kind: 'subagent',
+      purpose: '画像小结',
+      label: '画像小结',
+      // 轮外：发生在这一轮之前（启动补跑），时间轴上另起一段
+      startedAt: turn.at - 60_000,
+      ms: 1_200,
+      model: 'demo-model',
+      promptChars: 520,
+      promptTokEst: 260,
+      ok: true,
+      note: null,
+      offTurn: true,
+      turnIndex: null
+    }
+  ]
+  return { ...turn, spans }
+}
 
 /** 投第一句之前的停顿：引用先亮，正文再开始（≈120ms，与真实路径的观感一致）。 */
 const DEMO_DELTA_DELAY_MS = 120
@@ -370,7 +440,8 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
     const titles: Record<number, string> = {}
     for (const session of payload.history ?? []) {
       for (const turn of session.turns) {
-        historyTurns.push(turn)
+        // 演示数据自带子代理 span（见 withDemoSpans 的说明）
+        historyTurns.push(withDemoSpans(turn))
         titles[turn.turn] = session.title
       }
     }
@@ -380,7 +451,7 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
 
   /** 把一轮脚本信封交给驾驶舱（接在历史轮次后面）。 */
   function publishEnvelope(turn: DemoScriptTurn): void {
-    publishedTurns.push(turn.diagnostics)
+    publishedTurns.push(withDemoSpans(turn.diagnostics))
     publishSnapshot()
   }
 
