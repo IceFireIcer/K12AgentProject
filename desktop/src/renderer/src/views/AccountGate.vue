@@ -18,6 +18,10 @@
  *      藏起来的话，下一个人打开电脑时看到的仍然是上一个人的界面。
  *   ③ **不新增导航页**（`stores/ui.ts` 的 PAGES 不许加）：它是应用级门禁，
  *      不是「可以去的一个页面」—— 没进门前连侧栏都不该看见。
+ *   ④ **新建表单不问学段**（2026-10-01 用户裁决）：第一次进来的人还不认识这套界面，
+ *      让他先选一个「年级」是替系统做决定；真正的学段由之后的冷启动五问 q1 定。
+ *      建号时落一个中性初始值（见 `DEFAULT_ACCOUNT_GRADE`），q1 答完就被真实值覆盖。
+ *      ★ 已有账号卡片上的学段**照常显示**：那是已经定下来的事实，不是要再问一遍。
  *   判据全在 `stores/accounts.ts`（`gateOpen`）：能力没就绪时这屏**根本不出现**，
  *   应用照常进默认学生（故障开放，见那个文件的文件头）。
  */
@@ -25,9 +29,13 @@ import { computed, ref, watch } from 'vue'
 import { Plus } from 'lucide-vue-next'
 import { useFocusReturn } from '../composables/useFocusReturn'
 import type { GradeLevel } from '@shared/ipc-events'
-import { GRADE_LEVELS } from '../api/grade'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../labels'
-import { formatLastUsed, useAccountsStore, type AccountSummary } from '../stores/accounts'
+import {
+  DEFAULT_ACCOUNT_GRADE,
+  formatLastUsed,
+  useAccountsStore,
+  type AccountSummary
+} from '../stores/accounts'
 import { useStudentStore } from '../stores/student'
 import { DEFAULT_LOGO_URL } from '../brand-logo'
 
@@ -38,7 +46,8 @@ const cardRef = ref<HTMLElement | null>(null)
 /** 新建表单：名单为空时直接摊开，非空时点「新建一个账号」才展开。 */
 const creating = ref(false)
 const draftName = ref('')
-const draftGrade = ref<GradeLevel>('junior')
+// ★ 没有 `draftGrade`：新建表单不再问学段（见文件头 ④）。建号先落中性初始值，
+//   学段由 q1 定；已有账号的学段仍照常展示（那是服务端的事实）。
 
 const canSubmit = computed(() => draftName.value.trim().length > 0)
 const hasAccounts = computed(() => accounts.accounts.length > 0)
@@ -59,7 +68,7 @@ async function pick(studentId: string): Promise<void> {
 
 async function submitCreate(): Promise<void> {
   if (!canSubmit.value) return
-  await accounts.createAccount(draftName.value, draftGrade.value)
+  await accounts.createAccount(draftName.value, DEFAULT_ACCOUNT_GRADE)
 }
 
 /**
@@ -164,22 +173,8 @@ useFocusReturn(cardRef, () => accounts.gateOpen, { trap: true })
               data-testid="account-gate-name"
             />
           </label>
-          <div class="gate__field">
-            <span class="gate__label">学段</span>
-            <div class="gate__grades">
-              <button
-                v-for="level in GRADE_LEVELS"
-                :key="level"
-                type="button"
-                class="gate__grade"
-                :data-on="String(draftGrade === level)"
-                :data-testid="`account-gate-grade-${level}`"
-                @click="draftGrade = level"
-              >
-                {{ GRADE_LABELS[level] }}
-              </button>
-            </div>
-          </div>
+          <!-- ★ 新建不再问学段（文件头 ④）：学段由五问 q1 定，这里问了反而会与 q1 打架。
+               中性初始值由 store 的 DEFAULT_ACCOUNT_GRADE 提供。 -->
           <!-- ★ 主行动走设计系统的 .k12-cta，不在这里再写一份主色皮肤：
                门禁这一屏只有这一个主行动（进来就是「建号 + 开始」），
                所以主色填充归它，不会和别处抢（见 base.css 里 .k12-cta 的判据）。 -->
@@ -383,28 +378,6 @@ useFocusReturn(cardRef, () => accounts.gateOpen, { trap: true })
 .gate__input:focus-visible {
   outline: 2px solid var(--k12-accent);
   outline-offset: 1px;
-}
-.gate__grades {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--k12-sp-2);
-}
-.gate__grade {
-  min-height: 30px;
-  padding: 0 var(--k12-sp-3);
-  border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-pill);
-  background: var(--k12-surface);
-  color: var(--k12-fg-2);
-  font-family: inherit;
-  font-size: var(--k12-fs-caption);
-  cursor: pointer;
-}
-.gate__grade[data-on='true'] {
-  border-color: var(--k12-accent-ink);
-  background: var(--k12-accent-soft);
-  color: var(--k12-accent-ink);
-  font-weight: 650;
 }
 /* 只补布局：颜色 / 圆角 / 五态全部由 .k12-cta 提供（不在这里抄第二份） */
 .gate__submit {

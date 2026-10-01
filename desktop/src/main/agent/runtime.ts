@@ -211,6 +211,15 @@ export interface ChatRuntimeOptions {
    * `<userData>/students/<id>/pi-agent/`。**未经校验的 id 不许进来**（会被拼进路径）。
    */
   studentId: string
+  /**
+   * ★★ **当前账号**解析（生产 = `ipc/handlers.ts` 的 `resolveActiveStudentId`）。
+   *
+   * 为什么写学段要有这一层：`studentId` 是**装配那一刻**的学生，而账号可以在装配之后
+   * 切换 / 新建 —— 线上事故正是「学段写到了上一个学生」（界面按新账号读、库写进旧账号，
+   * 关卡树与取题学段对不上 → 练习页必然 404）。
+   * 缺省 = 不复核（旧调用方 / 单测不必传），行为与改造前一致。
+   */
+  resolveStudentId?: () => string
   /** ★ 设置页的 Key（第一档）；其余档位由 `resolveCredentials` 处理。 */
   apiKey?: string
   /** `apiKey` 来源标签（设置页 vs CLI），只影响 `credentials.source` 诊断。 */
@@ -360,6 +369,14 @@ export interface ChatRuntime {
    * 失败**抛可读异常**，由 `handlers.ts` 翻成可读中文回执（绝不抛过 IPC）。
    */
   setGradeLevel(gradeLevel: GradeLevel): Promise<{ changed: boolean; cooldownRemainingTurns: number }>
+  /**
+   * ★ Q1 的学段 = **冷启动初始值**：把服务端已存的那份学段读回来并立即生效。
+   *
+   * 与 {@link setGradeLevel} 的区别：**不写 override**（不产生 `source=explicit`、
+   * 不进 10 轮手动冷却）、不做任何写库 —— 只是让进程内那份 `appliedGrade` 跟上
+   * 刚写进「学生资料」的初始值，之后仍由自动推断微调。
+   */
+  refreshGradeLevel(): Promise<GradeLevel>
   /**
    * ★★ **主动发起对话**：把一句开场引导写进 Pi 会话（需求原文要求的那一半）。
    *
@@ -1670,7 +1687,16 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       gradeLevel: GradeLevel
     ): Promise<{ changed: boolean; cooldownRemainingTurns: number }> {
       if (disposed) throw new Error('会话已关闭，无法设定学段。')
-      const result = await postGradeOverride(paths.studentId, gradeLevel)
+      // ★★ **调用时**复核当前账号：绝不用装配那一刻捕获的 id 写库。
+      //    线上事故：建号 / 切号之后运行时尚停在旧学生，学段写进了上一个学生的库里，
+      //    而读路径每次读 accounts.json → 界面与库两套真值（练习页必然 404）。
+      //    `ensureChatRuntime()` 已在装配前发现换人并重建；这里是最后一道闸 ——
+      //    宁可回一句可读中文，也绝不把学段写到别人名下。
+      const targetStudentId = options.resolveStudentId?.() ?? paths.studentId
+      if (targetStudentId !== paths.studentId) {
+        throw new Error('当前账号已经切换，请重新进入这一页后再设置学段。')
+      }
+      const result = await postGradeOverride(targetStudentId, gradeLevel)
       gradeExtension.adoptOverride(result.gradeLevel, result.cooldownRemainingTurns)
       bindCurrentSession()
       // 结构性日志：只有学段与轮数，**不含任何凭证、不含学生原话**
@@ -1682,6 +1708,19 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         changed: result.changed,
         cooldownRemainingTurns: result.cooldownRemainingTurns
       }
+    },
+    /**
+     * ★ Q1 的学段 = **冷启动初始值**（见接口上的注释）：只把服务端那份读回来并立即生效。
+     *
+     * `refresh()` 按 `state.source` 决定 `explicitChoice` —— 我们这条路不写 explicit，
+     * 于是它保持 false，与「初始值仍可被自动微调」一致。读失败只记 warn 不抛：
+     * 引导流程绝不因为这一句读不到而卡住（下一轮 `observeTurn` 还会再对齐一次）。
+     */
+    async refreshGradeLevel(): Promise<GradeLevel> {
+      if (disposed) return gradeExtension.appliedGrade()
+      await gradeExtension.refresh()
+      bindCurrentSession()
+      return gradeExtension.appliedGrade()
     },
 
     /**

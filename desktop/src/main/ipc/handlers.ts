@@ -144,7 +144,13 @@ import {
 //   两处各写一份的话规则会悄悄分叉（见那个文件的注释）。这里直接 import 共用。
 import { mergeModelCandidates } from '@shared/provider-catalog'
 import { parseChatSendRequest } from './chat-request.ts'
-import { createTraceProjector, registerDataHandlers, registerOnboardingHandlers, sendTraceTo } from './handlers-data.ts'
+import {
+  createTraceProjector,
+  registerDataHandlers,
+  registerOnboardingHandlers,
+  sendTraceTo,
+  updateStudentGradeForAccount
+} from './handlers-data.ts'
 import { createLlmSummarizer } from '../agent/onboarding/index.ts'
 import { ChatStreamRegistry, type StreamTarget, type TurnHandle } from './chat-stream.ts'
 
@@ -453,6 +459,8 @@ export function resolveActiveStudentId(): string {
  *    所以切换必须先 `swapRuntime()`（dispose 旧的、建新的），见那个函数的注释。
  */
 let runtime: ChatRuntime | null = null
+/** ★ 正在装配的那份**属于哪个学生**（换号检测用；见 {@link ensureChatRuntime}）。 */
+let runtimePendingStudentId = ''
 /** 正在装配中的 Promise（并发首条消息只装配一次）。 */
 let runtimePending: Promise<ChatRuntime> | null = null
 
@@ -539,8 +547,21 @@ export function setChatRuntimeFactoryForTests(
  * 在下一个真实回合前补上配置（见那个函数的注释：这是实测踩到的启动竞态）。
  */
 export async function ensureChatRuntime(): Promise<ChatRuntime> {
+  // ★★ 当前账号与「已装配 / 正在装配」的那一份不是同一个人 → 先把旧的收掉，再按当前账号装配。
+  //    Pi 会话按学生隔离是合规硬要求：一个运行时绝不许替两个学生读写。
+  //    线上事故：建号后运行时尚停在旧学生，写学段落进上一个学生的 learning.db，
+  //    而读路径按 accounts.json 取新学生 → 界面学段与库里的学段对不上（练习页 404）。
+  const wanted = resolveActiveStudentId()
+  const assembling = runtimePending !== null ? runtimePendingStudentId : null
+  if (
+    (runtime !== null && runtime.studentId !== wanted) ||
+    (assembling !== null && assembling !== wanted)
+  ) {
+    await disposeChatRuntime()
+  }
   if (runtime) return runtime
   if (!runtimePending) {
+    runtimePendingStudentId = wanted
     // ★ 记下本次装配开始时的代际：装配期间被 dispose 过就作废（见 runtimeGeneration 的注释）
     const generation = runtimeGeneration
     // ★ 本次装配要开哪一条会话：显式指定过就用它，否则走冷启动默认（续上最近的一条）。
@@ -571,6 +592,7 @@ export async function ensureChatRuntime(): Promise<ChatRuntime> {
       })
       .finally(() => {
         runtimePending = null
+        runtimePendingStudentId = ''
       })
   }
   return await runtimePending
@@ -657,6 +679,8 @@ export function chatRuntimeOptionsFromLlm(
     userDataDir: app.getPath('userData'),
     // ★ 票 09：会话与 JSONL 落 `<userData>/students/<id>/pi-agent/`（一人一份，显式改道）
     studentId: resolveActiveStudentId(),
+    // ★★ 写学段前复核「还是不是这个人」：装配期捕获的 id 会在换号后过期（见 runtime 的同名字段）
+    resolveStudentId: resolveActiveStudentId,
     // ★ 工具调用轨迹的**实时**出口（右栏「工具调用轨迹」）：
     //   与 `trace` 字段的分工是「过程里的快照」vs「退出时落盘的完整记录」。
     onTraceRecord: pushTraceRecords,
@@ -1145,11 +1169,14 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
 
   // ── 冷启动引导（票 25：七条 invoke + 一条推送 onboarding:changed）────────
   //
-  // ★★ Q1 点选直达的落点就是**已有的那条 grade:set 链**，这里绝不另写一条写学段的路径：
-  //    「立即生效 + 10 轮冷却 + 手动不写 grade_signals」这三条纪律只能有一份实现，
-  //    分成两处迟早漂（一处改了另一处不知道，表现是「点选改学段不生效 / 冷却没算」）。
-  // ★ 学段写入成功即推一条 grade:changed（与 grade:set 处理器同一处收尾）——
-  //    学生点完 chip 就要看到指示器变了，那是这个动作的全部反馈。
+  // ★★ Q1 的学段 = **冷启动初始值**（2026-10-01 用户裁决）：走**学生资料更新**那条路
+  //    （`PATCH /api/students/{id}`，账号菜单「改名与学段」用的同一件事），
+  //    而不是 `grade:set` —— 后者是手动语义（写 `source=explicit` + 10 轮冷却），
+  //    会把一道引导选择题升格成「学生正式接管学段」。
+  // ★ 身份**在调用时**解析（`resolveActiveStudentId`），不用装配期捕获的 id。
+  // ★ 写成功后把进程内那份学段对齐（`refreshGradeLevel` 只读回服务端，不写 override、
+  //    不置 explicit），再推一条 grade:changed —— 学生点完 chip 就要看到指示器变了；
+  //    推的 origin 由 `readGradeState` 如实推导，**不硬写成 explicit**（那会是假话）。
   registerOnboardingHandlers({
     resolveStudentId: resolveActiveStudentId,
     // ★ 接线在这里、投影在 handlers-data.ts（与轨迹投影同一条纪律）——本文件才认识窗口。
@@ -1157,9 +1184,11 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
     // 会话 id 只用于落库审计：拿不到就给空串（服务端那侧该字段是可选的，缺了不发）。
     sessionId: () => runtime?.sessionId ?? '',
     applyGradeBand: async (level) => {
+      await updateStudentGradeForAccount(resolveActiveStudentId(), level)
       const instance = await ensureChatRuntime()
-      await instance.setGradeLevel(level)
-      pushGradeState({ gradeLevel: level, origin: 'explicit', source: 'explicit' })
+      await instance.refreshGradeLevel()
+      const state = await readGradeState(instance)
+      if (state) pushGradeState(state)
     },
     // ★★ 票 31：五问收齐后的概括（subagent 真接上）。
     //   配置由 `settings/runtime-config.ts` 取（含明文 Key，只在本进程内存里流转），

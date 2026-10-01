@@ -14,6 +14,23 @@
  * 「换一个人用这台电脑」，这个代价是对的。
  *
  * ══════════════════════════════════════════════════════════════════════════
+ * 为什么「建号」也必须整页重载（2026-10-01 线上事故）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 主进程的对话运行时是**装配时**按当时的学生建起来的，而「当前账号」只是一个指针。
+ * 建号只写指针不重载 → 运行时仍以装配时那个学生的身份跑：新账号的五问 q1 会把学段
+ * 写到**上一个学生**身上（界面以为初中、学生实际高中，取题学段对不上 → 练习页 404）。
+ * 所以建号与切号**共用同一条路**（{@link switchAndReload}）：写指针 → 以服务端为准
+ * 重读一次学段 → 整页重载，让运行时按新身份重新装配。
+ * ⚠️ 建号**不许**走 `enter()` 的「就是当前这个人」捷径（那条路不重载）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 顶栏学段 chip 以服务端为准
+ * ══════════════════════════════════════════════════════════════════════════
+ * 学段显示的真值在 `stores/chat.ts` 的 `currentGrade`（服务端 `grade:state`）——
+ * 本文件**不另存一份学段**，只在换人时喊一声 `refreshGrade` 让它重读。
+ * 客户端那份「我刚答了初中」的记忆在换人之后必须作废，否则界面挂着的是上一个学生的结论。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
  * 为什么门禁判据放在 sessionStorage（而不是 store 里的一个 ref）
  * ══════════════════════════════════════════════════════════════════════════
  * 上面那条「整页重载」与「启动时列出账号」是同一件事的两面：
@@ -40,6 +57,7 @@ import { computed, ref } from 'vue'
 import type { GradeLevel } from '@shared/ipc-events'
 import { describeClientError, toStudentFacingMessage } from '../api/student-facing'
 import { warnWiring } from '../api/wiring-notice'
+import { useChatStore } from './chat'
 import { useStudentStore } from './student'
 
 /**
@@ -61,6 +79,18 @@ export interface AccountSummary {
 
 /** 数据面回执（与 `api/data.ts` 的 `DataCallResult` 同形，回执从不抛）。 */
 export type AccountsCallResult<T = unknown> = { ok: true; data: T } | { ok: false; message: string }
+
+/**
+ * 建号时先落一个**中性初始学段** —— 账号门不再问学段（用户裁决，学段由五问 q1 定）。
+ *
+ * ★ 值必须与主进程的 `DEFAULT_GRADE_LEVEL`（`src/main/agent/prompts/grade.ts`）一致：
+ *   契约的 `StudentCreateRequest.gradeLevel` 是必填，而「账号门不问」意味着这一格只能由
+ *   一个双方约定的默认值顶上 —— 两处不一致会让「没问过的学段」与「还没判出来的学段」
+ *   显示成两个年级。
+ * ★ 渲染进程**不能直接 import 主进程的那个值**（那把主进程代码拖进了渲染包），
+ *   所以这里放一份**标注了出处**的镜像；主进程那侧改了值，这里要跟着改。
+ */
+export const DEFAULT_ACCOUNT_GRADE: GradeLevel = 'junior'
 
 /** 账号能力（探测通过后由 {@link resolveAccountsBridge} 组装）。 */
 export interface AccountsBridge {
@@ -272,6 +302,8 @@ export const useAccountsStore = defineStore('accounts', () => {
 
   /** 当前生效的学生（身份的唯一真相在 `stores/student.ts`，这里只是读它）。 */
   const student = useStudentStore()
+  /** 学段显示的真值在对话 store（服务端 `grade:state`）；换人时只喊它重读，不另存一份。 */
+  const chat = useChatStore()
   const activeId = computed(() => student.student?.studentId ?? '')
 
   /**
@@ -311,18 +343,13 @@ export const useAccountsStore = defineStore('accounts', () => {
   }
 
   /**
-   * 进入某个账号。
+   * ★★ 切到某个账号并**整页重载**（切号与建号共用的**唯一一条路**，见文件头）。
    *
-   * ★ 点自己（就是当前这个人）**不发切换请求**：什么都不用变，只把「已进门」记下来。
-   *   少一次写库，也少一次「切到自己」这种语义空转。
+   * 三步的顺序有理由：① 写「当前账号」指针（主进程一次调用内完成）→
+   * ② 以服务端为准重读一次学段（把上一个学生那份显示作废；重载后装配好会再读一次，
+   *    那一次才是最终生效的值）→ ③ 整页重载，让运行时按新身份重新装配。
    */
-  async function enter(studentId: string): Promise<boolean> {
-    if (studentId.trim() === '') return false
-    if (studentId === activeId.value) {
-      entered.value = studentId
-      writeEntered(studentId)
-      return true
-    }
+  async function switchAndReload(studentId: string): Promise<boolean> {
     const bridge = bridgeOrNull()
     if (!bridge) {
       error.value = bridgeMessage.value
@@ -338,6 +365,9 @@ export const useAccountsStore = defineStore('accounts', () => {
       }
       entered.value = studentId
       writeEntered(studentId)
+      // ★ 顶栏学段 chip 以服务端为准：先作废本地那份（它属于上一个学生），再重读一次。
+      //   重载之后装配成新身份时会再读一次 —— 这一句覆盖「重载还没发生 / 不可用」的时间窗。
+      void chat.refreshGrade()
       reloadNow()
       return true
     } catch (thrown) {
@@ -346,6 +376,23 @@ export const useAccountsStore = defineStore('accounts', () => {
     } finally {
       busy.value = false
     }
+  }
+
+  /**
+   * 进入某个账号。
+   *
+   * ★ 点自己（就是当前这个人）**不发切换请求、也不重载**：身份没变，只需要把「已进门」
+   *   记下来；但学段显示仍要**以服务端为准**重读一次（见 {@link switchAndReload} 第 ② 步）。
+   */
+  async function enter(studentId: string): Promise<boolean> {
+    if (studentId.trim() === '') return false
+    if (studentId === activeId.value) {
+      entered.value = studentId
+      writeEntered(studentId)
+      void chat.refreshGrade()
+      return true
+    }
+    return await switchAndReload(studentId)
   }
 
   /**
@@ -378,7 +425,12 @@ export const useAccountsStore = defineStore('accounts', () => {
         error.value = ACCOUNTS_ACTION_FAILED_HINT
         return false
       }
-      return await enter(target)
+      // ★★ 建号后**必须**与切号走同一条路（整页重载）—— 见文件头第二段的事故：
+      //   只写指针不重载，运行时仍是装配时那个学生的身份，新账号的 q1 会把学段写到
+      //   上一个学生身上。
+      //   ⚠️ 刻意**不**走 `enter()`：那条路对「就是当前这个人」有不重载的快捷键，
+      //   而建号绝不能命中它（否则事故原样复现）。
+      return await switchAndReload(target)
     } catch (thrown) {
       error.value = describeClientError(thrown, { fallback: ACCOUNTS_ACTION_FAILED_HINT })
       return false

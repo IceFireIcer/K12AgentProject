@@ -58,8 +58,6 @@ export interface OnboardingExtraction {
    * ★ 只有 Q1 会给出它 —— 其余四问给 null（学段不靠猜）。
    */
   gradeLevel: GradeLevelLiteral | null
-  /** Q5 建议的称呼（已过脱敏；命中或没说时是回落值）。只有 Q5 会给。 */
-  displayName: string | null
   /** 要写的白名单标签（key 已过白名单，调用方可直接 PUT）。 */
   tags: OnboardingTagWrite[]
 }

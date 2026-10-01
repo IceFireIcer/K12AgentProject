@@ -593,19 +593,10 @@ export function createOnboardingService(initial: OnboardingDeps = {}): Onboardin
     }
     // ③ 本地抽出的标签逐条投影（白名单键）
     await writeTags(sid, extraction.tags)
-    // ④ Q5 的称呼落盘（★ 集成期修的功能死洞）
-    //    此前**没有任何路径**把称呼写进 identity_local，于是 GET /identity 恒回空 realName，
-    //    渲染层永远把 `{{student_name}}` 替换成「同学」—— 占位机制静默失效：
-    //    **模型被要求用占位符，而占位符永远替换不出真名**。
-    //    ⚠️ 写失败只记日志、**不打断引导**：称呼丢了顶多回落「同学」，
-    //      而把新用户的前 30 秒卡在这里代价大得多（执行报告 §1.7 的硬要求）。
-    if (questionId === 'q5' && extraction.displayName !== null) {
-      try {
-        await saveIdentityFlags(sid, { realName: extraction.displayName })
-      } catch (error) {
-        log('[onboarding] 称呼没有落盘（引导继续，本会话仍用内存里的称呼）：' + describeError(error), 'warn')
-      }
-    }
+    // ④ 称呼**不在这里写**（2026-10-01 用户裁决）：五问的 q5 已换成兴趣 / 动机题，
+    //    称呼改为**账号门填的昵称**，由**建号**那条路写进 identity_local.real_name
+    //    （见 ipc/handlers-data.ts 的 accounts:create）。本服务对称呼只读不写 ——
+    //    否则学生答的爱好会被当成称呼覆盖掉真名。
   }
 
   /** 概括调用的超时包装（桩挂死时队列不能被无限占住）。 */
@@ -710,7 +701,6 @@ export function createOnboardingService(initial: OnboardingDeps = {}): Onboardin
     progress = recordAnswer(progress, questionId)
     answers.set(questionId, extraction.text)
     mergeTags(extraction.tags)
-    if (extraction.displayName !== null) displayName = extraction.displayName
     const finished = progress.state === 'done'
     if (finished) active = false
     enqueue(() => persistAnswer(sid, questionId, extraction))

@@ -10,7 +10,7 @@
  * | Q2 点选学科 + 本地关键词表 | subject, current_topic |
  * | Q3 点选 + 本地关键词表 | explain_style, output_length, practice_type, tone |
  * | Q4 点选 + 本地关键词表 | pace |
- * | Q5 称呼（过脱敏） | 只进 identity_local.real_name，**不设标签** |
+ * | Q5 兴趣 / 动机（2026-10-01 换题） | interest_topic（称呼改由**账号门建号**写 identity_local.real_name） |
  * | 既有数据源（不在本文件） | knowledge_point / mastery / error_type ← 判分路径；emotion / intensity ← signals.py 元认知路；safety_level ← safety/guard |
  *
  * ★★ 纪律：**「靠位置，不靠解析」**。这个文件只回答「拿到这一问的回答文本，能本地映射出什么」，
@@ -29,10 +29,9 @@ import {
   INTENSITY_MIN,
   isLlmVisibleTag,
   ONBOARDING_QUESTIONS,
-  STUDENT_FALLBACK_NAME,
   type OnboardingQuestionId
 } from '../../../shared/profile-tags.ts'
-import { safeDisplayName, sanitizeStudentText } from './sanitize.ts'
+import { sanitizeStudentText } from './sanitize.ts'
 import type { GradeLevelLiteral, OnboardingExtraction, OnboardingTagWrite } from './types.ts'
 
 /* ------------------------------------------------------------------ *
@@ -242,6 +241,22 @@ export function tagsFromSignals(signals: { emotion?: unknown; intensity?: unknow
   return out
 }
 
+/**
+ * Q5：兴趣 / 动机（2026-10-01 换题，题面见 `shared/profile-tags.ts` 的注释）。
+ *
+ * ★ 自由回答整句就是兴趣线索 → `interest_topic`（置信度 0.7，与 Q3/Q4 的自由映射同档）：
+ *   这是**映射**不是归类猜测，也不新增任何采集。
+ * ★ 称呼**不再从这里产出**：它是账号门填的昵称，由**建号**那条路写进
+ *   `identity_local.real_name`（见 `ipc/handlers-data.ts` 的 `accounts:create`）——
+ *   否则学生答的爱好会被当成称呼写进去。
+ */
+function extractInterest(raw: string): OnboardingTagWrite[] {
+  const text = raw.trim()
+  if (text.length < 2) return []
+  const item = tag('interest_topic', text.slice(0, 40), 0.7)
+  return item === null ? [] : [item]
+}
+
 /* ------------------------------------------------------------------ *
  * 入口
  * ------------------------------------------------------------------ */
@@ -261,14 +276,12 @@ export function extractAnswer(questionId: OnboardingQuestionId, raw: unknown): O
     piiHit: clean.hit,
     piiPattern: clean.pattern,
     gradeLevel: null as GradeLevelLiteral | null,
-    displayName: null as string | null,
     tags: [] as OnboardingTagWrite[]
   }
   // ★★ 命中敏感模式 = **整条丢弃**：连映射都不做。
   //   否则「同学」这个回落值会顺着 Q2 的规则变成一条 current_topic=同学（看着无害，
   //   实际是把「这里原本有信息、被我们遮掉了」写进了库 —— 那不是丢弃，是留痕）。
   if (clean.hit) {
-    if (questionId === 'q5') base.displayName = STUDENT_FALLBACK_NAME
     return base
   }
 
@@ -290,7 +303,9 @@ export function extractAnswer(questionId: OnboardingQuestionId, raw: unknown): O
     base.tags = extractPace(text)
     return base
   }
-  // q5：称呼（过脱敏）+ 备注。★ 称呼**不设标签** —— 它只进 identity_local.real_name 与渲染层内存。
-  base.displayName = safeDisplayName(text)
+  if (questionId === 'q5') {
+    base.tags = extractInterest(text)
+    return base
+  }
   return base
 }

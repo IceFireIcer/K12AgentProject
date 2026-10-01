@@ -308,8 +308,49 @@ function accountPath(studentId: string): string {
   return `${ACCOUNTS_PATH}/${encodeURIComponent(studentId)}`
 }
 
+/**
+ * ★ Q1 的学段 = **冷启动初始值**（2026-10-01 用户裁决）：按当前账号改 `student.grade_level`
+ * —— 与账号菜单「改名与学段」**同一条路**（`PATCH /api/students/{id}`）。
+ *
+ * ★ 为什么不用 `grade:set`（`POST /api/grade/override`）：那条是**手动语义** ——
+ *   写 `grade_history(source=explicit)` 并进入 10 轮手动冷却，把「五问里的一道选择题」
+ *   升格成「学生正式接管学段」；而它实际只是冷启动的第一个初始值，之后仍该被自动推断微调。
+ * ⚠️ `studentId` 由调用方**在调用时**解析（`resolveActiveStudentId`），绝不接受装配期
+ *    捕获的 id —— 那正是「学段写到上一个学生」的成因。
+ */
+export async function updateStudentGradeForAccount(
+  studentId: string,
+  gradeLevel: GradeLevelLiteral
+): Promise<void> {
+  const result = await requestAccounts<unknown>(accountPath(studentId), {
+    method: 'PATCH',
+    body: { gradeLevel }
+  })
+  if (!result.ok) throw new Error(result.message)
+}
+
 /** 账号端点的请求超时（本机回环，毫秒级；与 `wire/data.ts` 默认同量级）。 */
 const ACCOUNTS_TIMEOUT_MS = 8_000
+
+/**
+ * ★★ 把「账号门填的昵称」写成学生称呼（`identity_local.real_name`）的**唯一写入点**
+ * （2026-10-01 用户裁决：五问 q5 改成兴趣题后，称呼改由**建号 / 改名**这条路负责）。
+ *
+ * ⚠️ 身份是**参数传进来的那一位**（建号时是刚建出来的 id、改名时是被改的那位）——
+ *    绝不用 `studentId()` 解析「当前账号」：建号这一刻当前账号还指着上一位。
+ * ⚠️ 写失败**只 warn 不抛**：称呼丢了顶多回落「同学」，绝不因此让建号 / 改名失败。
+ * ⚠️ 脱敏在服务端（`profile.py` 的 `safe_display_name`）—— 这条链只有一份实现，不在这里重写。
+ */
+async function writeAccountRealName(studentId: string, nickname: string): Promise<void> {
+  try {
+    await saveIdentityFlags(studentId, { realName: nickname })
+  } catch (error) {
+    console.warn(
+      '[accounts] 称呼没有落盘（不影响账号操作，界面回落「同学」）：' +
+        (error instanceof Error ? error.message : String(error))
+    )
+  }
+}
 
 /** 昵称上限（与契约 `StudentCreateRequest.nickname` 的 max_length 一致）。 */
 const ACCOUNT_NICKNAME_MAX_CHARS = 32
@@ -585,6 +626,9 @@ export function registerDataHandlers(options: {
       if (student === null) {
         return { ok: false, message: '新建账号失败：本地数据服务没有返回账号信息。' }
       }
+      // ★★ 称呼在这里写（见 writeAccountRealName 的说明）：账号门填的昵称 = 学生的称呼。
+      //    身份必须是**刚建出来的那一位**，不是当前账号 —— 建号这一刻 accounts.json 还指着上一位。
+      await writeAccountRealName(student.studentId, nickname)
       return { ok: true, data: student }
     }
   )
@@ -627,6 +671,9 @@ export function registerDataHandlers(options: {
       if (student === null) {
         return { ok: false, message: '修改账号失败：本地数据服务没有返回账号信息。' }
       }
+      // ★ 改名同样落到称呼上（与建号同一条纪律）：否则界面显示新昵称、
+      //   而模型眼里的 {{student_name}} 还是旧称呼。学段单独改时不碰称呼。
+      if (body.nickname !== undefined) await writeAccountRealName(target, body.nickname)
       return { ok: true, data: student }
     }
   )

@@ -787,6 +787,37 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
+   * ★★ **以服务端为准**重新读一次当前学生的学段（挂载 / 切号 / 建号后的唯一拉取口）。
+   *
+   * 为什么先清空再读（2026-10-01 建号事故）：`currentGrade` 记的是**上一个学生**的
+   * 判定结果。换人之后不清，界面就挂着别人的结论 —— 现场表现正是「界面写着初中、
+   * 学生实际高中」，而取题与关卡树按真实学段走，练习页必然对不上。
+   * 清空的代价只是读数回来之前显示「还没认出年级」；显示一个属于别人的结论更坏。
+   *
+   * ★ 读回来的值仍走 {@link applyGradeState} 这一个落点（推送与拉取共用同一套归一化
+   *   与过滤：`default` 这类「还没判过」的态照样不上屏），**不新增第二处真相**。
+   * ★ 缺 `getGrade` 时**不动**显示：宁可停在「还没认出年级」等推送，也不猜一个值。
+   */
+  async function refreshGrade(): Promise<void> {
+    currentGrade.value = null
+    gradeOrigin.value = null
+    gradeNotice.value = null
+    const lookup = resolveGradeBridge()
+    if (!lookup.ready) {
+      gradeBridgeError.value = lookup.message
+      return
+    }
+    gradeBridgeError.value = null
+    if (typeof lookup.bridge.getGrade !== 'function') return
+    try {
+      const result = await lookup.bridge.getGrade()
+      if (result.ok) applyGradeState(result.data)
+    } catch {
+      /* 读不到就保持「还没认出年级」：等推送或下一次拉取，绝不猜一个值 */
+    }
+  }
+
+  /**
    * 订上学段推送（幂等；缺通道时只记原因，不抛异常）。
    *
    * 主进程推什么就显示什么 —— 渲染进程**不做第二套判定**。
@@ -809,15 +840,10 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
-    // 初始值（可选能力）：拿不到就等推送，不报错
-    void lookup.bridge.getGrade?.().then(
-      (result) => {
-        if (result.ok) applyGradeState(result.data)
-      },
-      () => {
-        /* 拉取失败不影响推送路径 */
-      }
-    )
+    // 初始值（可选能力）：拿不到就等推送，不报错。
+    // ★ 与「手动重新拉取」**共用** refreshGrade 这一条实现（它先作废本地那份显示再读
+    //   服务端）：挂载时也要走这条路，否则换人后沿用上一份显示就会挂着别人的学段。
+    void refreshGrade()
   }
 
   /**
@@ -1359,6 +1385,8 @@ export const useChatStore = defineStore('chat', () => {
     quizResults,
     connect,
     connectGrade,
+    /** ★ 以服务端为准重新读一次当前学生的学段（换人 / 建号后调用；见其说明）。 */
+    refreshGrade,
     connectChapter,
     disconnect,
     /** 清界面上的这段对话（学段/章节与 Pi 的后端会话都不动；调用方先确认）。 */
