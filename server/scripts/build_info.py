@@ -161,6 +161,14 @@ def _git_commit(root: Path) -> tuple[str | None, bool]:
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=str(root),
             capture_output=True,
+            # ★★ 显式 utf-8 + errors="replace"（2026-09-28 集成期修的既有缺陷）：
+            #   裸 text=True 用**系统默认编码**（中文 Windows 是 GBK），而 git 输出是 UTF-8；
+            #   一旦工作树里有非 ASCII 路径（本仓库的 docs/执行报告-*.md 就是），
+            #   解码在 subprocess 的读取线程里抛 UnicodeDecodeError，被吞掉后 stdout 变成 None，
+            #   下一行 .strip() 直接 AttributeError —— 整个 build-info 指纹失效。
+            #   errors="replace" 保证 stdout **永远是 str**：指纹宁可标「脏」也不能崩。
+            encoding="utf-8",
+            errors="replace",
             text=True,
             timeout=10,
             check=False,
@@ -171,6 +179,9 @@ def _git_commit(root: Path) -> tuple[str | None, bool]:
             ["git", "status", "--porcelain"],
             cwd=str(root),
             capture_output=True,
+            # ★ 同上：这条**必然**回显工作树里的非 ASCII 路径，是那个 AttributeError 的触发点。
+            encoding="utf-8",
+            errors="replace",
             text=True,
             timeout=10,
             check=False,
