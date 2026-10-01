@@ -64,7 +64,6 @@ import {
   EyeOff,
   GraduationCap,
   HardDrive,
-  KeyRound,
   ListChecks,
   Palette,
   Plug,
@@ -74,7 +73,7 @@ import {
   SlidersHorizontal
 } from 'lucide-vue-next'
 import { GRADE_LEVELS } from '../api/grade'
-import { EMBEDDING_MODE_LABELS, MANUAL_PRESET_ID, type EmbeddingMode } from '../api/settings'
+import { EMBEDDING_MODE_LABELS, type EmbeddingMode } from '../api/settings'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL, chapterLineLabel, gradeOriginLabel } from '../labels'
 import { useChatStore } from '../stores/chat'
 import { useDemoSeedStore } from '../stores/demoSeed'
@@ -94,6 +93,7 @@ import { SATS, useThemeStore, type SatKey } from '../stores/theme'
 import { useViewModeStore } from '../stores/viewMode'
 import PageIdentity from '../components/PageIdentity.vue'
 import SurfacePanel from '../components/SurfacePanel.vue'
+import ModelSetup from '../components/ModelSetup.vue'
 import type { GradeLevel } from '@shared/ipc-events'
 
 const settings = useSettingsStore()
@@ -120,21 +120,7 @@ const ui = useUiStore()
 
 /* ------------------------------------------------------------ 供应商 */
 
-const showKey = ref(false)
 const showEmbeddingKey = ref(false)
-
-/** 预设下拉的说明（读目录 / 读失败 / 读到了几家，三种都说清）。 */
-const presetHint = computed(() => {
-  if (settings.loadingCatalog) return '正在读取 Pi 内置的供应商目录…'
-  if (settings.catalogError) return settings.catalogError
-  if (settings.catalog.length === 0) {
-    return '没有读到 Pi 内置供应商 —— 可以在下面手动填写 Provider ID / BaseURL / Model ID。'
-  }
-  return (
-    `已读到 Pi 内置的 ${settings.catalog.length} 个供应商：选一个会自动带出端点与常见模型，` +
-    '也可以停在「手动填写」自己填。'
-  )
-})
 
 const saveState = computed(() => {
   if (settings.loading) return 'loading'
@@ -151,11 +137,6 @@ const saveStateText = computed(() => {
 /** 嵌入 Key 栏的占位（掩码只做状态文案，绝不回填到输入框）。 */
 const embeddingHasStoredKey = computed(() => settings.snapshot?.embedding.hasKey ?? false)
 
-function onPresetChange(event: Event): void {
-  const target = event.target
-  if (target instanceof HTMLSelectElement) settings.applyPreset(target.value)
-}
-
 /** 保存（成功给一次 toast；失败原因由 store 的 errorText 落在页面上）。 */
 async function runSave(probeAfter = true): Promise<void> {
   const ok = await settings.save({ probeAfter })
@@ -169,35 +150,6 @@ function runSaveOnly(): void {
 function runProbe(): void {
   void settings.probeNow()
 }
-
-function runFetchModels(): void {
-  void settings.fetchModels()
-}
-
-/**
- * 探测结论的**一句话白话**（给不懂 HTTP 的人看）。
- *
- * ★ 后端那句原文是**排障文案**，形态是
- *   「连通成功：https://api.deepseek.com/models 返回 HTTP 200，可见模型 2 个（示例：…）。
- *     保存后即以 … 调用。」——信息完整，但一个学生读到 URL + HTTP 状态码只会以为出了问题。
- *   **后端文案不在这里改**（有测试盯着「连通成功」「重新填写 API Key」等字符串）：
- *   这里只把同一份结果**再表述一次**，原文一字不改地放在下面的「技术详情」里。
- * ★ 判据用正则从原文里**取事实**（模型个数 / HTTP 状态码），取不到就说一句不含细节的
- *   「连通正常」—— 不编一个具体数字出来。
- */
-const probeSummary = computed(() => {
-  const result = settings.probe
-  if (result === null) return ''
-  if (!result.ok) return '还没连通 —— 具体原因和改法在下面的「技术详情」里。'
-  const models = /可见模型\s*(\d+)\s*个/.exec(result.message)
-  if (models) return `连通正常（这个地址上有 ${models[1]} 个模型可用）`
-  const http = /返回 HTTP\s*(\d{3})/.exec(result.message)
-  if (http) return `连通正常（对方返回 HTTP ${http[1]}）`
-  return '连通正常'
-})
-
-/** 探测结果的标题那两个词（学生可见口径，与后端文案同一个词，不要改）。 */
-const probeTitle = computed(() => (settings.probe?.ok ? '连通成功' : '未能连通'))
 
 /* ------------------------------------------------------------ 嵌入模型 */
 
@@ -997,207 +949,48 @@ onBeforeUnmount(() => {
             <span class="card__meta">支持下改供应商 / BaseURL / Model ID</span>
           </header>
 
-          <el-form label-position="top" class="form">
-            <el-form-item label="供应商预设（Pi 内置目录）">
-              <select
-                class="pick"
-                data-testid="settings-llm-preset"
-                :value="settings.presetValue"
-                @change="onPresetChange"
-              >
-                <option :value="MANUAL_PRESET_ID">手动填写（自己填端点与模型）</option>
-                <option v-for="preset in settings.catalog" :key="preset.id" :value="preset.id">
-                  {{ preset.label }}
-                </option>
-              </select>
-              <p class="hint" data-testid="settings-preset-hint">{{ presetHint }}</p>
-            </el-form-item>
-
-            <el-form-item label="Provider ID（进 Pi）">
-              <el-input
-                v-model="settings.draft.providerId"
-                data-testid="settings-llm-providerid"
-                placeholder="deepseek"
-              />
-              <p class="hint">
-                决定用哪份 provider 定义。自定义或校内网关请自取一个 id（如 <code>custom</code>），
-                并在 Pi 的 <code>models[]</code> 里声明模型，否则该供应商下一个模型都没有。
-              </p>
-            </el-form-item>
-
-            <el-form-item label="供应商名称（仅显示）">
-              <el-input
-                v-model="settings.draft.providerName"
-                data-testid="settings-llm-provider"
-                placeholder="DeepSeek"
-              />
-              <p class="hint">只用于界面与排查，不参与任何调用逻辑。</p>
-            </el-form-item>
-
-            <el-form-item label="BaseURL">
-              <el-input
-                v-model="settings.draft.baseUrl"
-                data-testid="settings-llm-baseurl"
-                placeholder="https://api.deepseek.com"
-              />
-              <p class="hint" data-testid="settings-baseurl-hint">{{ settings.baseUrlHintText }}</p>
-            </el-form-item>
-
-            <el-form-item label="Model ID">
-              <el-input
-                v-model="settings.draft.modelId"
-                data-testid="settings-llm-modelid"
-                placeholder="deepseek-v4-flash"
-              />
-              <p class="hint">
-                必须是该 provider 模型目录里<strong>真实存在</strong>的 id。
-                DeepSeek 目录里只有 <code>deepseek-v4-flash</code> / <code>-vision-exp</code> /
-                <code>-pro</code>；填错会让首轮对话直接报「找不到模型」。
-              </p>
-            </el-form-item>
-
-            <el-form-item label="候选模型">
-              <div class="cands">
-                <div class="cands__head">
-                  <el-button
-                    size="small"
-                    data-testid="settings-fetch-models"
-                    :loading="settings.fetching"
-                    :disabled="settings.busy || demoSeed.seeded"
-                    @click="runFetchModels"
-                  >
-                    拉取模型清单
-                  </el-button>
-                  <span class="cands__note">从当前端点实时拉取，并与 Pi 目录里的清单合并。</span>
-                  <span v-if="demoSeed.seeded" class="cands__note" data-testid="settings-outbound-off">
-                    当前状态下这一项先不用动。
-                  </span>
-                </div>
-                <p v-if="settings.fetched" class="hint" data-testid="settings-fetch-message">
-                  {{ settings.fetched.message }}
-                </p>
-                <ul
-                  v-if="settings.candidatesOpen && settings.modelCandidates.length > 0"
-                  class="cands__list"
-                  data-testid="settings-model-candidates"
-                >
-                  <li v-for="id in settings.modelCandidates" :key="id">
-                    <button
-                      type="button"
-                      class="chip"
-                      :class="{ 'chip--on': settings.draft.modelId === id }"
-                      :data-testid="`settings-model-candidate-${id}`"
-                      @click="settings.chooseModel(id)"
-                    >
-                      {{ id }}
-                    </button>
-                  </li>
-                </ul>
-              </div>
-            </el-form-item>
-
-            <el-form-item label="API Key">
-              <div class="row-inline">
-                <el-input
-                  v-model="settings.draft.apiKey"
-                  data-testid="settings-llm-apikey"
-                  :type="showKey ? 'text' : 'password'"
-                  autocomplete="new-password"
-                  :placeholder="settings.hasStoredKey ? '已保存（留空则不修改）' : '请输入 API Key'"
-                  @input="settings.markKeyEdited()"
-                />
-                <el-button text :title="showKey ? '隐藏' : '显示'" @click="showKey = !showKey">
-                  <component :is="showKey ? EyeOff : Eye" :size="16" />
-                </el-button>
-              </div>
-              <p class="key-row">
-                <span class="key-state" data-testid="settings-key-status">{{ settings.keyStatus }}</span>
-                <span class="key-hint">{{ settings.keyStatusHint }}</span>
-                <span v-if="settings.keyCleared" class="key-cleared" data-testid="settings-key-cleared">
-                  保存后将删除已存的 Key
+          <!-- ★ 表单本体是**共享组件**（设置页与首次进入的账号门同一份实现，见 ModelSetup.vue）：
+               重复写第二份就会一处补了候选模型、另一处没有。这里只留卡片壳与本页自己的动作行；
+               卡片标题里那句「供应商 / BaseURL / Model ID」也留在本页（高级区的豁免理由与它绑定）。
+               动作行经 `#actions` 插槽进来 —— 设置页的四个动作（含「保存并生效」）与脏状态一字未动。 -->
+          <ModelSetup :show-primary="false">
+            <template #actions>
+              <div class="card__foot">
+                <span class="save-state" :data-phase="saveState" data-testid="settings-dirty">
+                  {{ saveStateText }}
                 </span>
                 <el-button
-                  text
-                  size="small"
-                  data-testid="settings-clear-key"
-                  :disabled="settings.busy || !settings.hasStoredKey"
-                  @click="settings.clearStoredKey()"
+                  data-testid="settings-reset"
+                  :disabled="!settings.dirty || settings.busy"
+                  @click="settings.resetDraft()"
                 >
-                  清除已保存的 Key
+                  放弃修改
                 </el-button>
-              </p>
-              <p class="hint">
-                <KeyRound :size="12" class="hint__ico" />
-                Key 仅存本机（<code>config.json</code>），不进日志、也进不了渲染进程 ——
-                这一栏从头到尾只拿得到掩码，明文只有主进程能读。
-              </p>
-            </el-form-item>
-          </el-form>
+                <el-button
+                  data-testid="settings-probe"
+                  :loading="settings.probing"
+                  :disabled="settings.busy || demoSeed.seeded"
+                  @click="runProbe"
+                >
+                  仅探测
+                </el-button>
+                <el-button data-testid="settings-save-only" :disabled="settings.busy" @click="runSaveOnly">
+                  仅保存
+                </el-button>
+                <!-- 本页的主动作：走共享的 `.k12-cta` 配方（主按钮的样式只允许有一处实现） -->
+                <button
+                  type="button"
+                  class="k12-cta"
+                  data-testid="settings-save"
+                  :disabled="settings.busy"
+                  @click="runSave()"
+                >
+                  {{ settings.saving ? '正在保存…' : '保存并生效' }}
+                </button>
+              </div>
+            </template>
+          </ModelSetup>
 
-          <!-- 探测结果：**分两层，谁都能看懂，谁都能查到**。
-               · 标题那两个词（`连通成功` / `未能连通`）是**既有的学生可见口径**，一字不改 ——
-                 它足够短，学生读得懂，也是验收脚本与后端文案共同认的那个串；
-               · 中间那句是白话结论（不带 URL、不带状态码）；
-               · 后端那一整段诊断原文收进「技术详情」里**一字不改** ——
-                 排障、截图、答辩要的都是它（`<details>` 折叠不影响 `textContent`，
-                 所以按文本取值的检查照样能读到 `连通成功：… HTTP 200 …`）。
-               ★ 探测不会修改你填的内容。 -->
-          <div v-if="settings.probing" class="probe probe--pending" data-testid="settings-probe-pending">
-            正在向该端点发起一次真实请求…
-          </div>
-          <div
-            v-else-if="settings.probe"
-            class="probe"
-            :class="settings.probe.ok ? 'probe--ok' : 'probe--fail'"
-            data-testid="settings-probe-result"
-            :data-ok="String(settings.probe.ok)"
-          >
-            <p class="probe__title" data-testid="settings-probe-title">
-              {{ probeTitle }}
-              <span class="probe__at">探测于 {{ settings.probeAt }}</span>
-            </p>
-            <p class="probe__msg" data-testid="settings-probe-summary">{{ probeSummary }}</p>
-            <details class="tech">
-              <summary class="tech__sum" data-testid="settings-probe-raw-summary">
-                技术详情（服务端原始回执）
-              </summary>
-              <p class="probe__msg" data-testid="settings-probe-message">{{ settings.probe.message }}</p>
-            </details>
-          </div>
-
-          <div class="card__foot">
-            <span class="save-state" :data-phase="saveState" data-testid="settings-dirty">
-              {{ saveStateText }}
-            </span>
-            <el-button
-              data-testid="settings-reset"
-              :disabled="!settings.dirty || settings.busy"
-              @click="settings.resetDraft()"
-            >
-              放弃修改
-            </el-button>
-            <el-button
-              data-testid="settings-probe"
-              :loading="settings.probing"
-              :disabled="settings.busy || demoSeed.seeded"
-              @click="runProbe"
-            >
-              仅探测
-            </el-button>
-            <el-button data-testid="settings-save-only" :disabled="settings.busy" @click="runSaveOnly">
-              仅保存
-            </el-button>
-            <!-- 本页的主动作：走共享的 `.k12-cta` 配方（主按钮的样式只允许有一处实现） -->
-            <button
-              type="button"
-              class="k12-cta"
-              data-testid="settings-save"
-              :disabled="settings.busy"
-              @click="runSave()"
-            >
-              {{ settings.saving ? '正在保存…' : '保存并生效' }}
-            </button>
-          </div>
           <!-- ★ 沙箱态：会外呼的那两个动作是**禁用**的，这里说明一句为什么 ——
                按钮变灰而不给理由，学生会以为是坏了。 -->
           <p v-if="demoSeed.seeded" class="hint" data-testid="settings-outbound-off-note">
@@ -1767,11 +1560,6 @@ onBeforeUnmount(() => {
   color: var(--k12-fg);
   font-weight: 650;
 }
-.hint__ico {
-  vertical-align: -2px;
-  margin-right: 4px;
-  color: var(--k12-muted);
-}
 /* 代码片不是角标：12px（原来是 11px，与角标同档，读不清） */
 .hint code {
   font-family: var(--k12-font-mono);
@@ -1797,37 +1585,7 @@ onBeforeUnmount(() => {
   color: var(--k12-good);
 }
 
-/* ── 供应商预设下拉（原生 select：与 el-input 同一视觉语言，零新增依赖）── */
-.pick {
-  width: 100%;
-  padding: 7px 11px;
-  border: 1px solid var(--k12-border-strong);
-  border-radius: var(--k12-r-control);
-  background: var(--k12-surface);
-  color: var(--k12-fg);
-  font-family: inherit;
-  font-size: var(--k12-fs-body-sm);
-  line-height: var(--k12-lh-ui);
-  cursor: pointer;
-}
-
 /* ── 候选模型 / 选项按钮（学段四档、章节清单共用同一形态）─────────────── */
-.cands {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
-}
-.cands__head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.cands__note {
-  font-size: var(--k12-fs-caption);
-  color: var(--k12-muted);
-}
 .cands__list,
 .opts {
   list-style: none;
@@ -1884,9 +1642,6 @@ onBeforeUnmount(() => {
 .opt--none {
   align-self: flex-start;
 }
-.chip {
-  font-family: var(--k12-font-mono);
-}
 
 /* ── Key 栏的状态行（掩码 + 提示 + 清除）───────────────────────────────── */
 .key-row {
@@ -1913,33 +1668,6 @@ onBeforeUnmount(() => {
 .key-cleared {
   color: var(--k12-warn);
   font-weight: 600;
-}
-
-/* ── 探测结果 ──────────────────────────────────────────────────────────── */
-.probe {
-  padding: 9px 13px;
-  border-radius: var(--k12-r-inset);
-  border: 1px solid var(--k12-border-strong);
-  background: var(--k12-surface-2);
-}
-.probe--ok {
-  border-color: var(--k12-good-border);
-  background: var(--k12-good-soft);
-}
-.probe--fail {
-  border-color: var(--k12-warn-border);
-  background: var(--k12-warn-soft);
-}
-.probe__title {
-  font-size: var(--k12-fs-body-sm);
-  font-weight: 650;
-  color: var(--k12-fg);
-}
-.probe__msg {
-  margin-top: 4px;
-  font-size: var(--k12-fs-caption);
-  line-height: var(--k12-lh-body);
-  color: var(--k12-fg-2);
 }
 
 /* ── 只读块（学段 / 章节 / 学段色调）──────────────────────────────────── */
@@ -2398,11 +2126,6 @@ onBeforeUnmount(() => {
 .tech .seed__btn:disabled {
   cursor: not-allowed;
   opacity: 0.6;
-}
-/* 探测结果里的时刻：它是时间戳不是标题，比主句轻一档 */
-.probe__at {
-  font-weight: 500;
-  color: var(--k12-muted);
 }
 
 /* ── 窄窗口：索引收成一行横向 tab，右栏单列满宽 ───────────────────────── */

@@ -22,6 +22,12 @@
  *      让他先选一个「年级」是替系统做决定；真正的学段由之后的冷启动五问 q1 定。
  *      建号时落一个中性初始值（见 `DEFAULT_ACCOUNT_GRADE`），q1 答完就被真实值覆盖。
  *      ★ 已有账号卡片上的学段**照常显示**：那是已经定下来的事实，不是要再问一遍。
+ *   ⑤ **首次进入先接模型**（2026-10-01 用户裁决：「拦，但给逃生口」）：
+ *      没配模型时五问照常能答，但答完的概括会降级（LLM 那份标签永久丢失）。
+ *      所以填完昵称后先走一步「把模型接上」：**只有真连通过了才能点主行动**，
+ *      旁边留一个「稍后配置」的逃生口（演示机 / 断网 / 家长不在场时靠它放行）。
+ *      ⚠️ **已有账号再次打开时不重复要**：这一段只在「首次进入 + 还没接上」时出现。
+ *      ⚠️ 设置通道缺失时**不拦路**（故障开放，与账号能力同一条纪律）。
  *   判据全在 `stores/accounts.ts`（`gateOpen`）：能力没就绪时这屏**根本不出现**，
  *   应用照常进默认学生（故障开放，见那个文件的文件头）。
  */
@@ -36,11 +42,14 @@ import {
   useAccountsStore,
   type AccountSummary
 } from '../stores/accounts'
+import { useSettingsStore } from '../stores/settings'
 import { useStudentStore } from '../stores/student'
+import ModelSetup from '../components/ModelSetup.vue'
 import { DEFAULT_LOGO_URL } from '../brand-logo'
 
 const accounts = useAccountsStore()
 const student = useStudentStore()
+const settings = useSettingsStore()
 const cardRef = ref<HTMLElement | null>(null)
 
 /** 新建表单：名单为空时直接摊开，非空时点「新建一个账号」才展开。 */
@@ -53,6 +62,17 @@ const canSubmit = computed(() => draftName.value.trim().length > 0)
 const hasAccounts = computed(() => accounts.accounts.length > 0)
 const showForm = computed(() => !hasAccounts.value || creating.value)
 const currentId = computed(() => student.student?.studentId ?? '')
+
+/** 首次进入的第二步（接模型）是否正在显示。 */
+const step = ref<'form' | 'model'>('form')
+
+/**
+ * 「配好了，开始学习」能不能点：**必须真连通过**（用户裁决）。
+ *
+ * ★ 还要求 `!dirty`：探测是在某一组配置上通过的，之后再改一个字，那次结论就过期了 ——
+ *   放行等于拿旧结论给新配置背书。
+ */
+const probeReady = computed(() => settings.probe?.ok === true && !settings.dirty)
 
 function gradeLabelOf(level: GradeLevel | undefined): string {
   return level === undefined ? GRADE_UNKNOWN_LABEL : GRADE_LABELS[level]
@@ -68,6 +88,30 @@ async function pick(studentId: string): Promise<void> {
 
 async function submitCreate(): Promise<void> {
   if (!canSubmit.value) return
+  // ★ 首次进入且模型还没接上 → 先走配置这一步（用户裁决：拦，但给逃生口）。
+  //   ⚠️ 判据里有 `!hasAccounts`：这一步**只在「第一次建号」那条路上**出现 ——
+  //     已有账号的人再打开应用、或在名单上新建第二个账号，都不该被再问一遍。
+  //   ⚠️ 设置通道缺失（bridgeError）时**不拦路**：宁可少一个前置检查，也不要一个进不去的界面。
+  await settings.load()
+  if (
+    !hasAccounts.value &&
+    settings.bridgeError === null &&
+    (!settings.hasStoredKey || settings.probe?.ok === false)
+  ) {
+    step.value = 'model'
+    void settings.loadCatalog()
+    return
+  }
+  await finishCreate()
+}
+
+/**
+ * 真正建号并进入（主行动与逃生口共用）。
+ *
+ * ★ 建号走 store 的 `createAccount`：它与切号**同一条路**（整页重载），
+ *   这样主进程的运行时才会按新账号重新装配（见 `stores/accounts.ts` 的文件头）。
+ */
+async function finishCreate(): Promise<void> {
   await accounts.createAccount(draftName.value, DEFAULT_ACCOUNT_GRADE)
 }
 
@@ -161,7 +205,12 @@ useFocusReturn(cardRef, () => accounts.gateOpen, { trap: true })
         </button>
 
         <!-- 新建（也是「第一次用这台电脑」时的唯一入口） -->
-        <form v-if="showForm" class="gate__form" data-testid="account-gate-form" @submit.prevent="submitCreate()">
+        <form
+          v-if="showForm && step === 'form'"
+          class="gate__form"
+          data-testid="account-gate-form"
+          @submit.prevent="submitCreate()"
+        >
           <label class="gate__field">
             <span class="gate__label">昵称</span>
             <input
@@ -190,6 +239,39 @@ useFocusReturn(cardRef, () => accounts.gateOpen, { trap: true })
             取消
           </button>
         </form>
+
+        <!-- 首次进入的第二步：先把模型接上（拦，但给逃生口；见文件头 ⑤）。
+             表单本体是共享组件 —— 与设置页同一份实现，学生面只换文案与不展示原始回执。 -->
+        <section v-if="step === 'model'" class="gate__model" data-testid="account-gate-model">
+          <h2 class="gate__model-title">先给团团接上一个会讲课的模型</h2>
+          <p class="gate__model-note">
+            没有它，团团连你问的问题都答不了；接好之后，它才能讲、能出题，也能判题。
+          </p>
+          <ModelSetup save-label="保存并测试" :show-raw-detail="false" show-status />
+          <div class="gate__model-actions">
+            <button
+              type="button"
+              class="k12-cta gate__submit"
+              :disabled="!probeReady || accounts.busy"
+              data-testid="account-gate-model-start"
+              @click="finishCreate()"
+            >
+              配好了，开始学习
+            </button>
+            <button
+              type="button"
+              class="gate__new"
+              :disabled="accounts.busy"
+              data-testid="account-gate-model-skip"
+              @click="finishCreate()"
+            >
+              稍后配置
+            </button>
+          </div>
+          <p class="gate__model-note">
+            现在跳过也行：团团会照常问你几个问题，只是先不会讲解和出题；之后随时能在设置里补上。
+          </p>
+        </section>
 
         <!-- 读不到名单时的出口：门禁的目的是选人，不是「读不到就不让用」 -->
         <button
@@ -382,6 +464,28 @@ useFocusReturn(cardRef, () => accounts.gateOpen, { trap: true })
 /* 只补布局：颜色 / 圆角 / 五态全部由 .k12-cta 提供（不在这里抄第二份） */
 .gate__submit {
   width: 100%;
+}
+
+/* 首次进入的第二步（接模型）：与新建表单同一张卡里的另一态 */
+.gate__model {
+  display: flex;
+  flex-direction: column;
+  gap: var(--k12-sp-3);
+}
+.gate__model-title {
+  font-size: var(--k12-fs-body-lg);
+  font-weight: 700;
+  color: var(--k12-fg);
+}
+.gate__model-note {
+  font-size: var(--k12-fs-caption);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
+}
+.gate__model-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--k12-sp-2);
 }
 
 .gate__error {
