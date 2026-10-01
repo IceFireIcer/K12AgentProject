@@ -37,7 +37,6 @@ const chat = useChatStore()
 const ui = useUiStore()
 
 type GraphNode = GraphView['nodes'][number]
-type GraphEdge = GraphView['edges'][number]
 
 const VIEWS = [
   { label: '后继视图', value: 'successor' },
@@ -229,14 +228,20 @@ const focusedNode = computed(() => nodeByKp.value.get(focus.value) ?? null)
  *   这种数据库口吻的标题）：依赖图的用途之一本来就是「推荐下一条路」，
  *   而学生真正要问的是「我该先学什么」「学完这个然后呢」。
  * ★ 方向语义不翻转：`from` 永远是前置、`to` 永远是后继（全项目一致）。
- * ★ 只列前几个 + 「还有 N 个」：浮层只有 264px 宽，把十几条全铺开会把画布淹掉；
- *   完整的清单在下面的边列表里（那里可以顺着边走）。
+ * ★★ 两张清单**同时显示**，不再按页面的「前置 / 后继」开关各露一半
+ *   （2026-10-01 用户裁决）：那个开关此后只决定**画布高亮**哪一侧；
+ *   卡片里两种关系都要看得见，否则学生切到哪边就少一半信息。
+ *   ⚠️ 早先这里是「只截前 3 个 + 还有 N 个」，而卡片底部另有一份按开关过滤的边列表
+ *   —— 同一份数据在一张卡里出现了两次（用户原话「信息密度太大」）。
+ *   现在两份截断版与底部那份**合并成两张完整列表**（在内层滚动），一条数据只出现一处。
+ * ★ 连同 `relation` 与两端 id 一起带上：行里的关系标注、教师视角的内部 slug 都要用。
  */
-const MAX_ADVICE = 3
-
 interface AdvisedNode {
   kpId: string
   name: string
+  relation: string
+  fromKpId: string
+  toKpId: string
 }
 
 function listOf(direction: 'from' | 'to'): AdvisedNode[] {
@@ -249,7 +254,13 @@ function listOf(direction: 'from' | 'to'): AdvisedNode[] {
     const own = direction === 'from' ? edge.toKpId : edge.fromKpId
     if (own !== kpId || seen.has(other)) continue
     seen.add(other)
-    list.push({ kpId: other, name: nameOf(other) })
+    list.push({
+      kpId: other,
+      name: nameOf(other),
+      relation: edge.relation,
+      fromKpId: edge.fromKpId,
+      toKpId: edge.toKpId
+    })
   }
   return list
 }
@@ -305,23 +316,13 @@ function goLearn(): void {
   void chat.send(planRequestDisplayText(name), buildPlanRequestMessage(kpId, name))
 }
 
-/** 当前方向的说明：浮层顶部那行 meta（下一行才是学生话的清单标题）。 */
-const directionLabel = computed(() =>
-  view.value === 'successor' ? '看它后面能学什么' : '看它前面要先会什么'
-)
-
-/** 边列表的小节标题：同一份数据的**学生话**版本（去掉「前置边 / 后继边」这种库表口吻）。 */
-const edgeSectionTitle = computed(() =>
-  view.value === 'successor' ? '学完它就能学' : '建议先学'
-)
-
 /**
- * 选中节点后沿一条边走到另一端：后继视图走向 `to`，前置视图走向 `from`。
- * 高亮方向保持不变 —— 学生是在"顺着链往下看"或"逆着链往回看"。
+ * ★ 2026-10-01 起，浮层里**不再有**「当前方向」那行说明，也**不再**按开关只显示一侧：
+ *   卡片两侧都列（见 `listOf` 的说明），开关只决定**画布高亮**哪一侧。
+ *   原来服务「卡片里只有一半数据」的那三块（`directionLabel` / `edgeSectionTitle` /
+ *   沿边走的 `walkTo`）一并删除 —— 留着就是界面在撒谎，或纯粹的死代码。
+ *   ⚠️ 行本身仍然可点：点一下直接跳到那一端，与原来「沿这条边走过去」**同一个落点**。
  */
-function walkTo(edge: GraphEdge) {
-  focus.value = view.value === 'successor' ? edge.toKpId : edge.fromKpId
-}
 
 /* ---------------------------------------------------------------- 取数 */
 
@@ -868,10 +869,12 @@ async function exportCsv(): Promise<void> {
             padding="sm"
             data-testid="dependency-inspector"
           >
+            <!-- 头部只留「我刚才点了谁」：原来右侧那行「看它后面能学什么」描述的是
+                 **开关方向**，而卡片现在两侧都显示（见 script 里 listOf 的说明）——
+                 留着就是界面撒谎（2026-10-01 用户裁决：直接删，不换成另一句）。 -->
             <header class="insp__head">
               <Layers :size="14" />
               <span class="insp__title">当前知识点</span>
-              <span class="insp__meta">{{ directionLabel }}</span>
             </header>
 
             <!-- 选中节点名 14px：**低于**身份行 22px，也与画布节点同档 ——
@@ -882,7 +885,72 @@ async function exportCsv(): Promise<void> {
             >
               {{ nameOf(focusedNode.kpId) }}
             </p>
-            <p class="insp__hint">点任意节点即可切换高亮的中心</p>
+            <!-- ── 学习建议：两张并列清单（建议先学 / 学完它就能学）─────────────
+                 ★★ 数据只有一份（依赖图的边），按方向拆成两张：学生真正要问的就是这两句。
+                    两张**同时显示** —— 页面顶部的「前置 / 后继」开关自此只决定**画布高亮**
+                    哪一侧（2026-10-01 用户裁决；理由见 script 里 listOf 的说明）。
+                 ★ 行样式沿用原来卡片底部那份清单（整行可点、逐行带「前置边 / 相关边」标注），
+                    不再用 chips —— chips 与底部清单曾是同一份数据的两份呈现。
+                 ★ 上移到指标区（掌握度）之前：它比「我掌握得怎样」更该先被读到。
+                 ★ 这一块是浮层里**唯一可滚**的一段：边数随图谱增长，
+                    让它内部滚动，上面的「当前节点」与下面的指标始终留在原位。 -->
+            <div class="insp__advice" data-testid="dependency-advice">
+              <section class="advice__group">
+                <header class="insp__head insp__head--sub">
+                  <GitBranch :size="14" />
+                  <span class="insp__title">建议先学</span>
+                  <span class="insp__meta">{{ prerequisites.length }} 条</span>
+                </header>
+                <div class="advice__list">
+                  <button
+                    v-for="item in prerequisites"
+                    :key="item.kpId"
+                    type="button"
+                    class="edge k12-tap"
+                    :title="`${nameOf(item.fromKpId)} → ${nameOf(item.toKpId)}`"
+                    @click="focus = item.kpId"
+                  >
+                    <span class="edge__name">{{ item.name }}</span>
+                    <span class="edge__rel">{{ item.relation === 'prerequisite' ? '前置边' : '相关边' }}</span>
+                    <!-- 内部 slug（教师 / 答辩视角）：这条边到底是哪两个知识点，
+                         用可核对的 id 写出来 —— 报告与排障要按它对齐数据。 -->
+                    <TeacherGate>
+                      <span class="edge__ids" :data-from="item.fromKpId" :data-to="item.toKpId">
+                        {{ item.fromKpId }} → {{ item.toKpId }}
+                      </span>
+                    </TeacherGate>
+                  </button>
+                  <p v-if="prerequisites.length === 0" class="insp__none">没有前置，可以从它开始。</p>
+                </div>
+              </section>
+
+              <section class="advice__group">
+                <header class="insp__head insp__head--sub">
+                  <GitBranch :size="14" />
+                  <span class="insp__title">学完它就能学</span>
+                  <span class="insp__meta">{{ consequences.length }} 条</span>
+                </header>
+                <div class="advice__list">
+                  <button
+                    v-for="item in consequences"
+                    :key="item.kpId"
+                    type="button"
+                    class="edge k12-tap"
+                    :title="`${nameOf(item.fromKpId)} → ${nameOf(item.toKpId)}`"
+                    @click="focus = item.kpId"
+                  >
+                    <span class="edge__name">{{ item.name }}</span>
+                    <span class="edge__rel">{{ item.relation === 'prerequisite' ? '前置边' : '相关边' }}</span>
+                    <TeacherGate>
+                      <span class="edge__ids" :data-from="item.fromKpId" :data-to="item.toKpId">
+                        {{ item.fromKpId }} → {{ item.toKpId }}
+                      </span>
+                    </TeacherGate>
+                  </button>
+                  <p v-if="consequences.length === 0" class="insp__none">这条链到这里就结束了。</p>
+                </div>
+              </section>
+            </div>
 
             <!-- ── 掌握度：进度条而不是一个裸数字 ──────────────────────────
                  学生读得懂「走到哪了」，读不懂一个孤零零的「62%」。
@@ -905,49 +973,6 @@ async function exportCsv(): Promise<void> {
               <p v-else class="insp__none">还没有练习记录，做几道题就知道你到哪一步了。</p>
             </div>
 
-            <!-- ── 学习建议：把依赖数据翻成学生话 ──────────────────────────
-                 「建议先学：X」= 指向它的那些边（前置）；「学完它就能学：Y」= 从它出发的边。
-                 这两句是浮层里最该被读的东西（学生真正的疑问就是这两句），
-                 所以放在掌握度之后、边清单之前，且各自可点（点了跳到那个知识点）。 -->
-            <section class="insp__advice" data-testid="dependency-advice">
-              <div class="advice__row">
-                <span class="insp__label">建议先学</span>
-                <template v-if="prerequisites.length > 0">
-                  <button
-                    v-for="item in prerequisites.slice(0, MAX_ADVICE)"
-                    :key="item.kpId"
-                    type="button"
-                    class="chip k12-tap"
-                    @click="focus = item.kpId"
-                  >
-                    {{ item.name }}
-                  </button>
-                  <span v-if="prerequisites.length > MAX_ADVICE" class="insp__none">
-                    还有 {{ prerequisites.length - MAX_ADVICE }} 个
-                  </span>
-                </template>
-                <span v-else class="insp__none">没有前置，这是可以最先开始学的知识点。</span>
-              </div>
-              <div class="advice__row">
-                <span class="insp__label">学完它就能学</span>
-                <template v-if="consequences.length > 0">
-                  <button
-                    v-for="item in consequences.slice(0, MAX_ADVICE)"
-                    :key="item.kpId"
-                    type="button"
-                    class="chip k12-tap"
-                    @click="focus = item.kpId"
-                  >
-                    {{ item.name }}
-                  </button>
-                  <span v-if="consequences.length > MAX_ADVICE" class="insp__none">
-                    还有 {{ consequences.length - MAX_ADVICE }} 个
-                  </span>
-                </template>
-                <span v-else class="insp__none">这条链到这里就结束了。</span>
-              </div>
-            </section>
-
             <!-- 主行动：去对话里学它（对任何节点都可用；与学习档案的「学习地图」
                  `MapTab.vue` 的 goLearn 同一条路，理由见 `<script>` 里的注释）。 -->
             <button
@@ -959,8 +984,12 @@ async function exportCsv(): Promise<void> {
               开始学习这个知识点 →
             </button>
 
-            <dl class="insp__kv">
-              <div class="insp__row">
+            <!-- 状态 / 章节 / 学段：三个「一眼扫过」的事实，收紧成**内联定义式**。
+                 原来是三行、左侧 52px 标签列的 dl（实测固定占 80px），读起来像三条表格行；
+                 现在按 flex-wrap 折行：事实一个不少，短章节名一行装得下（~23px），
+                 本章这种长标题折成三行也只占 68px（实测）。 -->
+            <dl class="insp__facts">
+              <div>
                 <dt>状态</dt>
                 <dd>
                   <span class="insp__tag" :data-mastered="focusedNode.mastered ? 'true' : 'false'">
@@ -968,11 +997,11 @@ async function exportCsv(): Promise<void> {
                   </span>
                 </dd>
               </div>
-              <div class="insp__row">
+              <div>
                 <dt>章节</dt>
                 <dd>{{ focusedNode.chapterTitle || '—' }}</dd>
               </div>
-              <div class="insp__row">
+              <div>
                 <dt>学段</dt>
                 <dd>{{ GRADE_LABELS[focusedNode.gradeLevel] ?? focusedNode.gradeLevel }}</dd>
               </div>
@@ -1000,48 +1029,6 @@ async function exportCsv(): Promise<void> {
               </dl>
             </TeacherGate>
 
-            <!-- 依赖边清单：从这里可以直接沿一条边走到它的另一端。
-                 ⚠️ 结构上分成「小节头（不动） + 清单（可滚）」：
-                    边数随图谱增长，而上面的"当前节点"信息必须始终可见 ——
-                    让整个浮层滚动的话，用户滚两下就看不见自己点的是谁了。 -->
-            <div class="insp__sep" />
-            <div class="insp__edges">
-              <header class="insp__head insp__head--sub">
-                <GitBranch :size="14" />
-                <span class="insp__title">{{ edgeSectionTitle }}</span>
-                <span class="insp__meta">{{ focusedEdges.length }} 条</span>
-              </header>
-              <div class="edges">
-                <!-- 显示中文名而不是 kp_id：id 对使用者没有意义。整行可点，沿边走到另一端。
-                     ★★ P3-5：`title` 是**可访问名**（读屏与悬停都会念出来），此前它是裸的
-                       `${fromKpId} → ${toKpId}` 两个内部 slug（`ai-definition-jr → ai-hierarchy-jr`）
-                       —— 学生的鼠标停在边上就会看到一手机器码。现在学生侧给中文名（就是按钮上
-                       那两个），内部 id 一字不删地挪进下面的 `<TeacherGate>`（排障仍要看它）。 -->
-                <button
-                  v-for="edge in focusedEdges"
-                  :key="`${edge.fromKpId}>${edge.toKpId}`"
-                  type="button"
-                  class="edge k12-tap"
-                  :title="`${nameOf(edge.fromKpId)} → ${nameOf(edge.toKpId)}`"
-                  @click="walkTo(edge)"
-                >
-                  <span class="edge__name">{{ nameOf(edge.fromKpId) }}</span>
-                  <span class="edge__arrow">→</span>
-                  <span class="edge__name">{{ nameOf(edge.toKpId) }}</span>
-                  <span class="edge__rel">{{ edge.relation === 'prerequisite' ? '前置边' : '相关边' }}</span>
-                  <!-- 内部 id（教师 / 答辩视角）：这条边到底是哪两个知识点，
-                       用可核对的 slug 写出来 —— 报告与排障要按它对齐数据。 -->
-                  <TeacherGate>
-                    <span class="edge__ids" :data-from="edge.fromKpId" :data-to="edge.toKpId">
-                      {{ edge.fromKpId }} → {{ edge.toKpId }}
-                    </span>
-                  </TeacherGate>
-                </button>
-                <p v-if="focusedEdges.length === 0" class="edges__none">
-                  这个方向上没有依赖边。
-                </p>
-              </div>
-            </div>
           </SurfacePanel>
         </div>
       </template>
@@ -1399,18 +1386,10 @@ async function exportCsv(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 7px;
-  /* ⚠️ 浮层本身**不滚**，只让底部的边清单滚（见 .insp__edges / .edges）。
+  /* ⚠️ 浮层本身**不滚**，只让中间那块建议清单滚（见 .insp__advice）。
    * 整层滚动会让"当前节点"跟着滚走 —— 用户点了一个节点、滚两下之后
    * 就看不见自己点的是谁了，面板失去意义。 */
   overflow: hidden;
-}
-/* 边清单区：小节头固定、清单可滚。`min-height: 0` 是 flex 子项能收缩的前提 ——
- * 少了它，这个块会按内容高度撑开，内层永远滚不起来（浮层会先被撑破）。 */
-.insp__edges {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  min-height: 0;
 }
 .insp__head {
   display: flex;
@@ -1453,11 +1432,6 @@ async function exportCsv(): Promise<void> {
   /* 长 kp_id 不换行会把浮层顶宽 */
   word-break: break-all;
 }
-.insp__hint {
-  margin-top: -2px;
-  font-size: var(--k12-fs-caption);
-  color: var(--k12-muted);
-}
 .insp__kv {
   margin: 2px 0 0;
   display: flex;
@@ -1493,7 +1467,11 @@ async function exportCsv(): Promise<void> {
   line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
-/* ── 学习建议（建议先学 / 学完它就能学）────────────────────────────────── */
+/* ── 学习建议（建议先学 / 学完它就能学）：两张并列清单 ────────────────────
+ * ★ 这一块是浮层里**唯一可滚**的一段（边数随图谱增长，而上面的"当前节点"
+ *   必须始终可见）。`min-height: 0` 是 flex 子项能收缩的前提 ——
+ *   少了它这个块会按内容高度撑开，浮层先被撑破、内层永远滚不起来；
+ *   `flex: 1 1 auto` 让超限时**优先压缩它**，其余各行保持自然高度。 */
 .insp__advice {
   display: flex;
   flex-direction: column;
@@ -1501,31 +1479,53 @@ async function exportCsv(): Promise<void> {
   padding: 8px 9px;
   border-radius: var(--k12-r-inset);
   background: var(--k12-surface-2);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
-.advice__row {
+.advice__group {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 4px;
 }
-/* 可点的知识点 chip（点了跳到那个知识点）：与学习地图的 `.chip` 同一配方 */
-.chip {
-  padding: 2px 10px;
-  border: 1px solid var(--k12-accent-border);
-  border-radius: var(--k12-r-pill);
-  background: var(--k12-accent-soft);
-  color: var(--k12-accent-ink);
-  font-size: var(--k12-fs-caption);
-  cursor: pointer;
-}
-@media (hover: hover) and (pointer: fine) {
-  .chip:hover {
-    border-color: var(--k12-accent-ink);
-  }
+.advice__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 /* 主行动：**铺满浮层宽度**（它是这一块里唯一「现在该按的」东西） */
 .insp__cta {
   width: 100%;
+}
+/* 状态 / 章节 / 学段：**一行内联定义式**（原来是三行、左侧 52px 标签列的 dl，竖着占 80px）。
+ * 事实一个不少，换行交给 flex-wrap；标签弱化、值加粗，读起来仍是「标签 值」的定义式。 */
+.insp__facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin: 0;
+  /* 折行时每一行都更紧：走 ui 档行高（1.6）而不是正文的 1.75 ——
+   * 这三条是「扫一眼」的事实，不需要正文的呼吸。 */
+  line-height: var(--k12-lh-ui);
+}
+.insp__facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.insp__facts dt {
+  font-size: var(--k12-fs-caption);
+  color: var(--k12-muted);
+}
+.insp__facts dd {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--k12-fs-caption);
+  font-weight: 600;
+  color: var(--k12-fg-2);
 }
 .insp__row {
   display: flex;
@@ -1565,29 +1565,7 @@ async function exportCsv(): Promise<void> {
   color: var(--k12-muted);
   font-weight: 400;
 }
-/* 浮层内部的分隔：检查器（上下文回执）与边清单（可操作列表）是两件事 */
-.insp__sep {
-  height: 1px;
-  margin: 3px 0 1px;
-  background: var(--k12-border);
-}
-
-/* 边清单：**唯一可滚**的一段。
- * 它是"随图谱增长"的那部分，让它在浮层内部滚动，
- * 而不是把整个浮层（连同"当前节点"）一起滚走。 */
-.edges {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  min-height: 0;
-  overflow-y: auto;
-  /* 滚动时留一点右侧余量，免得滚动条压住边名 */
-  padding-right: 2px;
-}
-.edges__none {
-  font-size: var(--k12-fs-caption);
-  color: var(--k12-muted-2);
-}
+/* 清单行：整行可点，点了跳到那一端（与原来「沿这条边走过去」同一个落点）。 */
 .edge {
   display: flex;
   align-items: center;
@@ -1611,10 +1589,6 @@ async function exportCsv(): Promise<void> {
   font-size: var(--k12-fs-caption);
   font-weight: 600;
   color: var(--k12-fg-2);
-}
-.edge__arrow {
-  color: var(--k12-accent-ink);
-  font-weight: 700;
 }
 .edge__rel {
   margin-left: auto;
