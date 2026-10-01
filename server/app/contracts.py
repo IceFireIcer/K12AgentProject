@@ -1837,6 +1837,25 @@ class OnboardingAnswerOut(CamelModel):
     state: OnboardingStateOut
 
 
+class OnboardingAnswerItem(CamelModel):
+    """一条五问问答（GET answers 的元素）。
+
+    ★ 正文与 ``onboarding_qa`` **同源**：脱敏在写入侧（主进程）已经做过，这里只回读，
+      不收窄、不改写；问句原文**不回传**（主进程有唯一脚本，配对在那边做，
+      少一处会漂的副本）。
+    """
+
+    question_id: OnboardingQuestionId
+    #: 学生原话（写入时已由主进程 sanitizeStudentText 处理过）。
+    answer_text: str
+
+
+class OnboardingAnswersOut(CamelModel):
+    """GET /api/onboarding/{student_id}/answers 的出参（冷启动概括补跑用）。"""
+
+    answers: list[OnboardingAnswerItem] = Field(default_factory=list)
+
+
 class ProfileTagUpdateRequest(CamelModel):
     """PUT /api/profile/{student_id}/tags/{key} 的请求体。"""
 
@@ -2117,7 +2136,10 @@ ONBOARDING_QUESTION_TEXTS: dict[str, str] = {
     "q2": "最近在学什么呀？有没有特别想搞懂的？",
     "q3": "我讲的时候，你更喜欢哪种方式？",
     "q4": "想讲快一点还是慢一点？",
-    "q5": "那我该怎么称呼你？还有什么想先告诉我的？",
+    # ★ 2026-10-01 换题：q5 从「称呼」换成兴趣/动机（称呼改由账号门在建号时写）。
+    #   这里只是 onboarding_qa.question_text 的审计副本，必须与 TS 的 ONBOARDING_QUESTIONS 同源，
+    #   否则事后核对时会看到一句学生从没见过的问题。
+    "q5": "除了学习，你平时还喜欢琢磨什么？",
 }
 
 
@@ -2149,6 +2171,9 @@ CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     OnboardingAnswerRequest,
     OnboardingStateOut,
     OnboardingAnswerOut,
+    # 补概括的只读出口（W8 / task-47）：只回五问正文；问句原文不回传（本地配对）。
+    OnboardingAnswerItem,
+    OnboardingAnswersOut,
     ProfileTagUpdateRequest,
     ProfileTagOut,
     ProfileTagsOut,

@@ -2934,6 +2934,33 @@
         "title": "MistakeListResponse",
         "type": "object"
       },
+      "OnboardingAnswerItem": {
+        "additionalProperties": false,
+        "description": "一条五问问答（GET answers 的元素）。\n\n★ 正文与 ``onboarding_qa`` **同源**：脱敏在写入侧（主进程）已经做过，这里只回读，\n  不收窄、不改写；问句原文**不回传**（主进程有唯一脚本，配对在那边做，\n  少一处会漂的副本）。",
+        "properties": {
+          "answerText": {
+            "title": "Answertext",
+            "type": "string"
+          },
+          "questionId": {
+            "enum": [
+              "q1",
+              "q2",
+              "q3",
+              "q4",
+              "q5"
+            ],
+            "title": "Questionid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "questionId",
+          "answerText"
+        ],
+        "title": "OnboardingAnswerItem",
+        "type": "object"
+      },
       "OnboardingAnswerOut": {
         "additionalProperties": false,
         "description": "POST answer 的回执：accepted + 最新状态（主进程据此推 onboarding:changed）。",
@@ -2991,6 +3018,21 @@
           "answerText"
         ],
         "title": "OnboardingAnswerRequest",
+        "type": "object"
+      },
+      "OnboardingAnswersOut": {
+        "additionalProperties": false,
+        "description": "GET /api/onboarding/{student_id}/answers 的出参（冷启动概括补跑用）。",
+        "properties": {
+          "answers": {
+            "items": {
+              "$ref": "#/components/schemas/OnboardingAnswerItem"
+            },
+            "title": "Answers",
+            "type": "array"
+          }
+        },
+        "title": "OnboardingAnswersOut",
         "type": "object"
       },
       "OnboardingQuestionId": {
@@ -5662,6 +5704,49 @@
           }
         },
         "summary": "提交一问的回答（重答覆盖）",
+        "tags": [
+          "onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/{student_id}/answers": {
+      "get": {
+        "description": "把该学生的五问问答正文读回来（**只读**：不建行、不写库、不留痕）。\n\n★ 为什么需要它：没配 Key 时五问照常答完，但那五条回答是冷启动最值钱的素材，\n  概括降级一次后就再没机会补（持续画像只从后续对话学，不会回头读它们）。\n  主进程补跑时若内存里没有（跨重启），就来这里回读。\n★ 只回该学生自己的行（一人一库）、只回五问（认不出的 question_id 整条丢掉）；\n  问句原文不回传 —— 主进程有唯一一份脚本，配对在那边做。",
+        "operationId": "read_onboarding_answers_api_onboarding__student_id__answers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingAnswersOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "读回五问问答（跨重启补概括用；只读）",
         "tags": [
           "onboarding"
         ]

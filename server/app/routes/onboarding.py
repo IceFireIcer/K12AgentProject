@@ -27,8 +27,10 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.contracts import (
     ONBOARDING_QUESTION_TEXTS,
+    OnboardingAnswerItem,
     OnboardingAnswerOut,
     OnboardingAnswerRequest,
+    OnboardingAnswersOut,
     OnboardingStateOut,
     safe_display_name,
 )
@@ -109,6 +111,42 @@ def read_onboarding_state(request: Request, student_id: str) -> OnboardingStateO
         logger.exception("读取引导状态失败：%s", student_id)
         raise HTTPException(
             status_code=503, detail=f"读取引导状态失败（本地数据库异常）：{exc}"
+        ) from exc
+    finally:
+        store.close()
+
+
+@router.get(
+    "/onboarding/{student_id}/answers",
+    response_model=OnboardingAnswersOut,
+    summary="读回五问问答（跨重启补概括用；只读）",
+)
+def read_onboarding_answers(request: Request, student_id: str) -> OnboardingAnswersOut:
+    """把该学生的五问问答正文读回来（**只读**：不建行、不写库、不留痕）。
+
+    ★ 为什么需要它：没配 Key 时五问照常答完，但那五条回答是冷启动最值钱的素材，
+      概括降级一次后就再没机会补（持续画像只从后续对话学，不会回头读它们）。
+      主进程补跑时若内存里没有（跨重启），就来这里回读。
+    ★ 只回该学生自己的行（一人一库）、只回五问（认不出的 question_id 整条丢掉）；
+      问句原文不回传 —— 主进程有唯一一份脚本，配对在那边做。
+    """
+    validate_student_id(student_id)
+    data_dir = require_data_dir(request)
+    store = open_learning_store(data_dir, student_id)
+    try:
+        answers = [
+            OnboardingAnswerItem(
+                question_id=record.question_id,  # type: ignore[arg-type]
+                answer_text=record.answer_text,
+            )
+            for record in store.onboarding_answers()
+            if record.question_id in _QUESTION_IDS
+        ]
+        return OnboardingAnswersOut(answers=answers)
+    except sqlite3.Error as exc:
+        logger.exception("读取五问问答失败：%s", student_id)
+        raise HTTPException(
+            status_code=503, detail=f"读取入门问答失败（本地数据库异常）：{exc}"
         ) from exc
     finally:
         store.close()

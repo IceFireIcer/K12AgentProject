@@ -151,7 +151,7 @@ import {
   sendTraceTo,
   updateStudentGradeForAccount
 } from './handlers-data.ts'
-import { createLlmSummarizer } from '../agent/onboarding/index.ts'
+import { createLlmSummarizer, onboardingService } from '../agent/onboarding/index.ts'
 import { ChatStreamRegistry, type StreamTarget, type TurnHandle } from './chat-stream.ts'
 
 const chatStreams = new ChatStreamRegistry()
@@ -417,6 +417,55 @@ export function saveCurrentAccountId(studentId: string): void {
   const target = accountsStatePath(app.getPath('userData'))
   const temp = `${target}.tmp`
   writeFileSync(temp, JSON.stringify({ currentStudentId: id }), 'utf8')
+  renameSync(temp, target)
+}
+
+/** 概括状态标记文件名（与 accounts.json 同目录、不同文件）。 */
+export const ONBOARDING_SUMMARY_FILE_NAME = 'onboarding-summary.json'
+
+/**
+ * ★★ 冷启动概括的**跨重启幂等标记**（唯一用途：别再打一次模型）。
+ *
+ * 文件形状：{"summaries":{"<studentId>":"ok"|"degraded"}} —— **只存状态词**。
+ *
+ * ⚠️⚠️ 这个文件里**绝不允许出现任何学生文本**（回答正文只在服务端 onboarding_qa 那一处）：
+ *    隐私纪律是「学生原话只有一处」，本地再存一份派生副本等于给同一段话造第二个真相，
+ *    还会随备份 / 导出一起漂出去。写「状态词」不属于此列 —— 它不含任何学生内容。
+ *    W9 的守卫测试会扫这个文件，钉住这条边界。
+ */
+function summaryMarkerPath(): string {
+  return join(app.getPath('userData'), ONBOARDING_SUMMARY_FILE_NAME)
+}
+
+/** 读标记（读不到 / 坏了 / 值不认识 → 空表：宁可多跑一次，也不误判成「已概括」）。 */
+function readSummaryMarkers(): Record<string, 'ok' | 'degraded'> {
+  try {
+    const parsed = JSON.parse(readFileSync(summaryMarkerPath(), 'utf8')) as { summaries?: unknown }
+    const table = parsed?.summaries
+    if (typeof table !== 'object' || table === null) return {}
+    const out: Record<string, 'ok' | 'degraded'> = {}
+    for (const [key, value] of Object.entries(table as Record<string, unknown>)) {
+      if (value === 'ok' || value === 'degraded') out[key] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** 这个学生的概括是不是已经成功过（只有 ok 才算；degraded 允许下次再试）。 */
+function summaryDoneFor(studentId: string): boolean {
+  return readSummaryMarkers()[studentId] === 'ok'
+}
+
+/** 落一个**状态词**（原子写：先 .tmp 再 rename；半截 JSON 只会让下次多跑一次）。 */
+function markSummaryDoneFor(studentId: string, ok: boolean): void {
+  const id = assertStudentId(studentId)
+  const markers = readSummaryMarkers()
+  markers[id] = ok ? 'ok' : 'degraded'
+  const target = summaryMarkerPath()
+  const temp = target + '.tmp'
+  writeFileSync(temp, JSON.stringify({ summaries: markers }), 'utf8')
   renameSync(temp, target)
 }
 
@@ -849,6 +898,9 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
         //      ② 切换失败 → 销毁会话，下一条消息按新配置**重建**（仍然生效，只是换新会话）；
         //      ③ 连销毁都失败 → 下次冷启动一定读到新配置（`ensureChatRuntime` 先读）。
         await applySavedLlmConfig()
+        // ★ Key 刚就绪：把「当时没 Key 时答完的五问」补概括一次。
+        //   **非阻塞**（打模型上限 8s，挡在这里就是把设置页卡住）；幂等判据在 service 里。
+        kickOnboardingSummaryRetry('设置保存')
         return { ok: true, data }
       } catch (error) {
         return { ok: false, message: `保存设置失败：${describeError(error)}` }
@@ -1202,6 +1254,19 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
       return instance.readProfileSummary()
     }
   })
+
+  // ★★ 补概括的两个接缝（2026-10-01 用户裁决）：
+  //   ① 回答正文走**服务端只读出口**（本地绝不复制一份学生原话）；
+  //   ② 幂等标记只存**状态词**（ok / degraded），落 <userData>/onboarding-summary.json。
+  onboardingService.configure({
+    loadAnswers: loadOnboardingAnswers,
+    summaryDone: summaryDoneFor,
+    markSummaryDone: markSummaryDoneFor
+  })
+
+  // ★ 存量用户补跑：启动后延迟一次（覆盖「当时没 Key、已经答完五问」的那批）。
+  //   非阻塞；已经概括过的不会再打模型（幂等判据在 service.retrySummary 里）。
+  scheduleStartupSummaryRetry()
 }
 
 /**
@@ -1219,6 +1284,83 @@ function currentGradeLevelForReads(): string | null {
   } catch {
     return null
   }
+}
+
+/**
+ * ★★ 摘要补跑的**触发**（非阻塞）——「拦，但给逃生口」的逃生口那一半。
+ *
+ * 为什么只在这两处问一次：Key 刚就绪（设置保存成功）与存量用户冷启动 ——
+ * 正是「当时没 Key、现在有了」的两种发生方式。**绝不 await**：它要打一次模型
+ * （上限 8s），挡在这里就是把设置页 / 启动流程卡住。
+ * 幂等判据全在 service.retrySummary()（本进程 ok / 跨重启标记），这里只负责「什么时候问」。
+ */
+function kickOnboardingSummaryRetry(trigger: string): void {
+  void (async () => {
+    try {
+      const outcome = await onboardingService.retrySummary()
+      const head = '[onboarding] 概括补跑（' + trigger + '）：'
+      if (outcome.ran) {
+        console.info(head + '已跑，新增 ' + String(outcome.added) + ' 条标签（' + outcome.reason + '）')
+      } else {
+        console.info(head + '未跑 —— ' + outcome.reason)
+      }
+    } catch (error) {
+      // 补跑是加分动作：异常只记日志，绝不影响设置保存 / 启动
+      console.warn('[onboarding] 概括补跑（' + trigger + '）异常：' + describeError(error))
+    }
+  })()
+}
+
+/** 回读五问问答的超时（本机回环，毫秒级；与设置域同量级）。 */
+const ONBOARDING_ANSWERS_TIMEOUT_MS = 8_000
+
+/**
+ * ★ 回读该学生的五问问答（跨重启补概括的**唯一**输入口）。
+ *
+ * 端点：GET /api/onboarding/{id}/answers（只读、按学生、正文与 onboarding_qa 同源）。
+ * 失败 / 形状不对 → null：调用方跳过并保持 degraded（**绝不拿空素材去打模型**）。
+ * ⚠️ 身份是**参数传进来的那位**（service 里绑定过的学生），不是「当前账号」。
+ */
+async function loadOnboardingAnswers(
+  studentId: string
+): Promise<Array<{ questionId: string; text: string }> | null> {
+  try {
+    const response = await apiFetch('/api/onboarding/' + encodeURIComponent(studentId) + '/answers', {
+      method: 'GET',
+      signal: AbortSignal.timeout(ONBOARDING_ANSWERS_TIMEOUT_MS)
+    })
+    if (!response.ok) return null
+    const data = (await response.json()) as { answers?: unknown }
+    if (!Array.isArray(data?.answers)) return null
+    const out: Array<{ questionId: string; text: string }> = []
+    for (const item of data.answers) {
+      if (typeof item !== 'object' || item === null) continue
+      const row = item as { questionId?: unknown; answerText?: unknown }
+      const questionId = typeof row.questionId === 'string' ? row.questionId.trim() : ''
+      const text = typeof row.answerText === 'string' ? row.answerText : ''
+      if (questionId === '' || text === '') continue
+      out.push({ questionId, text })
+    }
+    return out
+  } catch (error) {
+    console.warn('[onboarding] 回读五问问答失败（这次补跑跳过）：' + describeError(error))
+    return null
+  }
+}
+
+/** 启动补跑的延迟（ms）：等 sidecar 与设置缓存就绪，又不至于拖太久。 */
+const STARTUP_SUMMARY_RETRY_DELAY_MS = 15_000
+let startupSummaryRetryScheduled = false
+
+/** 启动后**延迟一次**补跑（只排一次；计时器 unref，不拖住退出）。 */
+function scheduleStartupSummaryRetry(): void {
+  if (startupSummaryRetryScheduled) return
+  startupSummaryRetryScheduled = true
+  const timer = setTimeout(
+    () => kickOnboardingSummaryRetry('应用启动'),
+    STARTUP_SUMMARY_RETRY_DELAY_MS
+  )
+  ;(timer as unknown as { unref?: () => void }).unref?.()
 }
 
 /**

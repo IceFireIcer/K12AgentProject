@@ -56,7 +56,8 @@ import {
   selectProgress,
   shouldStartOnboarding,
   summaryQuestionText,
-  type OnboardingDeps
+  type OnboardingDeps,
+  type OnboardingTagWrite
 } from '../src/main/agent/onboarding/index.ts'
 // ★ 回落值从**共享常量**取（不经过 onboarding 的 barrel）—— 白名单/常量只有那一份。
 import {
@@ -895,4 +896,127 @@ test('标签撤销：不在白名单的 key 连请求都不发', async () => {
   const wire = makeWire()
   await assert.rejects(() => retractProfileTag('student_001', 'school', wire.transport))
   assert.equal(wire.calls.length, 0)
+})
+
+/* ------------------------------------------------------------------ *
+ * W8 冷启动概括补跑（task-47）
+ * ------------------------------------------------------------------ */
+
+test('W8 ★ 补跑：degraded 后补跑一次；成功即幂等，不再打模型', async () => {
+  const { service, wire } = await startedService({
+    summarize: async () => ({ ok: false, degraded: true, reason: 'no-key', tags: [] })
+  })
+  wire.reply('/api/profile/student_001/tags', {})
+  for (const [questionId, answerText] of FIVE_ANSWERS) {
+    await service.answer(questionId, answerText)
+  }
+  await service.dispose()
+  assert.equal(service.snapshot().summary, 'degraded', '没有可用模型时概括应当降级')
+
+  // Key 就绪：换成真概括（同一条缝，调用侧一行不改）
+  service.configure({
+    summarize: async () => ({
+      ok: true,
+      degraded: false,
+      reason: '',
+      tags: [{ key: 'subject', value: '数学', source: 'declared', confidence: 0.6 }]
+    })
+  })
+  const first = await service.retrySummary()
+  assert.equal(first.ran, true, 'degraded 时应当补跑')
+  assert.equal(service.snapshot().summary, 'ok', '补跑成功置 ok')
+  const second = await service.retrySummary()
+  assert.equal(second.ran, false, '已经 ok → 幂等，不再打模型')
+  assert.match(second.reason, /已经概括过/)
+})
+
+test('W8 ★ 补跑：拿不到五问问答时**跳过**（绝不拿空素材打模型）', async () => {
+  const wire = makeWire()
+  wire.reply(STATE_PATH, {
+    onboardingState: 'done',
+    answered: ['q1', 'q2', 'q3', 'q4', 'q5'],
+    displayName: ''
+  })
+  wire.reply(IDENTITY_PATH, { parentConsent: true, memorySwitch: true })
+  let called = 0
+  const service = createOnboardingService({
+    studentId: () => 'student_001',
+    transport: wire.transport,
+    summarize: async () => {
+      called += 1
+      return { ok: true, degraded: false, reason: '', tags: [] }
+    },
+    log: () => {}
+  })
+  await service.start()
+  const outcome = await service.retrySummary()
+  assert.equal(outcome.ran, false)
+  assert.match(outcome.reason, /拿不到/)
+  assert.equal(called, 0, '拿不到问答就不该调模型')
+})
+
+test('W8 ★ 写侧纵深：summarize 注入了白名单外的 key → 一条 PUT 都不发', async () => {
+  const wire = makeWire()
+  wire.reply(STATE_PATH, {
+    onboardingState: 'done',
+    answered: ['q1', 'q2', 'q3', 'q4', 'q5'],
+    displayName: ''
+  })
+  wire.reply(IDENTITY_PATH, { parentConsent: true, memorySwitch: true })
+  // 绕过解析层直接注入一条脏 key：写入口必须自己兜住（纵深防御，与读侧对称）
+  const dirtyTags = [
+    { key: 'not_whitelisted', value: 'x', source: 'declared', confidence: 0.9 }
+  ] as unknown as OnboardingTagWrite[]
+  const service = createOnboardingService({
+    studentId: () => 'student_001',
+    transport: wire.transport,
+    loadAnswers: async () => [{ questionId: 'q1', text: '高中' }],
+    summarize: async () => ({ ok: true, degraded: false, reason: '', tags: dirtyTags }),
+    log: () => {}
+  })
+  await service.start()
+  const outcome = await service.retrySummary()
+  assert.equal(outcome.ran, true, '概括本身算成功')
+  const writes = wire.calls.filter((call) => call.method === 'PUT')
+  assert.equal(writes.length, 0, '白名单外的 key 不该产生任何写入（writeTags 自己复查）')
+})
+
+test('W8 ★ 补跑：从服务端回读问答 + 跨重启标记（成功一次后永不再跑）', async () => {
+  let marked = false
+  const seen: string[] = []
+  const wire = makeWire()
+  wire.reply(STATE_PATH, {
+    onboardingState: 'done',
+    answered: ['q1', 'q2', 'q3', 'q4', 'q5'],
+    displayName: ''
+  })
+  wire.reply(IDENTITY_PATH, { parentConsent: true, memorySwitch: true })
+  const service = createOnboardingService({
+    studentId: () => 'student_001',
+    transport: wire.transport,
+    loadAnswers: async () => [
+      { questionId: 'q1', text: '高中' },
+      { questionId: 'q5', text: '喜欢拼乐高' },
+      // 认不出的 id 整条丢掉（靠位置不靠解析）
+      { questionId: 'q9', text: '脏数据' }
+    ],
+    summaryDone: () => marked,
+    markSummaryDone: () => {
+      marked = true
+    },
+    summarize: async (input) => {
+      seen.push(input.answers.map((item) => item.text).join(','))
+      return { ok: true, degraded: false, reason: '', tags: [] }
+    },
+    log: () => {}
+  })
+  await service.start()
+  const first = await service.retrySummary()
+  assert.equal(first.ran, true, '状态已 done + 有回读问答 → 应当补跑')
+  assert.equal(seen.length, 1)
+  assert.match(seen[0] ?? '', /高中/)
+  assert.equal(seen[0]?.includes('脏数据'), false, '认不出的 questionId 不许进载荷')
+  assert.equal(marked, true, '成功要落跨重启标记')
+  const second = await service.retrySummary()
+  assert.equal(second.ran, false, '跨重启标记为真 → 不再跑（别每次启动都打模型）')
 })

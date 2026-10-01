@@ -260,5 +260,43 @@ class TestOnboardingIsolation(OnboardingCase):
         self.assertEqual(self.query("SELECT COUNT(*) AS n FROM learning_history")[0]["n"], 0)
 
 
+class TestOnboardingAnswersReadBack(OnboardingCase):
+    """W8（task-47）：补概括用的**只读**出口 —— 只回五问正文，零副作用、按学生隔离。
+
+    为什么需要它：没配 Key 时五问照常答完，但那批回答是冷启动最值钱的素材；
+    主进程跨重启补跑时必须能**回读**它们，而答案不能复制到本地（隐私：学生原话只有一处）。
+    """
+
+    def answers(self, student_id: str | None = None) -> object:
+        return self.client.get(f"/api/onboarding/{student_id or self.student_id}/answers")
+
+    def test_returns_the_five_answers_in_order(self) -> None:
+        for question_id in QUESTION_IDS:
+            self.assertEqual(self.answer(question_id, f"回答-{question_id}").status_code, 200)
+        response = self.answers()
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual([item["questionId"] for item in body["answers"]], list(QUESTION_IDS))
+        self.assertEqual(body["answers"][0]["answerText"], "回答-q1")
+        # ★ 问句原文**不回传**：配对在主进程那侧做（少一处会漂的副本）。
+        self.assertNotIn("questionText", body["answers"][0])
+
+    def test_reading_is_side_effect_free_and_empty_before_answering(self) -> None:
+        response = self.answers()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["answers"], [])
+        # 一条回答都没给过 → 读一次不该留下任何行（读路径零副作用；与 state 那条同口径：
+        # 共用的 open_learning_store 会建库文件，但**不建行**）。
+        self.assertEqual(self.query("SELECT COUNT(*) AS n FROM onboarding_qa")[0]["n"], 0)
+
+    def test_answers_do_not_leak_across_students(self) -> None:
+        self.answer("q1", "A 的回答")
+        other = "student_onb_002"
+        self.assertEqual(self.answers(other).json()["answers"], [])
+        self.answer("q1", "B 的回答", student_id=other)
+        self.assertEqual(self.answers().json()["answers"][0]["answerText"], "A 的回答")
+        self.assertEqual(self.answers(other).json()["answers"][0]["answerText"], "B 的回答")
+
+
 if __name__ == "__main__":
     unittest.main()

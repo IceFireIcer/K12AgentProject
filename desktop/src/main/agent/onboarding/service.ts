@@ -136,6 +136,38 @@ export interface OnboardingDeps {
   /** sidecar 调用出口（默认 = bridge/client.ts；测试注入替身来断言请求体）。 */
   transport?: OnboardingTransport
   log?: (line: string, level?: 'info' | 'warn' | 'error') => void
+  /**
+   * ★ 存量学生的五问问答（跨重启补概括用）：从服务端读回 onboarding_qa 的那五条。
+   *   返回 null / 空数组 = 拿不到 → 本轮跳过（保持 degraded 等下次），**绝不拿空**
+   *   transcript 去打模型（那样只会把状态刷成 ok，把素材永久丢掉）。
+   *   注入点在 ipc/handlers.ts（只有那里有 sidecar 出口）。
+   */
+  loadAnswers?: (studentId: string) => Promise<readonly OnboardingAnswerLike[] | null>
+  /** ★ 跨重启的幂等标记：这个学生上次是否已经概括成功过（true = 永不再跑，别每次启动都打模型）。 */
+  summaryDone?: (studentId: string) => boolean
+  /**
+   * ★ 记下**这一次**的结果（跨重启幂等）。只允许两个**状态词**：ok / degraded ——
+   *   注入方（ipc/handlers.ts）把它写进本地标记文件，那份文件里**不许出现任何学生文本**。
+   *   写失败只记日志，不影响本次结果。
+   */
+  markSummaryDone?: (studentId: string, ok: boolean) => void
+}
+
+/** 一条回读的五问问答（问句原文仍由本地脚本配对，服务端不必回传）。 */
+export interface OnboardingAnswerLike {
+  questionId: string
+  /** 已脱敏的回答文本（入库的是主进程 sanitizeStudentText 之后的产物）。 */
+  text: string
+}
+
+/**
+ * 补跑概括的结果（给触发点写日志用；**绝不抛**）。
+ * ran=false 时 reason 说明「为什么没跑」（没答完 / 已经概括过 / 拿不到问答）。
+ */
+export interface OnboardingRetryOutcome {
+  ran: boolean
+  reason: string
+  added: number
 }
 
 export interface OnboardingService {
@@ -149,6 +181,11 @@ export interface OnboardingService {
   dispose(): Promise<void>
   /** 当前内存快照（同步，纯读）。 */
   snapshot(): OnboardingSnapshot
+  /**
+   * ★ 冷启动概括的**补跑一次**（没 Key 时答完五问 → Key 就绪后补上那批素材）。
+   * 幂等：成功过就永不再跑；失败保持 degraded 等下次触发。**绝不抛**。
+   */
+  retrySummary(): Promise<OnboardingRetryOutcome>
 }
 
 /* ------------------------------------------------------------------ *
@@ -549,6 +586,10 @@ export function createOnboardingService(initial: OnboardingDeps = {}): Onboardin
       return
     }
     for (const item of tags) {
+      // ★★ 写侧也复查白名单（纵深防御，与读侧对称）。白名单闸原来只在「真实 summarizer 的解析」
+      //    与 mergeTags 两处，而本函数是**唯一的写库入口**：将来谁给 summarize 注入了不过滤的
+      //    实现，脏 key 也进不了库。对白名单内的条目行为零变化。
+      if (!isLlmVisibleTag(item.key)) continue
       try {
         await callApi(profileTagPath(sid, item.key), {
           method: 'PUT',
@@ -652,6 +693,100 @@ export function createOnboardingService(initial: OnboardingDeps = {}): Onboardin
     log('[onboarding] 概括走降级：只保留点选/本地映射得到的字段，引导照常结束', 'warn')
   }
 
+  /**
+   * ★★ 冷启动概括的**补跑**（2026-10-01）：没配 Key 时五问照常答完，但那五条回答是最值钱的
+   * 冷启动素材 —— 降级一次后就再没机会补，而持续画像只从**后续对话**学，不会回头读它们。
+   *
+   * 幂等（两处判据，缺一不可）：
+   *   · 本进程 summaryStatus === 'ok' → 不再跑；
+   *   · 跨重启：注入的 summaryDone() 为真 → 不再跑（否则每次启动都会打一次模型）。
+   * 失败**保留 degraded**（下次触发再试）；成功置 ok 并落跨重启标记。
+   *
+   * 输入优先级：本进程内存里刚收下的五条（学生刚答完就去配 Key 的主场景）→ 否则从服务端
+   * **回读**存量问答（deps.loadAnswers）；两条都拿不到就跳过，绝不拿空 transcript 去打模型。
+   * 出网纪律不变：只有脱敏回答 + 本地配对的问句原文 + 本地候选标签，真名/身份不进载荷。
+   */
+  /** 落「这次概括成没成」的状态词（注入失败只记日志：幂等标记丢了顶多多跑一次）。 */
+  function markSummary(sid: string, ok: boolean): void {
+    try {
+      deps.markSummaryDone?.(sid, ok)
+    } catch (error) {
+      log('[onboarding] 概括状态标记没落盘（下次启动可能再跑一次）：' + describeError(error), 'warn')
+    }
+  }
+
+  async function retrySummary(): Promise<OnboardingRetryOutcome> {
+    // ★ 状态还没读过（界面还没挂载 / 没调 onboarding:state）就先不跑：
+    //   ensureStudent() 会因「还没绑定」而重置内存状态，那时 progress 是 idle，
+    //   照跑只会得到一句「五问还没答完」的误导日志。
+    if (boundStudentId === '') {
+      return { ran: false, reason: '引导状态还没读过（等界面挂载后再试）', added: 0 }
+    }
+    let sid = ''
+    try {
+      sid = ensureStudent()
+    } catch (error) {
+      return { ran: false, reason: describeError(error), added: 0 }
+    }
+    if (summaryStatus === 'ok' || deps.summaryDone?.(sid) === true) {
+      return { ran: false, reason: '已经概括过（幂等：不再打模型）', added: 0 }
+    }
+    if (summaryStatus === 'pending') return { ran: false, reason: '概括正在进行中', added: 0 }
+    if (progress.state !== 'done') return { ran: false, reason: '五问还没答完', added: 0 }
+
+    let inputAnswers: Array<{ questionId: OnboardingQuestionId; text: string }> = [
+      ...answers.entries()
+    ].map(([questionId, text]) => ({ questionId, text }))
+    let source = '本进程内存'
+    if (inputAnswers.length === 0) {
+      let loaded: readonly OnboardingAnswerLike[] | null = null
+      try {
+        loaded = (await deps.loadAnswers?.(sid)) ?? null
+      } catch (error) {
+        return { ran: false, reason: '回读五问问答失败：' + describeError(error), added: 0 }
+      }
+      // ★ 回读的 questionId 是 string：必须过本地那份唯一的位置词表（认不出的整条丢掉），
+      //   否则脏 id 会一路进概括载荷（与「靠位置不靠解析」同一条纪律）。
+      const narrowed = (loaded ?? [])
+        .map((item) => ({ questionId: readQuestionId(item.questionId), text: item.text }))
+        .filter(
+          (item): item is { questionId: OnboardingQuestionId; text: string } => item.questionId !== null
+        )
+      if (narrowed.length === 0) {
+        return { ran: false, reason: '拿不到五问的问答内容（跳过，保持 degraded 等下次）', added: 0 }
+      }
+      inputAnswers = narrowed
+      source = '服务端回读'
+    }
+
+    summaryStatus = 'pending'
+    const outcome = await summarizeWithTimeout({
+      answers: inputAnswers,
+      tags: [...localTags],
+      displayName
+    })
+    if (!outcome.ok) {
+      summaryStatus = 'degraded'
+      lastError = outcome.reason
+      markSummary(sid, false)
+      log('[onboarding] 概括补跑失败（保持 degraded，下次触发再试）：' + outcome.reason, 'warn')
+      return { ran: true, reason: outcome.reason, added: 0 }
+    }
+    summaryStatus = 'ok'
+    const fresh = outcome.tags.filter((item) => !localTags.some((own) => own.key === item.key))
+    // ★ 与首次概括**同一条**写标签路径（白名单 + 逐条 PUT + 两道闸都在 writeTags 里），不另起一套。
+    try {
+      mergeTags(outcome.tags)
+      await writeTags(sid, fresh)
+    } catch (error) {
+      lastError = describeError(error)
+      log('[onboarding] 补跑概括的标签写入失败（不重跑：素材已进本进程内存）：' + lastError, 'warn')
+    }
+    markSummary(sid, true)
+    log('[onboarding] 概括补跑成功（来源：' + source + '，新增 ' + String(fresh.length) + ' 条标签）')
+    return { ran: true, reason: '成功', added: fresh.length }
+  }
+
   /* ---------------------------------------------------------------- *
    * 公开面
    * ---------------------------------------------------------------- */
@@ -749,6 +884,7 @@ export function createOnboardingService(initial: OnboardingDeps = {}): Onboardin
     },
     start,
     answer,
+    retrySummary,
     async dispose(): Promise<void> {
       await flush()
     },

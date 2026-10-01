@@ -537,6 +537,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/onboarding/{student_id}/answers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 读回五问问答（跨重启补概括用；只读）
+         * @description 把该学生的五问问答正文读回来（**只读**：不建行、不写库、不留痕）。
+         *
+         *     ★ 为什么需要它：没配 Key 时五问照常答完，但那五条回答是冷启动最值钱的素材，
+         *       概括降级一次后就再没机会补（持续画像只从后续对话学，不会回头读它们）。
+         *       主进程补跑时若内存里没有（跨重启），就来这里回读。
+         *     ★ 只回该学生自己的行（一人一库）、只回五问（认不出的 question_id 整条丢掉）；
+         *       问句原文不回传 —— 主进程有唯一一份脚本，配对在那边做。
+         */
+        get: operations["read_onboarding_answers_api_onboarding__student_id__answers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/onboarding/{student_id}/state": {
         parameters: {
             query?: never;
@@ -3204,6 +3230,23 @@ export interface components {
             withoutStem: number;
         };
         /**
+         * OnboardingAnswerItem
+         * @description 一条五问问答（GET answers 的元素）。
+         *
+         *     ★ 正文与 ``onboarding_qa`` **同源**：脱敏在写入侧（主进程）已经做过，这里只回读，
+         *       不收窄、不改写；问句原文**不回传**（主进程有唯一脚本，配对在那边做，
+         *       少一处会漂的副本）。
+         */
+        OnboardingAnswerItem: {
+            /** Answertext */
+            answerText: string;
+            /**
+             * Questionid
+             * @enum {string}
+             */
+            questionId: "q1" | "q2" | "q3" | "q4" | "q5";
+        };
+        /**
          * OnboardingAnswerOut
          * @description POST answer 的回执：accepted + 最新状态（主进程据此推 onboarding:changed）。
          */
@@ -3232,6 +3275,14 @@ export interface components {
             questionId: "q1" | "q2" | "q3" | "q4" | "q5";
             /** Sessionid */
             sessionId?: string | null;
+        };
+        /**
+         * OnboardingAnswersOut
+         * @description GET /api/onboarding/{student_id}/answers 的出参（冷启动概括补跑用）。
+         */
+        OnboardingAnswersOut: {
+            /** Answers */
+            answers?: components["schemas"]["OnboardingAnswerItem"][];
         };
         /**
          * OnboardingQuestionId
@@ -4825,6 +4876,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OnboardingAnswerOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_onboarding_answers_api_onboarding__student_id__answers_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnboardingAnswersOut"];
                 };
             };
             /** @description Validation Error */
