@@ -48,7 +48,8 @@ import {
   demoReportBody,
   demoSavedAnimationItemBody,
   demoSavedAnimationListBody,
-  demoSettingsBody
+  demoSettingsBody,
+  demoStudentBody
 } from './data.ts'
 
 /** 学习报告的天数上限（与 `study/client.ts` 的 `STUDY_MAX_REPORT_DAYS` 同口径）。 */
@@ -63,6 +64,28 @@ function jsonResponse(body: unknown): Response {
     status: 200,
     headers: { 'Content-Type': 'application/json' }
   })
+}
+
+/**
+ * `GET /api/students` 的合成清单：**只有一位**。
+ *
+ * ★★ 沙箱态下必须拦这条：真实账号列表一旦上屏，演示就把本机的学生泄漏出去了。
+ *    账号门/账号菜单从这里读到的只有这一位，点「切换」也只会在同一个人身上打转。
+ * ★ id / 昵称 / 学段都取自预置画像（**不另写一份字面量**）：两处一旦漂，
+ *   界面上显示的这个账号与画像里的就不是同一个人了。
+ */
+function demoAccountsBody(): unknown[] {
+  const student = demoStudentBody()
+  return [
+    {
+      studentId: typeof student.studentId === 'string' ? student.studentId : '',
+      nickname: typeof student.nickname === 'string' ? student.nickname : '',
+      gradeLevel: typeof student.gradeLevel === 'string' ? student.gradeLevel : '',
+      createdAt: typeof student.createdAt === 'number' ? student.createdAt : 0,
+      lastActiveAt: typeof student.lastActiveAt === 'number' ? student.lastActiveAt : 0,
+      currentChapter: typeof student.currentChapter === 'string' ? student.currentChapter : ''
+    }
+  ]
 }
 
 /** 从查询串里读报告天数（认不出用默认值；越界则夹到边界内）。 */
@@ -106,6 +129,12 @@ export async function demoResponseFor(path: string, init: RequestInit = {}): Pro
 
   /* ── 设置显示态（「早就配好、一直在用」那一栏）──────────────────────────── */
   if (pathname === '/api/settings') return jsonResponse(demoSettingsBody())
+
+  /* ── 账号（本机多个学生）──────────────────────────────────────────────────
+   * ★★ 这条也必须拦：真实账号列表上屏 = 演示泄漏本机学生（见 demoAccountsBody）。
+   *   只拦 GET —— 建号/改名/删号在 IPC 处理器层就被拒了，覆盖层放它们透传没有意义。
+   * ------------------------------------------------------------------ */
+  if (pathname === '/api/students') return jsonResponse(demoAccountsBody())
 
   /* ── 学生身份 / 画像 / 推荐 / 开场引导 / 报告 / 章节 ───────────────────── */
   const profile = /^\/api\/profile\/([^/]+)(?:\/([a-z]+))?$/.exec(pathname)

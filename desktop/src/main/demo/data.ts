@@ -438,8 +438,11 @@ export const DEMO_PROGRESS_LEVELS: readonly {
   stage: string
   badge: string | null
   mastery: number
+  /** 这 57 关全是**本学段**关卡路径（演示学生只有一个学段，没有路径外的历史行）。 */
+  inPath: boolean
 }[] = DEMO_KP_IDS.map((kpId) => ({
   kpId,
+  inPath: true,
   stage: DEMO_MASTERED_KP_IDS.includes(kpId)
     ? 'mastered'
     : DEMO_QUIZZED_KP_IDS.includes(kpId)
