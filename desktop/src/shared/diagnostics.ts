@@ -173,6 +173,40 @@ export interface DiagSandbox {
   animationReadyTimeout: boolean
 }
 
+/**
+ * 一条**运行时 span**：一次**不经 Pi** 的旁路模型调用（子代理）的用时与体量。
+ *
+ * ★ 为什么需要它：五问概括 / 画像刷新 / 画像小结这三条子代理**不经过 Pi**，
+ *   Pi extension 看不到它们；但它们都走主进程唯一的模型出网口
+ *   （`bridge/llm-completions.ts`，D-116），所以在那一个点打点就一个不漏。
+ * ★ 只留**体量与结论**：prompt 正文、回答正文一律不进这个结构（落盘那份更不许）。
+ * ⚠️ 可选字段的消费者必须容忍它缺席（旧信封 / 旧落盘记录没有它）。
+ */
+export interface RuntimeSpan {
+  id: string
+  kind: 'subagent'
+  /** 分类（泳道与文案用）：五问概括 / 画像刷新 / 画像小结 / 出题 / 动画生成 / 编程提示。 */
+  purpose: string
+  /** 上屏文案（中文、无技术词）。 */
+  label: string
+  /** 开始时刻（epoch ms）。 */
+  startedAt: number
+  /** 耗时（毫秒）。 */
+  ms: number
+  model: string | null
+  /** prompt 的**字符数**（只存数字，不存正文）。 */
+  promptChars: number
+  /** prompt 的估算 token（与信封其它估算同一口径）。 */
+  promptTokEst: number
+  ok: boolean
+  /** 失败原因（**已脱敏**：无正文、无凭证、无本机路径）。 */
+  note: string | null
+  /** 发生在某轮对话之外（如启动补跑）。 */
+  offTurn: boolean
+  /** 挂在第几轮（`offTurn` 时为 null）。 */
+  turnIndex: number | null
+}
+
 export interface TurnDiagnostics {
   /** 第几轮（与工具轨迹的 `turn` 同一个口径：一次学生提问 = 一轮）。 */
   turn: number
@@ -202,6 +236,11 @@ export interface TurnDiagnostics {
   done: DiagDone
   /** 渲染进程补齐的沙箱事件（主进程发出来的那份没有这个字段）。 */
   sandbox?: DiagSandbox
+  /**
+   * 这一份信封波及的**子代理运行时 span**（可选：旧信封没有这个字段，读侧按空数组处理）。
+   * ★ 轮外发生的那些也在这里，带 `offTurn: true`（别把它们算进某一轮的时间轴）。
+   */
+  spans?: RuntimeSpan[]
 }
 
 /**
@@ -217,6 +256,15 @@ export interface DiagnosticsSnapshot {
   limit: number
   persisted: boolean
   updatedAt: number
+  /**
+   * ★ **轮外段**：还没归属到任何一轮的子代理 span（可选，纯加法；缺失=空）。
+   *
+   * 为什么需要它：五问概括这类旁路调用发生在**还没有任何轮次**的时候（学生还没聊过），
+   * 而渲染层的子代理泳道是挂在某一轮信封上的 —— 没有轮就无处挂。这里给一个轮外容器，
+   * 主进程一侧到就推（防抖），渲染层据此另起一段。
+   * ★ 下一份轮次信封收尾时，这些 span 会被**迁移**进那一轮的 `spans`（同一条数据不留两份）。
+   */
+  offTurnSpans?: RuntimeSpan[]
 }
 
 /** preload 边界的形状检查（半截对象直接丢掉，别让界面上出现一行空白信封）。 */

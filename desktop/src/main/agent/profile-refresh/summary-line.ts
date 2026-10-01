@@ -360,11 +360,13 @@ async function callModelOnce(
   const initFor = (): RequestInit => llmPostInit(headers, body, SUMMARY_LINE_TIMEOUT_MS)
 
   let response: Response
+  // ★ 出网 span（V1 运行透视）：分类与上屏文案由调用点给，出网口只负责记事实与体量。
+  const span = { purpose: '画像小结', label: '写一段本轮学习小结', model: config.modelId }
   try {
-    response = await fetchResponse(chatCompletionsUrl(config.baseUrl), initFor())
+    response = await fetchResponse(chatCompletionsUrl(config.baseUrl), initFor(), span)
     if (response.status === 404 || response.status === 405) {
       const variant = chatCompletionsVariantUrl(config.baseUrl)
-      if (variant !== null) response = await fetchResponse(variant, initFor())
+      if (variant !== null) response = await fetchResponse(variant, initFor(), span)
     }
   } catch {
     return ''

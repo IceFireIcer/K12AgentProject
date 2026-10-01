@@ -321,12 +321,14 @@ export function createLlmSummarizer(options: {
     const initFor = (): RequestInit => llmPostInit(headers, body, ONBOARDING_SUMMARY_TIMEOUT_MS)
 
     let response: Response
+    // ★ 出网 span（V1 运行透视）：分类与上屏文案由调用点给，出网口只负责记事实与体量。
+    const span = { purpose: '五问概括', label: '把五问的回答整理成学习偏好', model: config.modelId }
     try {
-      response = await fetchResponse(chatCompletionsUrl(config.baseUrl), initFor())
+      response = await fetchResponse(chatCompletionsUrl(config.baseUrl), initFor(), span)
       // 404/405 = 地址写法不对（不是鉴权问题）：试一次 /v1 变体，仍不行才算失败
       if (response.status === 404 || response.status === 405) {
         const variant = chatCompletionsVariantUrl(config.baseUrl)
-        if (variant !== null) response = await fetchResponse(variant, initFor())
+        if (variant !== null) response = await fetchResponse(variant, initFor(), span)
       }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)

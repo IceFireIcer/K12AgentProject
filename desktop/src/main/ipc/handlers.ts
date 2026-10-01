@@ -28,7 +28,11 @@ import { gradeStatePath } from '../agent/extensions/grade.ts'
 import { bindCodeRunner, createRendererCodeRunner } from '../agent/extensions/coding.ts'
 import { builtinCatalog } from '../agent/pi-bootstrap.ts'
 import { STUDENT_ID_PATTERN, assertStudentId, isInside, resolveStudentPiPaths } from '../agent/pi-paths.ts'
-import { DiagnosticsStore, DIAGNOSTICS_FILE_NAME } from '../agent/diagnostics.ts'
+import {
+  DiagnosticsStore,
+  DIAGNOSTICS_FILE_NAME,
+  setOffTurnSpanNotifier
+} from '../agent/diagnostics.ts'
 import { emptyDiagnosticsSnapshot, type DiagnosticsSnapshot } from '@shared/diagnostics'
 // ── 演示沙箱（预置数据）─────────────────────────────────────────────────
 //   ★ 开关是内存态（`demo/state.ts`），覆盖层在 `bridge/client.ts`，
@@ -1267,6 +1271,9 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
   // ★ 存量用户补跑：启动后延迟一次（覆盖「当时没 Key、已经答完五问」的那批）。
   //   非阻塞；已经概括过的不会再打模型（幂等判据在 service.retrySummary 里）。
   scheduleStartupSummaryRetry()
+
+  // ★ 轮外 span 即时上屏：把推送口接给采集端（合并窗口见 scheduleOffTurnDiagnosticsPush）。
+  setOffTurnSpanNotifier(scheduleOffTurnDiagnosticsPush)
 }
 
 /**
@@ -1419,6 +1426,35 @@ function pushDiagnosticsSnapshot(snapshot: DiagnosticsSnapshot): void {
  */
 export const pushDiagnosticsTurn = (snapshot: DiagnosticsSnapshot): void => {
   pushDiagnosticsSnapshot(snapshot)
+}
+
+/**
+ * ★★ 轮外 span 的**即时上屏**（task-52）。
+ *
+ * 触发：`agent/diagnostics.ts` 每记下一条轮外 span（没有活动轮，如五问概括 / 启动补跑）
+ * 就通知这里一次。为什么必须即时：这类调用可能**永远等不到下一轮** —— 学生答完五问
+ * 没再发消息时，旧行为是「等下一份轮次信封」，界面上就一直没有子代理。
+ *
+ * ★ 合并窗口 300ms（**不是**重置式防抖）：窗口内的多条合并成一次推 ——
+ *   这就是推送频率的上界（≤ 1 次/300ms），一次交互里的 2–3 次旁路调用只推一次。
+ * ★ 推的仍是既有 `diagnostics:changed`，形状 = `DiagnosticsStore.snapshot()`：
+ *   轮外 span 要么在 `offTurnSpans`（还没有轮次可挂），要么已迁移进最新一轮的 `spans`。
+ */
+const OFF_TURN_PUSH_WINDOW_MS = 300
+let offTurnPushTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleOffTurnDiagnosticsPush(): void {
+  if (offTurnPushTimer !== null) return
+  offTurnPushTimer = setTimeout(() => {
+    offTurnPushTimer = null
+    try {
+      pushDiagnosticsSnapshot(diagnosticsStoreFor(resolveActiveStudentId()).snapshot())
+    } catch (error) {
+      // 诊断是旁路：推失败只记日志，绝不影响模型调用与业务
+      console.warn('[diagnostics] 轮外 span 推送失败：' + describeError(error))
+    }
+  }, OFF_TURN_PUSH_WINDOW_MS)
+  ;(offTurnPushTimer as unknown as { unref?: () => void }).unref?.()
 }
 
 /** 两条 invoke 通道：读取与清空。**失败也给一句可读中文**，绝不抛过 IPC。 */

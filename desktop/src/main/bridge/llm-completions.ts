@@ -39,8 +39,47 @@ export interface LlmChatRequest {
   timeoutMs: number
 }
 
+/** 调用点给 span 的分类与上屏文案（可省：省了就回落中性文案）。 */
+export interface LlmChatSpanOptions {
+  /** 分类：五问概括 / 画像刷新 / 画像小结 / 出题 / 动画生成 / 编程提示。 */
+  purpose?: string
+  /** 上屏文案（中文、无技术词）。 */
+  label?: string
+  /** 模型名（调用点最清楚）；省了就从请求体里读 `model`。 */
+  model?: string
+}
+
+/**
+ * 出网口交给上层的**一次调用事实**（只有体量与结论，**绝不含 prompt 正文**）。
+ * 采集端（`agent/diagnostics.ts`）把它补成信封里的 {@link RuntimeSpan}。
+ */
+export interface RuntimeSpanEvent {
+  purpose: string
+  label: string
+  model: string | null
+  promptChars: number
+  startedAt: number
+  ms: number
+  ok: boolean
+  note: string | null
+}
+
+/** span 采集口（由 `agent/diagnostics.ts` 在模块加载时注册）。 */
+export type RuntimeSpanSink = (event: RuntimeSpanEvent) => void
+let runtimeSpanSink: RuntimeSpanSink | null = null
+
+/**
+ * 注册 span 采集口（**唯一调用点在 `agent/diagnostics.ts` 的模块作用域**）。
+ *
+ * ★ 为什么用「注册口」而不是让本文件 import 采集端：bridge 是更低的层，
+ *   反过来依赖 agent 会把 fs / crypto 拖进只该管网络的模块（也容易成环）。
+ */
+export function setRuntimeSpanSink(sink: RuntimeSpanSink | null): void {
+  runtimeSpanSink = sink
+}
+
 /** 出网口（可注入；生产用本文件里的 `llmFetch`，测试用替身断言请求体）。 */
-export type LlmChatFetch = (url: string, init: RequestInit) => Promise<Response>
+export type LlmChatFetch = (url: string, init: RequestInit, span?: LlmChatSpanOptions) => Promise<Response>
 
 /** 只允许 http(s)：配置里被塞进 `file://` / `data:` 之类的地址时不许真的发出去。 */
 function isHttpUrl(url: string): boolean {
@@ -54,9 +93,98 @@ function isHttpUrl(url: string): boolean {
  *   （本文件不知道调用点的业务语义，不该替它决定「降级还是重试」）。
  * ★ 超时用 `AbortSignal.timeout`：sidecar 之外的对端可能挂住不回。
  */
-export async function llmFetch(url: string, init: RequestInit): Promise<Response> {
+export async function llmFetch(
+  url: string,
+  init: RequestInit,
+  span?: LlmChatSpanOptions
+): Promise<Response> {
   if (!isHttpUrl(url)) throw new Error('模型服务地址不是 http(s)，已拒绝出网')
-  return await fetch(url, init)
+  // ★ 打点在这里 —— 本文件是全应用唯一的模型出网口（D-116），所以旁路子代理
+  //   （不经过 Pi、extension 看不到的那几条）一个都漏不掉。
+  const startedAt = Date.now()
+  const summary = readPromptSummary(init?.body, span?.model)
+  const base: Omit<RuntimeSpanEvent, 'ms' | 'ok' | 'note'> = {
+    purpose: readOption(span?.purpose, DEFAULT_SPAN_PURPOSE),
+    label: readOption(span?.label, DEFAULT_SPAN_LABEL),
+    model: summary.model,
+    promptChars: summary.promptChars,
+    startedAt
+  }
+  try {
+    const response = await fetch(url, init)
+    emitRuntimeSpan({
+      ...base,
+      ms: Math.max(0, Date.now() - startedAt),
+      ok: response.ok,
+      note: response.ok ? null : 'HTTP ' + String(response.status)
+    })
+    return response
+  } catch (error) {
+    emitRuntimeSpan({
+      ...base,
+      ms: Math.max(0, Date.now() - startedAt),
+      ok: false,
+      note: describeSpanFailure(error)
+    })
+    throw error
+  }
+}
+
+/** 没给 purpose/label 时的中性回落（组件按 purpose 分泳道，所以别给空串）。 */
+const DEFAULT_SPAN_PURPOSE = '子代理'
+const DEFAULT_SPAN_LABEL = '一次子代理模型调用'
+
+function readOption(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback
+}
+
+/**
+ * 从请求体里读「模型名 + 提示词字符数」——**只取数字与模型名，不保留任何正文**。
+ * 读不出（不是 JSON / 没有 messages）时退回 body 的总长度：仍然只是个体量。
+ */
+function readPromptSummary(
+  body: unknown,
+  modelHint?: string
+): { model: string | null; promptChars: number } {
+  const hint = typeof modelHint === 'string' && modelHint.trim() !== '' ? modelHint.trim() : null
+  if (typeof body !== 'string' || body === '') return { model: hint, promptChars: 0 }
+  try {
+    const parsed = JSON.parse(body) as { model?: unknown; messages?: unknown }
+    const model =
+      typeof parsed.model === 'string' && parsed.model.trim() !== '' ? parsed.model.trim() : hint
+    let chars = 0
+    if (Array.isArray(parsed.messages)) {
+      for (const item of parsed.messages) {
+        if (typeof item !== 'object' || item === null) continue
+        const content = (item as { content?: unknown }).content
+        if (typeof content === 'string') chars += content.length
+      }
+    }
+    return { model, promptChars: chars > 0 ? chars : body.length }
+  } catch {
+    return { model: hint, promptChars: body.length }
+  }
+}
+
+/**
+ * 失败原因收敛成**可落盘的形状**：抹掉 URL 查询串（供应商网关常把凭据放那里）、
+ * 折成一行、截断；**不含正文**（错误信息本来就不该带正文，这里再兜一道）。
+ */
+function describeSpanFailure(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  return raw
+    .replace(/https?:\/\/[^\s"']+/gi, (url) => url.split('?')[0] ?? url)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160)
+}
+
+function emitRuntimeSpan(event: RuntimeSpanEvent): void {
+  try {
+    runtimeSpanSink?.(event)
+  } catch {
+    /* 诊断是旁路：采集端坏掉绝不该影响模型调用本身 */
+  }
 }
 
 /**

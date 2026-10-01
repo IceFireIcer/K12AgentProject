@@ -41,8 +41,11 @@ import {
   type DiagSafetyStage,
   type DiagnosticsSnapshot,
   type GradeLevel,
+  type RuntimeSpan,
   type TurnDiagnostics
 } from '@shared/diagnostics'
+// ★ span 采集口：出网口是更低的层，只把「一次调用事实」递过来（见那边的说明）。
+import { setRuntimeSpanSink, type RuntimeSpanEvent } from '../bridge/llm-completions.ts'
 import { GRADE_OVERRIDE_HEADING } from './extensions/grade.ts'
 import { STUDENT_CONTEXT_HEADING } from './prompts/student-context.ts'
 
@@ -60,13 +63,130 @@ const SEGMENT_DISPLAY_CHARS = 1600
  */
 export function estimateTokens(text: string): number {
   if (typeof text !== 'string' || text.length === 0) return 0
-  return Math.max(1, Math.round(text.length * 0.6))
+  return estimateTokensFromChars(text.length)
 }
 
 /** 十二位十六进制字节指纹（画像块的「逐字节稳定」判据）。 */
 export function byteHash(text: string): string {
   return createHash('sha256').update(text ?? '', 'utf8').digest('hex').slice(0, 12)
 }
+
+/* ------------------------------------------------------------------ *
+ * 运行时 span（子代理：五问概括 / 画像刷新 / 画像小结）
+ * ------------------------------------------------------------------ */
+
+/**
+ * ★★ span 缓冲的上限 —— 与轮次信封**同口径**（诊断是旁路，绝不许无界增长）。
+ */
+export const RUNTIME_SPAN_LIMIT = DIAGNOSTICS_TURN_LIMIT
+
+let spanSeq = 0
+/** 当前活动轮（由 {@link TurnDiagnosticsRecorder} 的构造/收尾维护）。 */
+let activeTurnIndex: number | null = null
+let spanBuffer: RuntimeSpan[] = []
+
+/** 由字符数估算 token（与 {@link estimateTokens} 同一口径；span 只有 chars、没有正文）。 */
+export function estimateTokensFromChars(chars: number): number {
+  if (typeof chars !== 'number' || !Number.isFinite(chars) || chars <= 0) return 0
+  return Math.max(1, Math.round(chars * 0.6))
+}
+
+/**
+ * 收下出网口的一次调用事实，补成冻结的 {@link RuntimeSpan}。
+ *
+ * ★ 轮内 → 挂当前轮；没有活动轮（启动补跑这类）→ `offTurn: true`。
+ * ★ `note` 在这里再过一次 {@link redactHostPaths} 并截断：落盘那份只能有结论，不能有路径；
+ *   prompt / 回答正文**从来不进这个结构**（出网口只给字符数）。
+ */
+export function recordRuntimeSpan(event: RuntimeSpanEvent): RuntimeSpan {
+  const turnIndex = activeTurnIndex
+  const note =
+    typeof event.note === 'string' && event.note.trim() !== ''
+      ? redactHostPaths(event.note.replace(/\s+/g, ' ').trim()).slice(0, 160)
+      : null
+  spanSeq += 1
+  const span: RuntimeSpan = {
+    id: 'span-' + String(spanSeq),
+    kind: 'subagent',
+    purpose: event.purpose,
+    label: event.label,
+    startedAt: event.startedAt,
+    ms: Math.max(0, Math.round(event.ms)),
+    model: event.model,
+    promptChars: Math.max(0, Math.round(event.promptChars)),
+    promptTokEst: estimateTokensFromChars(event.promptChars),
+    ok: event.ok,
+    note,
+    offTurn: turnIndex === null,
+    turnIndex
+  }
+  spanBuffer.push(span)
+  if (spanBuffer.length > RUNTIME_SPAN_LIMIT) spanBuffer = spanBuffer.slice(-RUNTIME_SPAN_LIMIT)
+  // ★ 轮外（没有活动轮）→ 立刻通知推送口：这类调用可能永远等不到下一轮。
+  if (span.offTurn) {
+    try {
+      offTurnSpanNotifier?.()
+    } catch {
+      /* 诊断是旁路：推送口坏掉不该影响模型调用 */
+    }
+  }
+  return span
+}
+
+/** 取走当前缓冲（信封收尾时调用；取走即清空）。 */
+export function drainRuntimeSpans(): RuntimeSpan[] {
+  const out = spanBuffer
+  spanBuffer = []
+  return out
+}
+
+/**
+ * ★ 只取**本轮**的 span（{@link TurnDiagnosticsRecorder} 收尾用）。
+ * 轮外那些**留在缓冲里** —— 它们要么被即时推送成「轮外段」，要么迁移进下一份信封。
+ */
+export function drainInTurnSpans(): RuntimeSpan[] {
+  const mine = spanBuffer.filter((span) => !span.offTurn)
+  spanBuffer = spanBuffer.filter((span) => span.offTurn)
+  return mine
+}
+
+/** 看一眼轮外那些（构建快照用，不取走）。 */
+export function peekOffTurnSpans(): RuntimeSpan[] {
+  return spanBuffer.filter((span) => span.offTurn)
+}
+
+/** 取走轮外那些（下一份轮次信封收尾时迁移进它，避免同一批数据留两份）。 */
+export function takeOffTurnSpans(): RuntimeSpan[] {
+  const out = peekOffTurnSpans()
+  spanBuffer = spanBuffer.filter((span) => !span.offTurn)
+  return out
+}
+
+/**
+ * 轮外 span 的**即时推送口**（由 `ipc/handlers.ts` 注册成「防抖推一份快照」）。
+ *
+ * ★ 为什么必须有它：轮外调用（五问概括 / 启动补跑）可能**永远等不到下一轮** ——
+ *   学生答完五问没再发消息时，旧行为是「等下一份轮次信封」，于是什么都看不到。
+ * ★ 为什么不在这里直接推：本模块不认识 Electron（推窗口在 handlers.ts）。
+ */
+export type OffTurnSpanNotifier = () => void
+let offTurnSpanNotifier: OffTurnSpanNotifier | null = null
+
+export function setOffTurnSpanNotifier(notifier: OffTurnSpanNotifier | null): void {
+  offTurnSpanNotifier = notifier
+}
+
+/** 只给测试用：清空缓冲 / 活动轮 / 序号（生产路径别调）。 */
+export function resetRuntimeSpansForTests(): void {
+  spanBuffer = []
+  activeTurnIndex = null
+  spanSeq = 0
+}
+
+// 模块加载即注册采集口：出网口（bridge）不认识本模块，由本模块把自己的口递过去。
+setRuntimeSpanSink((event) => {
+  recordRuntimeSpan(event)
+})
 
 /**
  * 上屏前抹掉本机路径。
@@ -192,6 +312,8 @@ export class TurnDiagnosticsRecorder {
   private rawThinking = ''
   /** 这一轮有没有出现过**终态**的供应商错误（`message_update.error` / 重试彻底失败）。 */
   private providerError = false
+  /** span 缓冲只取一次（finish 幂等，见那里）。 */
+  private spansTaken = false
 
   constructor(fields: {
     turn: number
@@ -202,6 +324,8 @@ export class TurnDiagnosticsRecorder {
     at?: number
   }) {
     this.startedAt = fields.at ?? Date.now()
+    // ★ 这一轮的跨度内发生的子代理调用都挂到它头上（轮外的那些例外，见 recordRuntimeSpan）。
+    activeTurnIndex = fields.turn
     this.envelope = {
       turn: fields.turn,
       requestId: fields.requestId,
@@ -384,6 +508,14 @@ export class TurnDiagnosticsRecorder {
       firstTokenMs: this.firstTokenAt === null ? null : Math.max(0, this.firstTokenAt - this.startedAt)
     }
     this.envelope.reasoning = filterReasoning(this.rawThinking)
+    // ★ 只取一次：finish() 幂等（done 分支与异常分支都会碰它），缓冲取走第二次就空了。
+    if (!this.spansTaken) {
+      this.spansTaken = true
+      const spans = drainInTurnSpans()
+      // 缺省不写这个字段（旧形状仍能跑；读侧按空数组处理）
+      if (spans.length > 0) this.envelope.spans = spans
+    }
+    activeTurnIndex = null
     return this.envelope
   }
 
@@ -460,7 +592,9 @@ export function stripForPersistence(turn: TurnDiagnostics): TurnDiagnostics {
     safetyFinal: { ...turn.safetyFinal, stages: turn.safetyFinal.stages.map((stage) => ({ ...stage })) },
     interceptions: turn.interceptions.map((item) => ({ ...item })),
     grade: { ...turn.grade },
-    done: { ...turn.done }
+    done: { ...turn.done },
+    // span 里本来就只有体量与结论（note 在采集时已脱敏）——这里只做一层拷贝。
+    ...(turn.spans ? { spans: turn.spans.map((span) => ({ ...span })) } : {})
   }
 }
 
@@ -492,24 +626,36 @@ export class DiagnosticsStore {
    * 收下一轮的信封：进内存环形缓冲（**完整版**）、落盘（**脱敏版**）、推进轮次号。
    */
   append(turn: TurnDiagnostics): void {
-    this.turns.push(turn)
+    // ★ 轮外 span **迁移进这一份信封**：渲染层的子代理泳道挂在轮次上（没有轮就无处挂），
+    //   而「轮外段」只是它们还没轮次可挂时的临时容器 —— 迁进来之后同一批数据只有一处。
+    const pendingOffTurn = takeOffTurnSpans()
+    const merged =
+      pendingOffTurn.length > 0
+        ? { ...turn, spans: [...(turn.spans ?? []), ...pendingOffTurn] }
+        : turn
+    this.turns.push(merged)
     if (this.turns.length > this.limit) this.turns = this.turns.slice(-this.limit)
-    this.nextTurn = Math.max(this.nextTurn, turn.turn) + 1
-    this.writeLine(stripForPersistence(turn))
+    this.nextTurn = Math.max(this.nextTurn, merged.turn) + 1
+    this.writeLine(stripForPersistence(merged))
   }
 
   /** 当前快照（轮次升序）。 */
   snapshot(): DiagnosticsSnapshot {
+    const offTurn = peekOffTurnSpans()
     return {
       turns: this.turns.map((turn) => turn),
       limit: this.limit,
       persisted: this.persisted,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
+      // ★ 纯加法：没有「还没归属的轮外 span」时**不写这个键**（旧消费方零感知）。
+      ...(offTurn.length > 0 ? { offTurnSpans: offTurn } : {})
     }
   }
 
   /** 清空（内存 + 磁盘，幂等）。 */
   clear(): DiagnosticsSnapshot {
+    // 一键清空也要清掉**还没归属**的 span（否则清完又被下一份快照带回来）。
+    drainRuntimeSpans()
     this.turns = []
     this.persisted = false
     try {
