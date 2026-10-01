@@ -828,6 +828,32 @@ test('G-I 没到 done 就弹引导：状态机是唯一判据，新建会话也�
   )
 })
 
+test('G-I q5 只收兴趣/动机：不再收集姓名/称呼（称呼归账号门），且不引心理侧写', () => {
+  // 2026-10-01 换题：称呼已由账号门负责（建号 / 改名），五问里再问一次等于同一个门出现两遍；
+  // q5 改为补「兴趣 / 动机」这一维（interest_topic）。
+  const q5 = ONBOARDING_QUESTIONS.find((question) => question.id === 'q5')
+  assert.ok(q5, 'q5 必须在五问脚本里')
+  assert.deepEqual(q5.chips, [], 'q5 是自由作答（给选项等于替他把话说了）')
+  assert.ok(
+    q5.text.includes('喜欢') || q5.text.includes('兴趣'),
+    'q5 必须落到兴趣 / 动机这一维：' + q5.text
+  )
+  // ★ 明确不收集姓名 / 称呼：那是账号门的职责
+  assert.equal(
+    ONBOARDING_QUESTIONS.some((question) => question.text.includes('称呼')),
+    false,
+    '五问都不再收集称呼（称呼走账号门）'
+  )
+  assert.equal(q5.text.includes('名字'), false, 'q5 不收集姓名')
+  // 不引心理侧写：不出现性格 / 心理 / 情绪 / 家庭这类词
+  for (const word of ['性格', '心理', '情绪', '家庭', '焦虑']) {
+    assert.equal(q5.text.includes(word), false, 'q5 不得引向心理侧写：' + word)
+  }
+  // 五问互不重复：每个问句各问一个维度
+  const texts = ONBOARDING_QUESTIONS.map((question) => question.text)
+  assert.equal(new Set(texts).size, texts.length, '五个问句不得重复')
+})
+
 /* ================================================================== *
  * G-J：概括是 fire-and-forget
  * ================================================================== */

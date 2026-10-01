@@ -167,7 +167,8 @@ const FIVE_ANSWERS: Array<[string, string]> = [
   ['q2', '数学'],
   ['q3', '一步一步慢慢推'],
   ['q4', '慢一点'],
-  ['q5', '小W']
+  // ★ 2026-10-01 换题：q5 不再是称呼，而是兴趣 / 动机（称呼由账号门负责，见 account-identity.test.ts）
+  ['q5', '喜欢拼乐高和看星星']
 ]
 
 /* ------------------------------------------------------------------ *
@@ -301,13 +302,31 @@ test('G-EX Q2/Q3/Q4：点选与关键词表都映射到白名单标签', () => {
   assert.deepEqual(extractAnswer('q4', '不知道').tags, [])
 })
 
-test('G-EX Q5：称呼过脱敏、不设标签；命中即回落', () => {
-  const named = extractAnswer('q5', '小W')
-  assert.equal(named.displayName, '小W')
-  assert.deepEqual(named.tags, [], '称呼绝不进标签表')
+test('G-EX Q5：抽兴趣标签、**不再产称呼**（称呼归账号门在建号 / 改名时写）', () => {
+  const interest = extractAnswer('q5', '喜欢拼乐高和看星星')
+  assert.equal(interest.tags[0]?.key, 'interest_topic')
+  assert.equal(interest.tags[0]?.value, '喜欢拼乐高和看星星')
+  assert.equal(interest.tags[0]?.source, 'declared')
+  assert.deepEqual(extractAnswer('q5', '好').tags, [], '太短不成线索（不硬凑）')
   const hit = extractAnswer('q5', '我叫小明')
-  assert.equal(hit.piiHit, true)
-  assert.equal(hit.displayName, STUDENT_FALLBACK_NAME)
+  assert.equal(hit.piiHit, true, '敏感模式照样整条丢弃')
+  assert.deepEqual(hit.tags, [], '命中即不产任何标签（连兴趣也不写）')
+})
+
+test('G-EX ★★ 答完五问不写身份：real_name 只由账号门在建号 / 改名时写（q5 不再覆盖它）', async () => {
+  const { service, wire } = await startedService()
+  for (const [questionId, answerText] of FIVE_ANSWERS) {
+    await service.answer(questionId, answerText)
+  }
+  await service.dispose()
+  const identityWrites = wire.calls.filter(
+    (call) => call.path === IDENTITY_PATH && call.method !== 'GET'
+  )
+  assert.equal(
+    identityWrites.length,
+    0,
+    '五问全程不得写 identity（旧实现是 q5 把爱好当称呼覆盖 real_name）'
+  )
 })
 
 test('G-EX 白名单纵深：所有抽出的 key 都是模型可见的；命中的回答一条标签都不产生', () => {
@@ -374,6 +393,28 @@ test('G-PR 禁做清单 13/14：情绪操控与依赖诱导的话术一个都不
     }
     for (const grade of ['小学低年级', '小学高年级', '初中', '高中']) {
       assert.equal(prompt.includes(grade), false, '引导 prompt 不该出现学段：' + grade)
+    }
+  }
+})
+
+test('G-PR 引导期答问纪律：先正面回答；不说推后话、不描述系统与呈现方式', () => {
+  // 2026-10-01 真机事故：学生问了一个学习问题，模型把回答往后推；同一轮还向学生承诺了
+  // 产品并不存在的操作入口，并解释了界面自己的呈现方式。两条纪律都写成正向要求。
+  for (const asked of [0, 3, 5]) {
+    const prompt = buildOnboardingSystemPrompt({ askedCount: asked, displayName: STUDENT_FALLBACK_NAME })
+    assert.ok(
+      prompt.includes('先用一两句话正面回答'),
+      '必须要求先正面回答学习问题（askedCount=' + String(asked) + '）'
+    )
+    assert.ok(prompt.includes('他的问题优先于流程'), '必须写明学生的问题优先于流程')
+    assert.ok(prompt.includes('你怎么运作'), '必须把「系统怎么运作 / 接下来怎样」划出话题外')
+    // 反向：这些措辞一个都不许出现 —— 模型会照着 prompt 里的说法讲给学生
+    for (const phrase of ['跳过', '略过', '等会儿再讲', '先把问题答完', '一条条冒出来']) {
+      assert.equal(
+        prompt.includes(phrase),
+        false,
+        'prompt 里出现了会被模型照说的推后 / 界面话术：' + phrase
+      )
     }
   }
 })
