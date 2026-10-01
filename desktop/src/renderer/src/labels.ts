@@ -166,6 +166,32 @@ export function showsStatusChip(status: TurnStatus): boolean {
   return status !== 'done'
 }
 
+/**
+ * 安全审查徽章的两种文案（用户 2026-10-01 真机走查给定，**一个字都不改**）。
+ *
+ * ★ 与 `TURN_STATUS_LABELS` 的分工：那是「这一轮现在什么状态」，这是「内容安全
+ *   审查的结论」—— 两者是独立的两件事，一轮可以既「回答完成」又「已通过安全审查」。
+ * ★ 放在这里的理由与其它文案相同：组件只决定**摆在哪**，措辞与显隐判据都不进组件
+ *   （否则导出 / 卡片再抄一份时就漂移了）。
+ */
+export const SAFETY_REVIEW_PASSED_LABEL = '已通过安全审查'
+export const SAFETY_REVIEW_FAILED_LABEL = '未通过安全审查'
+
+/**
+ * 何时显示安全审查徽章（绿 = 通过 / 红 = 被撤回）。
+ *
+ * ★ 只在**审查已经有结论**的终态显示：
+ *   · `done`    —— 整段终审通过，屏幕上的正文就是给学生的最终答案；
+ *   · `blocked` —— 终审判定违规，正文已被安全提示替换（红徽章）。
+ * ★ `streaming` 不显示：终审要等生成结束才跑，此刻先标「已通过」是一句**还没发生**
+ *   的承诺（本仓对承诺文案的纪律：不得超出该路径的实际行为）。
+ * ★ `error`（真失败）也不显示：本轮根本没走到终审，没结论就不标 —— 与学段徽章
+ *   「宁可不标，也不标一个假的」同一条判据。
+ */
+export function showsSafetyReviewChip(status: TurnStatus): boolean {
+  return status === 'done' || status === 'blocked'
+}
+
 /** 三种题型的中文名（`QuizQuestionType`，契约里的三个字面量）。 */
 export const QUIZ_TYPE_LABELS: Record<QuizQuestionType, string> = {
   choice: '选择题',

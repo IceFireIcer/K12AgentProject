@@ -32,10 +32,17 @@
  *      点击链路（`emit('branch')` → 页面确认框）**一字未改**。
  */
 import { computed, ref } from 'vue'
-import { BookMarked, ChevronRight, Ellipsis, GitBranch, X } from 'lucide-vue-next'
+import { BookMarked, ChevronRight, Ellipsis, GitBranch, ShieldCheck, X } from 'lucide-vue-next'
 import type { ChatTurn } from '../api/events'
 import type { CitationDetail } from '@shared/ipc-events'
-import { GRADE_LABELS, TURN_STATUS_LABELS, showsStatusChip } from '../labels'
+import {
+  GRADE_LABELS,
+  SAFETY_REVIEW_FAILED_LABEL,
+  SAFETY_REVIEW_PASSED_LABEL,
+  TURN_STATUS_LABELS,
+  showsSafetyReviewChip,
+  showsStatusChip
+} from '../labels'
 import { DEFAULT_LOGO_URL } from '../brand-logo'
 import { useDismissable } from '../composables/useDismissable'
 import { useEscape } from '../composables/useEscape'
@@ -127,6 +134,24 @@ const statusLabel = computed(() => TURN_STATUS_LABELS[props.turn.status])
  */
 const showStatus = computed(() => showsStatusChip(props.turn.status))
 const gradeLabel = computed(() => (props.turn.gradeLevel ? GRADE_LABELS[props.turn.gradeLevel] : null))
+
+/**
+ * 安全审查徽章（用户 2026-10-01 真机走查）：正常 = 绿底白字 + 盾牌 +「已通过安全审查」；
+ * 该轮触发安全终审、内容被撤回 = 红底白字 +「未通过安全审查」。
+ *
+ * ★ 数据是现成的、**不新开通道**：`turn.blocked` 就是 `blocked` 事件落下的那条撤回记录
+ *   （正文已被安全提示替换，见 `api/events.ts` 的 case 'blocked'）。
+ * ★ 「什么时候显示」收口在 labels 的 `showsSafetyReviewChip`，与状态角标同一手法 ——
+ *   组件里不写第二个判据。
+ */
+const safetyReview = computed<'passed' | 'failed' | null>(() => {
+  if (!showsSafetyReviewChip(props.turn.status)) return null
+  return props.turn.blocked === null ? 'passed' : 'failed'
+})
+/** 徽章文案（两句都由 labels 给，组件不拼词）。 */
+const safetyReviewLabel = computed(() =>
+  safetyReview.value === 'failed' ? SAFETY_REVIEW_FAILED_LABEL : SAFETY_REVIEW_PASSED_LABEL
+)
 
 /**
  * 正文按**极简 Markdown** 渲染（`components/MarkdownProse.vue` → `../markdown.ts` 的纯函数，
@@ -307,6 +332,20 @@ function pickBranch(): void {
             :data-grade="turn.gradeLevel"
           >
             {{ gradeLabel }}
+          </span>
+          <!-- 安全审查徽章：紧挨着学段标签（用户 2026-10-01 走查的位置要求）。
+               ★ 绿/红 + 白字走既有状态令牌，没有新造颜色（见下方 .chip--safety 的注释）。
+               ★ 只在审查有结论时出现（done / blocked）—— 判据在 labels，
+                 这里不写第二个条件。 -->
+          <span
+            v-if="safetyReview"
+            class="chip chip--safety"
+            :class="safetyReview === 'failed' ? 'chip--safety--bad' : 'chip--safety--good'"
+            :data-safety="safetyReview"
+            data-testid="turn-safety"
+          >
+            <ShieldCheck v-if="safetyReview === 'passed'" :size="12" aria-hidden="true" />
+            {{ safetyReviewLabel }}
           </span>
           <!-- 状态角标：`done` 不再渲染（内容出现就是完成），其余三态保留。
                `data-testid="turn-status"` 与 `:data-status` 都留着 —— 体检脚本按它们量状态。 -->
@@ -636,6 +675,28 @@ function pickBranch(): void {
 .chip--quiet {
   font-weight: 500;
   color: var(--k12-muted-2);
+}
+
+/* 安全审查徽章（用户 2026-10-01 真机走查）：圆角矩形 + 绿/红底白字 + 盾牌。
+ * ★ 三个颜色全部取既有令牌：底色 --k12-good / --k12-bad，字色 --k12-surface（= #FFFFFF，
+ *   与 .k12-cta 的白字同一来源）—— 没有新造颜色，因此 tokens.source.json 与
+ *   tokens.generated.css 一字未动。
+ * ★ 对比度实测（WCAG 相对亮度公式，与 check:contrast 同一实现）：
+ *   白字压 --k12-good(#0B7A57) = 5.34:1；压 --k12-bad(#C0392B) = 5.44:1。
+ *   两者都 ≥ AA 4.5:1（12px 正文级），与 check:contrast 里既有的
+ *   「good/bad 在 surface 上」是**同一对色**（公式对称），所以不需要新增 good-ink/bad-ink。
+ * ★ 圆角矩形用 --k12-r-inset（8px），刻意不用其它 chip 的 --k12-r-pill（胶囊）：
+ *   用户要的是「圆角矩形徽章」，与胶囊形的状态角标一眼可分。 */
+.chip--safety {
+  gap: 4px;
+  border-radius: var(--k12-r-inset);
+  color: var(--k12-surface);
+}
+.chip--safety--good {
+  background: var(--k12-good);
+}
+.chip--safety--bad {
+  background: var(--k12-bad);
 }
 
 /* 回答 = 纸面上的正文（**无重描边**：层次靠底色与留白，不靠描边） */
