@@ -401,3 +401,29 @@ export function formatRunMeta(elapsedMs: number, interrupted: boolean): string {
   const ms = Math.max(0, Math.round(elapsedMs))
   return interrupted ? `已中断（运行 ${ms} ms）` : `运行 ${ms} ms`
 }
+
+/**
+ * ★★ 从脚手架里抽出作者写的那句**「目标：…」**（面向学生，说清「这道题要写什么」）。
+ *
+ * 背景（2026-09-30 用户反馈「看不懂任务简报想让我干什么」）：任务简报此前只有
+ * 「做到这样就算完成」+ 知识点名，学生读完仍然不知道要动手写什么。而每份模板的
+ * **第一行注释**本来就是写给学生的目标句：
+ *
+ * ```python
+ * # 目标：写一个求平均值的函数，再用它算一遍
+ * ```
+ *
+ * 228 份随包模板全都带这一行（`server/tests/test_code_templates.py` 的资产测试
+ * 盯着模板完整性），所以直接读它比界面自造一句话可靠得多。
+ *
+ * ★ 抽不到就返回空串，**调用方整行不渲染** —— 绝不编一句「理解这道题」的废话。
+ * ★ 只认行首注释里的 `目标`（`#` 之后允许空格，中英文冒号都认）：正文里出现的
+ *   「目标」二字不该被当成说明抽出来。
+ */
+export function goalOfScaffold(scaffold: string): string {
+  for (const line of (scaffold ?? '').split(/\r?\n/)) {
+    const matched = /^\s*#\s*目标\s*[:：]\s*(\S.*?)\s*$/.exec(line)
+    if (matched !== null && matched[1] !== undefined) return matched[1]
+  }
+  return ''
+}

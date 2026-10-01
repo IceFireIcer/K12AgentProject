@@ -15,6 +15,8 @@
 import type { components } from '@shared/api-types'
 import type { GradeLevel, PayloadKind } from '@shared/ipc-events'
 import type { DiagnosticsSnapshot } from '@shared/diagnostics'
+// 引导问题 id（与生成物里的字面量联合同形；下面用它把「主进程总是给全的那两项」收窄成必填）。
+import type { OnboardingQuestionId } from '@shared/profile-tags'
 // 演示沙箱（预置数据）的跨边界类型：开关两态 + 脚本载荷 + 被拒提示语。
 // ★ 与 `shared/diagnostics.ts` 同一手法 —— 类型与运行期校验都住在 `shared/`，
 //   主进程与渲染进程 import 的是同一份，不各写一个副本。
@@ -122,6 +124,14 @@ export const IPC = {
   studyChapters: 'study:chapters',
   /** 渲染进程 → 主进程：某学段依赖图全览（`GET /api/graph/overview/{grade}`）。 */
   studyGraph: 'study:graph',
+  /**
+   * 渲染进程 → 主进程：学习历史（`GET /api/profile/{id}/history?limit=&offset=`）。
+   *
+   * ★ 2026-09-30 新增：学习档案的第六个分页「我做过什么」的明细流水。
+   *   与 `study:report` 的分工 —— 那个是**聚合**（每天多少条 / 正确率 / 连续天数），
+   *   这个是**逐条流水**（几点几分做了什么）。两者读同一张本地表。
+   */
+  studyHistory: 'study:history',
 
   // ── 历史会话（列表 / 回看 / 搜索 / ★ 恢复续聊）─────────────────────────
   // `sessions.ts` 与 `handlers.ts` 的注释里有「只接受会话 id」的安全约束说明。
@@ -306,6 +316,42 @@ export const IPC = {
    * ★ 副作用：库里一个学生都没有时**建一个**（新装的机器首跑就是这种情况）。
    */
   studentGet: 'student:get',
+  /**
+   * 渲染进程 → 主进程：**列出本机已有的账号**（`GET /api/students`）。
+   *
+   * ★ 「账号」= 本机的多个学生（一人一目录、一人一库）。列表只给账号门/账号菜单用，
+   *   **不暴露库文件路径**：服务端回的是 Student 投影（昵称 / 学段 / 最近使用）。
+   * ★ 它是 invoke（有回执）：开了应用要先知道「有没有账号、都是谁」才能决定显示门还是对话页。
+   */
+  accountsList: 'accounts:list',
+  /**
+   * 渲染进程 → 主进程：**新建账号**（`POST /api/students`；id 由服务端分配）。
+   * ★ 只收昵称与学段：真实姓名不采集（§12 数据最小化），账号 id 也**不由前端指定**。
+   */
+  accountsCreate: 'accounts:create',
+  /**
+   * 渲染进程 → 主进程：**改名 / 改学段**（`PATCH /api/students/{id}`，两个字段都可选）。
+   * ★ 只认账号 id（**绝不接受路径**）；改学段会由服务端顺带清掉当前章节。
+   */
+  accountsRename: 'accounts:rename',
+  /**
+   * 渲染进程 → 主进程：**删掉一个账号**（`DELETE /api/students/{id}`，连学生目录一起删）。
+   *
+   * ★★ 与 `session:delete` 同一条纪律：破坏性操作，入参**只当一个 id 用** ——
+   *   先过学生 id 白名单（`^[A-Za-z0-9_-]{1,64}$`），服务端再校验一遍，禁止路径穿越。
+   * ★★ **当前账号不许删**（先切走再删）：主进程在处理器里挡下并回一句可读中文，
+   *   而不是留下一个指向空目录的「当前账号」。
+   */
+  accountsDelete: 'accounts:delete',
+  /**
+   * 渲染进程 → 主进程：**切换当前账号**（本机状态文件里记下「当前是谁」）。
+   *
+   * ★ 它不是服务端写入：切换只改**本机**的当前账号指针（`accounts.json`），
+   *   下一步的学生态由既有通道按新身份重新读 —— 主进程不在这里动会话/运行时装配
+   *   （那是渲染层重载与 runtime 的事）。
+   * ★ 仍是 invoke：界面要拿到回执才知道「切没切成」，切错了得给一句人话。
+   */
+  accountsSwitch: 'accounts:switch',
 
   // ── 画像与推荐 ────────────────────────────────────────────────────────
   /** 渲染进程 → 主进程：读画像（`GET /api/profile/{id}`：掌握度 + 偏好 + 推荐点）。 */
@@ -337,6 +383,20 @@ export const IPC = {
    *   按学生过滤列回来。结构上不含 `answer`/`explanation`（与题库那条路同一个投影）。
    */
   quizGeneratedList: 'quiz:generated-list',
+  /**
+   * 渲染进程 → 主进程：**做完一关内置题后的自动追加出题**（后台个性化生成）。
+   *
+   * ★ 触发判据（什么时候算「做完」）在渲染层，**配额与难度在主进程复核** ——
+   *   渲染层递上来的只有知识点与作答轨迹，出几道由主进程按上限算。
+   * ★ 它是 invoke：回执回来时题目才出现。「后台」指的是学生不被阻塞
+   *   （生成期间照常翻题 / 重做 / 切关），不是另开一条推送流。
+   */
+  quizGenerateAuto: 'quiz:generate-auto',
+  /**
+   * 渲染进程 → 主进程：**「还想再练练」**——带着合并列表全部题目的作答轨迹再要一批。
+   * ★ 每批固定 10 道、编号顺延；与自动阶段那条共用同一套生成与登记链路。
+   */
+  quizGenerateMore: 'quiz:generate-more',
 
   // ── 编程 ──────────────────────────────────────────────────────────────
   /**
@@ -412,7 +472,50 @@ export const IPC = {
    * ★ 重活（分块 + 嵌入整份教材，秒级到十几秒）→ **必须用长超时**，
    *   否则会撞上 `bridge/client.ts` 的 8s 默认兜底，把一次成功的重建报成超时。
    */
-  knowledgeRebuild: 'knowledge:rebuild'
+  knowledgeRebuild: 'knowledge:rebuild',
+
+  // ── 冷启动画像（票 25：对话式五问 + 白名单标签）────────────────────────
+  //
+  // ★★ 五问的回答走**独立通道**（onboarding:answer），**绝不混进 chat:send** ——
+  //    ChatSendRequest 的字段集合被守卫 G6c 钉死为 ['text']，学生 id 与问题 id
+  //    一个都不许进去。而「这条回答属于哪一问」**靠位置、不靠解析**：
+  //    渲染层展示第 N 问时记下 pendingQuestionId，学生的**下一条**消息连同 qid 一起递进来。
+  // ★ 八条里**只有 onboarding:changed 是推送**（M→R），其余七条都是 invoke（有回执）。
+  // ★ **一个 studentId 字段都没有**：身份由主进程 resolveActiveStudentId 决定，别「补全」它。
+  // ★ 票 31：原本那条 onboarding:skip 已**全链路删除**（五问不允许跳过，未答完就续问），
+  //   删通道而不是留一条没人调用的死路 —— 留着它就是下一次「两处真相」的入口。
+  /** 渲染进程 → 主进程：读当前引导状态（未答完就给下一问）。 */
+  onboardingState: 'onboarding:state',
+  /** 渲染进程 → 主进程：交一问的回答（qid 由渲染层按位置给出，不是猜出来的）。 */
+  onboardingAnswer: 'onboarding:answer',
+  /** 主进程 → 渲染进程：**引导状态变化**（八条里唯一的推送）。 */
+  onboardingChanged: 'onboarding:changed',
+  /** 渲染进程 → 主进程：读画像标签（GET /api/profile/{id}/tags，已按 TTL 过滤）。 */
+  profileTags: 'profile:tags',
+  /** 渲染进程 → 主进程：一键撤销一条 L3 标签（DELETE /api/profile/{id}/tags/{key}）。 */
+  profileTagRetract: 'profile:tag-retract',
+  /**
+   * 渲染进程 → 主进程：读**画像变化时间线**（GET /api/profile/{id}/timeline，§5.2 #11）。
+   * ★ 它回答的是「画像怎么变成现在这样的」——`profile:tags` 只给当前值，给不了过程。
+   * ★ 学生 id 仍由主进程决定（请求里**没有** studentId，与其它画像通道同一纪律）。
+   */
+  profileTimeline: 'profile:timeline',
+  /**
+   * 渲染进程 → 主进程：读**画像小结**（三期，2026-09-30，学习档案五行结构的第五行）。
+   *
+   * ★ 这个通道**只读缓存、不生成**：小结在**画像变更之后**由主进程顺带生成
+   *   （`profile-refresh` 的 refresh-apply 落库成功时），所以打开档案页永远是
+   *   零等待、零模型调用（用户裁决 D）。
+   * ★ 读不到（还没生成过 / 文件坏了）→ 回空串，界面显示后端给的空态文案。
+   */
+  profileSummary: 'profile:summary',
+  /** 渲染进程 → 主进程：读身份层（真名只用于**渲染层本地替换**）。 */
+  identityRead: 'identity:read',
+  /**
+   * 渲染进程 → 主进程：设置页的两道闸（家长同意 / 记忆开关）。
+   * ★ 它们是**闸不是信息**：不在 LLM 可见白名单里，主进程读它们决定行为。
+   */
+  identityFlagsSet: 'identity:flags-set'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
@@ -450,7 +553,11 @@ export const PUSH_CHANNELS: readonly IpcChannel[] = [
   IPC.turnEntries,
   // ★ 演示模式：每轮结束推一次**诊断信封快照**。
   //   ⚠️ 只有它进这个清单；`diagnosticsRead` / `diagnosticsClear` 都是 **invoke**（有回执）。
-  IPC.diagnosticsChanged
+  IPC.diagnosticsChanged,
+  // ★ 引导状态变化（票 25）：学生答完一问 / 收齐五问时推一次。
+  //   ⚠️ **只有它**进这个清单；`onboardingState` / `onboardingAnswer` /
+  //      `profileTags` / `profileTagRetract` / `identityRead` / `identityFlagsSet` 都是 invoke。
+  IPC.onboardingChanged
 ]
 
 /**
@@ -565,6 +672,107 @@ export interface ChapterSetResult {
   chapterTitle: string
 }
 
+/* ------------------------------------------------------------------ *
+ * 冷启动画像（票 25）：跨 IPC 的请求 / 回执类型
+ *
+ * ★★ 下面六个形状**全部来自生成物**（`@shared/api-types`，pydantic → OpenAPI → TS）。
+ *   这里曾经手写过一份 —— 那违反「**契约面只走 pydantic**」这条硬边界（架构守卫 #3），
+ *   而且首轮联调就当场现形：渲染层按生成的 `OnboardingQuestionId` 联合类型声明状态，
+ *   手写的 `string[]` 与之不兼容（`stores/onboarding.ts` 两处 TS2322）。
+ *   **别再写第二份契约类型。**
+ * ★ 回执一律复用与 `SettingsCallResult` 同形的判别联合：**失败也给一句可读中文**，
+ *   绝不让异常穿过 IPC 变成界面上的堆栈文本。
+ * ------------------------------------------------------------------ */
+
+export type OnboardingCallResult<T> = { ok: true; data: T } | { ok: false; message: string }
+
+/**
+ * 引导状态载荷（GET /api/onboarding/{sid}/state 的投影 + onboarding:changed 的推送载荷，同形）。
+ *
+ * ★★ 基础形状来自生成物；`answered` / `nextQuestionId` 在**这一层收窄成必填** ——
+ *   生成物里它们可选，是因为 pydantic 那边给了默认值，而**主进程的投影永远给全这两项**。
+ *   不收窄的话，每个消费方都要为「主进程从没发过的 undefined」写一个分支
+ *   （实测：渲染层 store 因此报 TS2488 / TS18048）。这是**契约的收窄**，不是第二份契约。
+ */
+export type OnboardingStatePayload = components['schemas']['OnboardingStateOut'] & {
+  answered: OnboardingQuestionId[]
+  nextQuestionId: OnboardingQuestionId | null
+}
+
+/**
+ * 一问的回答（onboarding:answer 的入参）。
+ *
+ * ★★ **没有 studentId**：身份由主进程 resolveActiveStudentId 决定 —— 一旦它能由渲染进程
+ *    指定，「读别人的画像」就只是一个字符串的距离（与 quiz/chapter 那些通道同一条纪律）。
+ * ★ questionId 由渲染层按**位置**给出（展示第 N 问时记下 pendingQuestionId，下一条消息配对），
+ *    主进程**不猜**「哪句话是答案」。
+ */
+export type OnboardingAnswerRequest = components['schemas']['OnboardingAnswerRequest']
+
+/**
+ * 一条画像标签（GET /api/profile/{sid}/tags 的元素）。
+ * ★ label（中文名）由**后端**给：渲染层的每个字符串字面量都会被 kp-slug 守卫扫到，
+ *   中文名从后端来，界面与守卫天然不打架。
+ */
+/** ★ 同上：`confidence` 在这里收窄成必填（主进程的归一化永远给 `number | null`）。 */
+export type ProfileTagView = components['schemas']['ProfileTagOut'] & { confidence: number | null }
+
+/**
+ * 标签集（GET / PUT / DELETE 三个端点都回这个形状）。★ `tags` 同样收窄成必填。
+ */
+export type ProfileTagsPayload = components['schemas']['ProfileTagsOut'] & { tags: ProfileTagView[] }
+
+/**
+ * 身份层（identity_local 的对外投影）。
+ * ★★ realName 只给**渲染层做本地替换**（{{student_name}} 占位符）；
+ *    **任何 prompt 都不许读它**（守卫 G-C）。
+ */
+export type IdentityPayload = components['schemas']['IdentityOut']
+
+/** 设置页两道闸的部分更新（只发改动的字段，绝不全量覆盖）。 */
+export type IdentityFlagsRequest = components['schemas']['IdentityFlagsRequest']
+
+/** 画像标签读取 / 撤销的回执（data 是**已按 TTL 过滤**的标签集）。 */
+export type ProfileTagsCallResult = OnboardingCallResult<ProfileTagsPayload>
+
+/**
+ * 画像变化时间线（§5.2 #11）。★ 后端已经把 title/detail 拼成中文，
+ *   渲染层**直接渲染**，不在前端拼句子（契约书 §2.1 同一条理由：渲染层的
+ *   每个字符串字面量都会被 kp-slug 守卫扫到）。
+ */
+/**
+ * 时间线上的一件事。★ 三个字段收窄成必填：主进程归一化时**永远给全**它们，
+ *   不收窄会让每个消费方都写一遍 undefined 分支（与 ProfileTagView 同一取舍）。
+ */
+export type ProfileTimelineEventView = components['schemas']['ProfileTimelineEvent'] & {
+  at: number
+  kind: 'grade' | 'tag' | 'onboarding'
+  title: string
+}
+
+export type ProfileTimelinePayload = components['schemas']['ProfileTimeline'] & {
+  events: ProfileTimelineEventView[]
+}
+
+/** 时间线读取的回执。 */
+export type ProfileTimelineCallResult = OnboardingCallResult<ProfileTimelinePayload>
+
+/**
+ * 画像小结的载荷（三期，2026-09-30）。
+ *
+ * ★ 只有一段文本：`''` = 还没生成过（或生成失败 / 缓存坏了）—— 界面据此显示
+ *   后端给的空态文案。**不返回生成时间**：学生面不需要知道「这段话是什么时候写的」，
+ *   而多一个字段就多一处要维护的展示口径。
+ */
+export interface ProfileSummaryPayload {
+  text: string
+}
+
+export type ProfileSummaryCallResult = OnboardingCallResult<ProfileSummaryPayload>
+
+/** 身份层读写的回执。 */
+export type IdentityCallResult = OnboardingCallResult<IdentityPayload>
+
 /** 一轮对话的入参。 */
 export interface ChatSendRequest {
   /** 学生输入（主进程会再次校验非空，不信任渲染进程）。 */
@@ -629,10 +837,95 @@ export interface StudyGradeRequest {
 }
 
 /** 学习报告的入参。 */
+/**
+ * 学习历史的分页参数（2026-09-30）。
+ *
+ * ★ 两个字段都可选：不传就用端点默认（30 条 / 第 0 页）。
+ * ★ **只有数字** —— 学生身份由主进程决定，渲染进程指不了别人（与其它 study 通道同一纪律）。
+ */
+export interface StudyHistoryRequest {
+  /** 这一页最多几条（端点侧再挡一道上限）。 */
+  limit?: number
+  /** 按时间倒序跳过几条（翻页用）。 */
+  offset?: number
+}
+
 export interface StudyReportRequest {
   /** 时间窗天数；省略即 7 天（服务端有默认，这里显式给一个便于界面回显）。 */
   days?: number
 }
+
+/* ------------------------------------------------------------------ *
+ * 账号（本机多个学生）——跨 IPC 的请求 / 回执类型
+ *
+ * ★★ 「账号」与「学生」是同一个东西的两个说法：库里一人一行、盘上一人一目录。
+ *   这里只做**跨 IPC 的投影与回执**，身份最终仍由主进程解析（渲染进程递不了别人）。
+ * ★ 基础形状取自生成物（`@shared/api-types`，pydantic → OpenAPI → TS）——
+ *   A1 新增的 PATCH/DELETE 两个契约还没生成到本机时，按它们的字段口径先手写，
+ *   生成物落地后换成 `components['schemas'][…]` 即可（注释就在那两处）。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 账号列表里的一行：**直接用生成的 `Student`**，不在这里手写第二份。
+ * ★ 手抄一份字段名的代价是「界面上某一列永远是空的」这种最难发现的静默错误。
+ */
+export type AccountSummary = components['schemas']['Student']
+
+/**
+ * `accounts:list` 的载荷。
+ * ★ 包一层对象而不是裸数组：以后要加「上一次用的是谁」这类字段时，
+ *   回执形状不用改（清单通道的回执一旦是数组，加字段就只能改形状或另开通道）。
+ */
+export interface AccountsListPayload {
+  students: AccountSummary[]
+}
+
+/**
+ * `accounts:create` 的入参（= 服务端的 `StudentCreateRequest`）。
+ * ★ 没有 studentId：账号 id 由服务端分配，前端指定不了（指定得了就能覆盖别人的目录）。
+ */
+export type AccountsCreateRequest = components['schemas']['StudentCreateRequest']
+
+/**
+ * `accounts:rename` 的入参（只发改动的字段，不动的字段不出现）。
+ *
+ * ⚠️ 对应的服务端契约（`StudentUpdateRequest`）还没走到生成物里，所以先按其字段口径
+ *   手写；`npm run gen:api` 跑过之后换成 `components['schemas']['StudentUpdateRequest']`。
+ */
+export interface AccountsRenameRequest {
+  /** 要改的账号 id（会被拼进请求路径，主进程先过白名单）。 */
+  studentId: string
+  /** 新昵称；不改就不发这个字段。 */
+  nickname?: string
+  /** 新学段；不改就不发这个字段。 */
+  gradeLevel?: GradeLevel
+}
+
+/** `accounts:delete` 的入参（只认账号 id，**绝不接受路径**）。 */
+export interface AccountsDeleteRequest {
+  studentId: string
+}
+
+/** `accounts:switch` 的入参（同上：只认账号 id）。 */
+export interface AccountsSwitchRequest {
+  studentId: string
+}
+
+/**
+ * 删号回执的载荷（服务端 `StudentDeleteResult` 的投影；生成物落地后换成它）。
+ * ★ `deleted: false` 不是失败：那个账号本来就不在了（界面照常刷新列表）。
+ */
+export interface AccountDeletePayload {
+  studentId: string
+  deleted: boolean
+}
+
+/** 账号五条通道的通用回执（与 `StudyCallResult` 同形：失败也给一句可读中文）。 */
+export type AccountsCallResult<T> = { ok: true; data: T } | { ok: false; message: string }
+
+export type AccountsListResult = AccountsCallResult<AccountsListPayload>
+export type AccountsStudentResult = AccountsCallResult<AccountSummary>
+export type AccountsDeleteResult = AccountsCallResult<AccountDeletePayload>
 
 /** 历史会话搜索的入参。 */
 export interface SessionSearchRequest {
@@ -1007,3 +1300,12 @@ export const KNOWLEDGE_LONG_TASK_TIMEOUT_MS = 180_000
 export interface KnowledgePointsRequest {
   gradeLevel?: GradeLevel
 }
+
+/* ------------------------------------------------------------------ *
+ * 练习页「动态出题」：跨 IPC 的载荷类型
+ *
+ * ★ 类型**定义**在 shared/quiz-generate.ts（渲染层组装、主进程校验，两边同一份），
+ *   这里只做转出 —— preload 与处理器都从本文件取类型，少一个 import 来源。
+ * ★ 载荷里没有 studentId / gradeLevel：身份与学段由主进程注入。
+ * ------------------------------------------------------------------ */
+export type { DecisionTrace, QuizGenerateRequest } from '@shared/quiz-generate'

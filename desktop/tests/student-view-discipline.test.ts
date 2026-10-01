@@ -216,7 +216,11 @@ const TERMS = [
  * ★ 每一条都必须回答同一个问题：**这个词会渲染到学生眼前吗？** 答不上来就不该豁免。
  */
 const TERM_EXEMPT_FILES = new Set([
-  // 教师专用的数据检视页（`PAGES.knowledge.nav === 'teacher'`，学生侧栏里进不去，守卫 ③ 钉着）
+  // 参考资料库：2026-09-30 起**学生可见**（`nav: true`），但这一页的技术面
+  // （`kb.sqlite` 路径、`kp_id`、嵌入状态、导入 / 重建）都收在 `showTechnical` 分档里，
+  // 学生面渲染不到 —— 所以这里的词表豁免仍然成立。
+  // ★ 判据始终是「**这个词会渲染到学生眼前吗**」，而不是「这一页学生能不能进」；
+  //   分档本身由下面那条测试钉着（三处关键技术面各断一次）。
   'views/Knowledge.vue',
   /**
    * ★★ 运行透视（2026-09-27 前叫「演示驾驶舱」）的技术口原文案。
@@ -300,16 +304,12 @@ const TERM_EXEMPT = [
       '⚠️ 本条豁免**必须**配「豁免必须名副其实」那条守卫：它钉住高级区真的存在、且这些词真的落在它里面。'
   },
   {
-    file: 'cards/coding.ts',
-    terms: ['kpId'],
+    file: 'study/plan-request.ts',
+    terms: ['kp_id'],
     why:
-      '这是**发给模型的 wire 文本**（`buildHintRequestMessage` 等）。给学生看的是 `hintRequestDisplayText()`／`runRequestDisplayText()`，' +
-      '二者分离由守卫 ⑥ 钉着；回看历史也过 `codingUserTextDisplay()`。'
-  },
-  {
-    file: 'cards/quiz.ts',
-    terms: ['kpId'],
-    why: '同上：`buildQuizSubmissionMessage` 是 wire 文本，展示走 `quizSubmissionDisplayText()`'
+      '这是**发给模型的 wire 文本**（buildPlanRequestMessage / buildQuizAskMessage 里逐字带 kp_id=，否则模型认不到知识点）；' +
+      '学生面走 planRequestDisplayText / quizAskDisplayText，回看历史走 planUserTextDisplay —— 三者分离由本文件 ⑥ 那组断言钉着' +
+      '（与 cards/coding.ts / cards/quiz.ts 同一性质）。'
   },
   {
     file: 'sandbox/iframe-host.ts',
@@ -439,11 +439,12 @@ test('★★ 豁免必须名副其实：被豁免的词要真的落在「只给�
     }
   }
 
-  // ④ 同理钉住「教材知识库」页的整体定位：它虽然整页都是技术面，但**导入 / 重建**
-  //    这两个真功能不能因为「反正教师才看」而被删掉（删了就是 D-040 那个坑：
-  //    做了却进不去的功能等于没做）。判据落在**按钮的点击处理器**上 ——
-  //    「文件里出现过 `rebuild`」会被 store 的引用喂饱（复审实测：把两个按钮整段删掉，
-  //    旧判据照样绿，因为 store 里还有 `knowledge.rebuild()`）。
+  // ④ 同理钉住「教材知识库」页的两个真功能：**导入 / 重建**不能因为「反正学生不看」
+  //    而被删掉（删了就是 D-040 那个坑：做了却进不去的功能等于没做）。
+  //    ★ 2026-09-30 起这两个按钮**只在教师档渲染**（`v-if="showTechnical"`），
+  //      但它们仍必须**真的接上** —— 判据落在**点击处理器**上：
+  //      「文件里出现过 `rebuild`」会被 store 的引用喂饱（复审实测：把两个按钮整段删掉，
+  //      旧判据照样绿，因为 store 里还有 `knowledge.rebuild()`）。
   const kb = stripComments(read('src', 'renderer', 'src', 'views', 'Knowledge.vue'))
   assert.match(
     kb,
@@ -590,18 +591,44 @@ test('★★ 默认视角必须是学生，且切换入口只在设置页', () =
  * ③ 教师专属页必须真的进不去（且切回来时能把人带走）
  * ================================================================== */
 
-test('★★ 参考资料库是教师专属页：侧栏判定走唯一谓词，且切回学生视角会把人带走', () => {
+test('★★ 参考资料库 2026-09-30 起学生可见：侧栏判定走唯一谓词，页面内技术面按档分技能', () => {
   const ui = read('src', 'renderer', 'src', 'stores', 'ui.ts')
   const sidebar = read('src', 'renderer', 'src', 'components', 'AppSidebar.vue')
   const app = read('src', 'renderer', 'src', 'App.vue')
+  const knowledgeView = read('src', 'renderer', 'src', 'views', 'Knowledge.vue')
 
   // ★ 判据必须是**这条页面项的 nav 字段本身**，而不是「文件里出现过 'teacher'」——
   //   后者在文件里任何一处出现都能喂饱它。
   const knowledgeBlock = ui.slice(ui.indexOf('  knowledge: {'), ui.indexOf('  knowledge: {') + 400)
   assert.match(
     knowledgeBlock,
-    /nav:\s*'teacher'/,
-    "参考资料库必须标成教师专属：`PAGES.knowledge.nav = 'teacher'`（学生侧栏里进不去）"
+    /nav:\s*true/,
+    '参考资料库自 2026-09-30 起学生可见：`PAGES.knowledge.nav = true`（用户裁决）'
+  )
+  // ★★ 换档之后**这一条比原来更重要**：页面里的技术内容必须真的分档 ——
+  //    否则「学生可见」就等于把 `kp_id`、嵌入状态、导入 / 重建摆到学生面前
+  //    （2026-09-20 走查发现的那个问题会原样回来）。
+  //    ① 分档收口在**一个**由档位派生的布尔量上（不是散落的 v-if 判据）。
+  assert.match(
+    knowledgeView,
+    /const showTechnical = computed\(\(\) => viewMode\.isTeacher\)/,
+    '页面必须有一个由档位派生的分档开关（showTechnical = viewMode.isTeacher）'
+  )
+  //    ② 三处在学生面**必须消失**（每处各断一次：少挡一处就是把不该看的放出来了）。
+  assert.match(
+    knowledgeView,
+    /v-if="showTechnical"[\s\S]{0,400}导入教材/,
+    '「导入教材」按钮必须只在教师档渲染（它是往里写东西的重活）'
+  )
+  assert.match(
+    knowledgeView,
+    /v-if="showTechnical"[\s\S]{0,40}prop="kpId"/,
+    '`kp_id` 列必须只在教师档渲染（内部标识对学生没有意义）'
+  )
+  assert.match(
+    knowledgeView,
+    /v-if="showTechnical"[\s\S]{0,40}prop="embedded"/,
+    '「向量（嵌入状态）」列必须只在教师档渲染（它是索引口径，不是教材内容）'
   )
   // ★ 2026-09-26：`nav` 扩成四态（true / 'teacher' / 'debug' / false）—— 之后各页按
   //   档位收口（「运行透视」是 `'teacher'`，学生档看不到）。断言按**前缀**匹配，
@@ -661,16 +688,18 @@ test('★★ 上面那些判据必须**真的按三态工作**（不是只看函
   assert.equal(visibleInSidebar(PAGES.chat, 'teacher'), true, '对话页在教师视角下也必须可见')
   assert.equal(visibleInSidebar(PAGES.chat, 'debug'), true, '对话页在演示档下同样可见')
 
-  // ② 教师专属页：**学生视角不可见、教师视角可见**（两侧都要断，少一侧就不算三态）
+  // ② 参考资料库：**2026-09-30 起三档都可见**（用户裁决「学生视角就可以查看」）——
+  //    它从前的落点是 `nav: 'teacher'`（学生档看不到），换档的理由与页面内的分档
+  //    断言见上一条测试；这里守的是**侧栏判定本身**。
   assert.equal(
     visibleInSidebar(PAGES.knowledge, 'student'),
-    false,
-    '学生视角下「参考资料库」**不许**进侧栏（它是数据检视页，含 kb.sqlite 路径与两个破坏性按钮）'
+    true,
+    '学生视角下「参考资料库」必须可见（用户裁决：学生要能查教材内容）'
   )
   assert.equal(
     visibleInSidebar(PAGES.knowledge, 'teacher'),
     true,
-    '教师视角下「参考资料库」必须可见（功能没被删，只是默认不给学生看）'
+    '教师视角下「参考资料库」照旧可见'
   )
 
   // ②' 技术证据页（2026-09-27 起 `nav: 'teacher'`）：**教师 / 答辩档及以上可达、学生档不可见**。
@@ -694,7 +723,11 @@ test('★★ 上面那些判据必须**真的按三态工作**（不是只看函
   )
 
   // ③ `isTeacherOnlyPage` 与它同源
-  assert.equal(isTeacherOnlyPage('knowledge'), true, 'knowledge 是教师专属页')
+  assert.equal(
+    isTeacherOnlyPage('knowledge'),
+    false,
+    'knowledge 自 2026-09-30 起**不是**教师专属页（学生可见）—— 换成 `nav: true` 之后它就失去了「切视角被带走」的资格'
+  )
   assert.equal(isTeacherOnlyPage('chat'), false, 'chat 不是教师专属页')
   assert.equal(isTeacherOnlyPage('dependency'), false, '学习地图不是教师专属页（学生会用它）')
   assert.equal(
@@ -707,7 +740,11 @@ test('★★ 上面那些判据必须**真的按三态工作**（不是只看函
     'teacher',
     '「运行透视」要求的最低档位是 teacher（App.vue 的迁移监听读它）'
   )
-  assert.equal(requiredViewFor('knowledge'), 'teacher', '知识库页要求的最低档位是 teacher')
+  assert.equal(
+    requiredViewFor('knowledge'),
+    null,
+    '参考资料库自 2026-09-30 起学生可见 ⇒ 没有最低档位要求（切视角不会把人带走）'
+  )
   assert.equal(requiredViewFor('chat'), null, '对话页对所有档位开放')
 
   // ④ 反面对照：**没有哪一页会在三档视角下都不可见** ——
@@ -897,6 +934,57 @@ test('★★ 发给模型的指令不得原样渲染成学生气泡', () => {
     store,
     /studentFacingMessages|studentFacingUserText/,
     '恢复历史时也要过一遍翻译（JSONL 里存的是 wire 原文，回看会重新印出来）'
+  )
+})
+
+/* ================================================================== *
+ * ⑥′ 学习计划按钮：wire 与显示文本同样必须分离（与 ⑥ 同一条纪律）
+ * ================================================================== */
+
+test('★★ 学习计划的两条 wire 与两句显示文本必须分离（⑥ 的口径扩到 study/plan-request.ts）', () => {
+  const plan = read('src', 'renderer', 'src', 'study', 'plan-request.ts')
+  const planCode = stripComments(plan)
+
+  // ① wire 必须保留写给模型的约束（不能为了「界面好看」把指令删薄）
+  assert.match(
+    planCode,
+    /3~5 个学习步骤|3~5个学习步骤/,
+    'buildPlanRequestMessage 仍必须把「3~5 个学习步骤」的结构要求交给模型'
+  )
+  assert.match(planCode, /贴合我的学段/, '还要保留「贴合我的学段」这条约束')
+  assert.match(planCode, /不要口头出题/, 'buildQuizAskMessage 仍必须写明「不要口头出题」')
+  assert.match(planCode, /不要在题面里直接给答案/, '还要保留「不要在题面里直接给答案」')
+
+  // ② 显示文本必须另有其人（只留 wire 会让那句内部指令落进学生气泡）
+  assert.match(
+    planCode,
+    /export function planRequestDisplayText\(/,
+    '必须有「给学生看的那句话」（学习计划）—— 否则学生气泡里就是那句内部指令'
+  )
+  assert.match(
+    planCode,
+    /export function quizAskDisplayText\(/,
+    '必须有「给学生看的那句话」（练习检验）'
+  )
+
+  // ③ 显示文本里不许带内部 kp_id / 工具名（与 coding 那组同一条判据）
+  for (const name of ['planRequestDisplayText', 'quizAskDisplayText']) {
+    const at = planCode.indexOf('export function ' + name + '(')
+    assert.ok(at > 0, name + ' 必须存在才能检查它的函数体')
+    // 精确切到函数体结束（下一个顶层 '\n}'），不要把后面的 wire 函数一起扫进来
+    const end = planCode.indexOf('\n}', at)
+    // ⚠️ 先剥注释：本仓注释刻意引用「不许带 kp_id」这类说明，不剥会把说明书当成泄露
+    const body = stripComments(planCode.slice(at, end > at ? end : at + 400))
+    assert.doesNotMatch(body, /kp_id|kpId/, name + ' 的学生话里不许出现内部知识点 id')
+    assert.doesNotMatch(body, /get_\w+/, name + ' 的学生话里不许出现工具名')
+  }
+
+  // ④ 回看历史必须过一遍翻译（JSONL 里存的是 wire 原文，回看会重新印出来）
+  const store = read('src', 'renderer', 'src', 'stores', 'chat.ts')
+  assert.match(
+    store,
+    /planUserTextDisplay/,
+    '恢复历史时也要过 planUserTextDisplay 翻译（与 coding / quiz 同一条分发链）'
   )
 })
 
@@ -1448,16 +1536,21 @@ test('★★ 章节在提示词里是**纯背景**，不给行动指引', () => 
 test('★★ 页面标题与分组：去课程色彩 + 三组（只改给人看的，内部 id 不动）', () => {
   const ui = read('src', 'renderer', 'src', 'stores', 'ui.ts')
 
-  // ① 标题：五处改名（D-064）
+  // ① 标题：历次改名（D-064；2026-09-30 用户裁决：闯关挑战 → 个性化学习）
   assert.match(ui, /title: '问问智团团'/, '对话页标题改成「问问智团团」')
-  assert.match(ui, /title: '闯关挑战'/, '闯关页标题改成「闯关挑战」')
+  assert.match(ui, /title: '个性化学习'/, '闯关页标题改成「个性化学习」（2026-09-30 改名，内部 id 仍是 quiz）')
   assert.match(ui, /title: '学习记录'/, '学习档案改成「学习记录」')
   assert.match(ui, /title: '参考资料库'/, '教材知识库改成「参考资料库」')
   assert.match(ui, /title: '知识图谱'/, '学习地图改成「知识图谱」')
   // 三个功能名本来就没有课程色，**不许**跟着乱改
-  for (const keep of ["title: '动画讲解'", "title: '编程环境'", "title: '设置'"]) {
+  // ⚠️ 「智码工坊」是唯一的例外：2026-09-29 从「编程环境」改过去的（理由见 ui.ts 的 PAGES.coding ——
+  //    这一页按教材章节分块、一关一关造东西，「环境」说的是开发工具，不对应那条动线）。
+  //    内部 id 仍然叫 `coding`，所以这条断言盯的只是**给人看的标题**。
+  for (const keep of ["title: '动画讲解'", "title: '智码工坊'", "title: '设置'"]) {
     assert.ok(ui.includes(keep), `${keep} 不该被改（它没有课程色彩）`)
   }
+  // 改名要改干净：旧名不许再留在页面清单里（两个名字都叫得通的话，侧栏与探针迟早对不上）
+  assert.ok(!ui.includes("title: '编程环境'"), '页面清单里还留着旧名「编程环境」')
   // 课程色彩词不许再出现在标题里
   for (const banned of ['对话课堂', '闯关练习', '学习档案', '教材知识库', '学习地图']) {
     assert.ok(!ui.includes(`title: '${banned}'`), `标题里还有课程色彩的旧名「${banned}」`)

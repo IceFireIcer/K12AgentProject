@@ -46,6 +46,7 @@ import {
   type QuizResultView
 } from '../cards/quiz'
 import { codingUserTextDisplay } from '../cards/coding'
+import { parsePlanRequest, planUserTextDisplay } from '../study/plan-request'
 import {
   applyChatEvent,
   emptyConversation,
@@ -212,6 +213,68 @@ export const useChatStore = defineStore('chat', () => {
     openingDismissed.value = true
   }
 
+  /* ------------------------------------------------------------ 学习计划（巩固条） */
+
+  /**
+   * ★★ **「学习计划」那一轮的认领与输出**（2026-09-30 用户裁决）。
+   *
+   * 裁决内容：学习地图 / 依赖图两处「开始学习」从「只预填一句话」改成**跳页 + 直发**
+   * （那两个入口的意图就是「现在讲这一个」，见两个 goLearn 的注释），讲完之后在消息列表
+   * 末尾**常驻**一条「去闯关练一练 / 现在考考我」。
+   *
+   * ★ 为什么 kpId 只能从**这一轮**带出来：巩固条的两条路都要它（一条切闯关页的关卡、
+   *   一条发练习请求），而「刚才讲的是哪个知识点」只写在那一轮发给模型的那段文本里 ——
+   *   让界面去别处反查（D-074 之前推荐那条路就是这样）会两处不同源，按钮点下去落空。
+   * ★ 为什么 `planReady` 只在终态 `done` 置真：回答还在逐字生成、或这一轮中途报错时
+   *   挂出按钮，等于请学生去练一个还没讲的东西 —— 时机会错，比按钮迟到更糟。
+   * ★ 认领只发生在 {@link send} 里，判据是**真正发给模型的那段**（不是显示文本）：
+   *   显示文本是「我想学「循环结构」…」，里面没有内部编号，认不出来。
+   *   `ChatSendRequest` 依旧只有 `text` 一个字段（守卫 G6c）——
+   *   这一整块状态都是**渲染进程本地**的，不过 IPC。
+   */
+  const planKpId = ref('')
+  const planKpName = ref('')
+  const planReady = ref(false)
+  /** 被认领的那一轮的 requestId（`''` = 没有在等的计划轮）。 */
+  let planRequestId = ''
+
+  /**
+   * 清掉计划会话。
+   *
+   * ★ 与 `openingDismissed` **同址**（三处：冷启动/切换对齐、切会话、清空对话）：
+   *   两者都是「属于这一段对话」的临时状态 —— 换一段对话后还挂着上一个知识点的
+   *   巩固条，学生会以为现在讲的还是那一个。
+   */
+  function clearPlanSession(): void {
+    planKpId.value = ''
+    planKpName.value = ''
+    planReady.value = false
+    planRequestId = ''
+  }
+
+  /**
+   * 核对被认领那一轮的终态（每次事件折叠后调一次）。
+   *
+   * ★ 为什么不 `watch`：调用点本来就在事件回调里、且状态刚折完；多一层 watch
+   *   只会多一次调度，还会与滚动跟随的时序错开。
+   */
+  function settlePlanTurn(): void {
+    if (planRequestId === '') return
+    const turn = conversation.value.turns.find((item) => item.requestId === planRequestId)
+    if (turn === undefined || turn.status === 'streaming') return
+    planRequestId = ''
+    // `done` = 计划真的讲完了 → 挂出巩固条。
+    if (turn.status === 'done') {
+      planReady.value = true
+      return
+    }
+    // 其余终态（`error` / `blocked`）一律清掉：`blocked` 的正文已经被撤回，
+    // 底下再留一条「去练一练」是在邀请学生练一个刚被收回的计划。
+    planKpId.value = ''
+    planKpName.value = ''
+    planReady.value = false
+  }
+
   const turns = computed(() => conversation.value.turns)
   const streaming = computed(() => turns.value.some((turn) => turn.status === 'streaming'))
 
@@ -366,6 +429,10 @@ export const useChatStore = defineStore('chat', () => {
     unsubscribe = subscribeToChatEvents(window.api, (event) => {
       const wasStreaming = streaming.value
       conversation.value = applyChatEvent(conversation.value, event)
+      // ★ 被认领的计划轮可能在这一条事件上到了终态 —— 终态决定消息列表末尾那条常驻
+      //   巩固条出不出来（见 planKpId 的说明）。放在下面「自动补发排队」之前：
+      //   补发的那一句若是新的一份计划请求，它自己的认领会覆盖这里的结果。
+      settlePlanTurn()
 
       // ★★ 一轮结束 → 把排队的那条发出去（见 queuedText 的说明）。
       //
@@ -490,6 +557,7 @@ export const useChatStore = defineStore('chat', () => {
       openingKpId.value = result.openingKpId
       openingKpName.value = result.openingKpName
       openingDismissed.value = false
+      clearPlanSession()
     } catch {
       /* 拉取失败不影响推送路径（学生仍能正常开新对话） */
     }
@@ -677,6 +745,7 @@ export const useChatStore = defineStore('chat', () => {
     openingKpId.value = result.openingKpId
     openingKpName.value = result.openingKpName
     openingDismissed.value = false
+    clearPlanSession()
     // ★ 清掉超前缓冲：那些条目 id 属于**上一条会话** —— 留着它们会在新会话里
     //   命中同一个 requestId（理论上不会，但那是一个不该存在的巧合依赖）。
     pendingTurnEntries.clear()
@@ -711,6 +780,7 @@ export const useChatStore = defineStore('chat', () => {
     openingKpId.value = ''
     openingKpName.value = ''
     openingDismissed.value = false
+    clearPlanSession()
     // ★ 清掉「显示 → wire」映射（与 `applySwitchResult` 同一条纪律：它是本地翻译表，
     //   属于这段对话；留着会让同一句显示文本被翻译成上一段对话的 wire 文本）。
     wireTextByDisplay.clear()
@@ -1009,7 +1079,12 @@ export const useChatStore = defineStore('chat', () => {
    */
   function studentFacingUserText(text: string): string {
     const coding = codingUserTextDisplay(text)
-    return coding === text ? quizUserTextDisplay(text) : coding
+    if (coding !== text) return coding
+    const quiz = quizUserTextDisplay(text)
+    if (quiz !== text) return quiz
+    // ★ 计划请求（含「现在考考我」那条）与两个卡片模块走同一条分发链：三者都只认自己的
+    //   前缀，认不出一律原样返回 —— 绝不改写学生自己打的字。
+    return planUserTextDisplay(text)
   }
 
   function studentFacingMessages<T extends { role: 'user' | 'assistant'; text: string }>(
@@ -1108,6 +1183,19 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
+    // ★★ 认领「学习计划 / 练习检验」轮（见 planKpId 的说明）：判据是**真正发给模型的那段**
+    //    （不是显示文本 —— 学生气泡里那句「我想学「循环结构」…」没有内部编号）。
+    //    ⚠️ 位置必须在忙时排队之后：排队那条这一轮不发，等它被自动补发时再认领；
+    //    补发只带一个参数，wire 文本由 `wireTextFor` 从本地映射表取回，所以判据落在
+    //    `outgoing` 上不会漏。
+    const planClaim = parsePlanRequest(outgoing)
+    if (planClaim !== null) {
+      planKpId.value = planClaim.kpId
+      planKpName.value = planClaim.kpName
+      // 新的一份计划还没讲完 —— 巩固条先收起来，讲完了才挂（见 settlePlanTurn）。
+      planReady.value = false
+    }
+
     // ★ 这一轮用的学段由**服务端**决定（自动判定 / 学生已手动选定的那把值）：
     //   这里只是把「当前生效的学段」记在轮次上，供界面标注；轮次标注**不是**学段的写入路径。
     const gradeAtSend = currentGrade.value
@@ -1124,6 +1212,13 @@ export const useChatStore = defineStore('chat', () => {
         return
       }
       conversation.value = startTurn(conversation.value, result.requestId, text, gradeAtSend)
+      // ★ 认领的计划轮到这里才拿到 requestId —— 记下它，终态（done / error）才有人认。
+      //   建轮时 `startTurn` 会回放已经超前到达的事件，所以建完立刻核对一次：
+      //   这一轮完全可能在回执回来之前就已经讲完了。
+      if (planClaim !== null) {
+        planRequestId = result.requestId
+        settlePlanTurn()
+      }
       // ★ 补上可能超前到达的条目 id（见 `pendingTurnEntries`）
       const buffered = pendingTurnEntries.get(result.requestId)
       if (buffered) {
@@ -1188,6 +1283,11 @@ export const useChatStore = defineStore('chat', () => {
    *
    * ★ 这里**不改视图**：切视图是 `stores/ui.ts` 的事，调用方（错题本分页）
    *   两件事一起做。本函数只管草稿，这样它就不依赖 UI 状态（更好测、更少耦合）。
+   *
+   * ★★ 2026-09-30 用户裁决：学习地图 / 依赖图两处「开始学习」**改成直发**（见 `send()`
+   *   与两个 goLearn），因为那两个入口要的就是「现在讲这一个」，预填还要学生再按一次；
+   *   **错题本的「去练一练」仍保持预填** —— 那不是同一件事：从错题本来的时候学生还没想好
+   *   要练哪一题，让他先看见那句话、再补一句「我想练简单的」仍然是对的。
    */
   function prepareQuestion(text: string): void {
     draft.value = text
@@ -1270,6 +1370,13 @@ export const useChatStore = defineStore('chat', () => {
     /** 重新读一次当前章节（学段变化后由 store 自己调；不抛异常）。 */
     refreshChapter,
     send,
+    /* ── 学习计划的巩固条（2026-09-30 裁决那两个「开始学习」入口）────────── */
+    /** 刚才讲的那个知识点（巩固条的两条路都要它；空串 = 没有可练的目标）。 */
+    planKpId,
+    /** 那个知识点的中文名（空串 = 名字取不到，按钮文案走通用句）。 */
+    planKpName,
+    /** 计划讲完了没有（只有终态 `done` 才置真；见 {@link planKpId} 的说明）。 */
+    planReady,
     /* ── 演示沙箱（本机脚本轮次；见 stores/demoSeed.ts）────────────────── */
     /** ★ 开一轮脚本轮次（学生那条 + 助手气泡；三种 id 恒空，不能当分叉点）。 */
     beginScriptedTurn,

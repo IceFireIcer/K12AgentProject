@@ -79,6 +79,7 @@ import { GRADE_LABELS, GRADE_UNKNOWN_LABEL, chapterLineLabel, gradeOriginLabel }
 import { useChatStore } from '../stores/chat'
 import { useDemoSeedStore } from '../stores/demoSeed'
 import { useKnowledgeStore } from '../stores/knowledge'
+import { useProfileCardStore } from '../stores/profileCard'
 import { useSettingsStore } from '../stores/settings'
 import { useSidecarStore } from '../stores/sidecar'
 import { useStudyStore } from '../stores/study'
@@ -108,6 +109,8 @@ const demoSeed = useDemoSeedStore()
 const chat = useChatStore()
 const study = useStudyStore()
 const knowledge = useKnowledgeStore()
+/** 家长同意 / 记忆开关的当前值（后端给；设置页只回显与提交）。 */
+const profileCard = useProfileCardStore()
 const sidecar = useSidecarStore()
 const theme = useThemeStore()
 /** 学生 / 教师视角（见文件头：这是**防误入**，不是权限）。 */
@@ -254,6 +257,38 @@ async function chooseGrade(level: GradeLevel): Promise<void> {
   }
 }
 
+/**
+ * 家长同意 / 记忆开关（票 25 的裁决 B：默认同意，家长可在设置页关）。
+ *
+ * ★ 写入口只有一条：`stores/profileCard.ts` 的 `setFlags` —— 它**等后端回执才改界面**。
+ *   开关是很典型的那种「乐观更新看起来更顺」的地方，而一旦失败，界面会显示
+ *   「已经关了」而库里还开着（于是标签照写）。那种谎言比慢半秒严重得多。
+ * ★ 两个开关各自提交需要的那个字段，不把另一个的当前值一起发过去：
+ *   「一次只改一件事」让失败的影响面永远是一格。
+ */
+const consentBusy = ref(false)
+const consentNotice = ref<string | null>(null)
+
+async function flipFlags(flags: { parentConsent?: boolean; memorySwitch?: boolean }): Promise<void> {
+  if (consentBusy.value) return
+  consentBusy.value = true
+  consentNotice.value = null
+  try {
+    const failure = await profileCard.setFlags(flags)
+    if (failure !== null) consentNotice.value = failure
+  } finally {
+    consentBusy.value = false
+  }
+}
+
+function toggleMemory(): void {
+  void flipFlags({ memorySwitch: !profileCard.memorySwitch })
+}
+
+function toggleConsent(): void {
+  void flipFlags({ parentConsent: !profileCard.parentConsent })
+}
+
 /* ------------------------------------------------------------ 教材章节 */
 
 /**
@@ -324,6 +359,9 @@ onMounted(() => {
   if (settings.snapshot === null && !settings.loading) void settings.load()
   void settings.loadCatalog()
   void knowledge.loadStats()
+  // ★ 两道闸的当前值：直达设置页（没经过对话页）时也要能回显，所以这里自己读一次。
+  //   读失败只是这两格显示不出当前值，不影响本页别的任何一节（见 store 的降级口径）。
+  void profileCard.load().catch(() => {})
   // 章节清单与对话页指示器共用同一条取数路径（学段缺失时它只给一句提示，不发请求）
   void study.loadChapters(chat.currentGrade)
   bindSectionSpy()
@@ -639,7 +677,7 @@ onBeforeUnmount(() => {
              ⚠️ 四档受 `v-show` 控制，**不是** `v-if`：见 `gradePickerOpen` 的说明。
              ⚠️ 失败 / 回执那三行放在收起区**外面**：收起来时出错也要看得见
                （静默失败会让学生以为「保存过了」）。 -->
-        <SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">
+        <SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block" shine>
           <header class="card__head">
             <GraduationCap :size="15" />
             <h2 class="card__title">学段</h2>
@@ -1303,6 +1341,61 @@ onBeforeUnmount(() => {
             <el-descriptions-item label="代码执行">渲染进程 Worker 隔离</el-descriptions-item>
           </el-descriptions>
 
+          <!-- ── 家长同意与记忆开关（票 25/27 的裁决 B：**默认同意**，家长可在设置页关）
+               ★ 这两道闸的语义**完全不同**，所以文案里绝不许混着说：
+                 · 「少记一点」= 不写标签（关掉之后画像不再长，已有的仍然在）；
+                 · 「不用画像」= 不外发（画像一个字节都不进提示词，问答照常）。
+               ★ 文案如实说清「关掉之后会发生什么」，既不恐吓也不敷衍 ——
+                 一个 10 岁学生把「关掉＝整个软件不能用了」当真，会直接不敢碰这两个开关。
+               ★ 失败**不撒谎**：等后端回执才改界面（见 stores/profileCard.ts）。 -->
+          <div class="field" data-testid="settings-consent-block">
+            <p class="field__label">家长同意与记忆</p>
+            <p class="hint">
+              这两项由老师或家长决定。默认为开，随时可以关；关掉之后立刻生效，不用重启。
+            </p>
+            <button
+              type="button"
+              class="switch"
+              role="switch"
+              data-testid="settings-memory-switch"
+              :aria-checked="profileCard.memorySwitch"
+              :data-on="String(profileCard.memorySwitch)"
+              :disabled="consentBusy"
+              @click="toggleMemory()"
+            >
+              <span class="switch__track" aria-hidden="true"><span class="switch__knob" /></span>
+              <span class="switch__text">
+                <span class="switch__title">让智团团记住这些</span>
+                <span class="switch__desc">
+                  开着的时候，我会把你的偏好与学习情况记下来，下次少问一遍。
+                  关掉之后不再记新的，已经记下的仍然留在本机，你可以在右边的「我记住了什么」里逐条看。
+                </span>
+              </span>
+            </button>
+            <button
+              type="button"
+              class="switch"
+              role="switch"
+              data-testid="settings-consent-switch"
+              :aria-checked="profileCard.parentConsent"
+              :data-on="String(profileCard.parentConsent)"
+              :disabled="consentBusy"
+              @click="toggleConsent()"
+            >
+              <span class="switch__track" aria-hidden="true"><span class="switch__knob" /></span>
+              <span class="switch__text">
+                <span class="switch__title">把画像用在回答里</span>
+                <span class="switch__desc">
+                  开着的时候，我回答时会参考上面这些记录。关掉之后一条都不再参考，
+                  问答照常用。两份记录都只存在这台电脑上。
+                </span>
+              </span>
+            </button>
+            <p v-if="consentNotice" class="warn" data-testid="settings-consent-notice">
+              {{ consentNotice }}
+            </p>
+          </div>
+
           <ul class="rules">
             <li><Server :size="14" /><span>Python 服务只绑<strong>本机回环地址</strong>，端口由系统分配，启动时握手告知。</span></li>
             <li><HardDrive :size="14" /><span>对话正文不进 SQLite；一人一库，不跨学生复用连接。</span></li>
@@ -1574,6 +1667,76 @@ onBeforeUnmount(() => {
 }
 .save-state[data-phase='clean'] {
   color: var(--k12-good);
+}
+
+/* ── 家长同意 / 记忆开关 ────────────────────────────────────────────────
+ * 两个开关都是**开关**（`role="switch"` + `aria-checked`），不是复选框：
+ *   它们立刻生效、没有「保存」这一步，语义上更接近一个开关。
+ * ★ 触控目标 44px（比别处 28px 下限高）：家长多半在手机上远程指导，按不准代价大。
+ * ★ 状态不只靠颜色（开=accent 底、关=border-strong 底），还有滑块位置与 aria-checked。
+ * ⚠️ 不用 Element Plus 的 el-switch：全站没有别处用它 —— 引进来会多一整套外观，
+ *    而这个开关只需要「一眼看得出开还是关」。 */
+.switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.switch:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.switch__track {
+  flex: none;
+  width: 34px;
+  height: 20px;
+  margin-top: 2px;
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-border-strong);
+  position: relative;
+  transition: background 120ms ease;
+}
+.switch[data-on='true'] .switch__track {
+  background: var(--k12-accent);
+}
+.switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--k12-surface);
+  transition: transform 120ms ease;
+}
+.switch[data-on='true'] .switch__knob {
+  transform: translateX(14px);
+}
+.switch__text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.switch__title {
+  font-size: var(--k12-fs-body-sm);
+  font-weight: 600;
+  color: var(--k12-fg);
+}
+.switch__desc {
+  font-size: var(--k12-fs-caption);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-muted);
 }
 
 /* ── 表单：单列 ─────────────────────────────────────────────────────────── */

@@ -216,10 +216,20 @@ export type TurnSubmitter = (
 /** 当前学段读取出口（默认走 `apiFetch`）。 */
 export type GradeStateFetcher = (studentId: string) => Promise<GradeStateSnapshot>
 
-/** 第二层判定通道：给一段对话上下文，返回一个提议（`null` = 这条通道不可用）。 */
+/**
+ * 第二层判定通道：给一段对话上下文 + 一张画像摘要，返回一个提议（`null` = 这条通道不可用）。
+ *
+ * ★★ `persona`（票 26 / D-073 的老问题）：「高中生提问也很朴素、判不出来」。
+ *   判定提示词里原先只有 5–8 句问句，模型只能按「看起来深不深」猜；补上**学生自己说的学段档位**
+ *   与系统观察到的风格/卡点之后，判定手里才真的有一条身份侧证据。
+ *   文本由 `prompts/profile-block.ts` 的 `buildJudgePersona()` 生成（白名单投影，
+ *   只含判学段用得上的那几项），**不在这里拼** —— 两份拼法必然漂移。
+ *   `undefined` / 空串 = 没有可用标签，判定按老口径照常进行（不多说一句、不编一段）。
+ */
 export type Layer2Judge = (input: {
   turns: Array<{ turn: number; text: string }>
   currentGrade: GradeLevel
+  persona?: string
 }) => Promise<GradeProposal | null>
 
 export type Layer2Status =
@@ -231,6 +241,63 @@ export type Layer2Status =
   | 'insufficient_evidence'
   | 'already_proposed'
   | 'used'
+
+/* ------------------------------------------------------------------ *
+ * 引导模式（票 25 的 B 侧产物）在本扩展里的唯一消费面
+ * ------------------------------------------------------------------ */
+
+/**
+ * ★★ 引导（对话式五问）模式的**唯一消费面** —— 契约 §4 的冻结签名在这里照抄一遍。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么是**注入**而不是 `import '../onboarding/index.ts'`
+ * ---------------------------------------------------------------------------
+ * 引导模块由 B 独立落盘（写域不相交）。静态 import 一份**还不存在**的模块会让
+ * 整个 `grade.ts`（连同 6 份既有学段测试）在 B 落地之前全部导入失败 ——
+ * 那是拿「已经跑绿的东西」去赌另一条写域的进度。注入则把接线变成**一行显式动作**：
+ *   · 没接线 = 引导模式不生效（干净的降级，常规学段模板照常工作）；
+ *   · 接上线 = `systemPromptFor()` 整份换成引导版（§1.3）。
+ * 契约里的三个函数一个都没改签名，只是它们**从哪来**由接线方决定。
+ *
+ * ★ `promptParams()` 是契约之外**多要的一个成员**：`buildOnboardingSystemPrompt`
+ *   需要 `askedCount` / `displayName` 两项状态，而它们住在 B 的引导服务里
+ *   （C 侧不持有第二份引导状态 —— 那会是第二处真相）。没有它就**不进引导模式**，
+ *   而不是拿一个猜出来的 0 / 空名字去拼一份假的引导 prompt。
+ */
+export interface OnboardingPromptPort {
+  /** 现在是不是引导期（B 的 `isOnboardingActive()`）。 */
+  isOnboardingActive(): boolean
+  /** 引导模式的整份 system prompt（B 的 `buildOnboardingSystemPrompt()`）。 */
+  buildOnboardingSystemPrompt(params: { askedCount: number; displayName: string }): string
+  /**
+   * 引导期**关掉了哪三块**（B 的 `onboardingGuardNotes()`）。
+   *
+   * ⚠️ 这些字符串是**给人看的**（日志 / 诊断），B 的文件头写明「不给模型看」——
+   *   所以 C 只用它记一行「引导模式生效、关掉了什么」，**绝不拼进 prompt**。
+   */
+  onboardingGuardNotes(): readonly string[]
+  /** 拼引导 prompt 需要的两项状态（B 的 `onboardingService.snapshot()` 里就有）。 */
+  promptParams(): { askedCount: number; displayName: string }
+}
+
+/**
+ * 读引导期「关掉了哪三块」（B 给的说明）。
+ *
+ * ★ 这些字符串**只进日志与诊断**：B 的文件头写明「给人看不给模型看」。
+ *   把它们拼进 prompt 会让模型读到一堆内部段落名 —— 既是预算浪费，也是实现泄漏。
+ *   C 侧的用法就一句：引导模式第一次生效时记一行，让「为什么这轮没有工具」可查。
+ * ★ **绝不抛**：端口来自别的模块，收尾日志取不到不该影响本轮 prompt。
+ */
+function readOnboardingGuardNotes(port: OnboardingPromptPort): string[] {
+  try {
+    const notes = port.onboardingGuardNotes()
+    return Array.isArray(notes)
+      ? notes.filter((note): note is string => typeof note === 'string' && note.trim().length > 0)
+      : []
+  } catch {
+    return []
+  }
+}
 
 export interface GradeExtensionStats {
   /** 本会话已观察到的轮数（`input` 事件计数）。 */
@@ -260,6 +327,8 @@ export interface GradeExtensionOptions {
   submitter?: TurnSubmitter
   fetcher?: GradeStateFetcher
   judge?: Layer2Judge | null
+  /** 引导模式端口（默认不接线 = 非引导；见 {@link OnboardingPromptPort}）。 */
+  onboarding?: OnboardingPromptPort | null
   /** 学生身份来源（默认 `currentAgentSession`；测试可注入）。 */
   sessionProvider?: () => { studentId: string; sessionId: string; gradeLevel: GradeLevel } | null
   log?: (line: string, level?: 'info' | 'warn') => void
@@ -288,6 +357,16 @@ export interface GradeExtension {
   appliedGrade(): GradeLevel
   /** 接线第二层判定通道（`runtime.ts` 建会话后调用；不接线 = 干净降级）。 */
   useJudge(judge: Layer2Judge | null): void
+  /**
+   * ★★ 接线**引导模式**（契约 §4；`runtime.ts` 建会话后调用）。
+   * 不接线 = 引导模式不生效（常规学段模板照常工作）—— 与 `useJudge` 同一条降级纪律。
+   */
+  useOnboarding(port: OnboardingPromptPort | null): void
+  /**
+   * 现在是不是引导期。`runtime.ts` 据此**跳过画像块与每轮微调段的注入**（§1.3：
+   * 引导期画像还是空的，注入了反而误导）。
+   */
+  isOnboarding(): boolean
   /**
    * ★ 采纳学生的手动选择（服务端已写库之后调用）。
    *
@@ -386,14 +465,20 @@ export function isDegradedLayer2(status: Layer2Status): boolean {
  *   ② 学生自述年级算证据（旧版那句「不要猜测他的身份」会把它一起挡掉）。
  *   ⚠️ 门槛本身**没有**拿掉：证据不足时仍要求它保持当前学段 ——
  *   「初中 → 高中」是一次真实的讲法切换，乱跳比不动更伤。
+ *
+ * ★★ 2026-09-28（票 26）：多接一个 `persona`，**追加在最末尾**。
+ *   画像摘要（`prompts/profile-block.ts` 的 `buildJudgePersona()`）由接线方
+ *   （`runtime.ts`）在调用前取一次 —— 本函数**不发 HTTP、不读任何存储**，
+ *   它只是把一段文本放到该放的位置（这样它仍然是一个可单测的纯函数）。
  */
 export function buildJudgePrompt(
   turns: Array<{ turn: number; text: string }>,
-  currentGrade: GradeLevel
+  currentGrade: GradeLevel,
+  persona?: string
 ): string {
   const recent = turns.slice(-LAYER2_WINDOW_TURNS)
   const lines = recent.map((turn) => `${turn.turn}. ${turn.text}`)
-  return [
+  const base = [
     '你是 K12 场景下的学段分级助手。下面是一名学生最近的提问（按时间先后）。',
     `系统当前按「${currentGrade}」跟他对话。`,
     '请判断他更像哪个学段的学生。四个取值：primary_low（小学低年级）/ primary_high（小学高年级）/ junior（初中）/ senior（高中）。',
@@ -418,6 +503,21 @@ export function buildJudgePrompt(
     '  · 0.75 以上 —— 有明确的高中 / 初中课程范围证据（或学生自述年级且与内容一致）；',
     '  · 0.6 ~ 0.75 —— 倾向如此，但还能解释成别的学段；',
     '  · 0.6 以下 —— 拿不准（系统会保持现状，不会改）。'
+  ].join('\n')
+  /*
+   * ★★ 画像摘要**追加在最末尾**（票 26）：它是判定时最后读到的一条证据；
+   * 而「只输出一行 JSON」的输出契约由这段自己的收尾句**重申** —— 不能因为多了一段
+   * 就让模型忘了输出格式（parseProposal 虽然宽松读，但格式跑偏会白丢一次判定）。
+   */
+  const extra = typeof persona === 'string' ? persona.trim() : ''
+  if (extra.length === 0) return base
+  return [
+    base,
+    '',
+    extra,
+    '（上面这段画像只是**一条**参考证据：学生自述的学段档位比推断可信；与他这次问的内容矛盾时以内容为准。）',
+    '仍然只输出一行 JSON，不要解释、不要代码块：',
+    '{"suggestedGrade": "primary_low|primary_high|junior|senior", "confidence": 0.0, "note": "一句话理由"}'
   ].join('\n')
 }
 
@@ -673,6 +773,12 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
   const sessionProvider = options.sessionProvider ?? currentAgentSession
 
   let judge: Layer2Judge | null = options.judge ?? null
+  /** ★ 引导模式端口（`null` = 没接线 = 非引导；见 {@link OnboardingPromptPort}）。 */
+  let onboarding: OnboardingPromptPort | null = options.onboarding ?? null
+  /** 引导状态读取失败只记一次日志（每轮都记会刷屏，而它每轮都会被问一次）。 */
+  let warnedOnboardingError = false
+  /** 引导模式的「关掉了哪三块」只记一次日志（每轮都记会刷屏）。 */
+  let loggedOnboardingSections = false
 
   /** 本轮生效的学段（`before_agent_start` 用）。 */
   let appliedGrade: GradeLevel = DEFAULT_GRADE_LEVEL
@@ -1122,8 +1228,73 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     }
   }
 
+  /**
+   * 现在是不是引导期（**绝不抛**：端口来自别的模块，它抛不能连带把 prompt 组装打崩）。
+   *
+   * ★ 失败一律**按非引导处理**：引导 prompt 拼不出来时，用一份正常的学段模板作答，
+   *   比把学生扔进一个空 prompt 强得多（首轮可用的底线）。
+   */
+  const onboardingActive = (): boolean => {
+    const port = onboarding
+    if (!port) return false
+    try {
+      return port.isOnboardingActive() === true
+    } catch (error) {
+      if (!warnedOnboardingError) {
+        warnedOnboardingError = true
+        log(
+          '[grade] 引导状态读取失败（本轮按常规模式处理）：' +
+            (error instanceof Error ? error.message : String(error)),
+          'warn'
+        )
+      }
+      return false
+    }
+  }
+
   /** 本轮 system prompt（**同步纯逻辑**，`runtime.ts` 的 `before_agent_start` 调它）。 */
   const currentSystemPrompt = (incoming: string | undefined): string => {
+    /**
+     * ★★ 引导模式（票 25 §1.3）：**整份**换成引导版 ——
+     *   学段权威段（学段还没问出来，此时宣布「按初中讲」是假的）、工具、画像块
+     *   在这一支里**全部不出现**（权威段是「追加」上去的，所以这里 return 得越早越好；
+     *   画像块由 runtime 侧跳过，见 `isOnboarding()`）。
+     *
+     * ⚠️ 降级方向是有意的：B 的引导 prompt 拼不出来（服务没就绪 / 抛异常 / 空串）时
+     *   退回**常规学段模板** —— 引导学生那几句话的实现属于 B，C 侧不该自己编一份
+     *   （那是第二份真相），但「至少给出一份能用的 prompt」是首轮的底线。
+     */
+    if (onboardingActive()) {
+      const port = onboarding
+      if (port) {
+        try {
+          const params = port.promptParams()
+          const askedCount = Math.max(0, Math.trunc(Number(params?.askedCount) || 0))
+          const displayName = typeof params?.displayName === 'string' ? params.displayName.trim() : ''
+          const built = port.buildOnboardingSystemPrompt({ askedCount, displayName })
+          if (typeof built === 'string' && built.trim() !== '') {
+            // ★ 引导模式第一次生效时留一行「关掉了哪三块」——它是**给日志/排查看的**
+            //   （B 的 onboardingGuardNotes() 明文写「给人看不给模型看」），所以绝不拼进 prompt。
+            if (!loggedOnboardingSections) {
+              loggedOnboardingSections = true
+              const notes = readOnboardingGuardNotes(port)
+              if (notes.length > 0) log('[grade] 引导模式生效：' + notes.join('；'))
+            }
+            return built
+          }
+          log('[grade] 引导 prompt 为空，本轮退回常规学段模板（引导服务可能还没就绪）', 'warn')
+        } catch (error) {
+          log(
+            '[grade] 引导 prompt 组装失败，本轮退回常规学段模板：' +
+              (error instanceof Error ? error.message : String(error)),
+            'warn'
+          )
+        }
+      } else if (!warnedOnboardingError) {
+        warnedOnboardingError = true
+        log('[grade] 引导状态为真但端口未接线（runtime 未调用 useOnboarding）——本轮按常规模式', 'warn')
+      }
+    }
     try {
       return buildGradeSystemPrompt({
         incoming,
@@ -1188,6 +1359,19 @@ export function createGradeExtension(options: GradeExtensionOptions = {}): Grade
     judge = next
     warnedNoJudge = false
   }
+  /**
+   * ★★ 接线引导模式（契约 §4）。
+   *
+   * ★ 退出前的冲洗**不在这里**：`onboardingService.dispose()` 由 `runtime.dispose()` 直接调
+   *   （B 的文件头点名了这个位置：紧随 `gradeExtension.flush()`，两者都是 /api 调用方）。
+   *   本扩展只拥有「prompt 怎么切」这一件事 —— 少一个跨模块的生命周期接口，少一处能漏。
+   */
+  extension.useOnboarding = (port: OnboardingPromptPort | null): void => {
+    onboarding = port
+    warnedOnboardingError = false
+    loggedOnboardingSections = false
+  }
+  extension.isOnboarding = onboardingActive
   extension.adoptOverride = adoptOverride
   extension.snapshot = snapshot
   extension.reset = reset

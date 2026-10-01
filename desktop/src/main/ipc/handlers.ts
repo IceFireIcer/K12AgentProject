@@ -19,7 +19,7 @@
  */
 
 import { app, BrowserWindow, dialog, ipcMain, type WebContents } from 'electron'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { apiFetch } from '../bridge/client.ts'
@@ -27,7 +27,7 @@ import { describeRuntimeFailure } from '../agent/events.ts'
 import { gradeStatePath } from '../agent/extensions/grade.ts'
 import { bindCodeRunner, createRendererCodeRunner } from '../agent/extensions/coding.ts'
 import { builtinCatalog } from '../agent/pi-bootstrap.ts'
-import { assertStudentId, isInside, resolveStudentPiPaths } from '../agent/pi-paths.ts'
+import { STUDENT_ID_PATTERN, assertStudentId, isInside, resolveStudentPiPaths } from '../agent/pi-paths.ts'
 import { DiagnosticsStore, DIAGNOSTICS_FILE_NAME } from '../agent/diagnostics.ts'
 import { emptyDiagnosticsSnapshot, type DiagnosticsSnapshot } from '@shared/diagnostics'
 // ── 演示沙箱（预置数据）─────────────────────────────────────────────────
@@ -78,6 +78,7 @@ import {
   type GradeCallResult,
   type GradeSetResult,
   type GradeState,
+  type OnboardingStatePayload,
   type ProbeRequest,
   type ProbeResult,
   type ProviderCatalogEntry,
@@ -106,6 +107,7 @@ import {
   readStudyGradeLevel,
   studyChaptersPath,
   studyGraphPath,
+  studyHistoryPath,
   studyMistakesPath,
   studyReportPath
 } from '../study/client.ts'
@@ -142,7 +144,8 @@ import {
 //   两处各写一份的话规则会悄悄分叉（见那个文件的注释）。这里直接 import 共用。
 import { mergeModelCandidates } from '@shared/provider-catalog'
 import { parseChatSendRequest } from './chat-request.ts'
-import { createTraceProjector, registerDataHandlers, sendTraceTo } from './handlers-data.ts'
+import { createTraceProjector, registerDataHandlers, registerOnboardingHandlers, sendTraceTo } from './handlers-data.ts'
+import { createLlmSummarizer } from '../agent/onboarding/index.ts'
 import { ChatStreamRegistry, type StreamTarget, type TurnHandle } from './chat-stream.ts'
 
 const chatStreams = new ChatStreamRegistry()
@@ -340,31 +343,104 @@ function pushChapterState(next: ChapterState | null): void {
 }
 
 /**
- * ★ 默认学生 id（票 09：一人一目录、一人一库）。
+ * 把**引导状态**推给所有窗口（票 25 的唯一推送通道 `onboarding:changed`）。
  *
- * 为什么是常量而不是从渲染进程传：`ChatSendRequest` 里**没有** `studentId`（守卫 G7 冻结了
- * 只有 `text` / `gradeLevel` 两个字段），身份必须由**主进程**决定 —— 一旦学生 id 变成模型/前端
- * 可填的参数，`get_student_profile(student_id=...)` 这种形状就允许读数别人的画像。
+ * ★ 与 pushGradeState / pushChapterState 同一手法：**值没变就不推**由服务侧负责
+ *   （`onboardingService` 按载荷指纹判），这里只负责「发给谁」。
+ * ★ 放在 handlers.ts 而不是 handlers-data.ts：那一个文件**不碰 electron 的窗口**
+ *   （它的单测用的是一个只导出 ipcMain 的 electron 替身，多一个导出就当场炸）。
+ */
+function pushOnboardingState(payload: OnboardingStatePayload): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    const webContents = window.webContents
+    if (webContents.isDestroyed()) continue
+    webContents.send(IPC.onboardingChanged, payload)
+  }
+}
+
+/**
+ * ★ 学生 id 的**兜底默认值**（票 09：一人一目录、一人一库）。
  *
- * 「选学生」的 UI 属票 20/21；在那之前，本机固定用 `student_001`，
- * 并留一个**显式**的环境变量改道口（`K12_STUDENT_ID`）供人工验收跨学生隔离用：
- * 换一个 id 重启 = 换一套 `students/<id>/pi-agent/` 会话目录，绝不复用别人的。
+ * 为什么是常量而不是从渲染进程传：`ChatSendRequest` 里**没有** `studentId`（守卫 G6c 冻结了
+ * 只有 `text` 一个字段），身份必须由**主进程**决定 —— 一旦学生 id 变成模型/前端可填的参数，
+ * `get_student_profile(student_id=...)` 这种形状就允许读数别人的画像。
+ *
+ * 它只在新机器（还没有任何账号选择）时生效；取值优先级见 {@link resolveActiveStudentId}。
  */
 export const DEFAULT_STUDENT_ID = 'student_001'
 
-/** 环境变量优先（经 `assertStudentId` 校验）；非法或未设置时回落到 {@link DEFAULT_STUDENT_ID}。 */
+/**
+ * 「当前账号」状态文件名（落在 `<userData>` 下，与 `config.json` **同目录、不同文件**）。
+ *
+ * ★★ 为什么不写进 `config.json`：那是 LLM 配置的权威源，设置页每次保存都会**整体重写**
+ *   它（`PUT /api/settings`）—— 把当前账号塞进去，改一次设置就把账号选择抹掉了。
+ */
+export const ACCOUNTS_FILE_NAME = 'accounts.json'
+
+/** `<userData>/accounts.json` 的完整路径（**只有这里知道它长什么样**）。 */
+export function accountsStatePath(userDataDir: string): string {
+  return join(userDataDir, ACCOUNTS_FILE_NAME)
+}
+
+/**
+ * 读本机保存的当前账号（读不到 / 文件坏了 / 值非法 → 空串，交给调用方回落）。
+ *
+ * ★ 失败**不抛也不警告**：新装的机器上这个文件本来就不存在，那不是错误；
+ *   坏了（半截 JSON）时回落到默认值，学生看到的只是「回到了第一位账号」。
+ */
+function readSavedAccountId(): string {
+  try {
+    const raw = readFileSync(accountsStatePath(app.getPath('userData')), 'utf8')
+    const parsed = JSON.parse(raw) as { currentStudentId?: unknown }
+    const id = parsed?.currentStudentId
+    return typeof id === 'string' && STUDENT_ID_PATTERN.test(id) ? id : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 把「当前账号」落到本机状态文件（切号成功后调用；失败抛，由调用方翻成一句人话）。
+ *
+ * ★ 先写 `.tmp` 再 `renameSync`：直接覆写时崩在中间会留下半截 JSON，而它的后果是
+ *   「下次启动读不出当前账号」—— 静默回到第一位账号，学生以为自己切错了。
+ * ★ id 先过 `assertStudentId`：它会被拼进文件系统路径（跨账号读写是这个文件的红线）。
+ */
+export function saveCurrentAccountId(studentId: string): void {
+  const id = assertStudentId(studentId)
+  const target = accountsStatePath(app.getPath('userData'))
+  const temp = `${target}.tmp`
+  writeFileSync(temp, JSON.stringify({ currentStudentId: id }), 'utf8')
+  renameSync(temp, target)
+}
+
+/**
+ * ★★ **当前账号**的解析（全应用唯一真相点）。
+ *
+ * 优先级（**顺序不能换**）：
+ *   ① `K12_STUDENT_ID` 环境变量 —— 自动化 / 验收用的**最高优先级改道口**，必须保留：
+ *      换一个 id 重启 = 换一套 `students/<id>/pi-agent/` 目录，用于人工验跨账号隔离；
+ *   ② 本机保存的当前账号（{@link ACCOUNTS_FILE_NAME}）—— 账号门选过一次就要跨重启记住；
+ *   ③ {@link DEFAULT_STUDENT_ID} —— 新装机器还没建过账号时的落点。
+ *
+ * ★ 环境变量非法时**不继续往下走**（保持老口径：回落到默认值并警告一次）：它是最高改道口，
+ *   「写错了一个 id 却静默用了另一个账号」比「回落到第一位」更危险。
+ */
 export function resolveActiveStudentId(): string {
   const fromEnv = process.env.K12_STUDENT_ID
-  if (!fromEnv) return DEFAULT_STUDENT_ID
-  try {
-    return assertStudentId(fromEnv)
-  } catch (error) {
-    console.warn(
-      `[main] K12_STUDENT_ID 非法（${fromEnv}），已回落到 ${DEFAULT_STUDENT_ID}：` +
-        (error instanceof Error ? error.message : String(error))
-    )
-    return DEFAULT_STUDENT_ID
+  if (fromEnv) {
+    try {
+      return assertStudentId(fromEnv)
+    } catch (error) {
+      console.warn(
+        `[main] K12_STUDENT_ID 非法（${fromEnv}），已回落到 ${DEFAULT_STUDENT_ID}：` +
+          (error instanceof Error ? error.message : String(error))
+      )
+      return DEFAULT_STUDENT_ID
+    }
   }
+  const saved = readSavedAccountId()
+  return saved !== '' ? saved : DEFAULT_STUDENT_ID
 }
 
 /**
@@ -1059,9 +1135,43 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
     // ★ 学生身份由**主进程**决定（渲染进程递来的一律不当真）——
     //   与学段/章节那两条通道同一条纪律：身份一旦可指定，就是「读别人的数据」。
     resolveStudentId: resolveActiveStudentId,
+    // ★ 切号要落盘「当前账号」：userData 只有认识 Electron 的**本文件**知道，
+    //   所以写文件的能力由这里注入（handlers-data.ts 不 import Electron 的 app）。
+    saveCurrentAccount: saveCurrentAccountId,
     // ★ 题库的学段取自**当前会话的生效学段**（不是渲染进程递来的值）：
     //   前端若能指定学段，「只取不高于学生学段的内容」这条隔离就被绕开了。
     currentGradeLevel: () => currentGradeLevelForReads()
+  })
+
+  // ── 冷启动引导（票 25：七条 invoke + 一条推送 onboarding:changed）────────
+  //
+  // ★★ Q1 点选直达的落点就是**已有的那条 grade:set 链**，这里绝不另写一条写学段的路径：
+  //    「立即生效 + 10 轮冷却 + 手动不写 grade_signals」这三条纪律只能有一份实现，
+  //    分成两处迟早漂（一处改了另一处不知道，表现是「点选改学段不生效 / 冷却没算」）。
+  // ★ 学段写入成功即推一条 grade:changed（与 grade:set 处理器同一处收尾）——
+  //    学生点完 chip 就要看到指示器变了，那是这个动作的全部反馈。
+  registerOnboardingHandlers({
+    resolveStudentId: resolveActiveStudentId,
+    // ★ 接线在这里、投影在 handlers-data.ts（与轨迹投影同一条纪律）——本文件才认识窗口。
+    onChanged: pushOnboardingState,
+    // 会话 id 只用于落库审计：拿不到就给空串（服务端那侧该字段是可选的，缺了不发）。
+    sessionId: () => runtime?.sessionId ?? '',
+    applyGradeBand: async (level) => {
+      const instance = await ensureChatRuntime()
+      await instance.setGradeLevel(level)
+      pushGradeState({ gradeLevel: level, origin: 'explicit', source: 'explicit' })
+    },
+    // ★★ 票 31：五问收齐后的概括（subagent 真接上）。
+    //   配置由 `settings/runtime-config.ts` 取（含明文 Key，只在本进程内存里流转），
+    //   取不到就由服务自己走降级 —— 本文件**不猜配置、不碰 Key 的落盘**。
+    summarize: createLlmSummarizer({ getConfig: refreshRuntimeLlmConfig }),
+    // ★ 三期（2026-09-30）：画像小结的读取口 —— **接线在这里**（本文件认识 runtime，
+    //   而 handlers-data.ts 不 import Electron；见那边的 options 注释）。
+    //   小结存在 runtime 的 userDataDir 下，只读不生成；沙箱态由 handler 自己挡。
+    readSummary: async () => {
+      const instance = await ensureChatRuntime()
+      return instance.readProfileSummary()
+    }
   })
 }
 
@@ -1288,6 +1398,21 @@ function registerStudyHandlers(): void {
   ipcMain.handle(IPC.studyMistakes, async (): Promise<StudyCallResult> => {
     return await fetchStudyJson(studyMistakesPath(studentId()))
   })
+
+  ipcMain.handle(
+    IPC.studyHistory,
+    async (_event, payload: unknown): Promise<StudyCallResult> => {
+      // ★ 只接受两个**数字**（本页条数 / 倒序偏移）：渲染进程指不了学生
+      //   （身份由 `studentId()` 决定），也指不了别人的库 —— 与其它 study 通道同一纪律。
+      // ★ 认不出的值不报错，落回默认（30 条 / 第 0 页）：翻页参数不该把整页打成错误态。
+      const raw = (payload ?? {}) as { limit?: unknown; offset?: unknown }
+      const limit =
+        typeof raw.limit === 'number' && Number.isFinite(raw.limit) ? Math.floor(raw.limit) : 30
+      const offset =
+        typeof raw.offset === 'number' && Number.isFinite(raw.offset) ? Math.floor(raw.offset) : 0
+      return await fetchStudyJson(studyHistoryPath(studentId(), limit, offset))
+    }
+  )
 
   for (const [channel, buildPath] of [
     [IPC.studyChapters, studyChaptersPath],
@@ -1865,7 +1990,9 @@ async function resolveSessionPrelude(instance: ChatRuntime): Promise<SessionPrel
     const fetched = await fetchOpening(instance.sessionId)
     if (fetched.text) {
       // ★ 写进 Pi 会话（否则重启后这句开场消失）：内容与屏幕上显示的那一条**同一份文本**。
-      instance.appendOpeningMessage(fetched.text)
+      // ★ 目标知识点**跟着这句话一起落盘**：恢复会话时直接读它，不再靠文案比对
+      //   （见 `storedOpeningKp` 与 `sessions.ts` 的 `TranscriptMessage.openingKp`）。
+      instance.appendOpeningMessage(fetched.text, { kpId: fetched.kpId, kpName: fetched.kpName })
     }
     return {
       started: false,
@@ -1875,15 +2002,23 @@ async function resolveSessionPrelude(instance: ChatRuntime): Promise<SessionPrel
       openingKpName: fetched.kpName
     }
   }
-  const fetched = await fetchOpening(instance.sessionId)
+  // ★★ 目标知识点有**两条来源**，按可信度取（2026-09-30 修）：
+  //   ① `persisted` —— 写这条开场白时一起落进会话文件的那份（最可信：它就是**当时**
+  //      那句话指向的目标）；
+  //   ② 文件里没有那份元数据（老会话）→ 退回原来的「重新取到的开场语与文件里逐字相同」。
+  //   旧实现只有 ②，而推荐池会随画像变化 —— 重启后重取的那句经常不同，
+  //   于是卡片上留着一句「要不我们从 X 聊起？」，动作按钮却被撤掉了（学生点不动）。
+  const persisted = storedOpeningKp(instance.restoredMessages)
+  const fetched = persisted === null ? await fetchOpening(instance.sessionId) : null
+  const fresh = fetched !== null && fetched.text === stored ? fetched : null
   return {
     started: false,
     messages: [],
     opening: stored,
-    // ★★ 名字与 id 必须**同进同退**：文本对不上时两个都不给（否则卡片上写 A、
-    //    按钮却指向 B —— D-072 那条纪律在这里同样适用）。
-    openingKpId: fetched.text === stored ? fetched.kpId : '',
-    openingKpName: fetched.text === stored ? fetched.kpName : ''
+    // ★★ 名字与 id 必须**同进同退**（D-072）：拿不到目标时两个都不给，
+    //    卡片的动作按钮随之撤掉 —— 绝不出现「卡片上写 A、按钮指向 B」。
+    openingKpId: persisted?.kpId ?? fresh?.kpId ?? '',
+    openingKpName: persisted?.kpName ?? fresh?.kpName ?? ''
   }
 }
 
@@ -1899,6 +2034,26 @@ function storedOpeningText(messages: readonly TranscriptMessage[]): string {
   const first = messages[0]
   if (!first || first.role !== 'assistant') return ''
   return first.text.trim()
+}
+
+/**
+ * ★★ 会话文件里那条开场白**自带的目标知识点**（`openingKp`，2026-09-30 起写入）。
+ *
+ * 为什么要有它：动作按钮（「就从「X」开始」）必须知道这句邀请指向哪个知识点，
+ * 而「重新取一次开场引导」在重启后往往给出**另一句**（推荐池随画像变化，
+ * 模板说法与随机知识点都会变）—— 旧判据「逐字相同才认」于是把按钮撤掉，
+ * 界面上就剩一句没法接的邀请。落盘时把目标一起写下，恢复时**直接读**，与文案无关。
+ *
+ * ★ 老会话（这次改动之前写的）没有这份元数据 → 返回 `null`，调用方退回逐字判据。
+ * ★ 同进同退：`kpId` 必须非空，`kpName` 可以是空串（界面会退回含糊说法，
+ *   绝不把 slug 印给学生）。
+ */
+function storedOpeningKp(
+  messages: readonly TranscriptMessage[]
+): { kpId: string; kpName: string } | null {
+  const first = messages[0]
+  if (!first || first.role !== 'assistant') return null
+  return first.openingKp ?? null
 }
 
 /**

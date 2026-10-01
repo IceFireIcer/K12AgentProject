@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 编程环境页 —— 对话内联编程卡的**展开视图**。
+ * 智码工坊页（内部 id 仍是 `coding`）—— 对话内联编程卡的**展开视图**。
  *
  * ── 数据全部来自真实链路（本页不造任何一条数据）─────────────────────────
  *
@@ -33,10 +33,15 @@
  *
  * ── 布局（改动前先读）────────────────────────────────────────────────
  *
- *   左 268px 任务简报（要做什么 / 学习路径（分两组收起）/ 一句「卡住了怎么办」）
+ *   左 268px **课程总览**：按教材章节分块的关卡导航（总进度 + 继续闯关 + 手风琴）
+ *        + 沉在底部的一句「卡住了怎么办」—— 左栏只回答「我在哪 / 接下来去哪」。
  *   右侧主区：**无题时只有一块空态**（一个主行动 + 一句话，报告 1.6）；
  *             有题时（或在装配编辑器）才排满态框架：
- *             操作栏 → 身份行 → 编辑器 + 运行 + 输出 + 提示 → 页脚那句安全声明。
+ *             操作栏（info 位是面包屑：智码工坊 › 模块 › 关卡）→ 身份行 →
+ *             【代码区（**独占整列**）】→ 运行 + 输出 + 提示 → 页脚那句安全声明。
+ *             ★ 任务简报**仍是主工作区的浮层**（不在左栏）：要照着「做到这样算完成」补 TODO。
+ *             ★★ 2026-09-30 用户裁决：简报从「常驻卡」改成「悬浮窗，默认关闭」——
+ *               它常驻时白占 240–300px，编辑器因此窄了近 300px（代码才是这一屏的主角）。
  *
  * 内容区的最大字号（22px）落在身份行上：任务名 16px（块标题档）、正文 13–14px、
  * meta 12px —— 「这页在干什么」永远比「这题叫什么」重。
@@ -54,7 +59,8 @@ import {
   Download,
   FileText,
   Lightbulb,
-  RotateCcw
+  RotateCcw,
+  X
 } from 'lucide-vue-next'
 import PageIdentity from '@/components/PageIdentity.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -72,11 +78,20 @@ import {
   subscribeRunnerStatus,
   type RunnerStatus
 } from '../sandbox/pyodide-runner'
-import { formatRunMeta } from '../cards/coding'
+// `goalOfScaffold`：把脚手架里那句「目标：…」抽出来给学生看（纯函数 + 单测）
+import { formatRunMeta, goalOfScaffold } from '../cards/coding'
 // ★ 「拿不到中文名时显示什么」的唯一口径是 `study/kp-label.ts`：有名字用名字，
 //   没名字用中性的「未命名知识点」（原始 id 只进 `title` 悬停可见）——
 //   绝不退回 `prog-loop-jr` 这种 slug（学生看到只会以为报错）。这套规则原本在三页各写一份。
 import { kpLabel, kpLabelResolved } from '../study/kp-label'
+// ★ 学习路径的**分块**规则（按教材章节分组 / 「继续闯关」跳哪一关）不写在本页：
+//   本页只做「取数 + 折叠」，判据集中在 `study/workshop-path.ts`（纯函数，有单测）。
+import {
+  groupLevelsByChapter,
+  isLevelDone,
+  nextLevelId,
+  type WorkshopLevel
+} from '../study/workshop-path'
 
 const code = useCodeStore()
 const quiz = useQuizStore()
@@ -102,8 +117,15 @@ const knowledge = useKnowledgeStore()
  * 题目从哪来：学生的**学习路径**（真实取数，不是写死的三步）
  * ------------------------------------------------------------------ */
 
-/** 关卡顺序与阶段由服务端决定（依赖图拓扑序）——本页只显示，不重排、不推断。 */
-const levels = computed(() => quiz.levels)
+/**
+ * 关卡顺序与阶段由服务端决定（依赖图拓扑序）——本页只显示，不重排、不推断。
+ *
+ * ★★ 用 `pathLevels`（**本学段关卡路径**）而不是 `levels`（整张进度表）：这一页是
+ *   **学习路径**，而学段换过的学生名下还留着更低学段的旧关卡（合法记录，取题兼容）——
+ *   按整张表渲染，同一个大章节里同一个概念会出现三次（名字一字不差、内容按学段不同）。
+ *   口径与纯函数都在 `study/workshop-path.ts`（`pathLevelsOf`）。
+ */
+const levels = computed(() => quiz.pathLevels)
 const selectedKpId = ref('')
 
 /**
@@ -163,30 +185,132 @@ const taskNameResolved = computed(() => {
 /** 脚手架里的 TODO 处数（真实数出来的；填完它们就是这一题的目标）。 */
 const todoCount = computed(() => (code.template?.scaffold.match(/TODO/g) ?? []).length)
 
+/**
+ * ★★ 简报的**任务名**：用模板自己的 `title`（「函数：求人工智能的特征平均值」），
+ *   而不是知识点名（「人工智能的定义」）。
+ *
+ * 为什么（2026-09-30 用户反馈「看不懂任务简报想让我干什么」）：知识点名回答的是
+ * 「这是哪一课」，学生点开简报要的是「**我现在要写什么代码**」—— 前者他早就知道了
+ * （左栏正停在这一关上），后者原来整个简报里一个字都没说。228 份随包模板全都带
+ * `title`（服务端资产测试钉着完整性），缺省时才回落到知识点名。
+ */
+const taskTitle = computed(() => {
+  const fromTemplate = (code.template?.title ?? '').trim()
+  return fromTemplate !== '' ? fromTemplate : taskName.value
+})
+
+/**
+ * 「这次的目标」那句 —— 从脚手架第一行的 `# 目标：…` 注释里抽（纯函数在 cards/coding.ts）。
+ *
+ * ★ 它是**模板作者写给学生的原话**（「写一个求平均值的函数，再用它算一遍」），
+ *   比任何界面自造的一句话都准；抽不到就整行不渲染（不编）。
+ */
+const taskGoal = computed(() => goalOfScaffold(code.template?.scaffold ?? ''))
+
+/** 做完以后程序应当打印什么（等宽块展示；去尾换行，免得留一行空白）。 */
+const expectedOutputText = computed(() => (code.template?.expectedOutput ?? '').replace(/\s+$/, ''))
+
 /** 本页的尝试计数（第几次运行）——`attempt` 决定后端给哪一级提示，所以必须自己数对。 */
 const attempts = ref(0)
 /** 已经拿到分析结果的那一次尝试号（对不上就说明反馈是上一次的，不该冒充这一次）。 */
 const analyzedAttempt = ref(0)
+
+/**
+ * ★★ 任务简报的**悬浮窗开关**（2026-09-30 用户裁决：简报改成悬浮窗，可关可开，**默认关闭**）。
+ *
+ * 为什么默认关：简报是「需要时瞄一眼」的东西，而代码才是这一屏的主角。它常驻时
+ * 既占掉主工作区的一整列（把编辑器挤窄 ~280px），又在学生记住要求之后继续占着视线。
+ * ★ 关掉不丢任何东西：内容照常渲染（`v-if` 只是不挂进 DOM），从「代码」卡头的
+ *   「任务简报」按钮随时打开 —— 开关状态只活在本次页面会话里，不做持久化。
+ */
+const briefOpen = ref(false)
 
 /* ------------------------------------------------------------------ *
  * 学习路径的分组：整条路径有几十关，平铺出来就是一堵墙
  * ------------------------------------------------------------------ */
 
 /**
- * ★ 分组的目的只有一个：**「我做过什么 / 接下来做什么」要一眼能答**。
+ * ★ 分组的目的只有一个：**「我走到哪一坨了 / 接下来做什么」要一眼能答**。
  *
- * 分组只按**服务端给的 stage** 切，顺序仍是服务端的拓扑序（本页不重排）。
- * ★★ 2026-09-25 去掉关卡锁定：原来那第三组「还没解锁」（点不动的关卡）整组删掉 ——
- *   所有关卡都能点开练习。剩下两组仍有信息价值，默认开合不变：
- *   · 「正在学」默认展开 —— 它就是「接下来做什么」，学生一进页面要直接看到；
- *   · 「已经走过」默认收起 —— 它回答的是过去，关数会越攒越多。
- *   两组都是可点的按钮（键盘可达）。
+ * 模块 = 教材的一章（`chapterTitle`），关序与模块序都来自服务端（依赖图拓扑序），
+ * 本页只做「投影 + 折叠」—— 不重排、也不自己定义一套知识体系。
+ *
+ * ★★ 这里**没有**「未解锁」这一档（2026-09-25 起后端不再产出锁定态，
+ *   播种时每一关都是 `learning`）：所以模块头上的计数只有「已通关 N / M」，
+ *   关卡**全部可点**，不做任何置灰 / 禁用。
  */
-const openLevels = computed(() => levels.value.filter((level) => level.stage === 'learning'))
-const doneLevels = computed(() =>
-  levels.value.filter((level) => level.stage === 'quizzed' || level.stage === 'mastered')
+const modules = computed(() =>
+  groupLevelsByChapter(
+    levels.value.map((level): WorkshopLevel => ({ kpId: level.kpId, stage: level.stage })),
+    (kpId) => knowledge.kpChapterOf(kpId)
+  )
 )
-const showDone = ref(false)
+
+/** 已通关的关卡总数（顶部那块进度读它）。 */
+const doneCount = computed(() => levels.value.filter((level) => isLevelDone(level.stage)).length)
+
+/** 「继续闯关」的落点（第一个还没通关的关卡；全通关了回到第一关）。 */
+const nextKpId = computed(() => nextLevelId(levels.value))
+
+/**
+ * 模块的展开状态。
+ *
+ * ★ 默认值**跟着当前关走**，而不是写死「第一组展开」：默认展开的是
+ *   ① 当前正在做的那一关所在模块、② 第一个还没走完的模块 ——
+ *   学生一进页面看到的就是「我在哪」和「接下来做什么」，其余收起。
+ * ★ 手动点过之后**以手动为准**（`moduleOverrides`）：默认值会随换关而变，
+ *   不记这一份的话，学生刚展开的模块会在下一次换关时被系统收回去。
+ */
+const moduleOverrides = ref<Record<string, boolean>>({})
+
+/** 默认展开的模块键。 */
+const defaultOpenKeys = computed(() => {
+  const keys = new Set<string>()
+  const current = modules.value.find((mod) =>
+    mod.levels.some((level) => level.kpId === selectedKpId.value)
+  )
+  if (current) keys.add(current.key)
+  const pending = modules.value.find((mod) => mod.doneCount < mod.total)
+  if (pending) keys.add(pending.key)
+  return keys
+})
+
+/** 这一块现在是展开的还是收起的（手动优先，没手动过用默认值）。 */
+function isModuleOpen(key: string): boolean {
+  return moduleOverrides.value[key] ?? defaultOpenKeys.value.has(key)
+}
+
+function toggleModule(key: string): void {
+  moduleOverrides.value = { ...moduleOverrides.value, [key]: !isModuleOpen(key) }
+}
+
+/** 点「继续闯关」：跳到第一个还没通关的关卡（没有关卡时按钮是置灰的，不会走到这里）。 */
+function continuePath(): void {
+  const kpId = nextKpId.value
+  if (kpId !== '') void openTask(kpId)
+}
+
+/**
+ * 面包屑：`智码工坊 › 模块 › 关卡` —— 学生在编辑器里往下滚时也要知道**自己在哪**。
+ *
+ * ★ 它挂在**吸顶操作栏**的 info 位上（不另起一行）：那一栏滚到哪儿都在，
+ *   正是面包屑该在的地方；另起一行则会在滚动后消失，等于白给。
+ *   原先 info 位写的是「题目 X · 期望 Y」，与任务简报卡逐字重复 ——
+ *   现在那一栏换成**位置**（模块 + 关卡），卡片负责**内容**（要做到什么），
+ *   一处说位置、一处说内容，不再说两遍。
+ * ★ 关卡名取不到（教材换代留下的残留 kp）时**只显示到模块**：
+ *   摆一个「未命名知识点」当面包屑的最后一级没有信息量。
+ */
+const crumbs = computed<string[]>(() => {
+  if (selectedKpId.value === '') return []
+  const items = ['智码工坊']
+  const module = modules.value.find((mod) =>
+    mod.levels.some((level) => level.kpId === selectedKpId.value)
+  )
+  if (module) items.push(module.title)
+  if (levelNameResolved(selectedKpId.value)) items.push(levelLabel(selectedKpId.value))
+  return items
+})
 
 /** 编辑器区有没有「要做的事」：读到模板了，或者手里还有一份草稿。都没有才是空态。 */
 const editorHasWork = computed(() => code.template !== null || code.draft.trim() !== '')
@@ -210,7 +334,7 @@ const editorEmptyDesc = computed(() => {
   if (levels.value.length === 0) {
     return '左边还没读到学习路径。先回对话里问几句，让智团团把学段判出来，这里就会有第一关。'
   }
-  return '在左边的「学习路径」里点一关，这里就会出现那一题的代码骨架。标着 TODO 的地方就是你要补的地方。'
+  return '在左边的「课程总览」里点一关，这里就会出现那一题的代码骨架。标着 TODO 的地方就是你要补的地方。'
 })
 
 /**
@@ -564,7 +688,10 @@ async function downloadCode(): Promise<void> {
     downloadNote.value = '导出还没接线：保存对话框暂时用不了。'
     return
   }
-  const header = `# ${levelLabel(template.kpId)}\n# 期望效果：${template.expectedBehavior}\n\n`
+  // 导出文件头用**任务名 + 这次的目标**（与学生刚才在简报里读到的一致）；
+  // 抽不到目标时退回契约里的 expectedBehavior，绝不写一个空标题。
+  const goal = goalOfScaffold(template.scaffold)
+  const header = `# ${taskTitle.value}\n# ${goal !== '' ? `这次的目标：${goal}` : `期望效果：${template.expectedBehavior}`}\n\n`
   downloading.value = true
   downloadNote.value = null
   try {
@@ -648,105 +775,78 @@ watch(editorVisible, (visible) => {
 
 <template>
   <div class="code" data-testid="coding-view">
-    <!-- 左：任务简报。**收窄到 268px** —— 它是必要的任务上下文（保留），
-         但不许挤住编辑区；省下的宽度全给右侧。 -->
+    <!-- 左：**纯导航**（课程总览 → 模块 → 关卡）。
+         ★ 任务简报已搬到右栏主工作区顶部（与代码区同处一屏、同一视线）：
+           学生要照着「做到这样算完成」写代码，那一句与代码隔开一整列时，
+           他得先跨栏读一遍再回来 —— 左栏从此只回答「我在哪 / 接下来去哪」。 -->
     <aside class="code__brief">
-      <header class="code__brief-head">
-        <FileText :size="15" />
-        <span class="code__brief-title">任务简报</span>
-        <el-tag size="small" type="info" effect="plain">{{ code.template?.language ?? 'python' }}</el-tag>
-      </header>
-
-      <!-- 任务名 = **块标题档（16px）**。不得回到 22px：那是身份行的档位。 -->
-      <h2 class="code__name" data-testid="coding-view-task-name">
-        {{ taskName === '' ? '还没有选题目' : taskName }}
-      </h2>
-
-      <template v-if="code.template !== null">
-        <el-descriptions :column="1" size="small" border class="code__desc-list">
-          <el-descriptions-item label="做到这样就算完成">
-            <code class="code__mono">{{ code.template.expectedBehavior }}</code>
-          </el-descriptions-item>
-          <!-- ★ 「对应知识点」只在**真的取到中文名**时出现。
-               ⚠️ 这里原本直接摆 `code.template.kpId`（`prog-loop-jr` 这种 slug）——
-               学生对着一串英文短横线只会以为软件坏了。名字取不到就**整行不显示**：
-               摆一个「未命名知识点」在这里没有增量信息（任务名那一行已经在说同一件事了）。 -->
-          <el-descriptions-item v-if="taskNameResolved" label="对应知识点">
-            {{ taskName }}
-          </el-descriptions-item>
-          <el-descriptions-item label="要补的 TODO">{{ todoCount }} 处</el-descriptions-item>
-        </el-descriptions>
-      </template>
-      <p v-else-if="code.templateLoading" class="code__desc">正在读这一题的脚手架…</p>
-      <!-- ★ 模板读失败时这里**什么都不说**（走查 1.3）：原因与恢复动作一起放在右栏代码区里，
-           学生不必跨栏找原因。任务简报只保留「这一题是什么」这一类上下文。 -->
-      <p v-else class="code__desc">从下面的学习路径里选一关，就会读来对应的脚手架。</p>
-
+      <!-- ── 课程总览：按教材章节分块（先看大块，再进小关）─────────────────
+           ★ 模块名来自教材的 `chapterTitle`，顺序来自服务端的依赖图拓扑序 ——
+             本页不自己定义知识体系：教材加一章，这里就自动多一块，不会错位。
+           ★★ 没有「未解锁」这一档（后端播种时每一关都是 `learning`），
+             所以这里只有「已通关 / 可作答」两态，且**每一关都能点**。 -->
       <section class="code__sec">
-        <span class="code__sec-label">学习路径</span>
-        <!-- ★ 这一块是原型里那份写死的「完成步骤」的**真实版本**：顺序与阶段都来自
-             服务端的闯关进度（按依赖图拓扑序排好），本页只显示、不重排。
-             ★ 进度数字**只有一种格式**（报告 2.3）：`已掌握 N / M`。
-               下面两组的标题（正在学 / 已经走过）是**导航分组**，不是第二个指标 ——
-               原来这里那句「共 N 关 · 已经走过 N 关 · 正在学 N 关 · 还有 N 关没解锁」
-               把同一批数字又说了一遍，已删。
-             ★ 没有关卡时整行不显示（空态下不该出现「已掌握 0 / 0」这种仪表盘读数）。 -->
+        <span class="code__sec-label">课程总览</span>
+        <!-- ★ 进度数字只有一种格式（报告 2.3）：`已通关 N / M`。
+               模块头上的 `N / M` 是**同一口径的分块读数**，不是第二个指标。
+               没有关卡时整行不显示（空态下不该出现「0 / 0」这种仪表盘读数）。 -->
         <p
           v-if="levels.length > 0"
           class="code__sec-note"
           data-testid="coding-view-path-summary"
         >
-          已掌握 {{ doneLevels.length }} / {{ levels.length }}
+          {{ modules.length }} 个模块 / {{ levels.length }} 关
         </p>
       </section>
 
-      <!-- ── 学习路径：按 stage 分两组（正在学默认展开，「已经走过」默认收起）────
-           `data-testid="coding-view-path"` 落在**外层容器**上：两组共用它，
-           于是「这一页有没有路径」这个判断与分组细节无关（分组以后还会再调）。 -->
-      <div v-if="levels.length > 0" class="pathgrps" data-testid="coding-view-path">
-        <!-- ① 正在学（默认展开 —— 这就是「接下来做什么」） -->
-        <section v-if="openLevels.length > 0" class="pathgrp">
-          <p class="pathgrp__label">正在学（{{ openLevels.length }} 关）</p>
-          <ul class="path">
-            <li
-              v-for="level in openLevels"
-              :key="level.kpId"
-              class="path__item"
-              :data-stage="level.stage"
-              :class="{ 'path__item--on': level.kpId === selectedKpId }"
-            >
-              <button
-                type="button"
-                class="path__btn"
-                :data-testid="`coding-view-level-${level.kpId}`"
-                :data-active="level.kpId === selectedKpId ? 'true' : 'false'"
-                :title="levelNameResolved(level.kpId) ? undefined : level.kpId"
-                :disabled="running"
-                @click="openTask(level.kpId)"
-              >
-                <span class="path__dot" aria-hidden="true" />
-                <span class="path__name">{{ levelLabel(level.kpId) }}</span>
-                <span class="path__stage">{{ stageLabel(level.stage) }}</span>
-              </button>
-            </li>
-          </ul>
-        </section>
-
-        <!-- ② 已经走过（默认收起：它回答的是过去，关数只会越攒越多） -->
-        <section v-if="doneLevels.length > 0" class="pathgrp">
+      <!-- ── 模块导航 ──────────────────────────────────────────────────
+           `data-testid="coding-view-path"` 仍落在**外层容器**上：
+           「这一页有没有路径」这个判断与分块细节无关（分块以后还会再调）。 -->
+      <div v-if="levels.length > 0" class="mods" data-testid="coding-view-path">
+        <div class="mods__total">
+          <span class="mods__done k12-num" data-testid="coding-view-done-count">
+            已通关 {{ doneCount }} / {{ levels.length }}
+          </span>
+          <!-- ★ 「继续闯关」是**次要动作**（这一屏的主色填充是右栏的「运行」），
+               所以沿用 `.k12-cta` 的几何 + 描边变体，不抢主色。 -->
           <button
             type="button"
-            class="pathgrp__toggle k12-tap"
-            :aria-expanded="showDone"
-            data-testid="coding-view-path-done-toggle"
-            @click="showDone = !showDone"
+            class="k12-cta code__act--quiet mods__go"
+            :disabled="nextKpId === '' || running"
+            data-testid="coding-view-continue"
+            @click="continuePath"
           >
-            <ChevronRight :size="13" class="pathgrp__ico" :data-open="showDone" aria-hidden="true" />
-            已经走过 {{ doneLevels.length }} 关
+            继续闯关
           </button>
-          <ul v-show="showDone" class="path">
+        </div>
+
+        <section
+          v-for="(mod, modIndex) in modules"
+          :key="mod.key"
+          class="mod"
+          :data-key="mod.key"
+        >
+          <!-- 模块头：可点的折叠开关（键盘可达，`aria-expanded` 如实报状态） -->
+          <button
+            type="button"
+            class="mod__head k12-tap"
+            :aria-expanded="isModuleOpen(mod.key)"
+            :data-open="isModuleOpen(mod.key)"
+            :data-testid="`coding-view-module-${modIndex}`"
+            @click="toggleModule(mod.key)"
+          >
+            <ChevronRight
+              :size="13"
+              class="mod__ico"
+              :data-open="isModuleOpen(mod.key)"
+              aria-hidden="true"
+            />
+            <span class="mod__title">{{ mod.title }}</span>
+            <span class="mod__count k12-num">{{ mod.doneCount }} / {{ mod.total }}</span>
+          </button>
+          <ul v-show="isModuleOpen(mod.key)" class="path">
             <li
-              v-for="level in doneLevels"
+              v-for="level in mod.levels"
               :key="level.kpId"
               class="path__item"
               :data-stage="level.stage"
@@ -757,13 +857,21 @@ watch(editorVisible, (visible) => {
                 class="path__btn"
                 :data-testid="`coding-view-level-${level.kpId}`"
                 :data-active="level.kpId === selectedKpId ? 'true' : 'false'"
-                :title="levelNameResolved(level.kpId) ? undefined : level.kpId"
+                :title="
+                  levelNameResolved(level.kpId)
+                    ? `${levelLabel(level.kpId)} · ${stageLabel(level.stage)}`
+                    : level.kpId
+                "
                 :disabled="running"
                 @click="openTask(level.kpId)"
               >
                 <span class="path__dot" aria-hidden="true" />
                 <span class="path__name">{{ levelLabel(level.kpId) }}</span>
-                <span class="path__stage">{{ stageLabel(level.stage) }}</span>
+                <!-- ★ 状态标记**只在真的有结论时出现**：已通关画一个勾，
+                     当前这一关写「当前」。其余关卡不留任何标签 ——
+                     57 关全挂一个「学习中」等于没有状态（报告 §3.2）。 -->
+                <Check v-if="isLevelDone(level.stage)" :size="13" class="path__tick" aria-hidden="true" />
+                <span v-else-if="level.kpId === selectedKpId" class="path__now">当前</span>
               </button>
             </li>
           </ul>
@@ -778,14 +886,19 @@ watch(editorVisible, (visible) => {
       <!-- ★ 一句话就够（走查 C11：这一块原来写着提示分级机制 + 「别急着一次点到底」，
            属于把机制摆在学生面前；现在只留「卡住了该点哪」）。
            分级机制本身是**真话**，所以挪进 `title`，不删。 -->
+      <!-- ★ 毛玻璃圆角块（2026-09-30 用户裁决，见样式里那段说明）。
+           `k12-glass` 是 base.css 里那条**唯一的毛玻璃配方**（带 @supports 兜底），
+           这里不自己再写一遍 backdrop-filter。 -->
       <div
         class="code__hint-note"
         title="提示是一级一级给的：先是方向，再具体一点，最后一级才会把写法写全。"
       >
-        <Lightbulb :size="15" />
+        <Lightbulb :size="16" class="code__hint-ico" />
         <div>
           <p class="code__hint-title">卡住了怎么办</p>
-          <p class="code__hint-text">先自己想，想不出来再点右边的「求助」。</p>
+          <p class="code__hint-text">
+            先自己想，想不出来再点右边的<strong class="code__hint-key">求助</strong>。
+          </p>
           <p v-if="code.currentHintLevel > 0" class="code__hint-text" data-testid="coding-view-hint-progress">
             已给到第 {{ code.currentHintLevel }} 级（一共 {{ CODE_HINT_MAX }} 级）。
           </p>
@@ -799,7 +912,7 @@ watch(editorVisible, (visible) => {
            `data-testid="coding-view-run-locally"`（学生话）+ 紧挨着它的 `<TeacherGate>`
            （教师 / 答辩要的技术口径，学生视角下不在 DOM 里）。
            ⚠️ 要往左栏加回这段话之前，先回答「页脚那句为什么不够」——
-              答不上来就会变成第二处同义声明（报告 4.3 也要求左栏只留任务简报 + 学习路径）。 -->
+              答不上来就会变成第二处同义声明（左栏现在只留课程总览与关卡导航）。 -->
     </aside>
 
     <!-- 右：主区。PageActions 在这个滚动容器内 → 吸顶有效。 -->
@@ -836,7 +949,7 @@ watch(editorVisible, (visible) => {
         data-testid="coding-view-editor-empty"
       >
         <!-- 恢复动作只给**一个**：原因（上一行）→「重新读模板」。
-             「换一关」指的是左栏的学习路径，不在这里再排一个按钮（两个并列的主行动等于没有主行动）。 -->
+             「换一关」指的是左栏的课程总览，不在这里再排一个按钮（两个并列的主行动等于没有主行动）。 -->
         <button
           v-if="editorStage === 'error'"
           class="k12-cta"
@@ -852,9 +965,15 @@ watch(editorVisible, (visible) => {
       <template v-else>
         <PageActions>
           <template #info>
-            <!-- ★ 题目名用**教材里的中文名**（`taskName`），不再摆 `template.kpId` 那种 slug。 -->
-            <span v-if="code.template !== null">
-              题目 {{ taskName }} · 期望 <code class="code__mono">{{ code.template.expectedBehavior }}</code>
+            <!-- ★ 面包屑（`智码工坊 › 模块 › 关卡`）：挂在**吸顶**的这一栏里，
+                 所以学生滚到代码区下面时仍然看得到自己在哪。
+                 它替换掉的「题目 X · 期望 Y」与右上的任务简报卡逐字重复 ——
+                 那一句现在是卡片里的「做到这样就算完成」（见 `crumbs` 的说明）。 -->
+            <span v-if="crumbs.length > 0" class="code__crumb" data-testid="coding-view-crumb">
+              <template v-for="(crumb, index) in crumbs" :key="crumb">
+                <span v-if="index > 0" class="code__crumb-sep" aria-hidden="true">›</span>
+                <span :class="{ 'code__crumb-now': index === crumbs.length - 1 }">{{ crumb }}</span>
+              </template>
             </span>
             <span v-else>还没有可做的题目</span>
           </template>
@@ -882,15 +1001,110 @@ watch(editorVisible, (visible) => {
           {{ downloadNote }}
         </p>
 
-        <!-- 身份行（22px，全页唯一）：说的是「这页在干什么」，不是重复顶栏的「编程环境」。 -->
+        <!-- 身份行（22px，全页唯一）：说的是「这页在干什么」，不是重复顶栏的「智码工坊」。 -->
         <PageIdentity
           main="在这里把刚才学的写成代码"
           meta="代码在学生机本地执行，不上传"
           hint="先看任务要求，再在下面补全 TODO 并运行"
         />
 
-        <!-- 内边距走 SurfacePanel 的枚举（报告 §4.2）：md = sp-4（16px，8 点网格） -->
-        <SurfacePanel class="code__panel" padding="md">
+        <!-- ── 任务说明入口：**紧贴代码卡片上方**、右对齐（2026-09-30 用户裁决）。
+             ★ 为什么单独占一行而不是并进身份行：并进身份行时它跟大标题齐平，位置太靠上 ——
+               学生的视线落在「大标题 → 代码卡片」这条线上，入口贴住卡片上沿才在动线上。
+             ★ 文案是人话（原「任务简报」是内部叫法）：`看看要做什么` —— 一眼知道点开是什么。
+             ★ 走 `.k12-cta` 的几何（与「运行」「求助」同一档尺寸，比卡头那排 chip 大一圈），
+               但用 quiet 变体：这一屏**唯一的主色填充仍然只有「运行」**。 -->
+        <div class="code__brief-entry">
+          <button
+            type="button"
+            class="k12-cta code__act--quiet code__brief-open"
+            :aria-expanded="briefOpen"
+            data-testid="coding-view-task-toggle"
+            :title="briefOpen ? '收起这道题的要求' : '打开看看这道题要做什么、代码里要补哪几处'"
+            @click="briefOpen = !briefOpen"
+          >
+            <FileText :size="15" />
+            <span>{{ briefOpen ? '收起任务说明' : '看看要做什么' }}</span>
+          </button>
+        </div>
+
+        <!-- ── 任务简报（**悬浮窗**）+ 代码区 ──────────────────────────────
+             ★★ 2026-09-30 用户裁决：任务简报收进悬浮窗、**默认关闭**，代码区独占整列 ——
+                简报常驻时要白占 240–300px（编辑器被挤窄），而学生记住要求之后它就只是噪音。
+                入口是**紧贴本卡上沿**的那个按钮（`coding-view-task-toggle`，文案「看看要做什么」）。
+             ⚠️ 编辑器宿主（`.code__editor`）的尺寸归属不变：这里改的是**父级网格**，
+                不碰那个盒子（`tests/code-editor-mount.test.ts` 钉着）。 -->
+        <div class="code__work">
+          <!-- 浮层位置自己算：不把 `position: absolute` 直接加在 SurfacePanel 上 ——
+               它的 `.sf` 带 `position: relative`，同权重谁生效取决于样式注入顺序（本项目踩过）。
+               浮窗只在打开时挂进 DOM：关掉它连内容一起离场，不留不可见的大块。 -->
+          <div v-if="briefOpen" class="code__brief-float">
+          <SurfacePanel
+            class="code__task"
+            tone="float"
+            padding="md"
+            role="region"
+            aria-label="任务简报"
+            data-testid="coding-view-task"
+          >
+            <header class="code__task-head">
+              <FileText :size="15" />
+              <span class="code__task-title">任务简报</span>
+              <el-tag size="small" type="info" effect="plain">{{ code.template?.language ?? 'python' }}</el-tag>
+              <!-- 关闭键：浮窗盖在代码上，必须一眼能关掉（Esc 之外的第二条路，且能点到） -->
+              <button
+                type="button"
+                class="chip code__brief-close"
+                data-testid="coding-view-task-close"
+                title="收起任务简报"
+                @click="briefOpen = false"
+              >
+                <X :size="13" />
+              </button>
+            </header>
+
+            <!-- 任务名 = **块标题档（16px）**。不得回到 22px：那是身份行的档位。 -->
+            <!-- ★★ 2026-09-30 用户反馈「看不懂任务简报想让我干什么」→ 整块重写为
+                 「一、要做的是什么；二、代码里要动哪几处；三、做完长什么样」这个顺序。
+                 此前那三行（做到这样就算完成 / 对应知识点 / 要补的 TODO）读起来像一张规格表：
+                 标题是知识点名（学生早就知道自己在哪一关），却没有一句说清要写什么代码。
+                 ⚠️ 文案纪律：不写 TODO 这类开发词当标题（写成「要补的地方」），
+                    技术词只留在代码注释里（脚手架原文不动）。 -->
+            <h2 class="code__name" data-testid="coding-view-task-name">
+              {{ taskTitle === '' ? '还没有选题目' : taskTitle }}
+            </h2>
+
+            <template v-if="code.template !== null">
+              <!-- ① 要做什么：模板作者写在脚手架第一行的「目标：…」（抽不到就整行不渲染） -->
+              <p v-if="taskGoal !== ''" class="code__goal" data-testid="coding-view-task-goal">
+                {{ taskGoal }}
+              </p>
+              <!-- ② 要动哪几处：把「TODO」翻成学生读得懂的说法 + 下一步动作 -->
+              <p class="code__desc" data-testid="coding-view-task-todos">
+                代码里已经搭好了架子，留了 <b class="k12-num">{{ todoCount }}</b> 处要补的地方（代码里标着
+                <code class="code__mono">TODO</code>），把它们补完再点「运行」。
+              </p>
+              <!-- ③ 做完长什么样：程序真实应当打印的东西（等宽块，因为它是程序输出） -->
+              <div v-if="expectedOutputText !== ''" class="code__expected">
+                <span class="block__label">做完以后，程序会打印</span>
+                <pre class="block__code" data-testid="coding-view-task-expected">{{ expectedOutputText }}</pre>
+              </div>
+              <!-- 元信息：这是哪一课（学生排障 / 老师看课时要的，不占主视线）。
+                   ⚠️ 只在**真的取到中文名**时渲染：这里曾经直接摆 `prog-loop-jr` 这种 slug，
+                   学生对着一串英文短横线只会以为软件坏了。 -->
+              <p v-if="taskNameResolved" class="code__task-meta" data-testid="coding-view-task-point">
+                对应知识点：{{ taskName }}
+              </p>
+            </template>
+            <p v-else-if="code.templateLoading" class="code__desc">正在读这一题的脚手架…</p>
+            <!-- ★ 到不了这里的分支留一句兜底（真正没题时走上面的空态）：
+                 不解释机制，只说下一步。 -->
+            <p v-else class="code__desc">在左边「课程总览」里选一关，这里就会出现那一题的要求。</p>
+          </SurfacePanel>
+          </div>
+
+          <!-- 内边距走 SurfacePanel 的枚举（报告 §4.2）：md = sp-4（16px，8 点网格） -->
+          <SurfacePanel class="code__panel" padding="md">
           <header class="code__panel-head">
             <span class="code__panel-title">代码</span>
             <!-- 状态角标：`title` 里那句「第一次点运行时才准备环境」= 学生在意但不该占位的信息 -->
@@ -1073,12 +1287,15 @@ watch(editorVisible, (visible) => {
             <AlertTriangle :size="14" />{{ code.bridgeError }}
           </p>
         </SurfacePanel>
+        <!-- ↑ 关掉 `.code__work`：**运行结果 / 提示 / 页脚那句安全声明留在网格外**，
+             它们在宽屏下横跨整列（输出比简报更需要宽度，不该被挤进 300px 的那一格）。 -->
+        </div>
 
         <!-- ── 运行说明 ──────────────────────────────────────────────────────
              ★★ **全应用只此一处**常驻安全声明（走查 C7）：同一件事原来写了三遍
              （左栏「代码在哪里执行 · 安全边界」折叠块 + 本句 + 对话卡脚注），
              三遍里学生一遍都不会记住。现在：
-               · 左栏那个折叠块**整块删除**（报告 4.3 也要求左栏只留任务简报 + 学习路径）；
+               · 左栏那个折叠块**整块删除**（报告 4.3 也要求左栏只留导航 + 路径）；
                · 对话卡 `cards/CodingCard.vue` 只留「求助会把你的几行发给智团团」那条**行为告知**
                  （它是另一件事，不是这句的复读）。
              ⚠️ 想再加一处同义声明之前，先回答「这一处为什么不够」。
@@ -1125,7 +1342,7 @@ watch(editorVisible, (visible) => {
   height: 100%;
   min-height: 0;
 }
-/* 简报：340px → **268px**。它有必要的任务上下文（保留），但不许挤住编辑区。 */
+/* 左栏只剩**导航**（课程总览 → 模块 → 关卡），任务简报搬到主工作区了（见 `.code__work`）。 */
 .code__brief {
   --el-box-shadow-light: none;
   --el-box-shadow: var(--k12-shadow-float);
@@ -1140,13 +1357,69 @@ watch(editorVisible, (visible) => {
   background: var(--k12-surface-2);
   overflow-y: auto;
 }
-.code__brief-head {
+/* ── 面包屑（吸顶操作栏的 info 位）─────────────────────────────────
+ * 位置信息用 meta 档（12px）：它回答的是「我在哪」，不是这一屏的主角
+ * （主角是「做到这样算完成」那张卡）。 */
+.code__crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.code__crumb-sep {
+  color: var(--k12-muted-2);
+}
+/* 最后一级（当前关卡）用正文色 + 600 字重：其余是「路过的层级」。 */
+.code__crumb-now {
+  font-weight: 600;
+  color: var(--k12-fg-2);
+}
+/* ── 主工作区：代码区独占整列（任务简报是**浮层**，不占列）──────────
+ * ★★ 2026-09-30 用户裁决：简报收进悬浮窗（默认关闭）→ 代码区拿回整列宽度。
+ *   此前 ≥1440 是「简报 240–300px + 代码」两列，编辑器因此窄了近 300px。
+ * ★ `position: relative` 是**浮层的定位上下文**（`.code__brief-float` 相对它定位）。
+ * ⚠️ 这里只改**父级网格**：`.code__editor` 的高度仍钉在它自己那个盒子上
+ *   （`tests/code-editor-mount.test.ts` 盯着，Monaco 塌成 5px 那次事故就是这么来的）。 */
+.code__work {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--k12-gap);
+  align-items: start;
+}
+/* 任务简报浮层：贴主工作区右上角，限宽限高（内容超出时内部滚动）。
+ * ★ 盖在代码上是有意的：它是「需要时瞄一眼」，不需要时学生一键收起（`.code__brief-close`）。
+ * ★ `z-index: 6` 大于编辑器宿主（1）与骨架（1），小于吸顶操作栏那一档。 */
+.code__brief-float {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 6;
+  width: min(360px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+}
+/* 关闭键：靠右对齐（卡头里除它之外都是左对齐的信息）。 */
+.code__brief-close {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+.code__task {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.code__task-head {
   display: flex;
   align-items: center;
   gap: 8px;
   color: var(--k12-muted);
 }
-.code__brief-title {
+.code__task-title {
   font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
@@ -1162,6 +1435,36 @@ watch(editorVisible, (visible) => {
   font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg-2);
+}
+/* 任务说明入口：单独一行、右对齐，紧贴代码卡片上沿。 */
+.code__brief-entry {
+  display: flex;
+  justify-content: flex-end;
+}
+/* 入口按钮：几何沿用 `.k12-cta`（与「运行 / 求助」同档），填充走 quiet 变体。 */
+.code__brief-open {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* ①「这次的目标」：模板作者写给学生的原话 —— 正文档（它是简报里最该被读到的一句）。 */
+.code__goal {
+  font-size: var(--k12-fs-body);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg);
+}
+/* ③「做完以后，程序会打印」：与运行输出那一块同族（`block__label` + `block__code`）。 */
+.code__expected {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* 元信息（对应知识点）：meta 档灰字，不抢主视线。 */
+.code__task-meta {
+  font-size: var(--k12-fs-caption);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
 }
 .code__brief-err {
   display: flex;
@@ -1181,15 +1484,9 @@ watch(editorVisible, (visible) => {
   font-weight: 600;
   color: var(--k12-accent-ink);
 }
-.code__desc-list {
-  margin-top: -2px;
-}
-/* 键值对的标签与取值都是 meta：12px（EP 默认 14px 在 268px 的简报里比正文还重）。 */
-.code__desc-list :deep(.el-descriptions__label),
-.code__desc-list :deep(.el-descriptions__content) {
-  font-size: var(--k12-fs-caption);
-  line-height: var(--k12-lh-ui);
-}
+/* ⚠️ 2026-09-30：`.code__desc-list`（el-descriptions 键值表）随简报重写一起删了 ——
+ *   那张表把「做到这样就算完成 / 对应知识点 / 要补的 TODO」摆成规格表，学生读完仍不知道
+ *   要写什么。现在是「目标 → 要补几处 → 做完打印什么」的叙事顺序，不再需要它。 */
 .code__sec {
   display: flex;
   flex-direction: column;
@@ -1207,65 +1504,105 @@ watch(editorVisible, (visible) => {
   color: var(--k12-muted);
 }
 
-/* ── 学习路径（原型的「完成步骤」的真实版本）──────────────────────────
- * ★ 分两组：正在学（默认展开）/ 已经走过（默认收起）。
- *   原来的写法是 `levels.map` 平铺 57 关 —— 一堵墙，学生既找不到「我在哪」，
- *   也看不出「下一步是哪一关」。
- *   ★ 2026-09-25 去掉关卡锁定后不再有第三组「还没解锁」：每一关都能点开练习。
- *   分组只按服务端的 `stage`，顺序仍是服务端的拓扑序（本页不重排）。 */
-.pathgrps {
+/* ── 课程总览：按教材章节分块（模块 → 关卡）──────────────────────────
+ * ★ 原来的写法是「按 stage 分两组平铺」：正在学那组就是几十关的一堵墙 ——
+ *   学生既看不出自己在哪一坨，也看不出这一坨走完了没有。
+ *   现在先出现几个**模块头**（`第一章的标题  3 / 7`），展开才是关卡。
+ * ★ 模块名来自教材 `chapterTitle`，顺序来自服务端拓扑序（本页都不重排）。 */
+.mods {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   margin-top: -6px;
 }
-.pathgrp {
+/* 顶部进度块：一屏里**唯一**说「我通关了几关」的地方（模块头上的 N/M 是它的分块读数）。 */
+.mods__total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+}
+.mods__done {
+  font-size: var(--k12-fs-body-sm);
+  font-weight: 650;
+  color: var(--k12-fg-2);
+}
+.mods__go {
+  flex: none;
+}
+.mod {
   display: flex;
   flex-direction: column;
   gap: 5px;
 }
-/* 分组标签：meta 档 13px（不是 micro —— 它是标签不是角标）。 */
-.pathgrp__label {
-  font-size: var(--k12-fs-caption);
-  font-weight: 650;
-  color: var(--k12-fg-2);
-}
-/* 收起/展开的开关：`.k12-tap` 保底 28px 触控高度（设计系统的共享下限）。 */
-.pathgrp__toggle {
-  display: inline-flex;
+/* 模块头：可点的折叠开关（`.k12-tap` 保底 28px 触控高度）。
+ * ★ 常态就带底 + 边：它是**导航里的一个块**，不是纯文字标签 ——
+ *   旧实现的「已经走过 N 关」是透明底，看着像一句说明而不是能点的东西。 */
+.mod__head {
+  display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 6px;
-  border: 1px solid transparent;
-  border-radius: var(--k12-r-inset);
-  background: transparent;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface-2);
   color: var(--k12-fg-2);
-  font-size: var(--k12-fs-caption);
-  font-weight: 600;
+  font-size: var(--k12-fs-body-sm);
+  font-weight: 650;
   text-align: left;
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
-  .pathgrp__toggle:hover {
-    background: var(--k12-surface);
-    border-color: var(--k12-border);
+  .mod__head:hover {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
   }
 }
-/* 箭头：收起时向右、展开时向下（180° 旋转）—— 形状本身说明有更多内容。 */
-.pathgrp__ico {
+/* 展开中的模块：accent 淡底 + accent 边（与「关卡被选中」是同一种材质） */
+.mod__head[data-open='true'] {
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+  color: var(--k12-accent-ink);
+}
+/* 箭头：收起时向右、展开时向下 —— 形状本身说明「里面还有东西」。 */
+.mod__ico {
   flex: none;
   color: var(--k12-muted);
   /* 状态过渡（不是入场动效）：与 `ProgressBar` / `ConfirmDialog` 同一口径，
-   * `prefers-reduced-motion` 下关掉 —— 方向本身仍然由旋转角度表达，信息不丢。 */
+   * `prefers-reduced-motion` 下关掉 —— 方向本身仍由旋转角度表达，信息不丢。 */
   transition: transform var(--k12-dur-state) var(--k12-ease-state);
 }
-.pathgrp__ico[data-open='true'] {
+.mod__head[data-open='true'] .mod__ico {
+  color: var(--k12-accent-ink);
+}
+.mod__ico[data-open='true'] {
   transform: rotate(90deg);
 }
 @media (prefers-reduced-motion: reduce) {
-  :root:not([data-k12-reduced-motion='off']) .pathgrp__ico {
+  :root:not([data-k12-reduced-motion='off']) .mod__ico {
     transition: none;
   }
+}
+.mod__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mod__count {
+  flex: none;
+  font-size: var(--k12-fs-caption);
+  font-weight: 600;
+  color: var(--k12-muted);
+}
+.mod__head[data-open='true'] .mod__count {
+  color: var(--k12-accent-ink);
 }
 .path {
   list-style: none;
@@ -1302,8 +1639,12 @@ watch(editorVisible, (visible) => {
   cursor: not-allowed;
   opacity: 0.6;
 }
-/* 三态在**颜色与形状**上都不同，不只差一个图标：
- * 已通过 / 已掌握 = 实心绿点；学习中 = accent 空心环；认不出的阶段 = 灰空心点 */
+/* ★★ 只有**两态**（已通关 / 可作答），且差异落在颜色上：
+ * 已通关 = 绿点 + 绿名 + 一个勾；可作答 = 中性灰点 + 常规字色。
+ * ⚠️ 为什么不给「可作答」强调色：后端播种时**每一关都是 `learning`**
+ *   （2026-09-25 起没有锁定态），给这一档上强调色 = 57 关全强调
+ *   （旧实现正是如此，于是「状态」等于没有状态）。
+ *   当前这一关的高亮由 `.path__item--on` 单独给（那是选中，不是进度）。 */
 .path__dot {
   flex: none;
   width: 8px;
@@ -1315,17 +1656,9 @@ watch(editorVisible, (visible) => {
 .path__item[data-stage='mastered'] .path__dot {
   background: var(--k12-good);
 }
-.path__item[data-stage='learning'] .path__dot {
-  background: transparent;
-  box-shadow: inset 0 0 0 2px var(--k12-accent-ink);
-}
 .path__item[data-stage='quizzed'] .path__name,
 .path__item[data-stage='mastered'] .path__name {
   color: var(--k12-good);
-}
-.path__item[data-stage='learning'] .path__name {
-  color: var(--k12-accent-ink);
-  font-weight: 650;
 }
 .path__name {
   flex: 1;
@@ -1334,10 +1667,17 @@ watch(editorVisible, (visible) => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.path__stage {
+/* 已通关的勾（与绿点是同一件事的第二个通道：形状 + 颜色） */
+.path__tick {
+  flex: none;
+  color: var(--k12-good);
+}
+/* 「当前」：只落在**正在做的那一关**上（不是进度档，是选中档） */
+.path__now {
   flex: none;
   font-size: var(--k12-fs-caption);
-  color: var(--k12-muted);
+  font-weight: 650;
+  color: var(--k12-accent-ink);
 }
 /* 当前这一题：accent-soft 底 + accent 边 —— 与「哪一关在学」是两件事，所以两种标记都在 */
 .path__item--on .path__btn {
@@ -1349,29 +1689,62 @@ watch(editorVisible, (visible) => {
   font-weight: 650;
 }
 
-/* ── 「卡住了怎么办」：caption 档的说明文字，**不成框** ──────────────────
- * ★ 报告 C11 / 4.3：它原来是一个 warn 底 + 1px warn 边的圆角盒，和真正的警报
- *   （`.code__brief-err`）长一样 —— 而它说的只是「想不出来再点求助」。
- *   现在去框、去告警色，退成普通说明文字；提示分级机制在 `title` 里（模板上）。 */
+/* ── 「卡住了怎么办」：**毛玻璃圆角块**（2026-09-30 用户裁决）────────────────
+ * 报告 C11 / 4.3 当时把它去框、退成普通说明文字，理由是「它原来用 warn 底 + warn 边，
+ * 和真警报（`.code__brief-err`）长得一样」。用户裁决改回**有底**，但换一种底：
+ *   · 中性毛玻璃面（`.k12-glass`，base.css 那条唯一配方）+ 圆角 + 卡片影；
+ *   · **不再用告警色** —— 当初的问题是「像警报」，不是「有框」。
+ * 它沉在左栏底部，是学生卡住时唯一要找的那句话，值得一块独立的底把它从导航里拎出来。
+ * ⚠️ 分层仍走 D-106 三件套（底色差 + 一支线 + 单侧影），不靠加色。 */
 .code__hint-note {
   display: flex;
-  gap: 8px;
-  color: var(--k12-muted);
+  gap: 9px;
+  /* 不支持 backdrop-filter 的环境退回**实色**（下面的 @supports 会覆盖这一条），
+     否则半透明底会把下面的导航文字透上来（可读性事故）。 */
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border-strong);
+  border-radius: var(--k12-r-card);
+  box-shadow: var(--k12-shadow-card);
+  padding: 12px 14px;
+  /* ★ 贴在左栏**底部**：任务简报搬走之后，导航下面会空出一截 ——
+     这一块沉到底部，既填空，又保证它**一直在**（学生滚代码区时抬头就能看见）。 */
+  margin-top: auto;
 }
-.code__hint-note svg {
+/* ⚠️ 毛玻璃配方不直接用全局的 `.k12-glass`：本组件的 scoped 规则带属性选择器，
+ *   权重高于那个单类全局规则 —— 实测会把它的半透明底压回不透明（blur 也就白做了）。
+ *   所以照 `FloatPanel.vue` / `ConfirmDialog.vue` 的既有做法在本文件里写一份：
+ *   **blur 参数与 base.css 一致**（12px / saturate 1.4），不透明度按表面分档。
+ *   ★ 72%：四档里最透的一档 —— 它背后是**平板色的左栏**，没有内容经过，
+ *   卡片感靠边框 + 卡片影撑，不需要靠不透明度（分档表见 base.css 的 `.k12-glass`）。 */
+@supports (backdrop-filter: blur(1px)) {
+  .code__hint-note {
+    background: color-mix(in srgb, var(--k12-surface) 72%, transparent);
+    backdrop-filter: blur(12px) saturate(1.4);
+  }
+}
+.code__hint-ico {
   flex: none;
   margin-top: 2px;
+  /* 图标取强调色：它是这一块里唯一的视觉锚点（文字保持正文墨色）。 */
+  color: var(--k12-accent-ink);
 }
+/* 标题：正文档 + 700 —— 原来 12px/650/muted 在毛玻璃底上读起来发灰。 */
 .code__hint-title {
-  font-size: var(--k12-fs-caption);
-  font-weight: 650;
-  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-body-sm);
+  font-weight: 700;
+  color: var(--k12-fg);
 }
+/* 正文：正文档 + `--k12-fg`（不是 muted）—— 用户要求「鲜艳显眼、可读性高」。 */
 .code__hint-text {
-  margin-top: 2px;
-  font-size: var(--k12-fs-caption);
+  margin-top: 3px;
+  font-size: var(--k12-fs-body-sm);
   line-height: var(--k12-lh-body);
-  color: var(--k12-muted);
+  color: var(--k12-fg);
+}
+/* 「求助」是这句话的动作词：强调色 + 700，但不做按钮（按钮在右栏，这里只是指路）。 */
+.code__hint-key {
+  color: var(--k12-accent-ink);
+  font-weight: 700;
 }
 
 /* ── 主区 ──────────────────────────────────────────────────────────── */
@@ -1467,7 +1840,12 @@ watch(editorVisible, (visible) => {
  *   （2026-09-27 真机事故：编辑区只剩一条黑边）。 */
 .code__editor {
   width: 100%;
+  /* ★ 420px 仍是**基准高度**：Monaco 的 100% 靠它解析（守卫 `code-editor-mount.test.ts`
+   *   逐字钉着这个数）。2026-09-30 用户裁决「编辑器尽量放大」→ 用 `min-height` 按视口抬高：
+   *   高窗口里编辑区跟着长，矮窗口里退回基准，不会再出现「编辑器只占半屏」。
+   *   上限 820px 是给超大窗口的：再高就超出「一屏看全一份脚手架」的需要。 */
   height: 420px;
+  min-height: clamp(420px, calc(100vh - 420px), 820px);
 }
 /* Monaco 内核装配中：骨架盖住编辑区（不占第二块高度） */
 .code__editor-skeleton {

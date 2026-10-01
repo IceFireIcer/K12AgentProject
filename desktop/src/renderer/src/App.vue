@@ -23,13 +23,15 @@
  *   切走期间保留监听正是「动画进度与编辑器内容不被丢掉」所必需的，故**不**额外加
  *   activate/deactivate 收放（加了反而会让切回后 ready 计时与进度断一截）。
  *
- * ★ 顶栏的三步循环按钮（`view-entry`）留在这里：它是**外壳级动作**，
- *   而外壳（`layouts/AppShell.vue`）刻意不知道有哪些页面。文案与顺序的唯一来源
- *   仍是 `stores/ui.ts`（`VIEW_LABELS` / `nextView`）—— 两处各写一份顺序迟早对不上
- *   （按钮写着「去设置」，点下去却到了学习档案）。
+ * ★★ 2026-10-01 用户裁决（D-126）：顶栏那个**三步循环按钮（`view-entry`）已删除**
+ *   —— 「把我红框框起来的按钮和那个分割线去掉」。它原来挂在外壳的 `#actions` 插槽里，
+ *   现在 `#actions` 不再由本文件填内容（外壳与插槽都留着：那是外壳的能力，不是这个按钮的）。
+ *   ⚠️ 别再顺手加回来：`stores/ui.ts` 的 `VIEW_LABELS` / `nextView` 仍在（`ui-shell.test.ts` 钉着），
+ *     但它们现在**只服务数据自洽**，不再有界面上那个按钮。
+ *   ⚠️ 探针 `scripts/verify-ui.mjs` 原先靠点这个按钮做「对话 → 学习档案 → 设置」的三步循环，
+ *     已改为按侧栏导航点击（同一个脚本里，别再依赖 `view-entry`）。
  */
 import { computed, onMounted, onUnmounted, watch } from 'vue'
-import { ArrowRight } from 'lucide-vue-next'
 import { BRAND_NAME, BRAND_TAGLINE } from '@shared/brand'
 import AppShell from './layouts/AppShell.vue'
 import Chat from './views/Chat.vue'
@@ -41,11 +43,14 @@ import Quiz from './views/Quiz.vue'
 import Knowledge from './views/Knowledge.vue'
 import Dependency from './views/Dependency.vue'
 import Demo from './views/Demo.vue'
+import AccountGate from './views/AccountGate.vue'
+import AccountMenu from './components/AccountMenu.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import FloatPanel from './components/FloatPanel.vue'
 import DiagnosticsPanel from './components/DiagnosticsPanel.vue'
 import ModelPicker from './components/ModelPicker.vue'
 import { useOnBackendReady } from './composables/useOnBackendReady'
+import { useAccountsStore } from './stores/accounts'
 import { useChatStore } from './stores/chat'
 import { useDemoSeedStore } from './stores/demoSeed'
 import { useConfirm } from './stores/confirm'
@@ -53,11 +58,12 @@ import { useSettingsStore } from './stores/settings'
 import { useSidecarStore } from './stores/sidecar'
 import { useStudentStore } from './stores/student'
 import { useTraceStore } from './stores/trace'
-import { nextView, requiredViewFor, viewModeAllows, PAGES, useUiStore, VIEW_LABELS } from './stores/ui'
+import { requiredViewFor, viewModeAllows, PAGES, useUiStore } from './stores/ui'
 import { useViewModeStore } from './stores/viewMode'
 import { useDiagnosticsStore } from './stores/diagnostics'
 
 const ui = useUiStore()
+const accounts = useAccountsStore()
 const viewMode = useViewModeStore()
 const chat = useChatStore()
 const demoSeed = useDemoSeedStore()
@@ -68,21 +74,6 @@ const diagnostics = useDiagnosticsStore()
 const confirm = useConfirm()
 const settings = useSettingsStore()
 
-/**
- * 顶栏循环按钮的文案。
- *
- * ★★ **不要在这里再套一层 `nextView()`**：`VIEW_LABELS[current]` 的语义本来就是
- *   「在 `current` 这一页时，按钮上写什么」——
- *   它指向的是**下一个视图**（`stores/ui.ts` 里 chat: '学习档案' / study: '设置' /
- *   settings: '返回对话'）。再套一层 `nextView` 会得到「在对话页写着『设置』，
- *   点下去却到了学习档案」—— 正是 `ui-shell.test.ts` 那条守卫要防的错位；
- *   而那条守卫检查的是**数据**（`VIEW_LABELS` 与 `nextView` 自洽），
- *   照不到「调用方多套了一层」，所以它会照常通过、界面却在撒谎。
- */
-const currentLabel = computed(() => VIEW_LABELS[ui.view])
-
-/** 点击后要去的视图（与上面的文案是同一个来源，保证「写着去哪儿就去哪儿」）。 */
-const nextTarget = computed(() => nextView(ui.view))
 
 /**
  * 窗口标题：品牌名 + 当前页名。
@@ -116,6 +107,9 @@ watch(
 function loadInitialData(): void {
   // 身份：昵称 / 学段 / 当前章节（侧栏、档案页、依赖图都要用）
   void student.load()
+  // 本机账号名单：启动门禁要列出「这台电脑上有谁」，并与身份比对出「上次用的是哪个」。
+  // ★ 与身份同一批读：两件事合成一屏判断，分成两批会让门禁先闪一下再补人。
+  void accounts.load()
   // 设置快照：模型 chip 在顶栏与输入条上（都是常驻 chrome）。
   // 只在设置页加载的话，学生第一次打开应用会看到「未配置模型」——
   // 而配置其实是好的，那是在拿「还没去读」冒充「没配」。
@@ -188,19 +182,9 @@ onUnmounted(() => {
     <p class="sr-only">{{ BRAND_NAME }}，{{ BRAND_TAGLINE }}</p>
 
     <AppShell>
-      <!-- 外壳级动作：三步循环（对话 → 学习档案 → 设置 → 对话） -->
-      <template #actions>
-        <button
-          class="cycle"
-          type="button"
-          data-testid="view-entry"
-          :title="`切到${currentLabel}`"
-          @click="ui.show(nextTarget)"
-        >
-          <span>{{ currentLabel }}</span>
-          <ArrowRight :size="14" />
-        </button>
-      </template>
+      <!-- ⚠️ 这里**曾经**有外壳级动作（三步循环按钮 `view-entry`）—— 2026-10-01 用户裁决删除（D-126）。
+           插槽本身是外壳的能力（`layouts/AppShell.vue` 仍留着 `#actions` + 它那条结构分面），
+           只是本文件不再往里塞东西：窗口按钮仍在最右端，用户点名的那条竖分割线随按钮一起消失。 -->
 
       <!-- ★ 全部分支都放在 <KeepAlive> **内部**（`v-if/v-else-if` 必须相邻，
            所以不能把 KeepAlive 只包住其中一个）。切走后组件被移进隐藏容器，
@@ -241,6 +225,13 @@ onUnmounted(() => {
       @cancel="confirm.onCancel()"
     />
     <ModelPicker />
+
+    <!-- 账号两件：门禁（启动时选人）+ 菜单（侧栏身份卡点开）。
+         ★ 与确认框 / 模型弹层同级挂在应用根：它们都不属于任何一页 ——
+           门禁在进应用之前，菜单要能在任何页面上打开。
+         ★ 两者都 Teleport 到 body，位置不受外壳的 overflow 影响。 -->
+    <AccountGate />
+    <AccountMenu />
   </div>
 </template>
 

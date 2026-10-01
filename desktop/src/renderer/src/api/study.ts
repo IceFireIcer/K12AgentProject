@@ -25,6 +25,11 @@ export interface StudyBridge {
   readStudyMistakes(): Promise<StudyCallResult>
   readStudyChapters(payload: { gradeLevel: GradeLevel }): Promise<StudyCallResult>
   readStudyGraph(payload: { gradeLevel: GradeLevel }): Promise<StudyCallResult>
+  /**
+   * 学习历史（明细流水，倒序分页；2026-09-30）。
+   * ★ 与 `readStudyReport` 的分工：那个是聚合（每天多少条），这个是逐条流水。
+   */
+  readStudyHistory(payload: { limit?: number; offset?: number }): Promise<StudyCallResult>
   listSessions(): Promise<StudyCallResult>
   readSessionTranscript(sessionId: string): Promise<StudyCallResult>
   searchSessions(payload: { query: string }): Promise<StudyCallResult>
@@ -54,6 +59,10 @@ const REQUIRED_METHODS = [
   'readStudyMistakes',
   'readStudyChapters',
   'readStudyGraph',
+  // ★ 学习历史（2026-09-30）：档案页的第六个分页，与上面四个 readStudy* 同级 ——
+  //   列入必需而不是可选，是为了避免「分页在、点了报错」那种半坏状态
+  //   （本项目整包发布，不会出现 preload 与渲染层版本错配）。
+  'readStudyHistory',
   'listSessions',
   'readSessionTranscript',
   'searchSessions',
@@ -99,6 +108,7 @@ export function resolveStudyBridge(host: K12Api | undefined = globalThis.window?
       readStudyMistakes: () => api.readStudyMistakes(),
       readStudyChapters: (payload) => api.readStudyChapters(payload),
       readStudyGraph: (payload) => api.readStudyGraph(payload),
+      readStudyHistory: (payload) => api.readStudyHistory(payload),
       listSessions: () => api.listSessions(),
       readSessionTranscript: (sessionId) => api.readSessionTranscript(sessionId),
       searchSessions: (payload) => api.searchSessions(payload),

@@ -15,12 +15,20 @@ import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { isDiagnosticsSnapshot, type DiagnosticsSnapshot } from '@shared/diagnostics'
 import {
   IPC,
+  type AccountsCreateRequest,
+  type AccountsDeleteRequest,
+  type AccountsDeleteResult,
+  type AccountsListResult,
+  type AccountsRenameRequest,
+  type AccountsStudentResult,
+  type AccountsSwitchRequest,
   type AnimationComposeRequest,
   type AnimationHostRequest,
   type AnimationRenderRequest,
   type AnimationSavedDeleteRequest,
   type AnimationSavedGetRequest,
   type AnimationSavedListRequest,
+  type QuizGenerateRequest,
   type QuizGeneratedListRequest,
   type AnimationSavedSaveRequest,
   type AnimationTemplatesRequest,
@@ -43,11 +51,19 @@ import {
   type GradeCallResult,
   type GradeSetResult,
   type GradeState,
+  type IdentityCallResult,
+  type IdentityFlagsRequest,
   type IpcChannel,
   type KnowledgeImportIpcRequest,
   type KnowledgePointsRequest,
+  type OnboardingAnswerRequest,
+  type OnboardingCallResult,
+  type OnboardingStatePayload,
   type ProbeRequest,
   type ProbeResult,
+  type ProfileTagsCallResult,
+  type ProfileSummaryCallResult,
+  type ProfileTimelineCallResult,
   type ProviderCatalogEntry,
   type QuizBankRequest,
   type QuizGradeRequest,
@@ -64,6 +80,7 @@ import {
   type SettingsUpdateRequest,
   type StudyCallResult,
   type StudyGradeRequest,
+  type StudyHistoryRequest,
   type StudyReportRequest
 } from '../main/ipc/channels'
 import type { SidecarState } from '../main/sidecar/protocol'
@@ -192,6 +209,8 @@ export interface K12Api {
   readStudyChapters(payload: StudyGradeRequest): Promise<StudyCallResult>
   /** 某学段依赖图全览（学习地图；带 `studentId` 就标注哪些已掌握）。 */
   readStudyGraph(payload: StudyGradeRequest): Promise<StudyCallResult>
+  /** 学习历史（明细流水，倒序分页；2026-09-30）。 */
+  readStudyHistory(payload?: StudyHistoryRequest): Promise<StudyCallResult>
   /**
    * 列出当前学生的历史会话（只读回看）。
    * ★ 回来看的是**投影后的摘要**（标题/条数/时间），不含任何宿主路径。
@@ -276,11 +295,28 @@ export interface K12Api {
    * ★ 它是独立通道，不是 6 事件之一（轨迹是工程证据，与对话状态机不是一回事）。
    */
   onTraceChanged(listener: (snapshot: TraceSnapshot) => void): () => void
-  /**
-   * 读**当前学生**（昵称 / 学段 / 当前章节）。
-   * ★ 学生身份由主进程决定；库里没有学生时主进程会建一个（新机器首跑）。
-   */
   getStudent(): Promise<StudyCallResult>
+  /**
+   * 列出**本机已有的账号**（昵称 / 学段 / 最近使用）。
+   *
+   * ★ 账号 = 本机的多个学生（一人一目录、一人一库）。回执里的 id 会被后面四条通道
+   *   原样带回来 —— 但主进程仍会自己校验一次（渲染进程递来的 id 一律不当真）。
+   */
+  listAccounts(): Promise<AccountsListResult>
+  /** 新建账号（昵称 + 学段；账号 id 由服务端分配，前端指定不了）。 */
+  createAccount(payload: AccountsCreateRequest): Promise<AccountsStudentResult>
+  /** 改名 / 改学段（只发改动的字段；改学段会由服务端顺带清掉当前章节）。 */
+  renameAccount(payload: AccountsRenameRequest): Promise<AccountsStudentResult>
+  /**
+   * 删掉一个账号（连本机那个学生目录一起删）。
+   * ★ 当前账号会被主进程挡下（先切走再删）—— 这是**不可恢复**的操作，界面要先二次确认。
+   */
+  deleteAccount(payload: AccountsDeleteRequest): Promise<AccountsDeleteResult>
+  /**
+   * 切换当前账号（只改本机的当前账号指针，不动服务端数据）。
+   * ★ 切完要**重新装配整套学生态**（最省事的做法是重载界面）——主进程只负责「当前是谁」。
+   */
+  switchAccount(payload: AccountsSwitchRequest): Promise<AccountsStudentResult>
   /** 读画像（掌握度 + 偏好 + 推荐知识点）。 */
   readProfile(): Promise<StudyCallResult>
   /** 读「推荐下一步」（依赖图 + 掌握度推导，聚合在 Python）。 */
@@ -335,6 +371,19 @@ export interface K12Api {
    */
   readGeneratedQuestions(payload?: QuizGeneratedListRequest): Promise<StudyCallResult>
   /**
+   * ★★ 做完一关内置题后的**自动追加出题**（后台个性化生成，不阻塞学生）。
+   *
+   * ★ 载荷只有知识点与作答轨迹：身份 / 学段 / 出几道都由主进程决定
+   *   （渲染层能指定这些就等于能替主进程决定读谁的数据、按哪一档出题）。
+   * ★ 题目是**先生成、后登记（答案进 Python）、再下发**的：登记失败的那一批不下发，
+   *   所以这里回来的每一道都能正常判分。
+   */
+  generateQuizAuto(payload: QuizGenerateRequest): Promise<StudyCallResult>
+  /**
+   * ★★ 「还想再练练」：带着当前全部题目的作答轨迹再要一批（固定 10 道，编号顺延）。
+   */
+  generateQuizMore(payload: QuizGenerateRequest): Promise<StudyCallResult>
+  /**
    * ★ 把一份已经生成好的动画存进库里。
    * ★ `promptHash` 是**十六进制摘要**：学生原话一个字都不进库。
    */
@@ -382,6 +431,36 @@ export interface K12Api {
    * ★ 必须推送：双击拖拽区、Win+↑/↓、拖到屏幕上边缘都会改变状态，渲染进程看不到。
    */
   onWindowMaximizedChanged(listener: (maximized: boolean) => void): () => void
+  /**
+   * 冷启动引导（票 25）：读当前引导状态。
+   * ★ 不接受任何入参：学生身份由主进程决定（渲染进程指定不了「读谁的」）。
+   * ★ 只有服务端状态是 not_started 时 nextQuestionId 才是 q1 —— 其余三态一律 null
+   *   （守卫 G-I：引导只在第一次使用弹，新建会话也不弹）。
+   */
+  readOnboardingState(): Promise<OnboardingCallResult<OnboardingStatePayload>>
+  /**
+   * ★★ 交一问的回答（**独立通道，绝不混进 sendChat**）。
+   * ★ questionId 由渲染层按**位置**给出：展示第 N 问时记下它，学生的下一条消息配对送上来。
+   * ★ 回执立刻返回 —— 后台的落库与概括是 fire-and-forget，界面不等它。
+   */
+  answerOnboarding(payload: OnboardingAnswerRequest): Promise<OnboardingCallResult<{ accepted: boolean }>>
+  /** 订阅引导状态变化（八条里唯一的推送），返回取消订阅函数。 */
+  onOnboardingChanged(listener: (payload: OnboardingStatePayload) => void): () => void
+  /** 读画像标签（已按 TTL 过滤；不在白名单的 key 一个都不会出现）。 */
+  readProfileTags(): Promise<ProfileTagsCallResult>
+  /** 一键撤销一条标签（L3 猜错了能救回来）。 */
+  retractProfileTag(key: string): Promise<ProfileTagsCallResult>
+  /** 读画像变化时间线（§5.2 #11；后端已把中文句子拼好，前端直接渲染）。 */
+  readProfileTimeline(limit?: number): Promise<ProfileTimelineCallResult>
+  /**
+   * 读画像小结（三期）：主进程本地缓存里的一段 AI 小结（`''` = 还没生成过）。
+   * ★ **只读不生成** —— 生成发生在画像变更之后，所以这个调用零等待、零模型开销。
+   */
+  readProfileSummary(): Promise<ProfileSummaryCallResult>
+  /** 读身份层（真名**只**用于渲染层的本地替换，主进程不会把它拼进任何 prompt）。 */
+  readIdentity(): Promise<IdentityCallResult>
+  /** 设置页的两道闸（只发改动的字段，绝不全量覆盖）。 */
+  setIdentityFlags(payload: IdentityFlagsRequest): Promise<IdentityCallResult>
 }
 
 /**
@@ -557,6 +636,10 @@ const api: K12Api = {
   readStudyChapters: (payload): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.studyChapters, payload) as Promise<StudyCallResult>,
 
+  // ★ 只递分页参数（本页条数 / 倒序偏移），学生身份由主进程决定（2026-09-30）
+  readStudyHistory: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.studyHistory, payload) as Promise<StudyCallResult>,
+
   readStudyGraph: (payload): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.studyGraph, payload) as Promise<StudyCallResult>,
 
@@ -644,6 +727,23 @@ const api: K12Api = {
   getStudent: (): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.studentGet) as Promise<StudyCallResult>,
 
+  // ── 账号（本机多个学生；五条都是 invoke —— 都要回执）─────────────────────
+  // ★ 学生身份仍由主进程决定：这里只递「要操作哪一个账号」，从不递「以谁的身份」。
+  listAccounts: (): Promise<AccountsListResult> =>
+    ipcRenderer.invoke(IPC.accountsList) as Promise<AccountsListResult>,
+
+  createAccount: (payload): Promise<AccountsStudentResult> =>
+    ipcRenderer.invoke(IPC.accountsCreate, payload) as Promise<AccountsStudentResult>,
+
+  renameAccount: (payload): Promise<AccountsStudentResult> =>
+    ipcRenderer.invoke(IPC.accountsRename, payload) as Promise<AccountsStudentResult>,
+
+  deleteAccount: (payload): Promise<AccountsDeleteResult> =>
+    ipcRenderer.invoke(IPC.accountsDelete, payload) as Promise<AccountsDeleteResult>,
+
+  switchAccount: (payload): Promise<AccountsStudentResult> =>
+    ipcRenderer.invoke(IPC.accountsSwitch, payload) as Promise<AccountsStudentResult>,
+
   readProfile: (): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.profileRead) as Promise<StudyCallResult>,
 
@@ -696,6 +796,13 @@ const api: K12Api = {
   readGeneratedQuestions: (payload): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.quizGeneratedList, payload) as Promise<StudyCallResult>,
 
+  // ── 练习页动态出题（invoke；两条都**不带** studentId / gradeLevel）──────────
+  generateQuizAuto: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.quizGenerateAuto, payload) as Promise<StudyCallResult>,
+
+  generateQuizMore: (payload): Promise<StudyCallResult> =>
+    ipcRenderer.invoke(IPC.quizGenerateMore, payload) as Promise<StudyCallResult>,
+
   readSavedAnimation: (payload): Promise<StudyCallResult> =>
     ipcRenderer.invoke(IPC.animationSavedGet, payload) as Promise<StudyCallResult>,
 
@@ -741,6 +848,61 @@ const api: K12Api = {
     return () => {
       ipcRenderer.removeListener(IPC.windowMaximizedChanged, handler)
     }
+  },
+
+  // ── 冷启动引导（票 25：五问 + 白名单标签）─────────────────────────────
+  //   ★ 八条里只有 onOnboardingChanged 是推送；其余七条都是 invoke（有回执）。
+  //   ★ 一律不带 studentId：身份由主进程决定（递进去就等于允许读别人的画像）。
+  readOnboardingState: (): Promise<OnboardingCallResult<OnboardingStatePayload>> =>
+    ipcRenderer.invoke(IPC.onboardingState) as Promise<OnboardingCallResult<OnboardingStatePayload>>,
+
+  // ★★ 逐字段重建：只递两个字符串（渲染进程多塞的字段进不来）——
+  //    这条通道与 sendChat 是**两条路**，问题 id 从不进对话请求（G6c 钉着 ChatSendRequest 只有 text）。
+  answerOnboarding: (payload): Promise<OnboardingCallResult<{ accepted: boolean }>> =>
+    ipcRenderer.invoke(IPC.onboardingAnswer, {
+      questionId: typeof payload?.questionId === 'string' ? payload.questionId : '',
+      answerText: typeof payload?.answerText === 'string' ? payload.answerText : ''
+    }) as Promise<OnboardingCallResult<{ accepted: boolean }>>,
+
+  onOnboardingChanged: (listener): (() => void) => {
+    const handler = (_event: IpcRendererEvent, payload: unknown): void => {
+      // 边界处过滤：四个字段的形状都对不上就整条丢掉（半截状态会让进度条乱跳）
+      if (!isOnboardingStatePayload(payload)) return
+      listener(payload)
+    }
+    ipcRenderer.on(IPC.onboardingChanged, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC.onboardingChanged, handler)
+    }
+  },
+
+  // 画像标签与身份层（读 / 撤销 / 两道闸）：一律不带 studentId。
+  readProfileTags: (): Promise<ProfileTagsCallResult> =>
+    ipcRenderer.invoke(IPC.profileTags) as Promise<ProfileTagsCallResult>,
+
+  retractProfileTag: (key): Promise<ProfileTagsCallResult> =>
+    ipcRenderer.invoke(IPC.profileTagRetract, String(key ?? '')) as Promise<ProfileTagsCallResult>,
+
+  // ★ 只递一个数字（条数上限）；不传就让后端用默认值。
+  readProfileTimeline: (limit): Promise<ProfileTimelineCallResult> =>
+    ipcRenderer.invoke(
+      IPC.profileTimeline,
+      typeof limit === 'number' && Number.isFinite(limit) ? limit : undefined
+    ) as Promise<ProfileTimelineCallResult>,
+
+  // ★ 三期（2026-09-30）：读画像小结（只读主进程缓存，不触发任何生成）
+  readProfileSummary: (): Promise<ProfileSummaryCallResult> =>
+    ipcRenderer.invoke(IPC.profileSummary) as Promise<ProfileSummaryCallResult>,
+
+  readIdentity: (): Promise<IdentityCallResult> =>
+    ipcRenderer.invoke(IPC.identityRead) as Promise<IdentityCallResult>,
+
+  // ★ 只递**显式的布尔字段**：不给的键一个都不发（部分更新，绝不全量覆盖两道闸）。
+  setIdentityFlags: (payload): Promise<IdentityCallResult> => {
+    const flags: IdentityFlagsRequest = {}
+    if (typeof payload?.parentConsent === 'boolean') flags.parentConsent = payload.parentConsent
+    if (typeof payload?.memorySwitch === 'boolean') flags.memorySwitch = payload.memorySwitch
+    return ipcRenderer.invoke(IPC.identityFlagsSet, flags) as Promise<IdentityCallResult>
   }
 }
 
@@ -818,6 +980,28 @@ function isTraceSnapshot(value: unknown): value is TraceSnapshot {
   return typeof record.turn === 'number' && Array.isArray(record.entries)
 }
 
+/**
+ * 引导状态的最小形状检查（`onboarding:changed` 的推送载荷）。
+ * ★ `nextQuestionId` 允许 **null**（= 不该再弹了），所以判据是「是字符串或 null」而不是真值 ——
+ *   写成 `if (!record.nextQuestionId) return false` 会把「收齐五问」那条最关键的推送整条丢掉。
+ * ★ `answered` 必须是数组、`displayName` 必须是字符串：半截状态会让进度与称呼一起乱。
+ */
+function isOnboardingStatePayload(value: unknown): value is OnboardingStatePayload {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as {
+    onboardingState?: unknown
+    answered?: unknown
+    nextQuestionId?: unknown
+    displayName?: unknown
+  }
+  return (
+    typeof record.onboardingState === 'string' &&
+    Array.isArray(record.answered) &&
+    (record.nextQuestionId === null || typeof record.nextQuestionId === 'string') &&
+    typeof record.displayName === 'string'
+  )
+}
+
 /** 四个学段字面量（与 `shared/ipc-events.ts` 的 `GradeLevel` 同源，此处只做运行期校验）。 */
 const GRADE_LEVELS = ['primary_low', 'primary_high', 'junior', 'senior'] as const
 
@@ -853,6 +1037,8 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.studyMistakes,
   IPC.studyChapters,
   IPC.studyGraph,
+  // ★ 学习历史（2026-09-30）：学习档案第六个分页的取数通道
+  IPC.studyHistory,
   // 历史会话（invoke；**只接受 id，不接受路径**）
   IPC.sessionList,
   IPC.sessionTranscript,
@@ -884,6 +1070,12 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.demoScript,
   // 学生身份 / 画像 / 学段证据（invoke；身份由主进程决定）
   IPC.studentGet,
+  // 账号五条（invoke；**都不进** PUSH_CHANNELS —— 它们只有回执，没有任何流）
+  IPC.accountsList,
+  IPC.accountsCreate,
+  IPC.accountsRename,
+  IPC.accountsDelete,
+  IPC.accountsSwitch,
   IPC.profileRead,
   IPC.profileRecommendation,
   IPC.gradeSignals,
@@ -905,6 +1097,9 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.animationSavedGet,
   // 学生自己的生成题（读；身份由主进程决定）
   IPC.quizGeneratedList,
+  // 练习页动态出题（invoke；配额外批量生成，**同样不带** studentId / gradeLevel）
+  IPC.quizGenerateAuto,
+  IPC.quizGenerateMore,
   IPC.animationSavedSave,
   IPC.animationSavedDelete,
   IPC.animationCompose,
@@ -917,7 +1112,20 @@ export const WHITELISTED_CHANNELS: readonly IpcChannel[] = [
   IPC.windowMinimize,
   IPC.windowToggleMaximize,
   IPC.windowClose,
-  IPC.windowMaximizedChanged
+  IPC.windowMaximizedChanged,
+  // 冷启动引导与画像标签（票 25 / 票 31：七条 invoke + **一条推送** onboarding:changed）。
+  // ★ 八条都要在这里登记：G9 断言 WHITELISTED_CHANNELS 与 IPC 的全部取值**逐字相等**，
+  //   漏一条或名字写错都会当场红（白名单是渲染进程能看到的能力面）。
+  IPC.onboardingState,
+  IPC.onboardingAnswer,
+  IPC.onboardingChanged,
+  IPC.profileTags,
+  IPC.profileTagRetract,
+  IPC.profileTimeline,
+  // ★ 三期：画像小结（只读缓存；生成在画像变更之后，由主进程自己做）
+  IPC.profileSummary,
+  IPC.identityRead,
+  IPC.identityFlagsSet
 ]
 
 contextBridge.exposeInMainWorld('api', api)

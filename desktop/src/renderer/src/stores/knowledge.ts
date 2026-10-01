@@ -22,6 +22,7 @@ import {
   type KnowledgePointsView,
   type KnowledgeStatsView
 } from '../api/data'
+import { useOpLog } from './opLog'
 
 /** 导入的三态：还没试 / 校验被拒 / 已接收（可能重建失败）。 */
 export type ImportPhase = 'idle' | 'rejected' | 'accepted'
@@ -53,6 +54,15 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
   const lastElapsedMs = ref<number | null>(null)
 
   const bridgeError = ref<string | null>(null)
+
+  /**
+   * 操作日志（导入 / 重建 / 读取）。
+   *
+   * ★ 只在**终态**记一条：这几条路径要么是长任务、要么每次开页都会跑一遍，
+   *   逐条记会刷屏；而失败恰是用户最想事后回看的那一段（成功的读取没什么可查的）。
+   */
+  const opLog = useOpLog()
+
   /** 非响应式：并发取数只发一次（统计与清单会同时被挂载）。 */
   let statsInFlight: Promise<void> | null = null
   let pointsInFlight: Promise<void> | null = null
@@ -98,6 +108,28 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     return map
   })
 
+  /**
+   * 知识点 id → 教材章节 的索引。
+   *
+   * ★ 存在的理由：智码工坊要把几十关按**大模块**分块（见 `study/workshop-path.ts`），
+   *   而「这一关属于哪一坨」的权威答案是教材的 `chapter_title` ——
+   *   闯关进度（`progress.levels`）里**没有**章节字段，只有 kpId。
+   *   所以分组是「进度 × 知识点清单」的一次 join，本索引就是 join 的右表。
+   * ★ 与 `kpIndex` 同源（同一份 `points`），所以两张表不会各自漂移。
+   */
+  const kpChapterIndex = computed(() => {
+    const map = new Map<string, string>()
+    for (const row of points.value?.points ?? []) {
+      if (row.chapterTitle) map.set(row.kpId, row.chapterTitle)
+    }
+    return map
+  })
+
+  /** 取知识点所属章节；查不到回 `null`（调用方据此把关卡落进「其他关卡」组）。 */
+  function kpChapterOf(kpId: string): string | null {
+    return kpChapterIndex.value.get(kpId) ?? null
+  }
+
   /** 取知识点显示名；拿不到回 `null`（调用方回退显示 id，**不编名字**）。 */
   function kpNameOf(kpId: string): string | null {
     return kpIndex.value.get(kpId) ?? null
@@ -119,6 +151,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     const lookup = resolveDataBridge()
     if (!lookup.ready) {
       bridgeError.value = lookup.message
+      opLog.push({ level: 'error', action: 'read', target: '统计', detail: lookup.message })
       return
     }
     bridgeError.value = null
@@ -127,10 +160,16 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     statsInFlight = (async () => {
       try {
         const result = await lookup.bridge.readKnowledgeStats()
-        if (result.ok) stats.value = result.data as KnowledgeStatsView
-        else statsError.value = result.message
+        if (result.ok) {
+          stats.value = result.data as KnowledgeStatsView
+        } else {
+          statsError.value = result.message
+          opLog.push({ level: 'error', action: 'read', target: '统计', detail: result.message })
+        }
       } catch (thrown) {
-        statsError.value = thrown instanceof Error ? thrown.message : String(thrown)
+        const message = thrown instanceof Error ? thrown.message : String(thrown)
+        statsError.value = message
+        opLog.push({ level: 'error', action: 'read', target: '统计', detail: message })
       } finally {
         statsLoading.value = false
         statsInFlight = null
@@ -145,6 +184,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     const lookup = resolveDataBridge()
     if (!lookup.ready) {
       bridgeError.value = lookup.message
+      opLog.push({ level: 'error', action: 'read', target: '知识点清单', detail: lookup.message })
       return
     }
     bridgeError.value = null
@@ -155,10 +195,21 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
         // ★ 不带学段过滤：一次取全，过滤在**界面层**（`filteredPoints`）。
         //   每切一次学段就重发一次请求，换来的只是一个本地就能做的筛选。
         const result = await lookup.bridge.readKnowledgePoints({})
-        if (result.ok) points.value = result.data as KnowledgePointsView
-        else pointsError.value = result.message
+        if (result.ok) {
+          points.value = result.data as KnowledgePointsView
+        } else {
+          pointsError.value = result.message
+          opLog.push({
+            level: 'error',
+            action: 'read',
+            target: '知识点清单',
+            detail: result.message
+          })
+        }
       } catch (thrown) {
-        pointsError.value = thrown instanceof Error ? thrown.message : String(thrown)
+        const message = thrown instanceof Error ? thrown.message : String(thrown)
+        pointsError.value = message
+        opLog.push({ level: 'error', action: 'read', target: '知识点清单', detail: message })
       } finally {
         pointsLoading.value = false
         pointsInFlight = null
@@ -197,6 +248,15 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     importProblems.value = []
     importMessage.value = ''
     importedFile.value = { name: input.fileName, sizeKb: Math.max(1, Math.round(input.markdown.length / 1024)) }
+    // 计时起点放在**发请求前**：日志里的耗时是用户实际等了多久，不含主进程校验
+    // 与落盘前后那点瞬时开销，也不是服务端自报的时间。
+    const t0 = Date.now()
+    opLog.push({
+      level: 'info',
+      action: 'import',
+      target: input.fileName,
+      detail: '开始导入'
+    })
     try {
       const result = await lookup.bridge.importKnowledge({
         fileName: input.fileName,
@@ -208,22 +268,37 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
         // 传输层失败（sidecar 没起来 / 超时）—— 与「内容被拒」不是一回事
         importPhase.value = 'rejected'
         importProblems.value = [result.message]
+        opLog.push({ level: 'error', action: 'import', detail: result.message })
         return
       }
       const data = result.data as KnowledgeImportView
       importMessage.value = data.message
       if (data.ok) {
         importPhase.value = 'accepted'
+        opLog.push({
+          level: 'success',
+          action: 'import',
+          target: input.fileName,
+          detail: '已接收',
+          durationMs: Date.now() - t0
+        })
       } else {
         // ★ 内容被拒：逐条列出原因（缺文件头 / kp_id 不符 / 学段错位 / 超纲术语）
         importPhase.value = 'rejected'
         importProblems.value = data.problems ?? []
+        opLog.push({
+          level: 'warn',
+          action: 'import',
+          detail: importProblems.value.length > 0 ? importProblems.value.join('；') : '内容被拒'
+        })
       }
       if (data.stats) stats.value = data.stats
       await loadAll(true)
     } catch (thrown) {
+      const message = thrown instanceof Error ? thrown.message : String(thrown)
       importPhase.value = 'rejected'
-      importProblems.value = [thrown instanceof Error ? thrown.message : String(thrown)]
+      importProblems.value = [message]
+      opLog.push({ level: 'error', action: 'import', detail: message })
     } finally {
       importing.value = false
     }
@@ -245,11 +320,16 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     }
     rebuildPhase.value = 'running'
     rebuildMessage.value = ''
+    // 客户端计时与回执的 elapsedMs 并存：有服务端耗时就优先用它的（更贴近真实重建
+    // 时间），拿不到才退回这里 —— 两条都比日志上写个空耗时强。
+    const t0 = Date.now()
+    opLog.push({ level: 'info', action: 'rebuild', detail: '开始重建' })
     try {
       const result = await lookup.bridge.rebuildKnowledge()
       if (!result.ok) {
         rebuildPhase.value = 'failed'
         rebuildMessage.value = result.message
+        opLog.push({ level: 'error', action: 'rebuild', detail: result.message })
         return
       }
       const data = result.data as {
@@ -262,16 +342,25 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
       if (data.ok) {
         rebuildPhase.value = 'done'
         rebuildMessage.value = data.message
+        opLog.push({
+          level: 'success',
+          action: 'rebuild',
+          detail: data.message || '重建完成',
+          durationMs: typeof data.elapsedMs === 'number' ? data.elapsedMs : Date.now() - t0
+        })
         if (data.stats) stats.value = data.stats
         indexedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
         await loadPoints(true)
       } else {
         rebuildPhase.value = 'failed'
         rebuildMessage.value = data.message
+        opLog.push({ level: 'error', action: 'rebuild', detail: data.message })
       }
     } catch (thrown) {
+      const message = thrown instanceof Error ? thrown.message : String(thrown)
       rebuildPhase.value = 'failed'
-      rebuildMessage.value = thrown instanceof Error ? thrown.message : String(thrown)
+      rebuildMessage.value = message
+      opLog.push({ level: 'error', action: 'rebuild', detail: message })
     }
   }
 
@@ -310,7 +399,9 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
     gradeCount,
     filteredPoints,
     kpIndex,
+    kpChapterIndex,
     kpNameOf,
+    kpChapterOf,
     ensureNames,
     loadStats,
     loadPoints,

@@ -275,6 +275,23 @@ test('★★ 换关卡与「重做本关」把单卡复位到第一题（切排�
  * 7. ★ 一屏一个主色填充：导航键不是 `.k12-cta`
  * ------------------------------------------------------------------ */
 
+test('★★ 主列不许压扁子项：滚动列里的每一块必须 `flex: none`', () => {
+  // ★★ 用户 2026-09-30 报「个性化学习底部那条白条是什么，是不是删东西没删干净」。
+  //   实测**不是**删码留下的残渣：那是「判分与掌握度说明」那张卡 ——
+  //   flex 列的默认 `flex-shrink: 1` 让浏览器在内容超高时**先压缩子项**，
+  //   它被从 56px 压成 21px，而内部的折叠标题仍有 48px 且被卡片的圆角裁掉
+  //   ⇒ 屏幕上只剩一条**没有任何字**的白条（看起来就像残留元素）。
+  //   判据：`overflow-y: auto` 的列空间不够时**滚动**，不许改写子项高度（P-168）。
+  const css = stripComments(read('src', 'renderer', 'src', 'views', 'Quiz.vue'))
+  const mainRule = /\.quiz__main\s*\{[\s\S]*?\}/.exec(css)?.[0] ?? ''
+  assert.match(mainRule, /overflow-y:\s*auto/, '锚点漂了：`.quiz__main` 不再是那个滚动列')
+  assert.match(
+    css,
+    /\.quiz__main\s*>\s*\*\s*\{[^}]*flex:\s*none/,
+    '★★ 滚动列里的子项必须 `flex: none` —— 否则内容一超高就把最后一块压成「白条」'
+  )
+})
+
 test('★ 上一题 / 下一题走 el-button，不再多一个主色填充（.k12-cta）', () => {
   for (const id of ['quiz-prev', 'quiz-next']) {
     const at = quizCode.indexOf(`data-testid="${id}"`)

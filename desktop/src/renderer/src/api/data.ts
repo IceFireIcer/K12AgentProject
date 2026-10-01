@@ -11,6 +11,7 @@
  */
 
 import type { GradeLevel, TraceSnapshot } from '@shared/ipc-events'
+import type { QuizGenerateRequest } from '@shared/quiz-generate'
 // ★ 相对路径 **type-only** import（编译后完全擦除，运行时不加载主进程代码）：
 //   与 `api/study.ts` / `api/grade.ts` 同一手法，守卫 G2/G3 允许。
 import type { K12Api } from '../../../preload/index'
@@ -89,6 +90,15 @@ export interface DataBridge {
    * ★ 身份由主进程注入；返回值与题库那条路同形（`QuizPayload`，结构上没有答案）。
    */
   readGeneratedQuestions(payload?: { kpId?: string; limit?: number }): Promise<DataCallResult>
+  /**
+   * 内置题全部判分过之后，按本轮作答轨迹自动追加一批个性化题（计划 §4.1）。
+   *
+   * ★ 入参只有 `kpId` 与决策记录：身份与学段由主进程注入（渲染层指定不了）。
+   * ★ 出参与 `readGeneratedQuestions` 同形（`QuizPayload` 投影，结构上没有答案）。
+   */
+  generateQuizAuto(payload: QuizGenerateRequest): Promise<DataCallResult>
+  /** 「还想再练练」：把**全部**题目的作答轨迹上行，换一批续练题（计划 §4.5）。 */
+  generateQuizMore(payload: QuizGenerateRequest): Promise<DataCallResult>
   /** 取库里的一条（**带 HTML**，可交给沙箱播）。 */
   readSavedAnimation(payload: { savedId: string }): Promise<DataCallResult>
   /** 存一条进动画库（`promptHash` 是摘要 —— 学生原话不进库）。 */
@@ -160,6 +170,8 @@ export const REQUIRED_METHODS = [
   'readSavedAnimation',
   'saveAnimationToLibrary',
   'readGeneratedQuestions',
+  'generateQuizAuto',
+  'generateQuizMore',
   'deleteSavedAnimation',
   'composeAnimation',
   'readKnowledgeStats',
@@ -215,6 +227,8 @@ export function resolveDataBridge(host: unknown = globalThis.window?.api): DataB
       hostAnimation: (payload) => api.hostAnimation!(payload),
       readSavedAnimations: (payload) => api.readSavedAnimations!(payload ?? {}),
       readGeneratedQuestions: (payload) => api.readGeneratedQuestions!(payload ?? {}),
+      generateQuizAuto: (payload) => api.generateQuizAuto!(payload),
+      generateQuizMore: (payload) => api.generateQuizMore!(payload),
       readSavedAnimation: (payload) => api.readSavedAnimation!(payload),
       saveAnimationToLibrary: (payload) => api.saveAnimationToLibrary!(payload),
       deleteSavedAnimation: (payload) => api.deleteSavedAnimation!(payload),
@@ -301,6 +315,14 @@ export interface QuizProgressView {
     badge: string | null
     /** 该关的掌握度 0–1。 */
     mastery: number
+    /**
+     * ★★ 这一关**在不在学生本学段关卡路径上**（P-085：关卡路径 = 本学段）。
+     *
+     * `false` = 路径外的历史记录（学段换过之后留下的更低学段关卡）。
+     * **路径视图**（智码工坊 / 闯关）只渲染 `true` 的那些；「学习记录」照旧渲染整份 ——
+     * 两处都渲染整张表的话，同一个概念会以**同名、内容按学段不同**的形态出现三次。
+     */
+    inPath: boolean
   }>
 }
 

@@ -122,8 +122,23 @@ export const useInsightStore = defineStore('insight', () => {
     return [...rows].sort((a, b) => b.score - a.score || a.kpId.localeCompare(b.kpId))
   })
 
-  /** 评价性摘要：平均掌握度 / 已掌握（≥0.6）/ 待加强（<0.6）。 */
-  const masterySummary = computed(() => {
+  /**
+   * 「最近在学」：按**最近一次接触时间**倒序（与掌握度排序是两种口径）。
+   *
+   * ★ 为什么不是按分数排：右栏要回答的是「我最近在碰哪些东西」，不是「我哪里最熟」——
+   *   后者在左边的概览分页里有全表（带排序、带导出）。
+   * ★ 没有 `lastSeenAt` 的行（老数据 / 只判过分没记时间）排在最后：**不猜时间**。
+   */
+  const recentRows = computed(() => {
+    const rows = profile.value?.mastery ?? []
+    return [...rows].sort((a, b) => {
+      const left = typeof a.lastSeenAt === 'number' ? a.lastSeenAt : 0
+      const right = typeof b.lastSeenAt === 'number' ? b.lastSeenAt : 0
+      return right - left || a.kpId.localeCompare(b.kpId)
+    })
+  })
+
+  /** 评价性摘要：平均掌握度 / 已掌握（≥0.6）/ 待加强（<0.6）。 */  const masterySummary = computed(() => {
     const rows = masteryRows.value
     if (rows.length === 0) return { average: 0, mastered: 0, needWork: 0, total: 0 }
     const total = rows.reduce((sum, row) => sum + row.score, 0)
@@ -268,6 +283,7 @@ export const useInsightStore = defineStore('insight', () => {
     errors,
     bridgeError,
     masteryRows,
+    recentRows,
     masterySummary,
     recommended,
     confidence,

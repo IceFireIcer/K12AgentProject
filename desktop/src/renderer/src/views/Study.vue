@@ -19,18 +19,32 @@
  *   「答错一题后回到档案页」的那次**不重挂**。所以「回到这一页时补一次取数」
  *   必须由 `onActivated` 承担（见下方 `onActivated` 的注释：这是错题本
  *   永远不刷新的那条真实缺陷的落点）。
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * 两列外壳（左：原有五个分页 / 右：画像栏）
+ * ══════════════════════════════════════════════════════════════════════════
+ * 学生回看自己的时候，看到的是「五张成绩单」——却看不到**智团团记住了他什么**。
+ * 画像那套链路（冷启动五问 → 白名单标签 → 每轮注入）早就通了，只是此前只在
+ * 对话页右栏露出来。这一版把右侧 20% 划出来交给 `StudyPortrait`：
+ *   · 左列**一个像素都不动**（`.study__head` 与 `.study__body` 原样留在左列里，
+ *     否则「五个分页」这一层既有布局会被顺手改坏）；
+ *   · 右列是 20%（`clamp(232px, 20%, 288px)`，见样式里的上下限理由）；
+ *   · `<1024` 时上下堆叠（见样式末尾的 `@media`）。
  */
 import { computed, onActivated, onMounted, watch } from 'vue'
 import { useChatStore } from '../stores/chat'
 import { useStudyStore } from '../stores/study'
 import { useQuizStore } from '../stores/quiz'
 import { useUiStore } from '../stores/ui'
+import { useProfileCardStore } from '../stores/profileCard'
+import StudyPortrait from '../components/StudyPortrait.vue'
 import { STUDY_TABS, findStudyTab } from '../study/tabs'
 
 const chat = useChatStore()
 const study = useStudyStore()
 const quiz = useQuizStore()
 const ui = useUiStore()
+const profileCard = useProfileCardStore()
 
 const current = computed(() => findStudyTab(ui.studyTab))
 
@@ -39,6 +53,13 @@ onMounted(() => {
   // 学段可能还没判定出来（`chat.currentGrade === null`）——那时章节/地图会给出
   // 一句「还没判定出学段」而不是编一个默认学段去查（见 store 里的注释）。
   void study.loadAll(chat.currentGrade)
+  // ★ 右栏画像要单独拉：档案页此前**不取**画像那一份数据（它在对话页右栏 /
+  //   设置页各自取过）。`profileCard.load()` 自带幂等与降级（桥不可用时只置
+  //   `bridgeError` 不抛），失败也不影响左边的五个分页。
+  // ★ 只在这里拉、不放进 `onActivated`：`load()` 内部每次都打三条桥（标签 /
+  //   身份 / 时间线），学生每切回档案页都重打一遍是白跑；画像在会话页有
+  //   `profile:changed` 推送会自己刷新，回到档案页读到的就是新值。
+  void profileCard.load().catch(() => {})
 })
 
 /**
@@ -105,52 +126,88 @@ watch(
     // ★ 切到「错题本」分页也补一次（同一个幂等动作；学生在这一页待着时
     //   不会有别的写入，所以这一条主要覆盖「切去闯关做题 → 切回档案 → 再点错题本」）。
     if (tab === 'mistakes') void study.loadMistakes()
+    // ★ 学习历史（2026-09-30）：与「历史会话」同一条懒加载口径 —— 点进这一页才读，
+    //   已经有数据就不再拉（`loadHistory` 里判一次）。
+    if (tab === 'history' && study.historyEvents.length === 0 && !study.historyLoading) {
+      void study.loadHistory()
+    }
   }
 )
 </script>
 
 <template>
   <section class="study" data-testid="study-view">
-    <header class="study__head">
-      <div>
-        <h2 class="study__title">学习档案</h2>
-        <p class="study__sub">{{ current.hint }}</p>
+    <!-- ── 左列：原有的一切原样搬进来（head + 错误条 + 五个分页）──────
+         ★ 这一列用 `<section class="study__main">` 而不是 class 直接挂在
+           `.study__body` 上：头部横条与滚动体是两件事，包一层才能让
+           「头部不滚、内容滚」这条既有行为原封不动。 -->
+    <section class="study__main">
+      <header class="study__head">
+        <div>
+          <h2 class="study__title">学习档案</h2>
+          <p class="study__sub">{{ current.hint }}</p>
+        </div>
+        <nav class="study__tabs" role="tablist" aria-label="学习档案分页">
+          <button
+            v-for="tab in STUDY_TABS"
+            :key="tab.id"
+            class="tab"
+            type="button"
+            role="tab"
+            :class="{ 'tab--on': tab.id === ui.studyTab }"
+            :aria-selected="tab.id === ui.studyTab"
+            :data-testid="`study-tab-${tab.id}`"
+            :title="tab.hint"
+            @click="ui.show('study', tab.id)"
+          >
+            {{ tab.label }}
+          </button>
+        </nav>
+      </header>
+
+      <p v-if="study.bridgeError" class="study__error" data-testid="study-bridge-error">
+        {{ study.bridgeError }}
+      </p>
+
+      <div class="study__body">
+        <KeepAlive>
+          <component :is="current.component" :key="current.id" />
+        </KeepAlive>
       </div>
-      <nav class="study__tabs" role="tablist" aria-label="学习档案分页">
-        <button
-          v-for="tab in STUDY_TABS"
-          :key="tab.id"
-          class="tab"
-          type="button"
-          role="tab"
-          :class="{ 'tab--on': tab.id === ui.studyTab }"
-          :aria-selected="tab.id === ui.studyTab"
-          :data-testid="`study-tab-${tab.id}`"
-          :title="tab.hint"
-          @click="ui.show('study', tab.id)"
-        >
-          {{ tab.label }}
-        </button>
-      </nav>
-    </header>
+    </section>
 
-    <p v-if="study.bridgeError" class="study__error" data-testid="study-bridge-error">
-      {{ study.bridgeError }}
-    </p>
-
-    <div class="study__body">
-      <KeepAlive>
-        <component :is="current.component" :key="current.id" />
-      </KeepAlive>
-    </div>
+    <!-- ── 右列：学生画像（只读一瞥，见 `components/StudyPortrait.vue`）── -->
+    <StudyPortrait />
   </section>
 </template>
 
 <style scoped>
+/* ── 两列外壳 ──────────────────────────────────────────────────────────
+ * 左列 `minmax(0, 1fr)`（不是 `1fr`）：`1fr` 的最小值是 `auto`，
+ * 分页里任何一处 `overflow: auto` 之外的宽内容（表格 / 长串）会把它顶宽，
+ * 右列被挤到窗口外。`minmax(0, 1fr)` 把最小宽度钉成 0，右列恒定 20%。
+ *
+ * 右列宽度 `clamp(280px, 25%, 348px)`（2026-09-30 从 `clamp(232px, 20%, 288px)` 调大）：
+ *   · 调大的理由：右栏从「几行标签 + 四条掌握度」变成了**五行结构（类型/性格/偏好/兴趣/小结）
+ *     + 最近在学**，内容量翻了倍 —— 20% 宽下「偏好」行（两个键值对）会折成竖条；
+ *   · 下限 280px —— 再窄的话三格掌握度行（名字 / 条 / 百分比）会把名字压成两三个字；
+ *   · 上限 348px —— 窗口宽到 1920 时纯 25% 是 480px，而这一栏承载的内容撑不起那么宽，
+ *     留白会把它读成「空面板」（与调大前同一条收口理由）；
+ *   · 中间段就是 25%（1440 窗口下 = 360 → 落在带内取 348，1280 下 = 320 直接生效）。
+ */
 .study {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(280px, 25%, 348px);
+  height: 100%;
+  min-height: 0;
+}
+
+/* 左列自己是一根纵向 flex（头不滚、体滚） —— 与改造前的 `.study` 同一条口径，
+ * 原样下移到这一层，头部/错误条/内容的行为一个像素都没动。 */
+.study__main {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -230,5 +287,28 @@ watch(
   flex: 1;
   min-height: 0;
   overflow: auto;
+}
+
+/* ── 窄窗：上下堆叠 ────────────────────────────────────────────────────
+ * ★ 断点取 1023px（沿用全站 `1024` 那条主断点）：再窄下去两列各自都在
+ *   自己的下限附近，左右并排会把分页内容挤成一条竖井。
+ * ★ 堆叠后**左侧内容在上、画像在下**（DOM 顺序天然如此）：
+ *   学生打开这一页第一眼要看的仍是成绩单，画像是一段可以往下滚到的补充。
+ * ★ 堆叠时右列的 `height: 100%` 在 grid 自动行下会失效（那一行由内容撑），
+ *   所以要显式给回一个 `height: auto`，否则画像栏的身高会塌成 0
+ *   —— 它内部是 `flex-direction: column` + `flex: 1` 的滚动体，没有外部
+ *   高度就是一屏空白。（`.portrait` 自带 `min-height: 0`，这里只需覆盖 height。）
+ */
+@media (max-width: 1023px) {
+  .study {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+  /* 堆叠后给画像栏一个可读的固定高度：不给的话它按内容撑开，
+   * 内部那段 `overflow-y: auto` 就永远不触发（内容全摊开、页面变很长）。 */
+  .study :deep(.portrait) {
+    height: auto;
+    max-height: 46vh;
+  }
 }
 </style>

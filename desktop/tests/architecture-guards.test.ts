@@ -411,29 +411,64 @@ test('G4: 6 事件词表严格是 delta/citation/payload/blocked/done/error', ()
 
 const FETCH_PATTERN = /\bfetch\s*\(/
 
-test('G5: src/main/bridge/client.ts 是唯一对 sidecar 发 HTTP 请求的文件', () => {
+/**
+ * ★ 主进程里**允许出现 `fetch(` 的全部文件**（两个，各管一条互不相干的路）。
+ *
+ * 票 31 之前只有一个：sidecar。接上真实的画像概括之后多了「外部大模型服务」这一条 ——
+ *   它对端是**用户在设置里填的供应商地址**，凭证是**供应商 Key**（不是 sidecar token），
+ *   目标路径是 `/chat/completions`（不是 `/api/*`）。
+ * 把它塞进 `client.ts` 是错的（那边是 127.0.0.1 + 启动新铸的 token + `/api/*` 纪律）；
+ * 让调用点就地 `fetch` 更错（那是「凭证注入有几处」这个问题重新失去答案）。
+ * 所以这里是**两个出口** —— 判据不是「数量」，而是「每条路的凭证注入只有一处」。
+ */
+const EGRESS_FILES = [bridgeClientFile, join(mainDir, 'bridge', 'llm-completions.ts')]
+
+test('G5: 出网只有两个口 —— sidecar 走 client.ts，外部模型走 llm-completions.ts', () => {
   const files = listFiles(mainDir)
   assert.ok(files.length > 0, 'src/main 下没有扫到任何文件，守卫形同虚设，请检查扫描路径')
 
   // 只看**可执行代码**：注释里写「这里不出现 fetch(」是解释纪律，不该被判违规
   // （踩过一次：注释里举反例，守卫当场把写注释的人拦下）。
+  const allowed = new Set(EGRESS_FILES.map((file) => resolve(file)))
   const offenders = files
-    .filter((file) => resolve(file) !== resolve(bridgeClientFile))
+    .filter((file) => !allowed.has(resolve(file)))
     .filter((file) => FETCH_PATTERN.test(stripComments(readSource(file))))
     .map(show)
 
   assert.deepEqual(
     offenders,
     [],
-    `以下文件绕过了唯一的 sidecar HTTP 客户端（src/main/bridge/client.ts）：\n  ${offenders.join('\n  ')}\n` +
-      `所有 /api/* 调用都必须走 client.ts，以保证 token 注入与脱敏只有一处。`
+    `以下文件自己发了 HTTP 请求，绕过了两个出网口：\n  ${offenders.join('\n  ')}\n` +
+      `sidecar（/api/*）必须走 bridge/client.ts；外部模型服务必须走 bridge/llm-completions.ts，\n` +
+      `以保证「token 注入」与「供应商 Key 注入」各自只有一处。`
   )
 
-  const clientSource = readSource(bridgeClientFile)
+  for (const file of EGRESS_FILES) {
+    assert.ok(
+      FETCH_PATTERN.test(readSource(file)),
+      `${show(file)} 里没有 fetch —— 它应当是一个真正的出网口（白名单里挂了个空壳等于把口子开没影）`
+    )
+  }
+})
+
+test('G5b: 两个出网口不许串味 —— sidecar 口不碰供应商 Key，模型口不打 /api/', () => {
+  const clientSource = stripComments(readSource(bridgeClientFile))
+  const llmSource = stripComments(readSource(join(mainDir, 'bridge', 'llm-completions.ts')))
+
+  // ① sidecar 的凭证是 X-Auth-Token（每次启动新铸）；供应商 Key 的形态是 Bearer。
+  //    两边串了 = 把供应商 Key 发给了本机 sidecar，或把本机 token 发给了公网。
   assert.ok(
-    FETCH_PATTERN.test(clientSource),
-    `src/main/bridge/client.ts 里没有 fetch —— 它应当是对 sidecar 发请求的唯一出口`
+    !/Authorization/.test(clientSource),
+    'bridge/client.ts 里出现了 Authorization —— sidecar 只认 X-Auth-Token，' +
+      '供应商 Bearer Key 绝不许出现在这一侧（它会随 /api/* 一起落进 sidecar 的日志）'
   )
+  assert.ok(
+    !/'\/api\//.test(llmSource) && !/"\/api\//.test(llmSource),
+    'bridge/llm-completions.ts 里出现了 /api/ 字面量 —— 外部模型口不许借道打 sidecar'
+  )
+  // ② 两边都必须是 POST 之外的通用实现：sidecar 口按 path 走，模型口只认 http(s)
+  assert.match(clientSource, /X-Auth-Token/, 'bridge/client.ts 必须继续在这里注入唯一那份 sidecar token')
+  assert.match(llmSource, /\^https\?:\\\/\\\//, '模型口必须校验地址是 http(s)（配置里塞进 file:// 时不许出网）')
 })
 
 // ── G6 token 不出主进程 ───────────────────────────────────────────────
@@ -631,6 +666,8 @@ const EXPECTED_API_METHODS = [
   'readStudyMistakes',
   'readStudyChapters',
   'readStudyGraph',
+  // ★ 学习历史（2026-09-30）：学习档案的第六个分页（只递分页参数，不接受 studentId）。
+  'readStudyHistory',
   // 历史会话：`readSessionTranscript` 与 `openSession` 都**只接受会话 id**，
   // 主进程先用 Pi 列出的会话做白名单对齐 —— 渲染进程无法指定路径。
   'listSessions',
@@ -680,6 +717,14 @@ const EXPECTED_API_METHODS = [
   // 学生身份 / 画像 / 学段证据。★ 一律不接受 `studentId`：身份由主进程决定，
   //   递进一个 id 就等于允许读别人的画像与学习记录。
   'getStudent',
+  // 账号（本机多个学生）：列表 / 建号 / 改名 / 删号 / 切号。
+  // ★ 五条都**不接受**「以谁的身份」：身份仍由主进程 resolveActiveStudentId 决定，
+  //   这里递的只是「操作哪一个账号」（后端会自己校验一遍）。
+  'listAccounts',
+  'createAccount',
+  'renameAccount',
+  'deleteAccount',
+  'switchAccount',
   'readProfile',
   'readRecommendation',
   'readGradeSignals',
@@ -706,6 +751,10 @@ const EXPECTED_API_METHODS = [
   // 库里存的是「按知识点 + 学段 + 请求指纹」分开的产物（同学段之外互不复用）。
   'readSavedAnimations',
   'readGeneratedQuestions',
+  // ★ 练习页动态出题（票 32，D-132）：两条 invoke —— 自动追加 / 「还想再练练」。
+  //   刻意**不**新增 Pi Tool、不进 6 事件词表：练习页不开对话（刷题不烧云端对话）。
+  'generateQuizAuto',
+  'generateQuizMore',
   'readSavedAnimation',
   'saveAnimationToLibrary',
   'deleteSavedAnimation',
@@ -726,7 +775,29 @@ const EXPECTED_API_METHODS = [
   'minimizeWindow',
   'toggleMaximizeWindow',
   'closeWindow',
-  'onWindowMaximizedChanged'
+  'onWindowMaximizedChanged',
+  // ── 冷启动引导与画像标签（票 25；2026-09-28 集成期补登）─────────────────
+  // ★ 为什么这 8 条必须登记在这里：G9 断言 preload 的方法集合与这份清单**逐字相等**
+  //   （不多不少）。票 25 加了 8 条通道却没同步这里，于是 G9 红 —— 而它红得**对**：
+  //   清单的意义就是「新增一个暴露面必须是一次显式动作」，漏登记等于绕过了审查。
+  // ★ 六条 invoke + **一条推送**（'onOnboardingChanged'）。
+  //   （票 31 删掉了 'skipOnboarding'：五问不允许跳过，未答完就续问，直到 done。
+  //    少一个暴露面同样是「一次显式动作」，所以这里也要跟着删。）
+  // ★ 全部**不接受 studentId**：身份由主进程 resolveActiveStudentId 决定 ——
+  //   一旦它能指定，「读别人的画像」就只是一个字符串的距离（与 getStudent 同一条纪律）。
+  // ★ 五问的回答走 answerOnboarding 这条独立通道，**绝不混进 sendChat**：
+  //   'ChatSendRequest' 的字段集合被 G6c 钉死为 ['text']。
+  'readOnboardingState',
+  'answerOnboarding',
+  'onOnboardingChanged',
+  'readProfileTags',
+  'retractProfileTag',
+  // ★ 画像变化时间线（§5.2 #11）：与其它画像通道一样**不接受 studentId**，只递一个条数上限。
+  'readProfileTimeline',
+  // ★ 画像小结（三期，2026-09-30）：只读主进程缓存、不生成；同样不接受 studentId。
+  'readProfileSummary',
+  'readIdentity',
+  'setIdentityFlags'
 ]
 
 /** preload 里绝不允许出现的通用转发方法名。 */
@@ -772,7 +843,13 @@ test('G9: preload 只暴露白名单方法，不暴露通用 ipcRenderer 转发'
 
   // 白名单通道集合 == 通道名单一来源里的全部通道（既不多也不少）
   const channelValues = [...new Set(Object.values(stringLiteralRecord(readSource(channelsFile), 'IPC', channelsFile)))]
-  const block = /export\s+const\s+WHITELISTED_CHANNELS[^=]*=\s*\[([\s\S]*?)\]/.exec(source)?.[1]
+  // ★★ 收尾锚点必须是**行首的 ]**（配 m 标志），不能用非贪婪的 \]（2026-09-28 集成期修正）。
+  //   数组内部的注释里只要出现一个右方括号，非贪婪匹配就当场截断 ——
+  //   本轮实测：注释里写了 `['text']`（说明 ChatSendRequest 只有 text），于是解析结果
+  //   正好少掉最后 8 条新通道，而断言消息却说「白名单与通道定义不一致」，
+  //   把人引去查 preload 的 channels 列表 —— 那里其实一条都不缺。
+  //   症状（少 8 条）与原因（注释里一个字符）之间的这段距离，就是这条守卫的易碎点。
+  const block = /export\s+const\s+WHITELISTED_CHANNELS[^=]*=\s*\[([\s\S]*?)^\]/m.exec(source)?.[1]
   assert.ok(block, `${show(preloadIndexFile)} 里找不到 WHITELISTED_CHANNELS`)
   const channelKeys = stringLiteralRecord(readSource(channelsFile), 'IPC', channelsFile)
   const whitelisted = [...block.matchAll(/IPC\.(\w+)/g)].map((match) => channelKeys[match[1]])

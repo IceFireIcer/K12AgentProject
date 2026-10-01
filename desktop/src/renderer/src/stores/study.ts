@@ -128,6 +128,17 @@ export interface SessionSearchHitShape {
 /** 报告时间窗（界面上的三个选项；后端上限 90）。 */
 export const REPORT_DAY_OPTIONS = [7, 14, 30] as const
 
+/**
+ * 学习历史（2026-09-30）：一页多少条。
+ *
+ * ★ 与端点默认值（30）一致；这里显式传是为了**翻页时能算出 offset**。
+ * ★ 30 条 ≈ 一周多的活动量：再少要频繁点「看更早的」，再多就成了一屏翻不完的长列表。
+ */
+export const HISTORY_PAGE_SIZE = 30
+
+/** 学习历史的一条（形状直接取契约，**不手工维护一份** —— 契约改了这里跟着变）。 */
+export type HistoryEventShape = components['schemas']['LearningEventEntry']
+
 export const useStudyStore = defineStore('study', () => {
   /** 知识点名索引（导出报告时把 kpId 换成中文名 —— 见 `exportReport` 的说明）。 */
   const knowledge = useKnowledgeStore()
@@ -178,6 +189,17 @@ export const useStudyStore = defineStore('study', () => {
   const sessions = ref<SessionSummaryShape[]>([])
   const sessionsLoading = ref(false)
   const sessionsError = ref<string | null>(null)
+
+  /* ---------------------------------------------------------- 学习历史 */
+  // ★ 2026-09-30：明细流水（与 `report` 的聚合是两种读数）。
+  //   懒加载（不进 `loadAll`）：学生点进这一页才读，否则每次进档案页都白拉一页。
+  const historyEvents = ref<HistoryEventShape[]>([])
+  /** 符合条件的总条数（决定「还有更早的」要不要显示）。 */
+  const historyTotal = ref(0)
+  /** 后端说还有没有下一页。 */
+  const historyHasMore = ref(false)
+  const historyLoading = ref(false)
+  const historyError = ref<string | null>(null)
   const searchQuery = ref('')
   const searchHits = ref<SessionSearchHitShape[] | null>(null)
 
@@ -372,6 +394,52 @@ export const useStudyStore = defineStore('study', () => {
     ])
   }
 
+  /* ---------------------------------------------------------------- 学习历史 */
+
+  /**
+   * 读一页学习历史（2026-09-30）。
+   *
+   * @param options.append `true` = 把这一页**接到**已有列表后面（「看更早的」按钮）。
+   *   ⚠️ 不能用替换：替换会让「翻页」变成「刚才那页不见了」，学生只能一路往下丢。
+   * @param options.limit  一页几条（默认 {@link HISTORY_PAGE_SIZE}）。
+   *
+   * ★ 失败**不抛**：错误写进 `historyError`，界面显示它 + 可重试（与其它分页一致）。
+   */
+  async function loadHistory(options: { append?: boolean; limit?: number } = {}): Promise<void> {
+    const api = ensureBridge()
+    if (!api) {
+      historyError.value = bridgeError.value ?? '学习历史还没接线。'
+      return
+    }
+    const limit = options.limit ?? HISTORY_PAGE_SIZE
+    // ★ offset 用**已有条数**推（不是页码 × 每页）：中途改过每页条数时页码会漂，
+    //   而条数永远是准的（倒序分页的唯一定位量）。
+    const offset = options.append ? historyEvents.value.length : 0
+    historyLoading.value = true
+    historyError.value = null
+    try {
+      const result = await api.readStudyHistory({ limit, offset })
+      if (!result.ok) {
+        historyError.value = result.message
+        return
+      }
+      const page = readHistoryPage(result.data)
+      if (page === null) {
+        historyError.value = '学习历史的结构不符合预期。'
+        return
+      }
+      historyEvents.value = options.append
+        ? [...historyEvents.value, ...page.events]
+        : page.events
+      historyTotal.value = page.total
+      historyHasMore.value = page.hasMore
+    } catch (error) {
+      historyError.value = `读取学习历史失败：${error instanceof Error ? error.message : String(error)}`
+    } finally {
+      historyLoading.value = false
+    }
+  }
+
   /* ---------------------------------------------------------------- 会话 */
 
   async function loadSessions(): Promise<void> {
@@ -543,6 +611,13 @@ export const useStudyStore = defineStore('study', () => {
     sessions,
     sessionsLoading,
     sessionsError,
+    // ★ 学习历史（2026-09-30）：明细流水（懒加载，见 loadHistory）
+    historyEvents,
+    historyTotal,
+    historyHasMore,
+    historyLoading,
+    historyError,
+    loadHistory,
     searchQuery,
     searchHits,
     exporting,
@@ -596,6 +671,44 @@ function readWithDefaults<T>(data: unknown, requiredKeys: string[], listKeys: st
 /** 数组检查（会话列表 / 搜索结果）。 */
 function readArray<T>(data: unknown): T[] | null {
   return Array.isArray(data) ? (data as T[]) : null
+}
+
+/**
+ * 归一化一页学习历史（2026-09-30）。
+ *
+ * ★ 与其它归一化同一条纪律：**脏数据整条丢**（认不出的活动、缺时间的行），
+ *   不猜、不补默认值 —— 界面上一条没有时间的记录就是个「说不清什么时候」的怪行。
+ * ★ 整份形状不对（不是对象 / events 不是数组）→ `null`（调用方报「结构不符合预期」）。
+ */
+function readHistoryPage(
+  data: unknown
+): { events: HistoryEventShape[]; total: number; hasMore: boolean } | null {
+  if (typeof data !== 'object' || data === null) return null
+  const record = data as Record<string, unknown>
+  if (!Array.isArray(record.events)) return null
+  const events: HistoryEventShape[] = []
+  for (const raw of record.events) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const event = raw as Record<string, unknown>
+    // ★ 三件事必须齐全才渲染：时间（多会儿）、活动种类、中文动作名。
+    //   少 `activityLabel` 就让后端补（渲染层绝不自己写一份活动名映射 —— 双视角纪律）。
+    if (typeof event.at !== 'number' || typeof event.activity !== 'string') continue
+    if (typeof event.activityLabel !== 'string' || event.activityLabel.trim() === '') continue
+    events.push({
+      id: typeof event.id === 'number' ? event.id : 0,
+      at: event.at,
+      activity: event.activity as HistoryEventShape['activity'],
+      activityLabel: event.activityLabel,
+      kpId: typeof event.kpId === 'string' ? event.kpId : '',
+      isCorrect:
+        event.isCorrect === true ? true : event.isCorrect === false ? false : null
+    })
+  }
+  return {
+    events,
+    total: typeof record.total === 'number' ? record.total : events.length,
+    hasMore: record.hasMore === true
+  }
 }
 
 /**

@@ -96,6 +96,7 @@ import {
   collectHints,
   collectResult,
   formatRunMeta,
+  goalOfScaffold,
   projectHint,
   readCodingCard
 } from '../src/renderer/src/cards/coding.ts'
@@ -1476,6 +1477,27 @@ test('card-9: 超长代码在消息里被截断（别把整份文件灌进 promp
   const message = buildRunRequestMessage('prog-loop-jr', long)
   assert.ok(message.length < long.length, '必须截断')
   assert.ok(message.includes('…'), '截断要有可见标记')
+})
+
+test('card-11: ★★ 从脚手架抽「目标：…」那句话（任务简报要拿它回答「要我写什么」）', () => {
+  // 真模板原文（228 份随包模板的第一行都是这个形状）
+  assert.equal(
+    goalOfScaffold('# 目标：写一个求平均值的函数，再用它算一遍\nnums = [1, 2, 3, 4]\n'),
+    '写一个求平均值的函数，再用它算一遍'
+  )
+  // 中英文冒号、`#` 后多空格、前后缩进都要认
+  assert.equal(goalOfScaffold('#目标:把 result 从小到大排好'), '把 result 从小到大排好')
+  assert.equal(goalOfScaffold('   #  目标 ：  调用函数  '), '调用函数')
+  // ★ 抽不到就返回空串（调用方整行不渲染）——绝不编一句「理解这道题」的废话
+  assert.equal(goalOfScaffold(''), '')
+  assert.equal(goalOfScaffold('nums = [1, 2, 3]\n# TODO 1：补完函数体\n'), '')
+  // ★ 只认**行首注释**：正文里出现「目标：」不该被当成说明抽出来
+  assert.equal(goalOfScaffold('print("目标：做点什么")\n'), '')
+  // ★ 只取第一行目标（后面的注释不算）
+  assert.equal(
+    goalOfScaffold('# 目标：第一句\n# 目标：第二句\n'),
+    '第一句'
+  )
 })
 
 test('card-10: 状态条文案区分"被中断"与"普通失败"（票 18 的头号演示）', () => {

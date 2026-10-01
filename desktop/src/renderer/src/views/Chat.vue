@@ -63,32 +63,57 @@ import MessageComposer from '../components/MessageComposer.vue'
 import ChatMessage from '../components/ChatMessage.vue'
 import ChapterIndicator from '../components/ChapterIndicator.vue'
 import SessionList from '../components/SessionList.vue'
+import { useOnBackendReady } from '../composables/useOnBackendReady'
 import { useChatStore } from '../stores/chat'
 import { useConfirm } from '../stores/confirm'
 import { useInsightStore } from '../stores/insight'
 import { useModelStore } from '../stores/model'
+// ★ 与闯关页共用同一个 Pinia 单例：对话页点「去闯关练一练」取的题，
+//   就是闯关页进去看到的同一批（不会两处各拉一份）。
+import { useQuizStore } from '../stores/quiz'
+// ★ `questionById` 是五问脚本的**唯一读取口**（`@shared/profile-tags` 的同一份常量）：
+//   引导区要把「已经答过的那几问」重新渲染出来（问原文 + 学生那句），问句不许在本页另抄一份。
+import { questionById, useOnboardingStore } from '../stores/onboarding'
+import type { OnboardingQuestionId } from '@shared/profile-tags'
+import { useProfileCardStore } from '../stores/profileCard'
 import { usePanelsStore } from '../stores/panels'
 import { useDiagnosticsPanel } from '../stores/diagnosticsPanel'
 import { useStudentStore } from '../stores/student'
 import { useTraceStore } from '../stores/trace'
 import { useUiStore, type PageName } from '../stores/ui'
 import { useViewModeStore } from '../stores/viewMode'
-// ★ 学段名（还没判出来时是「还没认出年级」）只有 `labels.ts` 一处实现 ——
-//   本页与右栏各写一份字面量迟早对不上，而那种不一致是「界面自相矛盾」。
-// ★★ 本页**不再**引用 `gradeOriginLabel`：空态那一行不再复读「来源」
-//   （手动选中 / AI 引擎推算）—— 见模板里 `.chat__hello-grade` 的说明（报告 2.1）。
-import { GRADE_UNKNOWN_LABEL } from '../labels'
+// ★ 空态**不再有学段那一行**（2026-09-30 用户裁决：去掉「当前按 XX 的讲法回答。」）——
+//   学段状态在顶栏指示器与侧栏身份卡各有一处，空态这一行只是第三次复读；
+//   所以 `GRADE_UNKNOWN_LABEL` 与本页也不再需要（`gradeOriginLabel` 早就不引用）。
 // ★ 品牌 logo 的 URL 只有 `brand-logo.ts` 一处实现（侧栏 / 空态 / 头像共用一张图）
 import { DEFAULT_LOGO_URL } from '../brand-logo'
+// ★ 巩固条的动作要把「学生气泡里的那句话」与「发给模型的报文」分开承载
+//   （前者是学生话、后者带指令），翻译只发生在 study/plan-request.ts 一处；
+//   「quizSourceLabel」是「刚出的题」那条来源标注（与卡片头 / 个性化学习页共用同一套文案）。
+import { buildQuizAskMessage, quizAskDisplayText, quizSourceLabel } from '../study/plan-request'
+// ★ 来源标注要读卡片载荷里的 source 与题数 —— 走 cards/quiz.ts 的白名单投影，
+//   本页不自己翻 payload（那会把「只读认识的字」这条纪律复制出第二份）。
+import { readQuizCard } from '../cards/quiz'
 
 const chat = useChatStore()
 const confirm = useConfirm()
 const insight = useInsightStore()
 const model = useModelStore()
+const quiz = useQuizStore()
 const student = useStudentStore()
 // ★ 工具轨迹只在「新会话」时需要写（清空）；订阅与渲染都在 ContextRail 里，
 //   这里取的仍是同一个 Pinia 单例，不会出现两份状态。
 const trace = useTraceStore()
+// ★★ 冷启动引导（五问）与画像标签卡：取数挂在 `useOnBackendReady` 上（见 `loadOnboardingData`）。
+//   这里取的与右栏 / 档案页是同一个 Pinia 单例 —— 不会出现两份状态。
+const onboarding = useOnboardingStore()
+const profileCard = useProfileCardStore()
+/**
+ * 上屏时给正文做 `{{student_name}}` 替换用的称呼（唯一出口是 `student-name.ts`）。
+ * ★ 只用后端给的**脱敏显示名**（`identity.displayName`）—— 真名 `realName` 一个字都不取，
+ *   它连 prompt 都不进。取不到就是空串，由 `renderStudentName` 兜成中性的「同学」。
+ */
+const studentName = computed(() => profileCard.identity?.displayName ?? '')
 const ui = useUiStore()
 // ★ 只用来给「还没配置模型」那条提示挑措辞（老师看「填什么」、学生看「找谁」）——
 //   双视角纪律的落点见那条提示的注释与 `stores/viewMode.ts`。
@@ -269,6 +294,15 @@ function onSend(text: string): void {
   stick.value = true
   showJump.value = false
   void scrollToBottom()
+  // ★★ 引导期（五问还没答完）：这句话是**对当前那一问的回答**，不进对话、不调模型。
+  //   问次由 store 按**位置**记（`submitAnswer` 的同步段里就取走并清掉待答问次），
+  //   所以这里只递一句话，别的什么都不用管；答完第 5 问后 `active` 自动变假，
+  //   下一条消息才走正常对话（`chat.send`）。
+  //   ⚠️ 顺序不能反：`submitAnswer` 先跑，问次才拿得到（见 stores/onboarding.ts）。
+  if (onboarding.active) {
+    void onboarding.submitAnswer(text)
+    return
+  }
   void chat.send(text)
 }
 
@@ -340,7 +374,27 @@ onMounted(() => {
 onActivated(() => {
   if (turns.value.length === 0) void nextTick(() => composerRef.value?.focus?.())
 })
+/**
+ * 首屏的**引导与画像**取数。
+ *
+ * ★★ 为什么必须挂在 `useOnBackendReady` 上（而不是裸 `onMounted`）：
+ *   引导状态来自本机数据服务，而那是**另一个进程** —— 挂载时它多半还没就绪。
+ *   只发一次的话，那一次失败会让「该弹的五问」永远不弹（新用户从此再没有被引导过），
+ *   而库里那条状态仍然是 `not_started`。
+ * ★ 两条各自独立失败：引导读不到不影响标签卡，反之亦然（两个 store 内部都吞了异常）。
+ * ★ `catch` 只是兜住「连 catch 都写漏了」的那种意外：这一步**绝不允许**拖住对话页。
+ */
+function loadOnboardingData(): void {
+  void onboarding.load().catch(() => {})
+  void profileCard.load().catch(() => {})
+}
+
+// 首屏取数：立刻跑一次 + sidecar 就绪后补跑一次
+useOnBackendReady(loadOnboardingData)
+
 onBeforeUnmount(() => {
+  // 引导那条推送也要退订（与其它几条推送同一处置，避免监听器堆积）
+  onboarding.dispose()
   mql?.removeEventListener('change', onBreakpoint)
   resizeObserver?.disconnect()
   resizeObserver = null
@@ -513,10 +567,11 @@ interface EntryItem {
 const entries: EntryItem[] = [
   { key: 'chat', label: '直接提问', desc: '随时问，按你的学段讲', icon: MessageCircle, to: null },
   { key: 'animation', label: '动画讲解', desc: '把过程画出来看', icon: Clapperboard, to: 'animation' },
-  { key: 'coding', label: '编程环境', desc: '在本地跑一段 Python', icon: Code, to: 'coding' },
-  // ★ 2026-09-21：与 `PAGES.quiz.title` 保持一致（「闯关练习」→「闯关挑战」）。
-  //   这四张卡是同一批入口的另一种呈现，名字与侧栏不一致学生会以为是两个功能。
-  { key: 'quiz', label: '闯关挑战', desc: '几道题检验一下', icon: Trophy, to: 'quiz' }
+  { key: 'coding', label: '智码工坊', desc: '在本地跑一段 Python', icon: Code, to: 'coding' },
+  // ★ 名字必须与 `PAGES.quiz.title` 一致（2026-09-21「闯关练习」→「闯关挑战」，
+  //   2026-09-30 再改成「个性化学习」）。这四张卡是同一批入口的另一种呈现，
+  //   名字与侧栏不一致学生会以为是两个功能。
+  { key: 'quiz', label: '个性化学习', desc: '几道题检验一下', icon: Trophy, to: 'quiz' }
 ]
 
 function onEntry(to: PageName | null): void {
@@ -535,25 +590,168 @@ function fillComposer(text: string): void {
   composerRef.value?.fill?.(text)
 }
 
+/* ── 冷启动引导（五问）：选项动作 ──────────────────────────────────────── */
+/**
+ * 问句里的可点选项（chip）：**点一下直接提交，立刻进入第 2 问**。
+ *
+ * ★★ 2026-09-30 用户裁决（推翻了 2026-09-29 的「只填进输入框」）：
+ *   只有第 1 问带选项（年级是闭集），点选**就是**他的回答，不必再让他按一次发送。
+ * ★ 它仍与打字**共用同一个出口** `onboarding.submitAnswer` —— 问次记录、防连点、
+ *   降级推进全都在那一处。这里**不许**自己记问次、也不许自己调桥（那才是第二条路径，
+ *   守卫在 `tests/renderer-onboarding.test.ts`）。
+ * ★ 第 2–5 问没有 chip（脚本里 `chips: []`），所以自由输入是那几问的唯一入口。
+ */
+function pickOnboardingOption(option: string): void {
+  if (onboarding.submitting) return
+  void onboarding.submitAnswer(option)
+}
+
+/** 问原文（引导区渲染「已经答过的那几问」用）；查不到给空串，不编问句。 */
+function questionTextOf(id: OnboardingQuestionId): string {
+  return questionById(id)?.text ?? ''
+}
+
 /* ── 空态之后的专题行：真实数据，没有就整段不出现 ───────────────────────── */
 
-/**
- * 推荐知识点的显示名。
- *
- * ★ 用 `item.name` —— **服务端已经解析好了**（`RecommendationItem.name` 由依赖图的
- *   `kp` 表查出来，图里查不到才退化成 `kp_id`）。
- *   渲染进程再拿 `kpId` 去知识点清单反查一遍是**多做一次**，而且两条路给出的名字
- *   可能不一致（一边是服务端快照、一边是当前清单）。谁解析的就用谁的。
+/*
+ * ⚠️ 2026-10-01（D-131）：这里**删掉了** `recommendedName` / `hasRecommended` 两个计算属性。
+ *   它们是「建议接着练：<知识点>」那半句的展示口径，而用户点名把那半句去掉了 ——
+ *   留着就是两个没人读的死计算（`vue-tsc` 会直接报 TS6133）。
+ *   推荐数据本身没动：`insight.recommended` 仍是服务端解析好的那一份，
+ *   档案页与侧栏照旧按它展示；要恢复这半句，把两个计算属性与那段模板一起加回来即可。
  */
-const recommendedName = computed(() => {
-  const item = insight.recommended
-  if (item === null) return null
-  return item.name.trim() || item.kpId
+
+
+/*
+ * ★ 2026-10-01 用户裁决（D-131）：**「建议接着练：<知识点>」这半句不再渲染**
+ *   ——「把我箭头指着的那行字也去掉」。它原先与章节拼在同一行（本轮专题）。
+ *
+ * ⚠️ 条件必须跟着改：原来整段的显示条件是 `章节 or 有推荐`；推荐不显示了还留着这个 `or`，
+ *   就会在「没选章节但有推荐」时渲染一个**空段落**（占高度、还带个图标）。
+ *   现在整段只认章节。`hasRecommended` / `recommendedName` 仍保留 —— 它们是
+ *   `insight.recommended` 的展示口径，档案页与侧栏还在用同一份判断。
+ */
+
+/* ── 巩固条：计划那一轮答完后的两路检验 ────────────────────────────────────
+ * ★ 为什么是**两路**：学生说「检验一下」时意图有两种落点 ——
+ *   想被系统按掌握度出题、并留下掌握记录（去闯关页），或不想离开这段对话、
+ *   马上来三道（就地再考我）。只给一条路，另一种意图的人只能自己去侧栏找入口。
+ * ★ 两路都指向**同一个知识点**（`chat.planKpId`，由计划那一轮认领）——
+ *   上一轮的正文刚讲完它，按钮上不必再复述名字。
+ * ⚠️ 这两个动作**不许**做成 `.k12-cta`：这一屏的主色填充只有一个（输入区的发送键），
+ *   同一屏两个主色按钮等于没有主色按钮（判据见 base.css 里 `.k12-cta` 的注释）。
+ */
+function goPlanQuizPage(): void {
+  // ★ `selectLevel` **只取题、不跳页**：跳页是这一屏的责任（见 stores/quiz.ts 的说明）——
+  //   两件事分给两层各做一件，闯关页自身仍能从关卡列表进入。
+  void quiz.selectLevel(chat.planKpId)
+  ui.go('quiz')
+}
+
+function askPlanQuizInChat(): void {
+  // ★ 与「我想学这个」走**同一条成对文本**：气泡里是学生口吻的那句，
+  //   送进模型的是带指令的报文（翻译只在 studentFacingUserText 一处发生，本页不另抄）。
+  void chat.send(quizAskDisplayText(chat.planKpName), buildQuizAskMessage(chat.planKpId, chat.planKpName))
+}
+
+/**
+ * 「换一批」与「现在考考我」**共用同一条 send**。
+ *
+ * ★ 为什么不再写一条消息对：wire 里已经写明「现场出 3 道新题」，所以再走一次就是
+ *   同知识点另出一批（生成的题会登记到本地，个性化学习里能看到、能再做）。
+ *   两句话的含义完全相同，多一份报文就多一处会漂的文案。
+ */
+function askPlanQuizMore(): void {
+  askPlanQuizInChat()
+}
+
+/* ── 刚出的题：来源标注 / 跳到个性化学习 / 卡片自己走到眼前 ─────────────────
+ * 报告「期二」的原话：点完按钮**不用手动滚**就能看到卡片并直接作答；
+ * 「期四」：这几道题也会出现在个性化学习里 + 一键跳转。 */
+
+/**
+ * 最新一张**练习题卡**（chat.cards 按时间升序，所以从后往前找第一张 kind === 'quiz'）。
+ *
+ * ★ 只认题卡不认批改结果卡：来源与题数只有出题载荷才有。
+ * ★ 不缓存、不做 computed：它只在两个地方各读一次（来源标注与滚动锚点），
+ *   而 chat.cards 自己已经是「卡片没变就不换引用」的缓存（见 store 的说明）。
+ */
+function latestQuizCard(): { id: string; payload: unknown } | null {
+  const cards = chat.cards
+  for (let index = cards.length - 1; index >= 0; index -= 1) {
+    const card = cards[index]
+    if (card !== undefined && card.kind === 'quiz') return card
+  }
+  return null
+}
+
+/**
+ * 刚出的那一批题（**只有它属于当前计划的知识点时才认**）。
+ *
+ * ★ 为什么要比 kpId：学生可能在这段对话里又问过别的知识点、出过别的题 ——
+ *   把别处的旧题标成「刚出的」，比不标更糟（学生会照着错的来源理解）。
+ */
+const latestPlanQuiz = computed(() => {
+  const card = latestQuizCard()
+  if (card === null) return null
+  const view = readQuizCard(card.payload)
+  if (view.kind !== 'questions' || view.kpId !== chat.planKpId) return null
+  return { source: view.source, count: view.questions.length }
 })
 
-const hasRecommended = computed(() => recommendedName.value !== null)
+/** 来源标注那一行（认不出给空串，模板据此整行不渲染）。 */
+const latestPlanQuizSource = computed(() =>
+  latestPlanQuiz.value === null
+    ? ''
+    : quizSourceLabel(latestPlanQuiz.value.source, latestPlanQuiz.value.count)
+)
 
-const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended.value)
+/**
+ * 「新题落地时，把它推到学生眼前」。
+ *
+ * ★★ 为什么需要它（真机实测）：卡片长在消息列表**末尾**，列表已经很长时它落在视口外
+ *   —— 学生点完「现在考考我」，屏幕上什么都没出现，读起来就是「按钮没反应」。
+ *
+ * ★★ 为什么不是给既有的滚动机制再加一个消费方：守卫 ux-queue-and-scroll 钉着一条
+ *   被实测证伪过的纪律 —— 负责滚动的响应式监听只允许依赖「新的一轮」这个**离散事件**，
+ *   不许依赖「内容变长了」这类尺寸代理量（引用块曾因此掉队 759px）。
+ *   所以这里依赖的是**卡片身份**（新的 id 出现了）而不是数组长度：id 变了 = 真的落了
+ *   一张新卡，与「变长了」是两回事；滚的也是卡片自己的 DOM 锚点，不是无脑到底。
+ * ★ 程序性滚动仍走同一套记账（selfScrollTop），所以不会被 onColScroll 误判成
+ *   「学生自己翻上去了」（见 scrollToBottom 上方那段竞态说明）。
+ * ★ 学生已经翻上去读旧内容时**不打扰**：只更新锚点，不拉视图（露出「回到最新」
+ *   由 onColScroll 负责）—— 与「跟随 / 停住」同一条哲学。
+ */
+let lastQuizCardId = ''
+
+async function revealQuizCard(): Promise<void> {
+  await nextTick()
+  const col = colRef.value
+  if (col === null) return
+  // 锚点用卡片根元素自己的 data-testid="quiz-card"：只挂在真正出题的卡片上
+  // （批改结果卡是另一个 testid），取最后一张就是刚落下的那一批。
+  const anchors = col.querySelectorAll<HTMLElement>('[data-testid="quiz-card"]')
+  const anchor = anchors[anchors.length - 1]
+  if (anchor === undefined) return
+  // 让卡片顶边落进视口（留 12px 呼吸）：无脑到底会把卡片顶出去（它下面还有巩固条）。
+  const delta = anchor.getBoundingClientRect().top - col.getBoundingClientRect().top
+  col.scrollTop = Math.max(0, col.scrollTop + delta - 12)
+  selfScrollTop.value = col.scrollTop
+}
+
+watch(
+  () => chat.cards,
+  (cards) => {
+    let newestId = ''
+    for (const card of cards) {
+      if (card.kind === 'quiz') newestId = card.id
+    }
+    if (newestId === '' || newestId === lastQuizCardId) return
+    lastQuizCardId = newestId
+    if (!stick.value) return
+    void revealQuizCard()
+  }
+)
 </script>
 
 <template>
@@ -662,20 +860,34 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
                一开始把它放在「有消息」那个分支里（排在 `<ChatMessage>` 前面），
                而它**只在会话为空时才有值** ⇒ 那个分支永远进不去 ⇒ 开场语发了、
                写进会话了、界面上却一个字都看不到（P-101）。
-               位置就是它的语义：这是**还没有任何一轮对话时**助手先开的口。 -->
-          <div v-if="isEmpty" class="chat__empty" data-testid="chat-empty">
-            <!-- AI 主动开口：有开场语时用它替代那句静态问候（两句「你好」叠着是重复的）。
-                 没有开场语（无推荐依据 / 刚清空）就退回原来的静态问候。 -->
+               位置就是它的语义：这是**还没有任何一轮对话时**助手先开的口。
+           ★★ 2026-09-30 用户裁决：**五问期间不显示这一屏**。冷启动的第一屏就是团团
+              的问题（见下面引导区），而不是「新对话页 + 四张能力入口 + 建议问题」——
+              一进应用先看到一屏落地页、问题挤在下面，读起来像问卷而不是聊天。
+              五问答完（`onboarding.active` 变假）后这一屏照常回来。 -->
+          <div v-if="isEmpty && !onboarding.active" class="chat__empty" data-testid="chat-empty">
+            <!-- 品牌问候：**有开场语时也在**（2026-09-30 用户裁决）。
+                 此前它被开场卡整个顶替掉，而开场卡自带一个 30px 的小 logo ——
+                 表现就是「随机抽题开场时，吉祥物和招呼一起缩水」，与没开场时的空态判若两页。
+                 现在问候恒定在场，主动引导接在它后面（见下）。 -->
+            <div class="chat__hello">
+              <!-- 空态问候的标记：用品牌 logo（吉祥物智团团）。
+                   ★ 这里**不跟学段换图** —— 它是「这个应用是谁」的品牌位，
+                     与「这一轮按哪个年级讲」无关（那是顶栏学段指示器的事）。
+                     学段换图只在侧栏品牌标那一处（见 `brand-logo.ts` 的说明）。 -->
+              <img class="chat__hello-mark" :src="DEFAULT_LOGO_URL" :alt="''" aria-hidden="true" draggable="false" />
+              <h2 class="chat__hello-title">你好，{{ student.nickname }}</h2>
+              <p class="chat__hello-sub">
+                我是智团团。你可以直接提问，也可以让我换个方式讲。我会按你的学段来回答。
+              </p>
+            </div>
+
+            <!-- ── 主动引导（随机抽一个知识点开场）：排在问候**之后**、能力卡之前。
+                 ★★ 2026-09-30 用户裁决：「抽选提问的时候应该是把那个加在后面一点，
+                    而不是把图标什么的也缩小掉」—— 所以它不再顶替问候、也不再自带小 logo，
+                    而是像一条消息那样接在问候下面（那个位置原来放的是学段说明行，已删）。
+                 ★ 显示与否仍只由 `chat.showOpening` 决定（见 tests/opening-guidance.test.ts）。 -->
             <div v-if="chat.showOpening" class="chat__opening" data-testid="chat-opening">
-              <!-- 标记用品牌 logo（吉祥物智团团）——与空态问候同一个品牌位，**
-                   这里也不跟学段换图**（那是顶栏学段指示器的事） -->
-              <img
-                class="chat__opening-mark"
-                :src="DEFAULT_LOGO_URL"
-                :alt="''"
-                aria-hidden="true"
-                draggable="false"
-              />
               <div class="chat__opening-body">
                 <p class="chat__opening-text">{{ chat.opening }}</p>
                 <div class="chat__opening-actions">
@@ -712,36 +924,6 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
               </div>
             </div>
 
-            <div v-else class="chat__hello">
-              <!-- 空态问候的标记：用品牌 logo（吉祥物智团团）。
-                   ★ 这里**不跟学段换图** —— 它是「这个应用是谁」的品牌位，
-                     与「这一轮按哪个年级讲」无关（那是顶栏学段指示器的事）。
-                     学段换图只在侧栏品牌标那一处（见 `brand-logo.ts` 的说明）。 -->
-              <img class="chat__hello-mark" :src="DEFAULT_LOGO_URL" :alt="''" aria-hidden="true" draggable="false" />
-              <h2 class="chat__hello-title">你好，{{ student.nickname }}</h2>
-              <p class="chat__hello-sub">
-                我是智团团。你可以直接提问，也可以让我换个方式讲。我会按你的学段来回答。
-              </p>
-            </div>
-
-            <!-- ★ 学段那一行**两种情况都要在**：它是「按哪个年级讲」的状态说明，
-                 与「谁在打招呼」无关 —— 有开场语时把它一起藏掉，学生就看不到
-                 当前是哪个学段在给他讲课了。
-                 ★★ 它只说**事实**，不复读**来源**（报告 2.1 / C2）：
-                   此前这里还有一句括号里的「（这是你自己选的 · 手动选中）」/「（AI 引擎判定）」，
-                   而同一个状态在一屏里已经说了三四遍（侧栏身份卡 / 顶栏 / 这里）——
-                   来源说法现在只在**侧栏身份卡**一处出现（`gradeOriginLabel()` 仍是唯一实现）。
-                 ★ 未判定时给的是学生话（「先随便问两句，我就能认出你的年级。」）：
-                   「判定」这类系统口吻与「大字给值、小字否定值」都要去掉（报告 2.2 / C2）；
-                   学段名本身来自 `labels.ts` 的 `GRADE_UNKNOWN_LABEL`（唯一字面量）。
-                 ★ 视觉上按报告 2.1 / 4.2 收成**一行灰字**：无底卡、无绿点 ——
-                   那颗绿点在一屏里与黄条、蓝主操作抢注意力（报告 2.4）。 -->
-            <p class="chat__hello-grade">
-              <template v-if="chat.currentGrade">
-                当前按<strong>{{ chat.currentGradeLabel ?? GRADE_UNKNOWN_LABEL }}</strong>的讲法回答。
-              </template>
-              <template v-else>先随便问两句，我就能认出你的年级。</template>
-            </p>
 
             <!-- ★★ 还没配置模型（没填 Key）：**进门就说清**，而不是等学生打完整句话、
                  按下发送、等一会儿才收到一句技术口吻的失败提示（实测缺陷，见
@@ -811,17 +993,128 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
               :turn="turn"
               :detail-of="chat.citationDetailOf"
               :branching="branchingEntryId !== null"
+              :name-of="studentName"
               @branch="onBranch"
             />
 
-            <!-- 本轮专题（真实数据：教材章节 + 推荐知识点），没有就整段不出现 -->
-            <p v-if="hasTopic" class="chat__topic" data-testid="chat-topic">
+            <!-- 本轮专题：**只报「这一轮在教材的哪一章」**（真实数据）。
+                 ★ 2026-10-01（D-131）：原先后面还跟着「建议接着练：<知识点>」，用户点名删掉；
+                   它删掉之后这一段的显示条件只认章节 —— 否则没选章节时会留下一个空段落。 -->
+            <p v-if="chat.currentChapter" class="chat__topic" data-testid="chat-topic">
               <BookMarked :size="13" />
-              <span v-if="chat.currentChapter">{{ chat.currentChapter }}</span>
-              <span v-if="chat.currentChapter && hasRecommended">·</span>
-              <span v-if="hasRecommended">建议接着练：{{ recommendedName }}</span>
+              <span>{{ chat.currentChapter }}</span>
             </p>
+
+            <!-- ── 常驻巩固条：计划那一轮答完后的两路检验 ──────────────────
+                 ★ 显示与否**只认 store 的 `planReady` + `planKpId`**：
+                   换会话 / 新会话时 store 清空它们，所以「消失」是数据驱动的，
+                   本页不存第二份标记位（多一处就多一处忘了清）。
+                 ★ 它排在消息列表**末尾**而不进底部固定区：它是对话的一部分
+                   （团团刚讲完计划，接着问一句「检验一下？」），
+                   进底部区会和输入条抢同一块定位上下文（见 `.chat__foot` 的注释）。 -->
+            <div
+              v-if="chat.planReady && chat.planKpId !== ''"
+              class="chat__consolidate"
+              data-testid="plan-consolidate"
+            >
+              <p class="chat__consolidate-text">这一步学完了？检验一下：</p>
+              <div class="chat__consolidate-actions">
+                <el-button data-testid="plan-quiz-page" @click="goPlanQuizPage()">去闯关练一练</el-button>
+                <el-button data-testid="plan-quiz-chat" @click="askPlanQuizInChat()">现在考考我</el-button>
+                <!-- ★ 换一批与「现在考考我」**共用同一条 send**（见 askPlanQuizMore 的说明）：
+                     同一个动作的两种说法，学生按哪个都一样。 -->
+                <el-button data-testid="plan-quiz-more" @click="askPlanQuizMore()">换一批</el-button>
+              </div>
+              <!-- ── 刚出的那几道题：来源标注 + 去个性化学习 ──────────────────
+                   ★ 卡片本身由 ChatMessage.vue 渲染（那是最密的守卫组件之一），
+                     本页插不进它与正文之间，所以这两行落在**紧接卡片的巩固条**里
+                     （卡片正下方的第一条）—— 2026-09-30 用户裁决：为一行标注给
+                     ChatMessage 加插槽不划算，卡片头上本来就有来源胶囊。
+                   ★ 来源文案与卡片头 / 个性化学习页**共用同一条**（quizSourceLabel），
+                     本页不另写一份。 -->
+              <template v-if="latestPlanQuiz !== null">
+                <p class="chat__consolidate-source" data-testid="plan-quiz-source">
+                  {{ latestPlanQuizSource }}
+                </p>
+                <p class="chat__consolidate-note">
+                  这几道题也会出现在「个性化学习」里，随时能再做一遍。
+                </p>
+                <div class="chat__consolidate-actions">
+                  <el-button data-testid="plan-open-quiz-page" @click="goPlanQuizPage()">
+                    去个性化学习里做这几道题
+                  </el-button>
+                </div>
+              </template>
+            </div>
           </template>
+
+          <!-- ── 冷启动引导（五问）：**对话流里的一条普通助手消息** ─────────
+               ★★ 位置就是它的语义（决策① / 票 31）：它排在消息列表**同一列**的末尾。
+               ★★ 2026-09-29 用户裁决：**去掉卡片壳**。
+                  此前它是一个套了边框 + 圆角 + 底色的独立卡片、还带一条
+                  「第 N 个问题，共 5 个」的流程进度 —— 读起来是「界面弹了个问卷」，
+                  而不是「团团在跟我说话」。现在它长得**和上面每一条助手消息一样**：
+                  头像 + 「智团团」+ 一张纸面，学生看到的是人在问。
+               ★ 进度条已删（用户：像普通聊天就不该有流程提示）。学生仍能从上文看出
+                 问到哪了；真要数，五问本身很短。
+               ★ 学生面**只有问句 + 他的回答**：不写「第几步流程」「引导」「onboarding」这类系统词。
+               ★ 没有跳过入口（票 31 用户裁决）：五问未答完就一直问，直到 done。
+               ★★ 2026-09-30 用户裁决（推翻了 2026-09-29 的形态与提交方式）：
+                  ① 引导期**不进对话、不调模型** —— 回答只交回 `onboarding.submitAnswer`，
+                     所以不会每题换来一条模型回复、也不会把问答堆进一条会话里；
+                  ② 已经答过的问答由本页从 `onboarding.transcript` 渲染成「团团问 / 我答」；
+                  ③ 第 1 问带选项，点一下**直接提交**并进入第 2 问；第 2–5 问学生自己写；
+                  ④ 第 5 问答完引导区整块消失，页面回到**正常的新对话页**（引导不留会话历史）。
+               守卫：`renderer-onboarding.test.ts` 的「引导期不进对话」「同一个出口」。 -->
+          <div v-if="onboarding.active" class="chat__onboarding" data-testid="onboarding-flow">
+            <template v-for="entry in onboarding.transcript" :key="entry.questionId">
+              <article class="chat__ask">
+                <img class="chat__ask-avatar" :src="DEFAULT_LOGO_URL" :alt="''" aria-hidden="true" draggable="false" />
+                <div class="chat__ask-col">
+                  <div class="chat__ask-meta">
+                    <span class="chat__ask-who">智团团</span>
+                  </div>
+                  <div class="chat__ask-paper">
+                    <p class="chat__ask-text">{{ questionTextOf(entry.questionId) }}</p>
+                  </div>
+                </div>
+              </article>
+              <div class="chat__answer" data-testid="onboarding-answer">
+                <p class="chat__answer-bubble">{{ entry.answerText }}</p>
+              </div>
+            </template>
+
+            <article class="chat__ask" data-testid="onboarding-question">
+              <img class="chat__ask-avatar" :src="DEFAULT_LOGO_URL" :alt="''" aria-hidden="true" draggable="false" />
+              <div class="chat__ask-col">
+                <div class="chat__ask-meta">
+                  <span class="chat__ask-who">智团团</span>
+                </div>
+                <div class="chat__ask-paper">
+                  <p class="chat__ask-text" data-testid="onboarding-question-text">
+                    {{ onboarding.currentQuestion?.text }}
+                  </p>
+                  <!-- 只有第 1 问带选项（`chips: []` 的那四问没有这一块） -->
+                  <div
+                    v-if="(onboarding.currentQuestion?.chips.length ?? 0) > 0"
+                    class="chat__ask-chips"
+                    data-testid="onboarding-chips"
+                  >
+                    <button
+                      v-for="option in onboarding.currentQuestion?.chips ?? []"
+                      :key="option"
+                      type="button"
+                      class="chat__ask-chip"
+                      data-testid="onboarding-chip"
+                      @click="pickOnboardingOption(option)"
+                    >
+                      {{ option }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
         </div>
       </div>
 
@@ -874,10 +1167,13 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
           {{ chat.queueNotice }}
         </p>
 
-        <!-- 输入条 -->
+        <!-- 输入条。
+             ★ 票 31：五问问句已**移入对话流**（见上面消息列末尾那一块），
+               所以底部区只剩输入条 / 待发送 / 回到最新三样 —— 它们仍在同一个定位上下文里。 -->
         <div class="chat__composer">
           <MessageComposer ref="composerRef" @send="onSend" />
         </div>
+
       </div>
       <!-- /chat__foot -->
 
@@ -1030,18 +1326,27 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   height: 32px;
   border: 1px solid var(--k12-border);
   border-radius: var(--k12-r-control);
-  background: transparent;
-  color: var(--k12-muted);
+  /* ★★ 2026-10-01 用户裁决（D-137）：「按钮因为背景颜色导致不清楚、没有边界」。
+   *   此前这里是 `background: transparent` + 1px `--k12-border`（1.47:1）——
+   *   淡到在带色调的信息条上读不出边界，看着像一段装饰而不是按钮。
+   *   现在与同一行的 `.chat__bar-btn`（白底 + 描边 + 投影）**同一套配方**：
+   *   一屏之内的同类控件必须长得一样，否则学生得逐个试才知道哪个能点。 */
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-card);
+  color: var(--k12-fg-2);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
   .chat__bar-icon:hover {
-    color: var(--k12-fg-2);
+    border-color: var(--k12-accent-ink);
+    color: var(--k12-accent-ink);
   }
 }
+/* 按下（= 该栏已展开）：浅色填充 + **实色强调边框** ——
+ * 原来用的是 `--k12-accent-border`（更淡的一档），在浅底上仍然读不出「开着」。 */
 .chat__bar-icon[aria-pressed='true'] {
   background: var(--k12-accent-soft);
-  border-color: var(--k12-accent-border);
+  border-color: var(--k12-accent);
   color: var(--k12-accent-ink);
 }
 
@@ -1063,6 +1368,123 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   display: flex;
   flex-direction: column;
   gap: var(--k12-gap-msg);
+}
+/* ── 冷启动引导（五问）：**对话流里的一条普通助手消息** ────────────────────
+ * ★ 票 31：它住在消息列（`.chat__inner`）里，排在消息末尾 —— 读作「团团接着问了一句」。
+ *   所以这里不需要 `order`（那是为了把它从底部区提上来才有的），也不需要浮卡式定位；
+ *   布局由父容器的 flex 列 + `gap: var(--k12-gap-msg)` 管。
+ *
+ * ★★ 2026-09-29 用户裁决：**去掉卡片壳**。此前它带 `border` + `border-radius` +
+ *   `box-shadow`，是一个**套了壳的独立卡片** —— 与上面每一条助手消息并排时，
+ *   学生会读成「界面弹了个问卷」。现在这几条壳体属性一个不留，形态与
+ *   `ChatMessage.vue` 的 `.turn__ai` 完全对齐（头像 28px + 名字 + 纸面），
+ *   两张纸面之间靠 `.chat__inner` 的 `gap` 分开 ——「一排消息」的读法就立住了。
+ * ★ 复用 `.turn__ai` / `.avatar` / `.answer` 的同一条口径但**不共用类名**：
+ *   那两个组件是父子关系之外的兄弟（ChatMessage 是子组件、本块在 Chat.vue 里），
+ *   scoped 样式跨不过去。若要共享类名就只能把样式提到全局，那会把「对话气泡」
+ *   这个只在消息流里成立的东西泄漏到别处。所以这里按同一把尺子重写一遍。
+ * ⚠️ 纸面底色用 surface（不是 surface-2）：它是**助手在说话**，与右侧的学生气泡
+ *    （surface-2）必须一眼分得开。 */
+.chat__ask {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.chat__ask-avatar {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  flex: none;
+  user-select: none;
+}
+.chat__ask-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--k12-gap-block);
+}
+.chat__ask-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.chat__ask-who {
+  font-size: var(--k12-fs-caption);
+  font-weight: 650;
+  color: var(--k12-muted);
+}
+/* 纸面：与 `ChatMessage.vue` 的 `.answer` 逐条同款（radius-card + surface + 1px 线 +
+ * shadow-card）—— 这是「一条助手消息」的全部视觉构成。 */
+.chat__ask-paper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--k12-gap-block);
+  padding: 16px 18px;
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
+  box-shadow: var(--k12-shadow-card);
+}
+.chat__ask-text {
+  font-size: var(--k12-fs-body);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg-2);
+  word-break: break-word;
+}
+/* 选项 chip：可点、点一下**填进输入框**（不直接发）。28px 触控下限与别处一致。 */
+.chat__ask-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chat__ask-chip {
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid var(--k12-border-strong);
+  /* ★ 走 token 而不是写死 999px：本仓库的圆角守卫（tests/radius-tokens.test.ts）
+     只允许 token 或 50%/0 —— 写死具体像素就等于把圆角梯度绕过去了。 */
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-family: inherit;
+  font-size: var(--k12-fs-caption);
+  cursor: pointer;
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat__ask-chip:hover {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
+    background: var(--k12-accent-soft);
+  }
+}
+/* 引导的问答列：一问一答按同一个消息间距挨着排；答完第 5 问整块消失（回到新对话页）。 */
+.chat__onboarding {
+  display: flex;
+  flex-direction: column;
+  gap: var(--k12-gap-msg);
+}
+/* ── 学生答的那一句（引导期由本页渲染，**不是**会话消息）────────────────────
+ * 与 `ChatMessage.vue` 的 `.turn__user` / `.bubble` 逐条同款（右对齐 + surface-2 +
+ * 右侧一道墨线）—— 读起来必须是「我答的那句」。scoped 样式跨不过子组件，
+ * 所以按同一把尺子重写一遍（与上面 `.chat__ask` 对 `.turn__ai` 同一条理由）。 */
+.chat__answer {
+  display: flex;
+  justify-content: flex-end;
+}
+.chat__answer-bubble {
+  max-width: min(560px, 78%);
+  padding: 10px 14px;
+  border-radius: var(--k12-r-inset);
+  background: var(--k12-surface-2);
+  border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
+  border-right: 3px solid var(--k12-accent);
+  color: var(--k12-fg);
+  font-size: var(--k12-fs-body);
+  line-height: var(--k12-lh-ui);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .chat__composer {
   width: 100%;
@@ -1217,6 +1639,9 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   user-select: none;
 }
 .chat__hello-title {
+  /* ★ 首屏问候是 40px 大字 → 用 display 那一套（圆润的阅读体）；
+   *   副标题与其余小字继续用 `--k12-font-ui`（黑体，小字号才立得住）。 */
+  font-family: var(--k12-font-display);
   font-size: var(--k12-fs-hero);
   font-weight: 650;
   line-height: var(--k12-lh-tight);
@@ -1229,22 +1654,10 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   color: var(--k12-fg-2);
   max-width: 58ch;
 }
-/* 学段那一行：**一行灰字**（报告 2.1 的「最多一行灰字」+ 4.2 的
- * 「纯说明 → caption 灰字、无框」）。
- * ★ 此前它是一个灰底圆角盒 + 一颗绿点；报告 2.4 说得很具体：一屏里黄（配置）、
- *   绿（本地）、蓝（主操作）同时抢注意力，而这行只是**状态说明**，不是状态告警。
- *   所以底卡与绿点一起去掉，只留一句灰字（`--k12-muted`）。
- * ★ 来源（手动选中 / AI 引擎推算）不在这里复读 —— 只在侧栏身份卡一处出现（2.1）。 */
-.chat__hello-grade {
-  font-size: var(--k12-fs-caption);
-  line-height: var(--k12-lh-body);
-  color: var(--k12-muted);
-  max-width: 72ch;
-}
-.chat__hello-grade strong {
-  color: var(--k12-fg);
-  font-weight: 650;
-}
+/* ⚠️ `.chat__hello-grade`（「当前按 XX 的讲法回答。」那一行）**已删** ——
+ *   2026-09-30 用户裁决。它原本是报告 2.1/4.2 收出来的「一行灰字」，
+ *   但同一个状态在顶栏学段指示器、侧栏身份卡已经各说了一次，这一行只是第三次复读；
+ *   而主动引导现在要占用这个位置（见下）。 */
 
 /* 「还没配置模型」那条提示：**这一屏里唯一的黄**（报告 2.4 的收敛口径：
  * 「黄条仅保留『模型未就绪且阻断对话』一种」）—— 上面的学段行已改成灰字，
@@ -1380,14 +1793,26 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   flex-wrap: wrap;
   gap: 8px;
 }
+/* ★★ 2026-09-30 用户裁决：原来 `background: transparent` 太不起眼，
+ *   学生看不出这是**三个可点的按钮**（读成三句灰字）—— 改成白底 + 60% 毛玻璃。
+ *   ★ 60% 是分档表里最透的一档：它背后是本页的平板底色（没有内容经过），
+ *     所以透明度只影响观感、不影响可读性（分档表见 base.css 的 `.k12-glass`）。
+ *   ★ 边框同时升到强线：底色变白之后，发丝线在浅底上读不出"这是个按钮"。 */
 .chat__suggest {
   padding: 8px 13px;
-  border: 1px solid var(--k12-border);
+  border: 1px solid var(--k12-border-strong);
   border-radius: var(--k12-r-pill);
-  background: transparent;
+  /* 不支持 backdrop-filter 的环境退回实色白（半透明底会把下面的内容透上来）。 */
+  background: var(--k12-surface);
   color: var(--k12-fg-2);
   font-size: var(--k12-fs-caption);
   cursor: pointer;
+}
+@supports (backdrop-filter: blur(1px)) {
+  .chat__suggest {
+    background: color-mix(in srgb, var(--k12-surface) 60%, transparent);
+    backdrop-filter: blur(12px) saturate(1.4);
+  }
 }
 @media (hover: hover) and (pointer: fine) {
   .chat__suggest:hover {
@@ -1406,6 +1831,8 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  /* 它排在问候**之后**（2026-09-30）：不再是"顶替问候的第一块"，
+   * 所以左右不再需要额外对齐品牌位 —— 保留纸张形态与那条强调竖条即可。 */
   padding: 13px 15px;
   border: 1px solid var(--k12-border);
   border-left: 3px solid var(--k12-accent-ink);
@@ -1413,13 +1840,9 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   background: var(--k12-surface);
   box-shadow: var(--k12-shadow-card);
 }
-.chat__opening-mark {
-  width: 30px;
-  height: 30px;
-  flex: none;
-  object-fit: contain;
-  user-select: none;
-}
+/* ⚠️ `.chat__opening-mark`（开场卡自带的 30px 小 logo）**已删**：
+ *   2026-09-30 用户裁决「不要把图标缩小」—— 空态的品牌标记恒用上面那个 52px 的大吉祥物，
+ *   开场卡不再自带第二个小图标（同一屏两个智团团，一大一小）。 */
 .chat__opening-body {
   display: flex;
   flex-direction: column;
@@ -1481,6 +1904,46 @@ const hasTopic = computed(() => chat.currentChapter.length > 0 || hasRecommended
   gap: 6px;
   padding-top: 6px;
   font-size: var(--k12-fs-caption);
+  color: var(--k12-muted);
+}
+
+/* ── 常驻巩固条：与开场引导**同一族**（白纸 + 圆角 + 左侧强调竖条）──────────
+ * ★ 复用既有配方而不是新写一套皮肤：它也是「系统主动接的一句」（与开场引导同类），
+ *   所以那个既有形态就是它的正确外观；新写一份就是又一次漂移
+ *   （见 base.css 里 `.k12-cta` 那段「不要抄第六份」的说明）。
+ * ⚠️ 两个按钮走 `el-button`（次级样式），这里**不**给它们上主色：
+ *   这一屏的主色填充归输入区的发送键。 */
+.chat__consolidate {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px 15px;
+  border: 1px solid var(--k12-border);
+  border-left: 3px solid var(--k12-accent-ink);
+  border-radius: var(--k12-r-card);
+  background: var(--k12-surface);
+  box-shadow: var(--k12-shadow-card);
+}
+.chat__consolidate-text {
+  font-size: var(--k12-fs-body);
+  line-height: var(--k12-lh-body);
+  color: var(--k12-fg);
+}
+.chat__consolidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* 刚出的那一批题的来源：它是这一块的**小标题**（比正文多半档字重、不抢主色）→ meta 档。 */
+.chat__consolidate-source {
+  font-size: var(--k12-fs-body-sm);
+  font-weight: 650;
+  color: var(--k12-fg-2);
+}
+/* 「也会出现在个性化学习里」是补充说明（不是新承诺，见 D-088）→ 说明档灰字。 */
+.chat__consolidate-note {
+  font-size: var(--k12-fs-caption);
+  line-height: var(--k12-lh-body);
   color: var(--k12-muted);
 }
 

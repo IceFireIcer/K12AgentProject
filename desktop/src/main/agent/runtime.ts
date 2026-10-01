@@ -47,7 +47,7 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { app } from 'electron'
-import type { GradeLevel } from '@shared/ipc-events'
+import type { GradeLevel, PayloadKind } from '@shared/ipc-events'
 import {
   bindTurnStream,
   describeProviderError,
@@ -65,6 +65,9 @@ import {
   bindAgentSession,
   CORE_EXTENSION_FACTORIES,
   describeRegistryReport,
+  // ★ 引导扩展的注册入口（票 25）：它**不在**票 08 冻结的六个业务扩展清单里，
+  //   所以只能经下面 agentExtensionsFactory 的 extra 注入（见 onboarding.ts 文件头）。
+  ONBOARDING_EXTRA_EXTENSION,
   registerAgentExtensions,
   type AgentExtensionApi
 } from './extensions/index.ts'
@@ -73,7 +76,7 @@ import {
 //   —— 见下方 `agentExtensionsFactory` 的说明。
 import { createAnimationExtension } from './extensions/animation.ts'
 import { createCodingExtension } from './extensions/coding.ts'
-import quizExtension from './extensions/quiz.ts'
+import quizExtension, { LLM_TIMEOUT_MS } from './extensions/quiz.ts'
 // ★ 学段**推断**扩展（票 21）：它独占 `input`（收集本轮证据）与 `before_agent_start`（按推断出的
 //   学段替换整段 prompt），并自兜异常。工厂是「可调用 + `.refresh()/.useJudge()` 诊断入口」的形态。
 import gradeExtension, {
@@ -87,6 +90,35 @@ import gradeExtension, {
 //   本文件只把它们接在 `buildSystemPrompt()` 这一个出口上 —— 6 个 prompt 落点共用它。
 import { fetchStudentContext } from './extensions/profile.ts'
 import { withStudentContext } from './prompts/student-context.ts'
+// ★ 画像标签的白名单投影（票 26/29/30）：投影与「段拼装」都在 prompts/ 那两个模块里，
+//   本文件只负责**取一次、拼一次**（唯一出口 `buildSystemPrompt`），不在这里拼任何正文。
+import { buildJudgePersona, fetchPersonaSnapshot, withPromptSections } from './prompts/profile-block.ts'
+import { buildTurnSections } from './prompts/adaptation.ts'
+import type { ProfileProjection, PromptSection } from './prompts/profile-block.ts'
+// ★★ 引导模式（票 25 的 B 侧产物）：契约 §4 的四个冻结签名只从这里进。
+//   本文件只做「接线」这一件事 —— 切 prompt 在 grade.ts 的分支里，退出冲洗在 dispose() 里。
+import {
+  buildOnboardingSystemPrompt,
+  isOnboardingActive,
+  onboardingGuardNotes,
+  onboardingService
+} from './onboarding/index.ts'
+// ★★ 持续画像迭代（二期）：每 N 轮把最近几轮对话交给概括，产出标签写回画像。
+//   本文件只做**两件事**：① 每轮结束时喂一轮对话进窗口 + 判要不要跑；
+//   ② 会话切换 / 关闭时清窗口（**跨学生泄漏是禁做 #9**，清窗口与清计数一样不能漏）。
+//   ⚠️ 编排（`runRefresh`）住在 profile-refresh 里，本文件**不碰**载荷、模型、落库细节。
+import {
+  applyRefreshTagsFromSidecar,
+  calibrateTurn,
+  clearTranscriptWindow,
+  noteTurn,
+  pushTurn,
+  readKnownTagsFromSidecar,
+  // ★ 三期（2026-09-30）：读 AI 小结缓存（`readProfileSummary()` 用）
+  readSummaryLineCache,
+  resetTurnClock,
+  runRefresh
+} from './profile-refresh/index.ts'
 import ragSearchExtension from './extensions/rag-search.ts'
 import {
   builtinCatalog,
@@ -118,6 +150,8 @@ import {
 // ★ 动画自由生成（票 17 的补充路径）：模板未命中时才被调用，无 Key 时干净降级。
 import { createAnimationGenerator } from './animation/generator.ts'
 import { createCodeExerciseGenerator } from './coding/generator.ts'
+// ★ 练习页动态出题的服务实例（进程内唯一）：模型通道由下面 fillCompleter 填/清。
+import { quizGenService } from './quizgen/service.ts'
 import {
   assertSessionManagerIsolated,
   ensureStudentPiDirs,
@@ -128,7 +162,7 @@ import {
 // ★ 历史消息的投影（`SessionEntry[]` → 可显示的问答）：**与「只读回看」共用同一个纯函数**。
 //   两处各写一份解析就会出现「回看里显示的消息」与「恢复出来继续聊的消息」不一致 ——
 //   而它们读的是同一份 JSONL，任何不一致都是解析差异（不是数据差异）。
-import { projectTranscript, titleFromText, type TranscriptMessage } from '../study/sessions.ts'
+import { projectTranscript, sessionTitleFrom, type TranscriptMessage } from '../study/sessions.ts'
 import {
   createTraceExtension,
   exportToolTrace,
@@ -343,8 +377,15 @@ export interface ChatRuntime {
    *   轨迹与成本统计能对上账；`stopReason: 'stop'` 表示它是一次完整收尾的表述。
    * ★ 由调用方保证「只在 `messageCount === 0` 时调用一次」——本方法不做幂等判断
    *   （判据在 `ipc/handlers.ts` 的 `openSession` 里，那里同时决定前端拿不拿得到它）。
+   *
+   * ★★ `opening`（可选）：这句开场**指向的知识点**，跟着消息一起落进会话文件
+   *   （字段名 `k12Opening`）。恢复会话时直接读它 —— 不再靠「重新取到的那句与文件里
+   *   逐字相同」来认目标（推荐池会随画像变，那条判据在重启后经常落空，
+   *   表现是卡片上留着一句邀请、动作按钮却没了）。
+   *   Pi 的 `appendMessage` 原样存这个对象（见 `dist/core/session-manager.js`），
+   *   而模型侧的 `convertToLlm` 只读 role/content 等已知键，多出来的元数据不影响它。
    */
-  appendOpeningMessage(text: string): void
+  appendOpeningMessage(text: string, opening?: { kpId: string; kpName: string }): void
   /**
    * ★ 用一次轻量模型补全给当前会话起个名字（写进 Pi 的 `session_info` 条目）。
    *
@@ -400,6 +441,13 @@ export interface ChatRuntime {
    * 内部已兜异常（提交失败只记日志），**不会抛**。
    */
   flushGrades(): Promise<void>
+  /**
+   * ★ 三期（2026-09-30）：读**画像小结**（主进程本地缓存里的一段中文；空串 = 还没生成过）。
+   *
+   * ★ 只读不生成 —— 生成发生在画像变更之后（见 `profile-refresh` 的 `refresh.ts`），
+   *   所以这个读口是零等待、零模型开销的；界面打开档案页不会因为它卡住。
+   */
+  readProfileSummary(): Promise<string>
   /** 关闭会话（`session.dispose()` 会把 JSONL flush 干净）。**幂等**。 */
   dispose(): Promise<void>
 }
@@ -701,6 +749,35 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   let lastStudentContextHash = ''
 
   /**
+   * ★★ 本轮画像标签的**白名单投影**（票 26/29/30）：由 runTurn() 的预取写入，
+   * 由 buildSystemPrompt()（三段）与 judge 闭包（judgePersona）读取。
+   *
+   * 为什么是「每轮一个共享的投影」而不是各消费点各自取一次：
+   *   同一轮里画像段、难度微调段、情绪定向段与学段判定的摘要必须是**同一份标签** ——
+   *   取两次就可能在两次 HTTP 之间库变了，于是模型看到的「他是谁」与判定手里的证据对不上，
+   *   而这种不一致没有任何报错，只会静默地把一套个性化讲成另一套。
+   *   null = 本轮没取到（没接线 / 404 / 读失败），三段与判定摘要一起为空 —— 干净降级。
+   */
+  let personaProjection: ProfileProjection | null = null
+  /**
+   * 本轮要注入的三段（画像 → 难度 → 情绪；由 buildTurnSections() 按固定顺序组装）。
+   *
+   * 为什么在这里持有一份而不是在 buildSystemPrompt 里现拼：拼装点有 6 个，其中
+   * systemPromptOverride 是**建会话时同步求值**的 —— 现拼会要求它读一个还没预取的投影，
+   * 反而把「第一轮没有段」与「后面有段」的差异放大。每轮 buildSystemPrompt 读同一份，
+   * 落盘证据与发出去的文本自然逐字一致。
+   */
+  let turnSections: PromptSection[] = []
+  /**
+   * 学段判定用的**画像摘要文本**（buildJudgePersona() 的产物；空串 = 本轮没有可用标签）。
+   *
+   * ⚠️ 它走**闭包变量**而不是 judge 的参数：grade-judge-wiring.test.ts 的 J4 按字面量
+   *   async ({ turns, currentGrade }) 断言「解构形状没被改」，persona 不能在解构里多一个字段。
+   *   类型上 buildJudgePrompt(turns, currentGrade, persona?) 仍保留第三个可选位（grade.ts 的契约）。
+   */
+  let judgePersona = ''
+
+  /**
    * ★★ **唯一的 system prompt 组装出口**：学段（权威）+ 学生情况（画像），6 个落点都走它。
    *
    * 顺序有意义（**不要对调**）：`withStudentContext` 把学生情况块插在**学段权威段之前**，
@@ -716,7 +793,14 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
    *   `before_agent_start` 用它覆盖，而 `withStudentContext` 对空块是原样返回（幂等）。
    */
   function buildSystemPrompt(incoming: string | undefined): string {
-    return withStudentContext(gradeExtension.systemPromptFor(incoming), studentContextBlock)
+    const grade = gradeExtension.systemPromptFor(incoming)
+    /**
+     * ★★ 引导模式（票 25 §1.3）：画像块与每轮微调段**都不注入** ——
+     *   五问刚开始问，画像此刻还是空的，注入了只会误导模型。
+     *   学段权威段也已经由上一行的引导分支**整份换掉**了（它在更早的一支里 return）。
+     */
+    if (gradeExtension.isOnboarding()) return grade
+    return withStudentContext(withPromptSections(grade, turnSections), studentContextBlock)
   }
 
   /**
@@ -902,6 +986,11 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       },
       extra: [
         { name: 'rag-search', factory: ragSearchExtension },
+        // ★ 引导扩展（票 25）：**空工厂**（无 Tool、无事件订阅，理由见 onboarding.ts 文件头）——
+        //   它的价值是让「引导这条能力在不在」在启动日志的注册报告里可判定，不靠人去读代码。
+        //   **不加也不影响功能**（引导由 IPC + grade.ts 的 prompt 分支驱动），
+        //   但少了它就少了「引导已就位」这条可观测证据。
+        ONBOARDING_EXTRA_EXTENSION,
         {
           name: 'trace',
           factory: createTraceExtension(trace, (records) => {
@@ -1108,6 +1197,57 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   }
 
   /**
+   * ★★ 把本轮的卡片写进会话文件的**一条 `custom` 条目**（2026-09-30 用户裁决：
+   * 推翻「历史消息不恢复卡片」，全部卡片都要能恢复，含动画卡）。
+   *
+   * ── 为什么是 `custom` 条目（`appendCustomEntry`）────────────────────────
+   *   Pi 的 `custom` 条目**只落盘、不进模型上下文**（`convertToLlm` 只认 message 条目）。
+   *   卡片是「当时那次交互的产物」：回看时学生要能再看见它（用户裁决），
+   *   但**绝不能**被当成对话内容回喂给模型 —— 那是一段几 KB 的界面 JSON，
+   *   既不参与理解，又会让模型对着自己没见过的界面产物讲话。
+   *   （另两条路都不合适：`appendMessage` 会进上下文；`appendCustomMessageEntry`
+   *   进上下文时还会被 `convertToLlm` 当成 **user** 消息 —— 伪造学生从没说过的话。）
+   *
+   * ── data 里两个 id 的分工 ────────────────────────────────────────────
+   *   · `entryId` 是**挂载点**：投影时按它把卡片挂到对应的助手消息上（不靠顺序猜）；
+   *   · `requestId` 只作**溯源**（排障时一眼对上是哪一轮），不是判据。
+   *
+   * ── 为什么在轮次收尾才写（而不是收到 `payload` 事件就写）────────────────
+   *   卡片必须跟在**这一轮的助手条目**后面，而助手条目的 id 只有整轮结束、
+   *   Pi 落盘之后才知道（`lastTurnEntries()` 从投影里取末尾那一对）。
+   *   写早了就没有挂载点，回看只能靠位置猜。
+   *
+   * ★ API 不存在（老版本 Pi / 测试替身）时**只记 warn 不抛**：退路就是
+   *   「卡片不回看」（本次改动之前的行为），绝不因此把一轮对话带崩。
+   */
+  function persistTurnCards(
+    requestId: string,
+    cards: ReadonlyArray<{ kind: PayloadKind; payload: unknown }>
+  ): void {
+    if (cards.length === 0) return
+    try {
+      const manager = sessionManager as {
+        appendCustomEntry?(customType: string, data: unknown): string
+      }
+      if (typeof manager.appendCustomEntry !== 'function') {
+        console.warn('[agent] SessionManager 没有 appendCustomEntry，本轮卡片未写入会话文件（回看看不到它们）')
+        return
+      }
+      const { entryId } = lastTurnEntries()
+      manager.appendCustomEntry('k12.cards', {
+        requestId,
+        // ★ 认不出助手条目时**不编** id：投影那边会退回「按位置挂」这条判据。
+        ...(entryId === '' ? {} : { entryId }),
+        cards: [...cards]
+      })
+    } catch (error) {
+      console.warn(
+        `[agent] 本轮卡片写入会话失败（回看将看不到它们）：${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  }
+
+  /**
    * ★ 把当前学生上下文写进扩展层（`extensions/index.ts` 的 `bindAgentSession`）。
    *
    * 契约是「**每次建会话 / 切学生时都要调用**」：Tool 里的 `currentAgentSession()` 只可能拿到
@@ -1134,6 +1274,31 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
   //   不 await：它要发一次本机 HTTP，绝不能拖慢建会话；`refresh()` 内部自己吞异常，
   //   sidecar 还没起来时只记一条 warn（干净降级 —— 第一轮用默认学段，第二轮回正）。
   void gradeExtension.refresh()
+
+  /**
+   * ★★ 持续画像迭代（二期）：用**服务端的累计轮次**校准本地轮次计数（只保证不因重启清零）。
+   *
+   * 为什么不另发一次 HTTP 取 `grade_signals.max(id)`：`gradeExtension` 已经在
+   * `refresh()` 里把同一个量（`GET /api/grade/state` 的 `cumulativeTurns`，
+   * 服务端数的是 `(session_id, turn)` 去重桶）同步下来了 —— 再发一次是第二处真相，
+   * 还要多一个端点契约。`snapshot()` 是它的**诊断读取口**（纯读，不触发任何 IO）。
+   *
+   * ⚠️ 语义是 `max(本地, 后端)`（见 `turn-clock.ts` 的 `calibrateTurn`）：
+   *   后端那个数天然 ≥ 真实轮数（一轮可能写多条信号），**不能直接覆盖**本地计数，
+   *   否则「每 5 轮」会变成「每 2 轮」（调用量翻倍）。
+   * ⚠️ fire-and-forget（不 await）：`refresh()` 是异步的，等它回来才校准会拖慢建会话；
+   *   这里**排在同一事件循环的下一拍**读一次即可 —— 读到旧值也无所谓（校准是保守的，
+   *   下个会话创建时还会再来一次）。
+   */
+  void Promise.resolve().then(() => {
+    try {
+      const stats = gradeExtension.snapshot() as { cumulativeTurns?: unknown }
+      const mark = typeof stats.cumulativeTurns === 'number' ? stats.cumulativeTurns : 0
+      if (mark > 0) calibrateTurn(options.studentId, mark)
+    } catch {
+      // 校准失败不影响任何东西（本地计数从 0 开始照常工作）
+    }
+  })
 
   /**
    * ★ 解析 provider 下要用的模型，**按优先级回落到该 provider 的第一个可用模型**。
@@ -1227,8 +1392,13 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       //   否则「热切换把 Key 清空」之后，`completerHolder` 还是旧连接 → 三个用途继续用
       //   已删除的 Key 发请求（与 `removeRuntimeApiKey` 同一条纪律，见 `applyLlmConfig`）。
       completerHolder = null
+      // ★ 反向同步：出题服务也摘掉通道（它据此立刻回「没有可用模型」，不发请求）
+      quizGenService.setCompleter(null)
       return
     }
+    // ★ 出题服务与动画生成器共用这条模型通道：填/清时同步交给它（热切换 Key 立即生效）。
+    //   服务收的是字符串 prompt，而 lazyComplete 收请求对象，所以这里包一层。
+    quizGenService.setCompleter((prompt) => lazyComplete({ prompt, timeoutMs: LLM_TIMEOUT_MS }))
     completerHolder = createModelCompleter(modelRuntime as never, modelForCompleter, {
       // 自审/判学段/生成片段都是**纯文本任务**：不给工具（模型能调用工具就会去调，
       // 而那些工具会改学生数据）。`maxTokens` 给够写一段片段，不追求长输出。
@@ -1274,7 +1444,12 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
     if (!credentialState.hasKey || !credentialState.authReady || useProbe) return null
     try {
       const raw = await lazyComplete({
-        prompt: buildJudgePrompt(turns, currentGrade),
+        // ★★ 画像摘要（票 26 / D-073）：`judgePersona` 由 `runTurn()` 的预取写入。
+        //   它直接解决「高中生提问也很朴素」那个老问题 —— 判定手里终于有了
+        //   **学生自己说的学段档位**与系统观察到的卡点，不再只靠 5–8 句问句猜深度。
+        //   ⚠️ 解构形状 `async ({ turns, currentGrade })` **不要**加字段：
+        //     `grade-judge-wiring.test.ts` 的 J4 按这个字面量判定接线没被绕过。
+        prompt: buildJudgePrompt(turns, currentGrade, judgePersona),
         timeoutMs: JUDGE_TIMEOUT_MS
       })
       return parseProposal(raw)
@@ -1286,6 +1461,30 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         }`
       )
       return null
+    }
+  })
+
+  /**
+   * ★★ **引导模式接线**（契约 §4；B 的 onboarding 模块经 barrel 暴露那四个冻结签名）。
+   *
+   * 三件事一次接完，且**每件都只有一处**：
+   *   ① 切 prompt：`gradeExtension` 在引导期把整份 prompt 换成引导版（§1.3；
+   *      学段权威段 / 工具 / 画像块全关，画像块那半由 `buildSystemPrompt` 的
+   *      `isOnboarding()` 分支跳过）；
+   *   ② 两项状态：`askedCount` / `displayName` 从 `onboardingService.snapshot()` 现取 ——
+   *      C 侧**不持有第二份引导状态**（那会是第二处真相，且必然与 B 的那个漂移）；
+   *   ③ 退出冲洗：`dispose()` 里紧随 `gradeExtension.flush()` 调 `onboardingService.dispose()`
+   *      （B 的文件头点名了这个位置：它也是 /api 调用方）。
+   *
+   * ★ 不接线时的行为仍然是**干净降级**（不是半成品）：常规学段模板 + 画像注入照常。
+   */
+  gradeExtension.useOnboarding({
+    isOnboardingActive,
+    buildOnboardingSystemPrompt,
+    onboardingGuardNotes,
+    promptParams: () => {
+      const snapshot = onboardingService.snapshot()
+      return { askedCount: snapshot.askedCount, displayName: snapshot.displayName }
     }
   })
 
@@ -1493,7 +1692,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
      * ⚠️ 写成 `assistant` 消息而**不是** `custom_message`：后者在 `convertToLlm` 里
      *    会变成 **user** 消息，于是模型以为「从X开始吧」是**学生**说的 —— 伪造对话记录。
      */
-    appendOpeningMessage(text: string): void {
+    appendOpeningMessage(text: string, opening?: { kpId: string; kpName: string }): void {
       const trimmed = text.trim()
       if (!trimmed || disposed) return
       try {
@@ -1523,7 +1722,12 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
           },
           stopReason: 'stop',
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          // ★★ 这句开场指向的知识点（可选）：**跟着消息一起落盘**，恢复时直接读。
+          //   只在真有目标（kpId 非空）时写 —— 空目标配一个按钮就是死按钮。
+          ...(opening && opening.kpId !== ''
+            ? { k12Opening: { kpId: opening.kpId, kpName: opening.kpName } }
+            : {})
         })
         console.warn(`[agent] 已把开场引导写入会话（${trimmed.length} 字符，未消耗 token）`)
       } catch (error) {
@@ -1539,7 +1743,7 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
      * ★ 用一次轻量补全给当前会话起名（写进 Pi 的 `session_info` 条目）。
      *
      * 判据与降级：拿不到模型通道（无 Key / 探针）→ 直接返回 `null`，
-     * 由调用方退回首条消息截断（「降级永不白屏」：标题只是列表里的一个字段）。
+     * 由**列表的标题投影**（`sessionTitleFrom`）兜底（「降级永不白屏」：标题只是列表里的一个字段）。
      *
      * ★ 提示词只包含**学生自己说的第一句**（截断到 200 字）+ 一句格式要求：
      *   不把整段对话喂进去（那是另一次不小的请求），也不要模型「总结这段对话」——
@@ -1561,17 +1765,20 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
             `学生说：${first.slice(0, 200)}`,
           timeoutMs: TITLE_TIMEOUT_MS
         })
-        const title = titleFromText(raw.trim())
-        // ★ 认不出（模型返回空 / 只有标点 / 返回了整段解释）时**不写**：
-        //   宁可继续用「首条消息截断」，也不要写一个比它更差的标题。
-        if (!title || title === '未命名') return null
+        const rawTitle = raw.trim()
+        // ★ 模型没回可用的字（空 / 只有空白）时不写：宁可继续用列表的标题投影兜底。
+        if (!rawTitle) return null
+        // ★ 模型回的这段字过**唯一一处标题投影**（列表那边用的是同一个函数），不在这里
+        //   另写一份判据 —— 两边迟早会漂移，而漂移的表现就是「标题里又冒出机器标记」：
+        //   首条消息本身就是【…】加 kp_id= 的机器文本，小模型完全可能把它原样回吐。
+        const title = sessionTitleFrom(undefined, rawTitle)
         const manager = sessionManager as { appendSessionInfo?(name: string): string }
         if (typeof manager.appendSessionInfo !== 'function') return null
         manager.appendSessionInfo(title)
         console.warn(`[agent] 已生成会话标题：${title}`)
         return title
       } catch (error) {
-        // 断网 / 超时 / 模型拒答：都走同一条降级（调用方用 firstMessage 截断）
+        // 断网 / 超时 / 模型拒答：都走同一条降级（由列表的标题投影兜底）
         console.warn(
           `[agent] 会话标题生成失败（退回首条消息截断）：${
             error instanceof Error ? error.message : String(error)
@@ -1726,7 +1933,19 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         //      有效块也一起丢掉」这个纯损失的分支；而残留旧值的风险是有限的 ——
         //      切换学生走的是**新建会话**（`ipc/handlers.ts` 的 ensureChatRuntime → createChatRuntime），
         //      新的 `ChatRuntime` 自带一个空块，跨学生复用同一个 runtime 的路径不存在。
+        // ★★ 画像标签预取（票 26/29/30）：**与画像预取并行发出** —— personaPrefetch 在
+        //    同一个 await 之前就起跑，所以本轮只等两者里慢的那个，多接一条能力**不增加一次
+        //    串行等待**（每多等 1ms 都是学生等首字延迟的 1ms）。
+        //    ⚠️ 不要改成「先 await 画像、再发标签请求」—— 那会把并行变成串行。
+        const personaPrefetch = fetchPersonaSnapshot(paths.studentId)
         studentContextBlock = await fetchStudentContext(paths.studentId)
+        // ★ 一次投影，四处消费：三段（画像 / 难度 / 情绪）与判定摘要都读**同一份**投影 ——
+        //   各自取一次会让两条链在同一轮看到不同的标签（同一个学生、同一轮、两套画像）。
+        //   fetchPersonaSnapshot **绝不抛**（读失败回 null），所以这里不需要额外的 try。
+        personaProjection = await personaPrefetch
+        turnSections = buildTurnSections({ projection: personaProjection })
+        judgePersona = buildJudgePersona(personaProjection)
+        // ★ 记录与指纹在下游（诊断信封）：它们读的是上面那份**已经落定的**投影。
         recorder.noteStudentContext(studentContextBlock, lastStudentContextHash)
         lastStudentContextHash = byteHash(studentContextBlock)
 
@@ -1827,9 +2046,28 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
           return { ok: false, status: 'missing-key', detail: 'checkAuth 未通过' }
         }
 
+        /**
+         * ★★ 本轮卡片收集（2026-09-30 用户裁决：全部卡片都要能恢复，含动画卡）。
+         *
+         * 为什么在 sink 外面再包一层：`payload` 事件是卡片的**唯一产出点**
+         * （`events.ts` 查过 `ipc/tool-kinds.ts` 的表才发），这里**原样收下**即可 ——
+         * 不重新查表、不重新解析工具结果（那会变成第二处真相）。
+         * 写盘在轮次收尾（见 `persistTurnCards`）：挂载点要等助手条目落盘。
+         */
+        const turnCards: Array<{ kind: PayloadKind; payload: unknown }> = []
+        const cardSink: TurnSink = {
+          emit(event) {
+            if (event.name === 'payload') {
+              turnCards.push({ kind: event.data.kind, payload: event.data.payload })
+            }
+            return gate.emit(event)
+          },
+          finish: () => gate.finish()
+        }
+
         const binding = bindTurnStream(
           session,
-          gate,
+          cardSink,
           // ★ `secret` 是**给脱敏用的**（不是给日志用的）：供应商原文里的这一把 Key 会被抹掉
           //   （见 `events.ts` 的 `describeProviderError`）。读 `activeApiKey`（可变）而不是
           //   建会话时的快照 —— 热切换之后要抹的是**当前那把**。
@@ -1934,9 +2172,37 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
         publishDiagnostics(
           recorder.hasProviderError ? { ok: false, status: 'provider-error' } : { ok: true, status: 'ok' }
         )
+        // ★★ 本轮卡片落盘（2026-09-30 用户裁决）：**在助手条目已经落盘之后**才写 ——
+        //   写入口要拿 `lastTurnEntries()` 的助手条目 id 当挂载点（不靠顺序猜）。
+        //   放在这里还有一个理由：撤回 / 泄漏那两条早退路径在前面**已经返回**，
+        //   被撤回的那一轮不该在回看里留下卡片（那是一段学生没看到的交互）。
+        persistTurnCards(sink.requestId, turnCards)
+        // ★★ 持续画像迭代（二期）：把本轮 (学生说, 我答) 记进窗口，并判要不要跑概括。
+        //   三个「不能挪」的理由：
+        //     ① **必须在安全终审之后**（`gate.settled()` 已 await）—— 被撤回的那一轮
+        //        内容一个字都没发给学生，不该进画像证据（与「观察必须在安全检查之后」同一条纪律）；
+        //     ② **必须 fire-and-forget**（这里 `void`）—— 概括是一次 LLM 往返，绝不拖慢本轮；
+        //     ③ 只在这条**已经走完的成功路径**上（三条早退 + 抛异常路径都不记：
+        //        那些轮次没有完整的「学生问 / 助手答」对，进画像只会污染证据）。
+        void observeProfileRefreshTurn(options.studentId, input.text)
         return { ok: true, status: 'ok' }
       } finally {
         busy = false
+      }
+    },
+
+    /**
+     * ★ 三期（2026-09-30）：读画像小结（主进程本地缓存，**只读不生成**）。
+     *
+     * 生成发生在画像变更之后（`observeProfileRefreshTurn` 里的 `generateSummaryLine`），
+     * 所以这个读口永远零等待 —— 打开档案页不会因为模型慢而卡住。
+     * 文件读不到 / 坏了 → 空串（界面显示后端给的空态文案），**不是错误路径**。
+     */
+    async readProfileSummary(): Promise<string> {
+      try {
+        return readSummaryLineCache(options.userDataDir, options.studentId)?.text ?? ''
+      } catch {
+        return ''
       }
     },
 
@@ -1970,13 +2236,117 @@ export async function createChatRuntime(options: ChatRuntimeOptions): Promise<Ch
       } catch {
         // 学段队列收尾失败不影响退出
       }
+      try {
+        // ★★ 引导服务的退出冲洗（契约 §1.6 第 3 条硬约束）：**紧随 gradeExtension.flush()**。
+        //   两者是同一类东西 —— 都把「后台队列里的 /api 调用」写出去，所以都必须排在 sidecar 停之前；
+        //   而引导的答案落库 / 概括进的是同一条画像链的输入，晚于它 flush 会丢掉最后一问。
+        //   位置不是随手挑的：B 的文件头点名了「runtime.dispose() 里紧随 gradeExtension.flush()」
+        //   （onboarding/service.ts 的 dispose = flush，内部有超时上限，不会拖死退出）。
+        await onboardingService.dispose()
+      } catch {
+        // 引导队列收尾失败不影响退出（与上面学段那条同一条纪律）
+      }
       await flushLearningLog()
       exportTrace()
+      // ★ 持续画像迭代（二期）：清掉本学生的环形窗口与轮次计数。
+      //   放在这里而不是 dispose 开头：清状态与对话收尾无关，但它必须**在退出流程里**，
+      //   否则切学生 / 关会话之后，下个学生会继承上一个的对话文本（禁做 #9）。
+      clearProfileRefreshState()
       try {
         session.dispose()
       } catch {
         // dispose 失败不该盖掉退出流程
       }
+    }
+  }
+
+  /**
+   * ★★ 持续画像迭代（二期）：把本轮对话喂进环形窗口，并在够轮次时发起一次概括。
+   *
+   * ── 它为什么是「fire-and-forget」──────────────────────────────────────────
+   * 概括是一次 LLM 往返（8s 超时 + 最多重试 1 次），**绝不能**出现在学生等待的路径上。
+   * 调用方（`runTurn` 收尾）用 `void` 丢弃它的 promise —— 与 `gradeExtension.observeTurn`
+   * 的「同步返回、fire-and-forget 上交」是同一条纪律。
+   *
+   * ── 它做四件事（顺序不能乱）────────────────────────────────────────────
+   *   ① `noteTurn`   记一轮（返回记完后的轮次号；顺带判「有没有实质内容」）；
+   *   ② `pushTurn`   把 (学生说, 我答) 存进环形窗口（★ 助手文本在**这里**取，见下）；
+   *   ③ `shouldRefresh` 判要不要跑（轮次够 + 这期间有内容）；
+   *   ④ 够就跑 `runRefresh`。
+   *
+   * ── ★★ 为什么助手文本要在这里从会话投影里现取，而不是从事件流累积 ──────────
+   * 事件流（`delta`）是最可靠的实时来源，但它住在 `bindTurnStream` 里，
+   * 而那条链是「映射 → sink」，不往回传文本。会话投影（`projectTranscript`）是
+   * **与回看共用同一个纯函数**的产物，本轮刚结束，末条 assistant 就是本轮的答案 ——
+   * 取它的好处是「只有一份解析逻辑」（本仓反复强调「同一份数据不要两处解析」）。
+   * 取不到（投影失败 / 本轮无 assistant）时留空串：窗口仍记这一轮，
+   * 概括的 prompt 里那一行会显示「（本轮助手没有回复）」—— 不影响学生侧证据。
+   */
+  async function observeProfileRefreshTurn(studentId: string, userText: string): Promise<void> {
+    try {
+      const turn = noteTurn(studentId, userText)
+      pushTurn(studentId, userText, lastAssistantText(), turn)
+      // ★ 触发判定与编排收在 `runRefresh` 里（本文件只负责「每轮结束后喂一轮」）——
+      //   调用点越薄，`runtime.ts` 这条最脆弱的编排水线被改动的面积就越小（计划 §5.3）。
+      await runRefresh(studentId, {
+        // ★ 模型配置取**本会话正在用的那一份**（`activeLlm` + `activeApiKey`）——
+        //   不进口 `settings/runtime-config.ts`（那会新增一条「本文件 ↔ settings」的边，
+        //   而且会话里的这一份才是「真正生效的」：热切换只更新它，不更新配置文件缓存）。
+        //   三者任一为空 → 概括侧判「没有可用配置」并按降级处理（不抛）。
+        getConfig: async () => ({
+          baseUrl: options.baseUrl?.trim() || DEFAULT_BASE_URL,
+          modelId: activeLlm.modelId,
+          apiKey: activeApiKey ?? ''
+        }),
+        readKnownTags: readKnownTagsFromSidecar,
+        applyTags: applyRefreshTagsFromSidecar,
+        // ★ 三期（2026-09-30）：小结缓存目录 —— 传了它，画像落库后才会顺带生成一段小结
+        userDataDir: options.userDataDir,
+        log: (line, level) => {
+          if (level === 'warn') console.warn(line)
+          else if (level === 'error') console.error(line)
+          else if (tracePiEvents) console.info(line)
+        }
+      })
+    } catch (error) {
+      // ★ 概括是增强能力：它出任何问题都**不许**影响对话（与 learning-log 同一条纪律）。
+      console.warn(
+        `[profile-refresh] 本轮持续概括异常（已忽略）：${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  }
+
+  /** 会话投影里末条 assistant 的文本（取不到给空串；见 `observeProfileRefreshTurn` 的说明）。 */
+  function lastAssistantText(): string {
+    try {
+      const entries = (sessionManager as { getEntries?(): unknown[] }).getEntries?.() ?? []
+      const messages = projectTranscript(entries).messages
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index] as TranscriptMessage
+        if (message.role === 'assistant') return typeof message.text === 'string' ? message.text : ''
+        if (message.role === 'user') break
+      }
+    } catch {
+      // 投影失败 = 本轮助手文本拿不到；窗口仍记这一轮（助手侧留空），不影响学生侧证据
+    }
+    return ''
+  }
+
+  /**
+   * ★ 会话切换 / 关闭时清掉这个学生的持续概括状态（**禁做 #9：绝不跨学生**）。
+   *
+   * ★ 为什么必须清：环形窗口里是**真实对话文本**，轮次计数是**这个学生走过几轮**。
+   *   不清的话，B 同学会继承 A 同学的对话并被送进概括（数据泄漏），
+   *   也会继承轮次而提前触发。两者都是正确性问题，不是优化。
+   * ★ 生产里单学生常见，但 `dispose()` 与换学生都会走到这里 —— 一次 `delete` 很便宜，
+   *   漏掉的代价是隐私事故。
+   */
+  function clearProfileRefreshState(): void {
+    try {
+      clearTranscriptWindow(options.studentId)
+      resetTurnClock(options.studentId)
+    } catch {
+      // 清状态失败绝不能拦住退出 / 切会话（与其它收尾步骤同一条纪律）
     }
   }
 

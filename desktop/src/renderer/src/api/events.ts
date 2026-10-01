@@ -48,6 +48,17 @@ export interface InlineCard {
   /** 产出这张卡片的 Tool 名（占位载荷里带的 `tool` 字段；没有则为 null）。 */
   tool: string | null
   payload: unknown
+  /**
+   * ★★ 这张卡片是**回看恢复**出来的（由 {@link restoredCards} 打标），
+   *    不是**本轮实时**产出的（live 路径不写它，`undefined` = 当轮实时）。
+   *
+   * ★ 为什么用显式标记、而不是「从载荷里猜」：实时与回看两条路上的载荷**是同一份**
+   *   （回看读的就是当初落盘的那份），载荷里没有任何字段能区分「刚生成」与「上个月生成」——
+   *   动画载荷里的托管地址在两条路上同样带着，而它的凭据有效期并不写在载荷里。
+   *   唯一知道「这是从会话里读回来的」的地方就是恢复这条路本身，所以标记在这里打。
+   * ★ 消费方（动画卡的回看策略）见 `cards/AnimationCard.vue` 的 `restoredSnapshot`。
+   */
+  restored?: boolean
 }
 
 /** 安全撤回：原文已撤回，展示 `safeText`。 */
@@ -150,11 +161,15 @@ export function emptyConversation(): ConversationState {
 }
 
 /**
- * 把「预置内容带来的卡片」转成内联卡片（`restoredTurn` 用）。
+ * 把恢复出来的卡片转成内联卡片（`restoredTurn` 用）。
  *
  * ★ `id` 用 `restored-${index}#${i}`：与实时轮次的 `${requestId}#${i}` 同一形态、
  *   不同前缀（稳定 key 只要求本轮内唯一）；`i` 取**入参里的位置**（丢掉的卡不影响后面的 id）。
  * ★ `tool` 恒为 `null` —— 历史里没有记 Tool 名（实时轮次才有）。
+ * ★★ **每个 kind 都收**（2026-09-30 用户裁决，见 `restoredTurn` 上那段）：这里**不按类型丢弃**，
+ *   只过一次白名单 —— 认得出的（动画 / 编程 / 练习）一律转成卡片交还界面，
+ *   认不出的整条丢掉（与实时路径同一个口径）。
+ * ★ 每张都带 `restored: true`：卡片据此知道自己是回看恢复的（各卡片自己决定回看怎么呈现）。
  */
 function restoredCards(
   index: number,
@@ -164,7 +179,13 @@ function restoredCards(
   for (const [position, card] of cards.entries()) {
     const kind = readPayloadKind(card.kind)
     if (kind === null) continue
-    out.push({ id: `restored-${index}#${position}`, kind, tool: null, payload: card.payload })
+    out.push({
+      id: `restored-${index}#${position}`,
+      kind,
+      tool: null,
+      payload: card.payload,
+      restored: true
+    })
   }
   return out
 }
@@ -177,13 +198,18 @@ function restoredCards(
  *    另建一条路径意味着两套气泡样式、两套滚动行为、两套「学生/AI」头像逻辑 ——
  *    而它们迟早分叉（本项目在「两处各写一份」上有过多次前科）。
  *
- * ★ 为什么**不**恢复当时的卡片 / 引用 / 降级档位：那些是**当时那一次交互**的产物
- *    （动画 iframe 的 nonce 早已过期、题库卡片也要重新取题），恢复它们等于伪造
- *    一次并未发生的交互。回看只需要「他问了什么、AI 答了什么」。
- * ★★ 2026-09-27 补充（演示沙箱）：上面那条决策**没有被推翻**，只是在数据口上变得显式 ——
- *    真实会话文件里**根本没有** `cards` 这个字段，所以从会话恢复出来的回看**仍然是纯文本**；
- *    只有**预置内容**（演示沙箱的预置历史会话）会在消息上带 `cards`，回看时也看得见动画。
- *    判据是「这条消息自己带没带」，而不是「谁在读它」—— 两条路从此不会互相串味。
+ * ★★ 2026-09-30 **用户裁决**：卡片随会话落盘、回看要恢复（本段**推翻**了下面那条旧决策）。
+ *    旧口径（2026-09-23 起）是「历史消息只恢复正文，不恢复卡片」，理由写着「卡片是当时那次
+ *    交互的产物，恢复它等于伪造一次并未发生的交互」。用户实测后指出这恰恰把学生**自己看过
+ *    的那张卡**弄丢了：同一段对话隔天打开只剩文字，学生会以为动画和题目都没了。
+ *    现在的口径：卡片（含动画）跟会话一起落盘，回看时原样恢复 —— **每个 kind 都恢复**，
+ *    白名单仍以 {@link readPayloadKind} 为准（认不出的整条丢掉，与实时路径同口径）。
+ *    预置内容（演示沙箱）与真实会话的投影走**同一个** `cards` 字段，恢复层不区分来源。
+ * ★ 那「一次性凭据不能重放」怎么办 —— 那是**卡片自己的回看策略**，不是恢复层的过滤条件：
+ *    动画卡在回看态不重播当时那一遍（见 `cards/AnimationCard.vue` 的 `restoredSnapshot`），
+ *    想现在再看就重新生成一段（新交互才配新凭据，绝不复用旧的）。恢复层只负责把卡片交还界面。
+ * ★ 引用 / 降级档位**仍然不**随历史恢复：它们只在「当时那一轮」的检索里有意义，
+ *    而正文与卡片已经把发生过什么说清楚了。本条只改卡片这一件事。
  * ★ `requestId` 用 `restored-` 前缀：它与 `turn_` 前缀的**真实轮次**区分开 ——
  *    任何按 requestId 认领轮次的逻辑（如悬浮追问窗）都不会误认一条历史消息。
  */
@@ -198,7 +224,7 @@ export function restoredTurn(
    */
   entryId = '',
   /**
-   * ★★ 这条消息当时带来的卡片（**可选，只有预置内容会给**，见上面那段说明）。
+   * ★★ 这条消息当时带来的卡片（**会话投影与预置内容都从这里进来**，见上面那段说明）。
    *
    * ★ 只落在**助手那条**上：卡片是回答的一部分，挂在学生气泡上只会让界面多出一张
    *   无所属的卡片。转成 `InlineCard[]` 之后走的是与实时轮次**同一套**渲染。
@@ -206,6 +232,8 @@ export function restoredTurn(
    *   会话投影（那边标的就是 `string`），而本模块的纪律是**认不出的整条丢掉**
    *   （与 live 路径的 `payload` 事件同一个口径）—— 宁可少一张卡，
    *   也不要往界面塞一张渲染不出来的空卡。
+   * ★★ 转出来的每张卡都带 `restored: true`（见 {@link InlineCard.restored}）：
+   *   卡片据此区分「回看恢复」与「本轮实时产出」（动画卡的回看策略要用）。
    */
   cards: ReadonlyArray<{ kind: string; payload: unknown }> = []
 ): ChatTurn {
@@ -265,10 +293,10 @@ export function restoreConversation(
     /** 条目 id（分叉点）；缺 = 那条消息不给分叉按钮。 */
     entryId?: string
     /**
-     * ★★ 这条消息当时带来的卡片（**可选，只有预置内容会给**）。
-     * 真实会话文件里根本没有这个字段 —— 所以真实历史的回看**仍然是纯文本**，
-     * 那条「不恢复当时的卡片/引用/降级档位」的决策不变（本条只给一个显式的数据口）。
-     * ★ `kind` 按 `string` 收（与主进程的会话投影同形），认不出的由 `restoredCards` 丢掉。
+     * ★★ 这条消息当时带来的卡片（**随会话落盘，回看时原样带回**；见 `restoredTurn` 上
+     * 那段 2026-09-30 的裁决）。没有这个字段（老会话 / 别处造的状态）= 这条消息没有卡片。
+     * ★ `kind` 按 `string` 收（与主进程的会话投影同形），认不出的由 `restoredCards` 丢掉；
+     *   认得出的**每个 kind 都收**（含动画）。
      */
     cards?: ReadonlyArray<{ kind: string; payload: unknown }>
   }>,

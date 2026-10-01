@@ -16,15 +16,34 @@
  *      抛出去会变成渲染进程侧的一坨堆栈文本，而不是界面上一句可读中文。
  */
 
+// ★ 三期（2026-09-30）：画像小结的读取口由**接线层注入**（见 handler 的注释）——
+//   本文件**不 import electron 的 app**：`tests/data-plane-forward.test.ts` 会在纯 node 下
+//   加载本模块，静态 import 一个 Electron 专属导出会让它直接语法错。
 import { DEFAULT_GRADE_LEVEL } from '../agent/prompts/grade.ts'
+// 学生 id 白名单：账号 id 会被拼进请求路径（服务端还会再校验一遍），
+// 与 `pi-paths.ts` 里拼文件系统路径用的是**同一个**正则（只允许 [A-Za-z0-9_-]{1,64}）。
+import { STUDENT_ID_PATTERN } from '../agent/pi-paths.ts'
 // ★ 演示沙箱：写操作在**处理器层**一律拒绝（回一句可读中文，绝不让状态码上屏）。
 import { isDemoSeeded } from '../demo/state.ts'
 // ⚠️ 相对路径 + `.ts` 后缀，**不用 `@shared/*` 别名**：本文件会被若干 node 单测直接加载
 //    （它们没有别名的解析钩子），写成别名会让那些用例当场 `Cannot find package`。
 import { DEMO_BLOCKED_MESSAGE } from '../../shared/demo-seed.ts'
+// ★ 学生面称呼的回落值（沙箱态回的那一帧状态用它）—— 与渲染层/主进程同一份常量。
+import { STUDENT_FALLBACK_NAME } from '../../shared/profile-tags.ts'
 import { ipcMain, type WebContents } from 'electron'
 import {
   IPC,
+  type AccountDeletePayload,
+  type AccountsCallResult,
+  type AccountsCreateRequest,
+  type AccountsDeleteRequest,
+  type AccountsDeleteResult,
+  type AccountsListPayload,
+  type AccountsListResult,
+  type AccountsRenameRequest,
+  type AccountsStudentResult,
+  type AccountsSwitchRequest,
+  type AccountSummary,
   type AnimationComposeRequest,
   type AnimationHostRequest,
   type AnimationRenderRequest,
@@ -37,13 +56,46 @@ import {
   type CodeHintRequest,
   type CodeRunHintRequest,
   type CodeTemplateRequest,
+  // ★ 决策记录与出题载荷：类型定义在 `shared/quiz-generate.ts`，经 `channels.ts` 转出
+  //   （渲染层组装、主进程校验，两边同一份）。
+  type DecisionTrace,
+  type IdentityCallResult,
+  type IdentityFlagsRequest,
   type KnowledgeImportIpcRequest,
   type KnowledgePointsRequest,
+  type OnboardingAnswerRequest,
+  type OnboardingCallResult,
+  type OnboardingStatePayload,
+  type ProfileTagsCallResult,
+  type ProfileSummaryCallResult,
+  type ProfileTimelineCallResult,
   type QuizBankRequest,
+  type QuizGenerateRequest,
   type QuizGradeRequest,
   type QuizProgressRequest,
   type StudyCallResult
 } from './channels.ts'
+// ★★ 冷启动引导（票 25）：五问流程与画像标签的**主进程出口**。
+//   · onboardingService 是流程状态与后台队列的唯一持有者（fire-and-forget 全在它内部）；
+//   · 四个 profile / identity 出口（标签读/撤销、身份读、两道闸写）都在同一个模块里，
+//     这里只做「校验入参 + 把异常翻成一句可读中文」——**绝不把异常穿过 IPC**。
+import {
+  fetchIdentity,
+  fetchProfileTags,
+  fetchProfileTimeline,
+  MAX_ONBOARDING_ANSWER_CHARS,
+  onboardingService,
+  retractProfileTag,
+  saveIdentityFlags,
+  // ⚠️ GradeLevelLiteral 用本文件上面那个（四个学段字面量已在这里定义了一次）——
+  //    两处同名会让 tsc 报 TS2440，而那个并集是同一个形状，没有必要 import 第二份。
+  type OnboardingService,
+  type OnboardingSummarizer
+} from '../agent/onboarding/index.ts'
+// ★★ sidecar 的**唯一出口**（`bridge/client.ts`）——账号那几条要 PATCH，
+//   而 `wire/data.ts` 的方法联合只认 GET/POST/PUT/DELETE，所以这里直接用它，
+//   **不新增第二个 HTTP 出口**（守卫 G5 扫的就是裸 `fetch(`）。
+import { apiFetch } from '../bridge/client.ts'
 import { dataRequests } from '../wire/data.ts'
 import type { TraceRecordForUi } from '../agent/trace.ts'
 import type { TraceEntry, TraceSnapshot } from '../../shared/ipc-events.ts'
@@ -60,6 +112,13 @@ import {
   type AnimationPayloadShape
 } from '../agent/extensions/animation.ts'
 import { createAnimationGenerator } from '../agent/animation/generator.ts'
+// ★★ 练习页动态出题：**进程内唯一实例** —— 模型通道由 runtime 填（`setCompleter`），
+//   生成由本文件发起。两边必须是同一个实例，否则模型通道接不上，生成永远降级。
+import { gradeSubjective, quizGenService } from '../agent/quizgen/service.ts'
+// ★ 主观题判分失败的既有可读文案（与对话里那条判分路同一句，不另写一份）。
+import { SUBJECTIVE_GRADING_FAILED_TEXT } from '../agent/extensions/quiz.ts'
+// ★★ 登记时落盘的评分细则缓存 —— 练习页手里没有 rubric，见 rubric-cache.ts 的文件头。
+import { rubricFor } from '../agent/quizgen/rubric-cache.ts'
 import type { TextCompleter } from '../agent/safety/review.ts'
 
 /** 题库一次最多取几道（与后端 `GET /api/quiz/bank` 的约束一致）。 */
@@ -83,6 +142,94 @@ export const ANIMATION_SAVED_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 export const ANIMATION_KP_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 /** 请求指纹（**十六进制摘要**；Python 的 `prompt_hash` 只收十六进制字符）。 */
 export const ANIMATION_PROMPT_HASH_RE = /^[0-9a-fA-F]{8,128}$/
+
+/* ------------------------------------------------------------------ *
+ * 练习页动态出题：决策记录的**白名单投影**
+ *
+ * ★★ 为什么在处理器层单独投影一遍：这是渲染进程递上来的数据，字段一个都不能信 ——
+ *   它会被拼进给模型的 Prompt（出错就是一次越界的模型调用），而 IPC 载荷是
+ *   渲染进程能完全控制的那一侧。投影只取白名单里的字段、逐项限长，其余一律不进；
+ *   认不出的整条丢掉（与 projectQuestion 同一「宁可少不要脏」口径）。
+ * ------------------------------------------------------------------ */
+
+/** 一次请求最多带多少条决策记录（防御性上限；正常一关就是几十条）。 */
+export const MAX_DECISION_TRACES = 200
+/** 题干开头截断长度（与后端写 learning_history 时 120 字的口径一致）。 */
+export const MAX_STEM_HEAD_CHARS = 120
+/** 单次作答文本上限（与判分通道的 2000 字同一口径）。 */
+export const MAX_TRACE_ANSWER_CHARS = 2_000
+/** 单题最多保留多少条提交轨迹（只留**最近**这些条：最新的卡点最有信息量）。 */
+export const MAX_TRACE_TRIES = 20
+/** 题型白名单（与题库载荷同一口径）。 */
+const DECISION_TYPES = ['choice', 'blank', 'code_blank'] as const
+/** 题目来源白名单：内置题库 / 智团团此前生成的题。 */
+const DECISION_SOURCES = ['bank', 'generated'] as const
+
+/**
+ * 投影**一条**决策记录；认不出就返回 null（整条丢）。
+ *
+ * ★ triesCount / firstTryCorrect 由 tries **重算**，不采信渲染层给的值：
+ *   两者本该同源，采信它等于给了「说一套、给一套」的机会。
+ * ★ 一次判分没回来的提交记 correct: null（不是 false）——「不知道」与「答错了」
+ *   对出题的价值相反，别在投影这一步把它们抹成同一个值。
+ */
+export function projectDecisionTrace(raw: unknown): DecisionTrace | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const source = raw as Partial<DecisionTrace>
+  const qid = readText(source.qid, 128)
+  if (!qid) return null
+  const type =
+    typeof source.type === 'string' && (DECISION_TYPES as readonly string[]).includes(source.type)
+      ? (source.type as DecisionTrace['type'])
+      : null
+  if (type === null) return null
+  const origin =
+    typeof source.source === 'string' && (DECISION_SOURCES as readonly string[]).includes(source.source)
+      ? (source.source as DecisionTrace['source'])
+      : null
+  if (origin === null) return null
+
+  const tries = (Array.isArray(source.tries) ? source.tries : [])
+    .map((item): { answer: string; correct: boolean | null } | null => {
+      if (item === null || typeof item !== 'object') return null
+      const entry = item as { answer?: unknown; correct?: unknown }
+      if (typeof entry.answer !== 'string' || entry.answer.length === 0) return null
+      return {
+        answer: entry.answer.slice(0, MAX_TRACE_ANSWER_CHARS),
+        correct: typeof entry.correct === 'boolean' ? entry.correct : null
+      }
+    })
+    .filter((item): item is { answer: string; correct: boolean | null } => item !== null)
+    .slice(-MAX_TRACE_TRIES)
+
+  return {
+    qid,
+    // index 只是「题号」这个展示序，缺了不影响出题 —— 给 0 而不是丢掉整条。
+    index: readInt(source.index, 1, 100_000) ?? 0,
+    type,
+    source: origin,
+    stemHead: typeof source.stemHead === 'string' ? source.stemHead.slice(0, MAX_STEM_HEAD_CHARS) : '',
+    tries,
+    firstTryCorrect: tries.length > 0 ? tries[0].correct : null,
+    triesCount: tries.length
+  }
+}
+
+/**
+ * 投影整个 context（白名单 + 条数上限）。
+ *
+ * ★ 上限按**前** 200 条截：列表是题号序，从头截意味着保住的总是最早那些题
+ *   （学生第一次答对 / 第一次卡住的地方），比从尾截更难丢关键信息。
+ */
+export function projectDecisionTraceContext(raw: unknown): DecisionTrace[] {
+  if (!Array.isArray(raw)) return []
+  const projected: DecisionTrace[] = []
+  for (const item of raw.slice(0, MAX_DECISION_TRACES)) {
+    const trace = projectDecisionTrace(item)
+    if (trace !== null) projected.push(trace)
+  }
+  return projected
+}
 
 /** 四个学段字面量（与契约 `GradeLevel` 逐字一致；此处只做运行期白名单）。 */
 const GRADE_LEVELS = ['primary_low', 'primary_high', 'junior', 'senior'] as const
@@ -144,6 +291,146 @@ export function newAnimationPayloadId(): string {
   return `anim-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+/* ------------------------------------------------------------------ *
+ * 账号（本机多个学生）：路径 / 入参校验 / 取数口
+ *
+ * ★★ 与其它通道同一条纪律：**身份由主进程决定**。账号这几条递的是「操作哪一个账号」
+ *    （一个要落进 URL 的 id），从不递「以谁的身份」—— 后者只有 `studentId()` 说了算。
+ * ★ id 会被拼进请求路径，所以先过 `STUDENT_ID_PATTERN`；服务端还会再校验一遍，
+ *   两道都要有（前端那道挡住明显穿越，服务端那道是权威）。
+ * ------------------------------------------------------------------ */
+
+/** 账号清单端点（`GET /api/students`）。 */
+const ACCOUNTS_PATH = '/api/students'
+
+/** 单个账号端点（`PATCH` / `DELETE /api/students/{id}`）。 */
+function accountPath(studentId: string): string {
+  return `${ACCOUNTS_PATH}/${encodeURIComponent(studentId)}`
+}
+
+/** 账号端点的请求超时（本机回环，毫秒级；与 `wire/data.ts` 默认同量级）。 */
+const ACCOUNTS_TIMEOUT_MS = 8_000
+
+/** 昵称上限（与契约 `StudentCreateRequest.nickname` 的 max_length 一致）。 */
+const ACCOUNT_NICKNAME_MAX_CHARS = 32
+
+/**
+ * 账号四条的取数口（列表 / 建号 / 改名 / 删号）。
+ *
+ * ★ 为什么不复用 `wire/data.ts` 的 `requestJson`：它的方法联合只认 GET/POST/PUT/DELETE，
+ *   而「改名」的契约是 **PATCH**。出口仍是同一个 `bridge/client.ts` 的 `apiFetch` ——
+ *   本文件**一个 `fetch(` 都不写**（架构守卫 G5 扫的就是裸 fetch）。
+ * ★ 失败消息与 `requestJson` 同口径（带状态码 + 服务端 detail）：界面上仍是可读中文，
+ *   绝不把异常穿过 IPC 变成一坨堆栈文本。
+ */
+async function requestAccounts<T>(
+  path: string,
+  init: { method: 'GET' | 'POST' | 'PATCH' | 'DELETE'; body?: unknown } = { method: 'GET' }
+): Promise<AccountsCallResult<T>> {
+  const verb = init.method === 'GET' ? '读取失败' : '操作失败'
+  try {
+    const response = await apiFetch(path, {
+      method: init.method,
+      ...(init.body !== undefined
+        ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(init.body) }
+        : {}),
+      signal: AbortSignal.timeout(ACCOUNTS_TIMEOUT_MS)
+    })
+    if (!response.ok) {
+      return {
+        ok: false,
+        message: `${verb}（HTTP ${response.status}）：${await readAccountsDetail(response)}`
+      }
+    }
+    return { ok: true, data: (await response.json()) as T }
+  } catch (error) {
+    return { ok: false, message: `${verb}：${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+/**
+ * 从失败响应里取一句细节（与 `wire/data.ts` / `ipc/handlers.ts` 的同名口径一致）。
+ *
+ * ★ 失败体有三种形态都要能用：`{detail: '…'}`、`{detail: [{loc, msg}]}`（pydantic 422）、
+ *   非 JSON（中间件直接回的纯文本）。只认字符串的后果是 422 退化成英文
+ *   `Unprocessable Entity` —— 学生既不知道哪个字段，也不知道要改什么。
+ */
+async function readAccountsDetail(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { detail?: unknown; message?: unknown }
+    const detail = body?.detail ?? body?.message
+    if (typeof detail === 'string' && detail) return clipAccountDetail(detail)
+    if (Array.isArray(detail)) {
+      const first = detail[0] as { loc?: unknown; msg?: unknown } | undefined
+      const field = Array.isArray(first?.loc)
+        ? first.loc.filter((part) => part !== 'body').join('.')
+        : ''
+      const message = typeof first?.msg === 'string' ? first.msg : '校验未通过'
+      return clipAccountDetail(field ? `${field}：${message}` : message)
+    }
+  } catch {
+    // 非 JSON 响应（例如中间件直接返回的 401 纯文本）：忽略，走下面的回落
+  }
+  return response.statusText || '没有更多说明'
+}
+
+/** 单行化 + 截断（失败消息要能进界面，不能是一条两 KB 的 JSON）。 */
+function clipAccountDetail(text: string): string {
+  const single = text.replace(/\s+/g, ' ').trim()
+  return single.length > 200 ? `${single.slice(0, 200)}…` : single
+}
+
+/** 读一个账号 id（非法 / 非字符串返回 `null`，**不猜**）。 */
+function readAccountId(value: unknown): string | null {
+  return typeof value === 'string' && STUDENT_ID_PATTERN.test(value) ? value : null
+}
+
+/** 读一个 Unix 毫秒时间戳（认不出给 `null`）。 */
+function readAccountMs(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * 把服务端回的一行学生投影成账号列表项；认不出返回 `null`（**整行丢掉，不猜**）。
+ *
+ * ★ 时间字段两种写法都认（`createdAt` / `lastActiveAt` 与 A1 可能补的
+ *   `createdAtMs` / `updatedAtMs`）：账号列表要显示「最近使用」，字段名对不上就会
+ *   安静地显示成 1970 —— 那是本轮最容易漏的一种错。
+ */
+function readAccountSummary(value: unknown): AccountSummary | null {
+  if (typeof value !== 'object' || value === null) return null
+  const row = value as Record<string, unknown>
+  const studentId = readAccountId(row.studentId)
+  const nickname = typeof row.nickname === 'string' ? row.nickname.trim() : ''
+  const gradeLevel = readGradeLevel(row.gradeLevel)
+  if (studentId === null || nickname === '' || gradeLevel === null) return null
+  return {
+    studentId,
+    nickname,
+    gradeLevel,
+    currentChapter: typeof row.currentChapter === 'string' ? row.currentChapter : '',
+    createdAt: readAccountMs(row.createdAt) ?? readAccountMs(row.createdAtMs) ?? 0,
+    lastActiveAt: readAccountMs(row.lastActiveAt) ?? readAccountMs(row.updatedAtMs) ?? 0
+  }
+}
+
+/**
+ * 这次失败是不是「这道主观题必须另走判分端点」（后端 409）。
+ *
+ * ★ 判据用 `requestJson` 拼出来的那句话里的**可读特征**：状态码（`HTTP 409`）或后端
+ *   detail 里点名的端点（`grade-subjective`）。不解析 JSON、不看具体题号 ——
+ *   消息本来是给人读的，这里是**唯一**一处把它当判据用；写脆了的表现是
+ *   「主观题静默退化成判不了分」，不报错。
+ */
+function isSubjectiveConflict(message: string | undefined): boolean {
+  if (typeof message !== 'string') return false
+  return message.includes('HTTP 409') || message.includes('grade-subjective')
+}
+
+/** 409 但缓存里没有这题细则（重启前生成的老题 / 缓存文件被清过）时的可读提示。 */
+const MISSING_RUBRIC_MESSAGE =
+  '这道题要模型来判分，但它当时没留下评分要点。先做下一题，或者回对话里让智团团讲讲这道题。'
+
 /**
  * 注册全部新增通道。
  *
@@ -157,6 +444,14 @@ export function registerDataHandlers(options: {
   currentGradeLevel: () => string | null
   /** 数据层请求注入点（测试用；生产恒为默认出口）。 */
   requests?: typeof dataRequests
+  /**
+   * 切号成功后把「当前账号」写到本机状态文件（**由 `handlers.ts` 注入**）。
+   *
+   * ★ 为什么是注入而不是在这里写文件：那份状态落在 Electron 的 `userData` 下，
+   *   而本文件**不 import Electron 的 `app`**（见文件头：纯 node 单测会加载本模块）。
+   * ★ 不注入时切号回一句可读中文（写不进去就说写不进去，绝不假装切成功）。
+   */
+  saveCurrentAccount?: (studentId: string) => void
   /**
    * **文本补全器**（`animation:compose` 的直连生成用；生产默认 `null` = 没有）。
    *
@@ -237,6 +532,174 @@ export function registerDataHandlers(options: {
   })
 
   /* ---------------------------------------------------------------- *
+   * 账号（本机多个学生）：列表 / 建号 / 改名 / 删号 / 切号
+   *
+   * ★★ 「当前账号」只有一个真相点：`resolveActiveStudentId()`（本文件所有通道都经
+   *    `studentId()` 取它）。切号只写本机那个指针，**不在处理器里动会话/运行时装配** ——
+   *    渲染层重载后一切按新身份重新读，装配归 runtime。
+   * ★★ 删号是破坏性的：**当前账号先拒绝**（回一句人话），切走之后再删。不挡的话，
+   *    「当前账号」会指向一个刚被删掉的目录，下一次读学生态整个空掉 —— 而界面只会说
+   *    「读取失败」，学生不知道那是自己刚删掉的账号。
+   * ★ 沙箱态（预置数据）下建号 / 改名 / 删号一律拒绝：它们会真的写、真的删本机学生目录，
+   *    而演示的前提是「真实数据一字未动」。列表与切号放行（切号只写本机指针，不碰库）。
+   * ---------------------------------------------------------------- */
+
+  ipcMain.handle(IPC.accountsList, async (): Promise<AccountsListResult> => {
+    const result = await requestAccounts<unknown>(ACCOUNTS_PATH)
+    if (!result.ok) return result
+    if (!Array.isArray(result.data)) {
+      return { ok: false, message: '读取账号失败：本地数据服务返回的数据不完整。' }
+    }
+    const students: AccountSummary[] = []
+    for (const row of result.data) {
+      const student = readAccountSummary(row)
+      // ★ 认不出的整行丢掉（与事件层「脏数据一律忽略」同一条口径）：
+      //   宁可列表少一行，也不给界面塞一个渲染不出来的账号。
+      if (student !== null) students.push(student)
+    }
+    const payload: AccountsListPayload = { students }
+    return { ok: true, data: payload }
+  })
+
+  ipcMain.handle(
+    IPC.accountsCreate,
+    async (_event, payload: unknown): Promise<AccountsStudentResult> => {
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
+      const request = (payload ?? {}) as Partial<AccountsCreateRequest>
+      const nickname = readText(request.nickname, ACCOUNT_NICKNAME_MAX_CHARS)
+      if (!nickname) {
+        return {
+          ok: false,
+          message: `新建账号失败：昵称不能为空（最多 ${ACCOUNT_NICKNAME_MAX_CHARS} 个字）。`
+        }
+      }
+      const gradeLevel = readGradeLevel(request.gradeLevel)
+      if (gradeLevel === null) return { ok: false, message: '新建账号失败：请选择学段。' }
+      const result = await requestAccounts<unknown>(ACCOUNTS_PATH, {
+        method: 'POST',
+        body: { nickname, gradeLevel }
+      })
+      if (!result.ok) return result
+      const student = readAccountSummary(result.data)
+      if (student === null) {
+        return { ok: false, message: '新建账号失败：本地数据服务没有返回账号信息。' }
+      }
+      return { ok: true, data: student }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.accountsRename,
+    async (_event, payload: unknown): Promise<AccountsStudentResult> => {
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
+      const request = (payload ?? {}) as Partial<AccountsRenameRequest>
+      const target = readAccountId(request.studentId)
+      if (target === null) return { ok: false, message: '修改账号失败：账号不合法。' }
+      // ★ 只发**要改的字段**：全量覆盖会把没提到的字段按服务端默认值重置
+      //   （学生只想改名，结果学段被改回默认值 —— 那种静默丢数据的错最难发现）。
+      const body: { nickname?: string; gradeLevel?: GradeLevelLiteral } = {}
+      if (request.nickname !== undefined) {
+        const nickname = readText(request.nickname, ACCOUNT_NICKNAME_MAX_CHARS)
+        if (!nickname) {
+          return {
+            ok: false,
+            message: `修改账号失败：昵称不能为空（最多 ${ACCOUNT_NICKNAME_MAX_CHARS} 个字）。`
+          }
+        }
+        body.nickname = nickname
+      }
+      if (request.gradeLevel !== undefined) {
+        const gradeLevel = readGradeLevel(request.gradeLevel)
+        if (gradeLevel === null) return { ok: false, message: '修改账号失败：学段不合法。' }
+        body.gradeLevel = gradeLevel
+      }
+      if (body.nickname === undefined && body.gradeLevel === undefined) {
+        return { ok: false, message: '修改账号失败：没有要改的内容。' }
+      }
+      const result = await requestAccounts<unknown>(accountPath(target), {
+        method: 'PATCH',
+        body
+      })
+      if (!result.ok) return result
+      const student = readAccountSummary(result.data)
+      if (student === null) {
+        return { ok: false, message: '修改账号失败：本地数据服务没有返回账号信息。' }
+      }
+      return { ok: true, data: student }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.accountsDelete,
+    async (_event, payload: unknown): Promise<AccountsDeleteResult> => {
+      const blocked = demoBlocked()
+      if (blocked !== null) return blocked
+      const request = (payload ?? {}) as Partial<AccountsDeleteRequest>
+      const target = readAccountId(request.studentId)
+      if (target === null) return { ok: false, message: '删除账号失败：账号不合法。' }
+      // ★★ 当前账号不许删：删掉它之后，下一次 resolveActiveStudentId 会指着一个不存在的
+      //    目录，界面上的学生态整个空掉 —— 而那不是一句「删除失败」能解释清楚的。
+      //    正确的动作是**先切到别的账号再删**（文案直接把这一步说出来）。
+      if (target === studentId()) {
+        return {
+          ok: false,
+          message: '这是当前正在用的账号，先切换到别的账号再删。'
+        }
+      }
+      const result = await requestAccounts<unknown>(accountPath(target), { method: 'DELETE' })
+      if (!result.ok) return result
+      const row = (result.data ?? {}) as { studentId?: unknown; deleted?: unknown }
+      const deleted = typeof row.deleted === 'boolean' ? row.deleted : null
+      const deletedId = typeof row.studentId === 'string' ? row.studentId : ''
+      if (deleted === null || deletedId === '') {
+        return { ok: false, message: '删除账号失败：本地数据服务没有返回删除结果。' }
+      }
+      // ★ `deleted: false` 不是失败：那个账号本来就已经不在了（界面照常刷新列表）。
+      const payloadOut: AccountDeletePayload = { studentId: deletedId, deleted }
+      return { ok: true, data: payloadOut }
+    }
+  )
+
+  ipcMain.handle(
+    IPC.accountsSwitch,
+    async (_event, payload: unknown): Promise<AccountsStudentResult> => {
+      const request = (payload ?? {}) as Partial<AccountsSwitchRequest>
+      const target = readAccountId(request.studentId)
+      if (target === null) return { ok: false, message: '切换账号失败：账号不合法。' }
+      // ★ 先确认真有这一位，再落盘：把当前账号指向一个不存在的目录，会让下一次读学生态
+      //   整个空掉（界面只能说「读取失败」，学生不知道自己点了什么）。
+      const listed = await requestAccounts<unknown>(ACCOUNTS_PATH)
+      if (!listed.ok) return listed
+      const rows = Array.isArray(listed.data) ? listed.data : []
+      let found: AccountSummary | null = null
+      for (const row of rows) {
+        const student = readAccountSummary(row)
+        if (student !== null && student.studentId === target) {
+          found = student
+          break
+        }
+      }
+      if (found === null) {
+        return { ok: false, message: '切换账号失败：这个账号已经不在本机了。' }
+      }
+      const save = options.saveCurrentAccount
+      if (save === undefined) {
+        return { ok: false, message: '切换账号失败：本机的账号记录暂时写不进去。' }
+      }
+      try {
+        // ★ 每次切号都写一次（即使切的就是当前那位）：这样「环境变量改道口」撤掉之后，
+        //   本机指针与界面上的选择仍然是一致的，而不是停留在默认值上。
+        save(target)
+      } catch {
+        return { ok: false, message: '切换账号失败：本机的账号记录暂时写不进去。' }
+      }
+      return { ok: true, data: found }
+    }
+  )
+
+  /* ---------------------------------------------------------------- *
    * 画像 / 推荐 / 学段证据
    * ---------------------------------------------------------------- */
   ipcMain.handle(IPC.profileRead, async (): Promise<StudyCallResult> =>
@@ -289,7 +752,7 @@ export function registerDataHandlers(options: {
     //   服务端 `QuizGradeRequest.student_id` 是必填：不注入就是整个闯关页判分 422
     //   （掌握度 / 学习历史 / 进度三处全都不写），且渲染进程手里那个 `studentId`
     //   哪怕真被转发进来也只是个被**覆盖**的多余字段，指不动别人的记录。
-    return await req.quizGrade(
+    const graded = await req.quizGrade(
       {
         qid,
         answer,
@@ -299,6 +762,31 @@ export function registerDataHandlers(options: {
       },
       studentId()
     )
+    // ★★ 带 rubric 的主观题：规则判分端点一律 409（「必须走 grade-subjective」），
+    //   而练习页手里没有 rubric（GET /api/quiz/generated 是投影后的，无 rubric/答案，
+    //   后端也没有读单题端点）。唯一能拿到它的时机是**登记那一刻** —— 所以遇 409
+    //   去缓存里取，用模型走一遍判分并把结论落库（契约与后端零改动）。
+    //   ⚠️ 其余失败路径**原样返回**：D-134 刚修好的 topic/文案不许在这里被覆盖。
+    if (graded.ok || !isSubjectiveConflict(graded.message)) return graded
+    const student = studentId()
+    const cached = rubricFor(student, qid)
+    if (cached === null) return { ok: false, message: MISSING_RUBRIC_MESSAGE }
+    try {
+      const result = await gradeSubjective({
+        studentId: student,
+        gradeLevel: readGradeLevel(options.currentGradeLevel?.()) ?? DEFAULT_GRADE_LEVEL,
+        qid,
+        answer,
+        stem: cached.stem,
+        rubric: cached.rubric
+      })
+      return { ok: true, data: result }
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : SUBJECTIVE_GRADING_FAILED_TEXT
+      }
+    }
   })
 
   ipcMain.handle(IPC.quizProgress, async (_event, payload: unknown): Promise<StudyCallResult> => {
@@ -459,6 +947,60 @@ export function registerDataHandlers(options: {
     // ★ 身份由主进程解析（与动画库那几条同一纪律：递进来就等于允许读别人的题）
     return await req.quizGeneratedList(studentId(), query)
   })
+
+  /* ---------------------------------------------------------------- *
+   * 练习页动态出题（做完内置题的自动追加 / 「还想再练练」）
+   *
+   * ★★ 身份与学段**由主进程注入**（与 quizBank 同一条纪律）：载荷类型里根本没有
+   *    studentId / gradeLevel 这两个字段，渲染进程递不了也改不了。
+   * ★ 沙箱演示态与判分同判据（demoBlocked）：出题要花真钱调模型，沙箱里一条都不出。
+   * ★ 出参形态与 quizGeneratedList 一致（data = 投影后的载荷，结构上没有答案）。
+   *   ok:true 但 data === null = 「这一批没有新题」（配额已满 / 当前没有可用模型）——
+   *   渲染层据此静默不追加（自动路径）或给一句行内说明（按钮路径），
+   *   所以这里**不**把它翻成 ok:false（那会让自动路径摆出错误卡）。
+   * ---------------------------------------------------------------- */
+  ipcMain.handle(IPC.quizGenerateAuto, async (_event, payload: unknown): Promise<StudyCallResult> =>
+    await runQuizGeneration(payload, 'auto')
+  )
+
+  ipcMain.handle(IPC.quizGenerateMore, async (_event, payload: unknown): Promise<StudyCallResult> =>
+    await runQuizGeneration(payload, 'more')
+  )
+
+  /** 两条出题通道的公共前半段：拦截 → 校验 → 投影 → 注入身份/学段 → 交给出题服务。 */
+  async function runQuizGeneration(
+    payload: unknown,
+    mode: 'auto' | 'more'
+  ): Promise<StudyCallResult> {
+    const blocked = demoBlocked()
+    if (blocked !== null) return blocked
+    const request = (payload ?? {}) as Partial<QuizGenerateRequest>
+    const kpId = readText(request.kpId, 64)
+    if (!kpId || !ANIMATION_KP_ID_RE.test(kpId)) {
+      return { ok: false, message: '出题失败：知识点不合法。' }
+    }
+    const run = {
+      kpId,
+      context: projectDecisionTraceContext(request.context),
+      studentId: studentId(),
+      // 学段取主进程当前生效的那一档（服务端推断出来的），再不行才是冷启动默认值 ——
+      // 绝不用渲染层递来的值（那等于绕开「只出本学段的题」这条隔离）。
+      gradeLevel: readGradeLevel(options.currentGradeLevel?.()) ?? DEFAULT_GRADE_LEVEL
+    }
+    const result =
+      mode === 'auto'
+        ? await quizGenService.generateAuto(run)
+        : await quizGenService.generateMore(run)
+    if (result.ok) {
+      if (!result.payload && result.note) {
+        // ★ 降级说明只在主进程日志里留痕：回执与 quizGeneratedList 同形，
+        //   承载不了「为什么没出题」这种附加语义（多塞字段就等于改契约形状）。
+        console.warn(`[quizgen] ${mode} 未产出题目：${result.note}`)
+      }
+      return { ok: true, data: result.payload ?? null }
+    }
+    return { ok: false, message: result.message ?? '这次没能出新题。' }
+  }
 
   ipcMain.handle(IPC.animationSavedGet, async (_event, payload: unknown): Promise<StudyCallResult> => {
     const request = (payload ?? {}) as Partial<AnimationSavedGetRequest>
@@ -758,4 +1300,195 @@ export function createTraceProjector(
 export function sendTraceTo(webContents: WebContents, snapshot: TraceSnapshot): void {
   if (webContents.isDestroyed()) return
   webContents.send(IPC.traceChanged, snapshot)
+}
+
+/* ------------------------------------------------------------------ *
+ * 冷启动引导与画像标签（票 25）：七条 invoke + 一条推送
+ *
+ * ★★ 四条纪律，逐条与契约书 §3 对应：
+ *   ① **学生身份由主进程决定**：这里所有处理器都只调 options.resolveStudentId()，
+ *      请求类型里一个 studentId 字段都没有（一旦能指定 = 允许读别人的画像）；
+ *   ② **五问的回答走独立通道**（onboarding:answer），**绝不混进 chat:send** ——
+ *      ChatSendRequest 的字段集合被守卫 G6c 钉死为 ['text']；
+ *   ③ **回执统一 {ok:true,data} | {ok:false,message}**，失败也给可读中文，
+ *      绝不让异常穿过 IPC（那会变成界面上的堆栈文本）；
+ *   ④ **只有 onboarding:changed 是推送**，其余七条都是 invoke（不进 PUSH_CHANNELS）。
+ *
+ * ★ 沙箱态（演示预置数据）：读状态一律回「引导早已结束」，写操作一律拒绝 ——
+ *   演示里**绝不能突然弹出冷启动五问**（那会真的往学生的库里写五条回答），
+ *   也不能改两道闸。这是「真实数据一字未动」这条判据在画像面的落点。
+ * ------------------------------------------------------------------ */
+
+/** 把任何异常翻成一句可读中文（IPC 边界上唯一的失败形态）。 */
+function describeOnboardingError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** 沙箱态下拒绝一次写入（与 registerDataHandlers 里的 demoBlocked 同一条文案）。 */
+function onboardingWriteBlocked(): { ok: false; message: string } | null {
+  return isDemoSeeded() ? { ok: false, message: DEMO_BLOCKED_MESSAGE } : null
+}
+
+/**
+ * 注册引导线七条 invoke 通道。
+ *
+ * @param options.resolveStudentId 学生身份（生产恒为 handlers.ts 的 resolveActiveStudentId）。
+ * @param options.applyGradeBand Q1 点选直达的落点 —— **走既有 grade:set 那条链**
+ *   （立即生效 + 10 轮冷却 + source=explicit，且不写 grade_signals）。由 handlers.ts 注入
+ *   （那里持有 ChatRuntime）；不注入时引导照常走完，只是学段不立即生效。
+ * @param options.sessionId 当前会话 id（落库审计用；拿不到就不发这个字段）。
+ * @param options.onChanged 状态推送（onboarding:changed）。★ 由 `handlers.ts` 注入 ——
+ *   本文件**不碰 electron 的窗口**（与 `createTraceProjector` 同一条纪律：投影在这里、
+ *   接线在那里），否则 node 单测里那个只导出 ipcMain 的 electron 替身会当场炸。
+ * @param options.summarize 五问收齐后的概括器（票 31 真接上 = `createLlmSummarizer`）。
+ *   ★ 由 `handlers.ts` 注入 —— 本文件**不读设置、不碰明文 Key**（那是 settings/runtime-config 的事）；
+ *   不注入时服务走降级桩（只保留本地抽取的字段，引导照常结束）。
+ * @param options.service 注入点（测试用；生产恒为模块单例 onboardingService）。
+ */
+export function registerOnboardingHandlers(options: {
+  resolveStudentId: () => string
+  applyGradeBand?: (level: GradeLevelLiteral) => Promise<void>
+  sessionId?: () => string
+  onChanged?: (payload: OnboardingStatePayload) => void
+  summarize?: OnboardingSummarizer
+  service?: OnboardingService
+  /**
+   * ★ 三期（2026-09-30）：读**画像小结**（只回一段中文，空串 = 还没生成过）。
+   *
+   * ★ 为什么是注入的回调而不是在本文件里取：小结存在主进程本地文件
+   *   （`<userData>/pi-agent/logs/`），而 userData 只有接线层（`handlers.ts` / runtime）
+   *   知道 —— 本文件更**不该** import Electron 的 `app`
+   *   （`tests/data-plane-forward.test.ts` 会在纯 node 下加载本模块，静态 import
+   *   一个 Electron 专属导出会让它当场语法错）。这与「接线在 handlers.ts、
+   *   投影在 handlers-data.ts」是同一条既有纪律。
+   * ★ 不传 = 这个通道恒回空串（界面显示后端给的空态文案），不影响其余能力。
+   */
+  readSummary?: () => Promise<string>
+}): void {
+  const service = options.service ?? onboardingService
+  service.configure({
+    studentId: options.resolveStudentId,
+    ...(options.onChanged ? { onChanged: options.onChanged } : {}),
+    ...(options.applyGradeBand ? { applyGradeBand: options.applyGradeBand } : {}),
+    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+    ...(options.summarize ? { summarize: options.summarize } : {})
+  })
+
+  /** 学生 id 的唯一取数口（本段所有处理器都经它，绝不读渲染进程递来的 id）。 */
+  const studentId = (): string => options.resolveStudentId()
+
+  ipcMain.handle(IPC.onboardingState, async (): Promise<OnboardingCallResult<OnboardingStatePayload>> => {
+    // ★ 沙箱态：直接回「引导早已结束」—— 既不弹五问，也不去读真实学生的流程状态。
+    if (isDemoSeeded()) {
+      return {
+        ok: true,
+        data: { onboardingState: 'done', answered: [], nextQuestionId: null, displayName: STUDENT_FALLBACK_NAME }
+      }
+    }
+    try {
+      return { ok: true, data: await service.start() }
+    } catch (error) {
+      // 读不到权威状态时**不猜**（宁可这一轮不弹引导，也不重复打扰学生）
+      return { ok: false, message: '读取引导状态失败：' + describeOnboardingError(error) }
+    }
+  })
+
+  ipcMain.handle(
+    IPC.onboardingAnswer,
+    async (_event, payload: unknown): Promise<OnboardingCallResult<{ accepted: boolean }>> => {
+      const blocked = onboardingWriteBlocked()
+      if (blocked !== null) return blocked
+      const request = (payload ?? {}) as Partial<OnboardingAnswerRequest>
+      const answerText = typeof request.answerText === 'string' ? request.answerText : ''
+      if (answerText.trim() === '') return { ok: false, message: '引导回答失败：还没有内容。' }
+      if (answerText.length > MAX_ONBOARDING_ANSWER_CHARS) {
+        return { ok: false, message: '引导回答失败：内容过长（最多 ' + String(MAX_ONBOARDING_ANSWER_CHARS) + ' 字）。' }
+      }
+      try {
+        // ★ questionId 只当**位置标签**用：认不出（不是 q1..q5）就拒，绝不去猜「哪句话是答案」。
+        const result = await service.answer(request.questionId, answerText)
+        if (!result.accepted) return { ok: false, message: result.message }
+        return { ok: true, data: { accepted: true } }
+      } catch (error) {
+        return { ok: false, message: '引导回答失败：' + describeOnboardingError(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(IPC.profileTags, async (): Promise<ProfileTagsCallResult> => {
+    try {
+      return { ok: true, data: await fetchProfileTags(studentId()) }
+    } catch (error) {
+      return { ok: false, message: '读取画像标签失败：' + describeOnboardingError(error) }
+    }
+  })
+
+  ipcMain.handle(
+    IPC.profileTimeline,
+    async (_event, limit: unknown): Promise<ProfileTimelineCallResult> => {
+      // ★ 只递一个**数字**上限：渲染进程指不了学生（身份由 resolveStudentId 决定）。
+      const raw = typeof limit === 'number' && Number.isFinite(limit) ? Math.floor(limit) : undefined
+      try {
+        return { ok: true, data: await fetchProfileTimeline(studentId(), raw) }
+      } catch (error) {
+        return { ok: false, message: '读取画像变化失败：' + describeOnboardingError(error) }
+      }
+    }
+  )
+
+  ipcMain.handle(IPC.profileTagRetract, async (_event, key: unknown): Promise<ProfileTagsCallResult> => {
+    const blocked = onboardingWriteBlocked()
+    if (blocked !== null) return blocked
+    const tagKey = readText(key, 64)
+    if (!tagKey) return { ok: false, message: '撤销标签失败：标签名不合法。' }
+    try {
+      return { ok: true, data: await retractProfileTag(studentId(), tagKey) }
+    } catch (error) {
+      return { ok: false, message: '撤销标签失败：' + describeOnboardingError(error) }
+    }
+  })
+
+  ipcMain.handle(IPC.profileSummary, async (): Promise<ProfileSummaryCallResult> => {
+    // ★★ 只读缓存、**不生成**（三期，2026-09-30）：小结在画像变更之后由主进程顺带写好
+    //   （`profile-refresh` 的 refresh-apply 成功时），所以这里没有网络调用、也不依赖模型可用。
+    // ★ 沙箱态回空串：预置演示数据下没有真实画像变更，也就不会有小结 ——
+    //   直接回空，界面显示后端给的空态文案（与 onboardingState 的沙箱 fail-safe 同一条纪律）。
+    if (isDemoSeeded()) return { ok: true, data: { text: '' } }
+    // ★ 没注入读取回调（测试 / 精简装配）→ 回空串，而不是报错：小结是可选能力。
+    if (options.readSummary === undefined) return { ok: true, data: { text: '' } }
+    try {
+      return { ok: true, data: { text: await options.readSummary() } }
+    } catch (error) {
+      // 读文件失败（权限 / 文件坏了）→ 回一句可读中文；界面可回落空态文案，不白屏
+      return { ok: false, message: '读取画像小结失败：' + describeOnboardingError(error) }
+    }
+  })
+
+  ipcMain.handle(IPC.identityRead, async (): Promise<IdentityCallResult> => {
+    try {
+      return { ok: true, data: await fetchIdentity(studentId()) }
+    } catch (error) {
+      return { ok: false, message: '读取身份信息失败：' + describeOnboardingError(error) }
+    }
+  })
+
+  ipcMain.handle(
+    IPC.identityFlagsSet,
+    async (_event, payload: unknown): Promise<IdentityCallResult> => {
+      const blocked = onboardingWriteBlocked()
+      if (blocked !== null) return blocked
+      const request = (payload ?? {}) as IdentityFlagsRequest
+      const flags: IdentityFlagsRequest = {}
+      if (typeof request.parentConsent === 'boolean') flags.parentConsent = request.parentConsent
+      if (typeof request.memorySwitch === 'boolean') flags.memorySwitch = request.memorySwitch
+      if (flags.parentConsent === undefined && flags.memorySwitch === undefined) {
+        return { ok: false, message: '保存开关失败：没有要改的开关。' }
+      }
+      try {
+        return { ok: true, data: await saveIdentityFlags(studentId(), flags) }
+      } catch (error) {
+        return { ok: false, message: '保存开关失败：' + describeOnboardingError(error) }
+      }
+    }
+  )
 }

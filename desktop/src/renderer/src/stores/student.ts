@@ -24,6 +24,12 @@ export const useStudentStore = defineStore('student', () => {
   const error = ref<string | null>(null)
   /** 非响应式的在途标记：并发的 `load()` 只发一次请求。 */
   let inFlight: Promise<void> | null = null
+  /**
+   * 身份「代数」。{@link reset} 时 +1，用来作废**已经在途**的那次读取 ——
+   * 它读的是改名 / 换人之前的那份身份，落地后会把旧值写回来。
+   * 常态下它是 0 且从不变化（没人 reset 时所有判断恒真），所以对现有路径零影响。
+   */
+  let generation = 0
 
   /**
    * 昵称的显示值。
@@ -57,9 +63,12 @@ export const useStudentStore = defineStore('student', () => {
 
     loading.value = true
     error.value = null
+    // ★ 记下本次读取属于哪一代：reset() 之后这里的结果一律丢弃（见 generation 的说明）
+    const mine = generation
     inFlight = (async () => {
       try {
         const result = await lookup.bridge.getStudent()
+        if (mine !== generation) return
         if (!result.ok) {
           error.value = result.message
           return
@@ -73,13 +82,33 @@ export const useStudentStore = defineStore('student', () => {
           error.value = '读取学生信息失败：本地数据服务返回的数据不完整。'
         }
       } catch (thrown) {
+        if (mine !== generation) return
         error.value = thrown instanceof Error ? thrown.message : String(thrown)
       } finally {
-        loading.value = false
-        inFlight = null
+        // 只有「仍是最新一代」才收尾：否则会把新一代刚点亮的 loading 关掉
+        if (mine === generation) {
+          loading.value = false
+          inFlight = null
+        }
       }
     })()
     await inFlight
+  }
+
+  /**
+   * 作废「当前是谁」这份缓存（账号改名 / 换人时调用）。
+   *
+   * ★ 为什么必须有：`load()` 是**幂等缓存**（已有数据就直接返回，见上面那条说明），
+   *   所以界面上那个昵称可能比库里旧 —— 改名之后侧栏会继续显示旧名字，
+   *   而「我明明改过了」在用户眼里就是「没保存」。
+   * ★ 换人（账号切换）不靠它，靠整页重载（见 `stores/accounts.ts` 的文件头）：
+   *   要清的远不止这一个 store。
+   */
+  function reset(): void {
+    generation += 1
+    student.value = null
+    error.value = null
+    inFlight = null
   }
 
   /**
@@ -94,5 +123,16 @@ export const useStudentStore = defineStore('student', () => {
     student.value = { ...student.value, currentChapter: chapterTitle }
   }
 
-  return { student, loading, error, nickname, gradeLevel, currentChapter, avatarText, load, applyChapter }
+  return {
+    student,
+    loading,
+    error,
+    nickname,
+    gradeLevel,
+    currentChapter,
+    avatarText,
+    load,
+    reset,
+    applyChapter
+  }
 })

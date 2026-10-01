@@ -59,8 +59,15 @@ export type PageName =
   | 'dependency'
   | 'demo'
 
-/** 学习档案里的分页（概览 / 错题本 / 章节 / 地图 / 会话）。 */
-export type StudyTab = 'report' | 'mistakes' | 'chapters' | 'map' | 'sessions'
+/**
+ * 学习档案里的分页（概览 / 错题本 / 章节 / 地图 / **学习历史** / 会话）。
+ *
+ * ★ 2026-09-30 加第六页「**学习历史**」（用户裁决）：`report` 给的是**聚合**
+ *   （每天多少条、正确率、连续天数），学生要能回看**逐条流水**
+ *   （几点几分做了什么）。两者读同一张 `learning_history` 表，回答的是不同问题
+ *   —— 聚合页答「我这一周怎么样」，流水页答「我那天到底做了什么」。
+ */
+export type StudyTab = 'report' | 'mistakes' | 'chapters' | 'map' | 'history' | 'sessions'
 
 export interface PageMeta {
   /** 页面中文名（侧栏项 + 顶栏标题）。 */
@@ -111,19 +118,41 @@ export function visibleInSidebar(meta: PageMeta, mode: ViewMode): boolean {
  *   ① **标题去课程色彩**：产品定位是「7×24 在线的 AI 老师」，我们没有「课程」——
  *      教材与知识点只是回答时的**参考**。所以「对话课堂 → 问问智团团」、
  *      「闯关练习 → 闯关挑战」、「学习档案 → 学习记录」、「教材知识库 → 参考资料库」、
- *      「学习地图 → 知识图谱」。动画讲解 / 编程环境 / 设置三个功能名本来就没有课程色，不动。
+ *      「学习地图 → 知识图谱」。动画讲解 / 设置两个功能名本来就没有课程色，不动。
+ *      ⚠️ 编程环境 → **智码工坊**是后来（2026-09-29）单独改的，见 `PAGES.coding` 的说明。
  *   ② **侧栏重分三组**：跟团团聊 / 动手试试 / 我的记录
  *      （原来是「能力 / 学习数据」两组 —— 「能力」这个词对学生没有意义）。
  *
  * ⚠️ **`PageName` 内部 id 一个都没改**（`chat` / `quiz` / `knowledge` / `dependency`…）：
  *   改名会牵动 `ui.go('quiz')`、`data-testid="coding-view-*"`、探针的页清单、
  *   架构守卫与文档计数 —— 而学生**看不见** id。所以这轮只动给人看的 `title` / `section`。
+ *
+ * ★★ 2026-09-30 再改一处（用户裁决）：「闯关挑战 → **个性化学习**」（内部 id 仍是 `quiz`）。
+ *   理由：这一页做的事是**按教材章节分块的知识点练习**（左栏二级导航：大章节 → 小知识点），
+ *   「闯关挑战」说的是游戏化外壳，盖不住「我该补哪个知识点」这条主线。
+ *   与 D-064 同一条纪律：只动给人看的 `title`，id / 存储键 / 路由语义一个都不碰。
  */
 export const PAGES: Record<PageName, PageMeta> = {
   chat: { title: '问问智团团', section: '跟团团聊', nav: true, icon: 'MessageCircle' },
   animation: { title: '动画讲解', section: '动手试试', nav: true, icon: 'Clapperboard' },
-  coding: { title: '编程环境', section: '动手试试', nav: true, icon: 'Code' },
-  quiz: { title: '闯关挑战', section: '动手试试', nav: true, icon: 'Trophy' },
+  /**
+   * 智码工坊（内部 id 仍是 `coding`）。
+   *
+   * ★★ 2026-09-29 从「编程环境」改名：这一页是**按教材章节分块的动手页**
+   *   （先看大模块、再进小关），「环境」这个词说的是开发工具，
+   *   而学生在这里做的是**一关一关造东西** —— 「工坊」才对应那条学习动线。
+   *   ⚠️ 改名只动 `title`（给人看的）：内部 id、`data-testid="coding-view-*"`、
+   *      探针的页清单都不动（学生看不见 id，改了只会白折腾一堆锚点）。
+   */
+  coding: { title: '智码工坊', section: '动手试试', nav: true, icon: 'Code' },
+  /**
+   * 个性化学习（内部 id 仍是 `quiz`）。
+   *
+   * ★★ 2026-09-30 从「闯关挑战」改名（理由见上面 PAGES 的说明）：左栏改成按教材章节
+   *   分块的二级导航（`views/Quiz.vue` 用 `study/workshop-path.ts` 的
+   *   `groupLevelsByChapter` 分块，与智码工坊同一口径）。
+   */
+  quiz: { title: '个性化学习', section: '动手试试', nav: true, icon: 'Trophy' },
   study: {
     title: '学习记录',
     subtitle: '掌握度 · 学段轨迹 · 学习历史',
@@ -138,9 +167,9 @@ export const PAGES: Record<PageName, PageMeta> = {
     nav: true,
     icon: 'Settings'
   },
-  // 数据层检视页：**挂进侧栏，但只在教师 / 答辩视角可见**。
+  // 参考资料库：**曾经是**数据层检视页（`nav: 'teacher'`），2026-09-30 起学生可见。
   //
-  // ★ 历史（两次都是实测踩出来的，改这一段前先读完）：
+  // ★ 历史（三次转折，改这一段前先读完）：
   //   ① 设计原型把它们标成 `nav: false`，而原型是 router 驱动的（可以直接改哈希进去）；
   //      本项目没有 router（见 D-040），`nav: false` 于是等于**这两页点不到** ——
   //      而这一页里恰恰有**导入教材 / 重建索引**两个真实功能。
@@ -148,13 +177,19 @@ export const PAGES: Record<PageName, PageMeta> = {
   //   ② 2026-09-20 走查发现另一端的问题：这一页会把 `kb.sqlite` 的**完整路径**
   //      （含 Windows 用户名）、`kp_id`、`已嵌入` 状态、以及两个破坏性按钮
   //      直接摆到学生面前 —— 一个 10 岁学生既看不懂，也不该有能力重建索引。
-  //   现在的落点 = 「入口还在、只是不在学生视角的侧栏里」（`nav: 'teacher'`）：
-  //   功能没被删，评委打开教师视角就能用；学生视角下侧栏不渲染它。
+  //      于是改成 `nav: 'teacher'`（学生侧栏里进不去）。
+  //   ③ ★★ 2026-09-30 用户裁决：**学生也要能查教材**（「学生视角就可以查看」）——
+  //      于是改回 `nav: true`。但 ② 里那些东西**一条都不能回到学生眼前**：
+  //      技术读数 / `kp_id` 列 / 向量与嵌入状态 / 导入 / 重建，全部关进 `TeacherGate`
+  //      （渲染层分档），学生面只留「有哪些教材、能搜什么」。
+  //      ⚠️ 这与全项目一致：TeacherGate **不是权限控制**（只防误入），
+  //      真正的破坏性操作防护在服务端（导入要过文件校验、重建要过模型与维度检查）。
   knowledge: {
     title: '参考资料库',
-    subtitle: '四学段分块 · 向量索引状态 · 导入与重建',
+    // ★ 学生面副标题：去掉「向量索引状态 · 导入与重建」—— 那是运维口径
+    subtitle: '按学段整理的教材与知识点，可以搜',
     section: '我的记录',
-    nav: 'teacher',
+    nav: true,
     icon: 'Library'
   },
   dependency: {
@@ -255,8 +290,10 @@ export const useUiStore = defineStore('ui', () => {
    *
    * ★ 它不再是独立状态：`page` 是唯一真相，`view` 由它派生 —— 两者各存一份
    *   就会出现「顶栏按钮按 view 循环、内容区按 page 渲染」的错位。
-   * ★ 保留这个名字是因为它已是**对外契约**：`ui-shell.test.ts`、`App.vue` 的
-   *   顶栏按钮、以及 `verify-ui.mjs` 的 `view-entry` 循环都按它取当前主视图。
+   * ★ 保留这个名字是因为它已是**对外契约**：`ui-shell.test.ts` 与
+   *   `verify-ui.mjs`（它按 `PAGES.title` 点侧栏导航）都按它取当前主视图。
+   *   ⚠️ 2026-10-01（D-126）：`App.vue` 里那个靠 `VIEW_LABELS`/`nextView` 显示文案的
+   *   顶栏三步循环按钮已删除 —— 这两个导出现在**只服务数据自洽**，界面上没有对应按钮了。
    *   非主视图（动画/编程/闯关/知识库/依赖图）回落到 `chat`。
    */
   const view = computed<ViewName>(() => viewOfPage(page.value) ?? 'chat')

@@ -173,10 +173,14 @@ test('嵌入块皮肤：.k12-inset 必须有底色 + 1px 细线（否则「浅�
   assert.match(rail, /class="[^"]*k12-inset/, '右栏至少要有一个真实的 .k12-inset 消费者（皮肤定义了就得用上）')
 })
 
-test('结构分面（侧栏 / 右栏 / 顶栏）必须有强线或单侧投影', () => {
+test('结构分面（侧栏 / 右栏 / 顶栏 / 档案画像栏）必须有强线或单侧投影', () => {
   const sidebar = read(...`${R}/components/AppSidebar.vue`.split('/'))
   const rail = read(...`${R}/components/ContextRail.vue`.split('/'))
   const topbar = read(...`${R}/components/AppTopbar.vue`.split('/'))
+  // ★ 学习档案页右栏（2026-09-29 新开出的 20%）：它与左列内容区同样是
+  //   一对「并列面」，「线 + 单侧投影」的口径必须与对话页右栏一致 ——
+  //   少一样就会在带学段色的桌面上读成「两块白纸糊在一起」。
+  const portrait = read(...`${R}/components/StudyPortrait.vue`.split('/'))
 
   // 侧栏：右缘是它与内容区唯一的分界。2026-09-22 曾删掉这条线（理由是"材质差够了"），
   // 而真实原因是两个档位的材质差塌陷 —— 见 D-105。现在要求"线 + 投影"都要有。
@@ -201,6 +205,20 @@ test('结构分面（侧栏 / 右栏 / 顶栏）必须有强线或单侧投影',
     /border-bottom:\s*1px\s+solid\s+var\(--k12-border-strong\)/,
     '顶栏必须有 border-bottom（强线档）'
   )
+
+  // 学习档案页的画像栏：左缘同理（它与左列内容区不是父子、是并列面）
+  const portraitBody = ruleBody(portrait, '.portrait')
+  assert.ok(portraitBody.length > 0, 'StudyPortrait 里找不到 .portrait 规则')
+  assert.match(
+    portraitBody,
+    /border-left:\s*1px\s+solid\s+var\(--k12-border-strong\)/,
+    '档案画像栏必须有 border-left（强线档）'
+  )
+  assert.match(
+    portraitBody,
+    /box-shadow:\s*var\(--k12-shadow-edge-left\)/,
+    '档案画像栏必须有 --k12-shadow-edge-left（单侧投影）'
+  )
 })
 
 test('单侧投影令牌存在，且由前景色派生（随学段主题走，不写死灰）', () => {
@@ -219,4 +237,36 @@ test('单侧投影令牌存在，且由前景色派生（随学段主题走，�
       `--k12-shadow-${name} 必须从 --k12-fg 派生（不要写死 rgba）`
     )
   }
+})
+
+/* ------------------------------------------------------------------ *
+ * D. 学习档案页的两列外壳
+ * ------------------------------------------------------------------ */
+
+test('★★ 学习档案页：左列内容 + 右列画像（25% 带上下限），窄窗堆叠', () => {
+  const study = read(...`${R}/views/Study.vue`.split('/'))
+
+  // ★ 两列 grid，且左列必须 `minmax(0, 1fr)`。
+  //   `1fr` 的最小值是 `auto`：分页里任何宽内容（表格 / 长串）会把它顶宽，
+  //   右列被挤到窗口外 —— 这是这一版最容易写错、且只在真机上才看得见的一处。
+  // ★ 2026-09-30：右列从 clamp(232px, 20%, 288px) 调大到 clamp(280px, 25%, 348px) ——
+  //   右栏内容从「几行标签 + 四条掌握度」变成「五行结构 + 最近在学」，20% 下会挤成竖条。
+  assert.match(
+    study,
+    /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+clamp\(\s*280px\s*,\s*25%\s*,\s*348px\s*\)/,
+    '两列宽度必须是 minmax(0, 1fr) + clamp(280px, 25%, 348px)（左列不钉 0 会被宽内容顶飞）'
+  )
+  // ★ 左列的头 / 体仍在（改造不许把五个分页那一层顺手改坏）。
+  const main = ruleBody(study, '.study__main')
+  assert.ok(main.length > 0, '左列外壳 .study__main 必须存在')
+  assert.match(main, /display:\s*flex/, '左列必须是纵向 flex（头不滚、内容滚）')
+  assert.match(main, /min-width:\s*0/, '左列要 min-width: 0（否则它是 grid 里被顶飞的那一个）')
+  // ★ 右栏组件真的挂在模板里。
+  assert.match(study, /<StudyPortrait\s*\/>/, '模板里必须真的渲染右栏画像组件')
+  // ★ 窄窗堆叠（1023px 断点，沿用全站主断点）。
+  assert.match(
+    study,
+    /@media\s*\(max-width:\s*1023px\)/,
+    '窄窗必须有 1023px 的堆叠规则（并排会把分页内容挤成一条竖井）'
+  )
 })

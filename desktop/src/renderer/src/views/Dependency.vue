@@ -24,7 +24,8 @@ import { useStudyStore, type GraphView } from '../stores/study'
 import { useInsightStore } from '../stores/insight'
 import { useChatStore } from '../stores/chat'
 import { useUiStore } from '../stores/ui'
-import { UNKNOWN_KP_LABEL, kpLabel, kpLabelResolved } from '../study/kp-label'
+import { kpLabel, kpLabelResolved } from '../study/kp-label'
+import { buildPlanRequestMessage, planRequestDisplayText } from '../study/plan-request'
 import { todayStamp } from '../study/export-naming'
 import ProgressBar from '../components/ProgressBar.vue'
 import TeacherGate from '../components/TeacherGate.vue'
@@ -284,24 +285,24 @@ watch(
  * 主行动「开始学习这个知识点 →」**落在对话页**（与学习档案的「学习地图」
  * `MapTab.vue` 的 `goLearn()` 完全同一条路，理由见那里的注释）：
  *   · 它对**任何**节点都可用（入口知识点可能还没有题库，
-*     而「问一句」永远通）；
+ *     而「问一句」永远通）；
  *   · 「学」这件事在本项目里的主场就是对话（7×24 的 AI 教师）；闯关是**检验**；
- *   · 走 `chat.prepareQuestion()` **预填**而不是直接发：学生看得见自己要问什么，
- *     也不会被替着消耗一次调用（与错题本的「去练一练」同一条纪律）。
+ *   · ★★ 2026-09-30 用户裁决：**推翻「只预填」**——现在先切到对话页、再直发一条
+ *     学习计划请求（学生气泡里是 `planRequestDisplayText` 那句自然话，
+ *     真正发给模型的是带 `kp_id` 的 wire 文本，见 `study/plan-request.ts`）。
+ *     ⚠️ 错题本的「去练一练」**仍然只预填**：两条路从这里起**不再是同一条纪律**，
+ *     别再照搬那一侧的说法。
  *
- * ★ 名字取不到（中性标签）时**不把占位词写进问题里** ——
- *   发给模型一句「我想学『未命名知识点』」等于给它一个它认不出的名字。
+ * ★ 名字取不到（中性标签）时给 plan-request 传**空串**、而不是占位词 ——
+ *   发给模型一句「我想学『未命名知识点』」等于给它一个它认不出的名字；
+ *   空串那条路径会退化成不带名字的说法，屏幕上仍是自然的一句。
  */
 function goLearn(): void {
   const kpId = focus.value
   if (!kpId) return
-  const label = nameOf(kpId)
-  chat.prepareQuestion(
-    label === UNKNOWN_KP_LABEL
-      ? '我想学一个新知识点，先给我讲讲它是怎么一回事吧。'
-      : `我想学「${label}」这个知识点，先给我讲讲它是怎么一回事吧。`
-  )
+  const name = nameResolved(kpId) ? nameOf(kpId) : ''
   ui.show('chat')
+  void chat.send(planRequestDisplayText(name), buildPlanRequestMessage(kpId, name))
 }
 
 /** 当前方向的说明：浮层顶部那行 meta（下一行才是学生话的清单标题）。 */

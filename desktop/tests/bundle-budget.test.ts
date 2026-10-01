@@ -71,11 +71,13 @@ const RUNTIME_DEPENDENCIES = [
  */
 const RENDERER_ONLY_PACKAGES = [
   '@element-plus/icons-vue',
-  '@fontsource-variable/inter',
   '@fontsource-variable/jetbrains-mono',
-  '@fontsource-variable/noto-sans-sc',
   'animejs',
   'element-plus',
+  // 字体（2026-09-30 起两套，都 SIL OFL 1.1）：正文 = Noto Sans SC；大字 = 霞鹜文楷屏幕阅读版。
+  // 两者都只被 base.css @import，由 vite 打进 out/renderer（包名进 devDependencies）。
+  '@fontsource-variable/noto-sans-sc',
+  'lxgw-wenkai-screen-webfont',
   'lucide-vue-next',
   'monaco-editor',
   'pinia',

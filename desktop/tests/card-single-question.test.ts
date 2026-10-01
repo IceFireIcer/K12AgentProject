@@ -140,39 +140,45 @@ test('★★ 「下一题」只在**后端判为答对**之后可点；答错留
  * 3. ★★ 进度卡外置
  * ------------------------------------------------------------------ */
 
-test('★★ 进度卡不再嵌在练习卡里，由消息层按 levels 独立渲染', () => {
+test('★★ 进度卡**不再出现在对话里**：题卡只管题目，进度看个性化学习 / 学习记录', () => {
+  // ★ 两段历史，别混起来读：
+  //   ① 2026-09-20（报告 §2.3）：进度卡从**练习卡里**拆出来，改由消息层独立渲染 —— 那一步是对的，
+  //      「题卡不被进度拉长」这条至今成立；
+  //   ② 2026-09-30 用户裁决（D-123）：**整个搬出对话** —— 对话里那张是**当时的进度快照**（会过期、占满屏），
+  //      学生真正看进度的地方是「个性化学习」与「学习记录」两页。
+  //   所以下面的断言从「消息层必须独立渲染」翻成「消息层不得再渲染」。
   assert.doesNotMatch(
     quizCard,
     /ProgressCard/,
-    '练习卡不得再引用 ProgressCard（进度/掌握度独立成卡，不塞进题卡）'
+    '练习卡不得引用 ProgressCard（进度/掌握度独立成卡，不塞进题卡）'
   )
   assert.doesNotMatch(
     quizCard,
     /Array\.isArray\([^)]*levels/,
-    '练习卡也不用再判断 levels（那是消息层的判据）'
+    '练习卡也不判断 levels（进度不是题卡的事）'
   )
 
+  assert.doesNotMatch(
+    chatMessage,
+    /import ProgressCard from/,
+    '★ 消息层不得再引入进度卡（D-123：进度卡搬出对话，看个性化学习 / 学习记录）'
+  )
+  assert.doesNotMatch(
+    chatMessage,
+    /<ProgressCard/,
+    '★ 对话里不得渲染进度卡 —— 要加回来先读 D-123 的理由，别当成「塞回题卡」那件事重做'
+  )
+  assert.doesNotMatch(
+    chatMessage,
+    /function hasLevels\(/,
+    'hasLevels 判据随进度卡一起撤掉（留着它就是一条没人用的死判据）'
+  )
+  // 卡片组本身仍在：载荷自己的那张卡（题卡 / 动画卡 / 编程卡）照旧渲染
   assert.match(
     chatMessage,
-    /import ProgressCard from '\.\.\/cards\/ProgressCard\.vue'/,
-    '消息层要引入进度卡（外置的落点）'
+    /data-testid="inline-cards"[\s\S]{0,260}<InlineCard/,
+    '内联卡片组仍要渲染载荷自己的那张卡'
   )
-  // ⚠️ 不能用 `blockOf`：函数签名里就有花括号（参数类型），会当成函数体起点。
-  const hasLevelsAt = chatMessage.indexOf('function hasLevels(')
-  assert.ok(hasLevelsAt > 0, '消息层要有 hasLevels 判据函数')
-  const hasLevels = chatMessage.slice(hasLevelsAt, chatMessage.indexOf('\n}', hasLevelsAt) + 2)
-  assert.match(hasLevels, /Array\.isArray[\s\S]{0,60}levels/, '判据只读载荷里有没有 levels 数组')
-  assert.match(
-    chatMessage,
-    /<ProgressCard[\s\S]{0,220}v-if="hasLevels\(card\)"/,
-    '★ 带 levels 的卡片旁边必须独立渲染一张进度卡'
-  )
-  // 渲染位置在**卡片组内部、InlineCard 之外**（紧跟题卡），而不是被塞回题卡
-  const group = chatMessage.slice(
-    chatMessage.indexOf('data-testid="inline-cards"'),
-    chatMessage.indexOf('</div>', chatMessage.indexOf('data-testid="inline-cards"'))
-  )
-  assert.match(group, /<InlineCard[\s\S]{0,220}<ProgressCard/, '进度卡排在 InlineCard 之后（紧跟题卡）')
 })
 
 /* ------------------------------------------------------------------ *

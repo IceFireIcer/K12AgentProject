@@ -11,7 +11,9 @@
  *   1. **清单**（{@link AGENT_EXTENSION_SPECS}）：六个扩展各自的文件、归属票、注册的 Tool 与订阅的事件；
  *   2. **注册器**（{@link createAgentExtensionRegistry} + {@link registerAgentExtensions}）：
  *      把工厂挂到 Pi 上，并给出「谁没落地 / 谁注册失败 / 11 个冻结 Tool 缺哪几个」的报告；
- *   3. **会话上下文**（{@link bindAgentSession}）：当前学生的身份与轮次上下文。
+ *   3. **会话上下文**（{@link bindAgentSession}）：当前学生的身份与轮次上下文；
+ *   4. **引导扩展的注册入口**（{@link ONBOARDING_EXTRA_EXTENSION}，票 25）——不在这六条清单里，
+ *      经 `RegistryOptions.extra` 注入（理由见那个常量的注释）。
  *
  * ★ 并行开发说明：`animation.ts` / `coding.ts` / `quiz.ts` / `grade.ts` 由票 14–19 各自落地，
  *   **它们不在本文件的静态 import 列表里** —— 那四个文件一旦被静态 import，未落地时整个主进程
@@ -26,6 +28,9 @@ import { join } from 'node:path'
 import type { GradeLevel } from '@shared/ipc-events'
 import { PAYLOAD_TOOL_NAMES } from '../../ipc/tool-kinds.ts'
 import learningLogExtension from './learning-log.ts'
+// ★ 引导扩展（票 25）：**空工厂**（不注册 Tool、不订阅事件）——
+//   引导的驱动方是 IPC 与 grade.ts 的 prompt 分支，不是 Pi 事件。理由见那个文件的文件头。
+import onboardingExtension from './onboarding.ts'
 import profileExtension from './profile.ts'
 
 /* ------------------------------------------------------------------ *
@@ -314,6 +319,24 @@ export interface RegistryReport {
 export const CORE_EXTENSION_FACTORIES: Record<string, AgentExtensionFactory> = {
   profile: profileExtension,
   'learning-log': learningLogExtension
+}
+
+/**
+ * 引导扩展（票 25）的**注册入口** —— 经 RegistryOptions.extra 注入（与 trace / rag-search 同一条路）。
+ *
+ * ★★ 为什么**不**进 AGENT_EXTENSION_SPECS / CORE_EXTENSION_FACTORIES：
+ *   那两处分别是「票 08 冻结的六扩展清单」与「本文件自带的核心扩展」，
+ *   它们的成员集合被 tests/agent-trace.test.ts 的 G8-5 逐字断言（多一个就红）。
+ *   而引导扩展**不注册 Tool、不订阅事件**（见 onboarding.ts 的文件头），
+ *   放进那两处只会让「六扩展」这个冻结口径失效，换不到任何东西。
+ *
+ * ⚠️ 接线在 **runtime.ts（C 的写域）**：在 agentExtensionsFactory 的 extra 数组里加一项
+ *   ONBOARDING_EXTRA_EXTENSION 即可。不加也不影响功能（引导由 IPC + grade.ts 的 prompt
+ *   分支驱动），只是启动日志的注册报告里少一条「引导已就位」的证据。
+ */
+export const ONBOARDING_EXTRA_EXTENSION: { name: string; factory: AgentExtensionFactory } = {
+  name: 'onboarding',
+  factory: onboardingExtension
 }
 
 /** 建一个注册表（不做任何 Pi 调用，纯装配，可单测）。 */

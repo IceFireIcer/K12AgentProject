@@ -31,18 +31,35 @@
  *    导入默认重建，所以它同样是重活），因此两处都**先问一句**再动手 ——
  *    用全站唯一的确认框（`stores/confirm.ts`），而不是「按下去就开始跑」。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RefreshCw, Upload, FileUp, AlertTriangle, CheckCircle2 } from 'lucide-vue-next'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { useConfirm } from '../stores/confirm'
+import { useViewModeStore } from '../stores/viewMode'
 import { GRADE_LABELS } from '../labels'
 import { GRADE_LEVELS } from '../api/grade'
 import EmptyState from '../components/EmptyState.vue'
 import TeacherGate from '../components/TeacherGate.vue'
+import OpLogPanel from '../components/OpLogPanel.vue'
 import type { GradeLevel } from '@shared/ipc-events'
 
 const knowledge = useKnowledgeStore()
 const confirm = useConfirm()
+const viewMode = useViewModeStore()
+
+/**
+ * ★★ 2026-09-30（用户裁决：**学生视角就可以查看**）：这一页从教师专属改成学生可见。
+ *
+ * 于是它必须**分档**：运维 / 排障 / 内部标识的那一半只在教师档出现，
+ * 学生看到的是「教材里有什么、能搜什么」。分档收口成这一个布尔量
+ * （而不是散在各处写 `viewMode.isTeacher`）—— 与 `TeacherGate` 同一条理由：
+ * 加删一处时能穷举核对，也不会有人把方向写反。
+ *
+ * ⚠️ 这**不是权限控制**（见 `stores/viewMode.ts` 的文件头）：破坏性操作真正的防护
+ *   在服务端（导入要过文件校验、重建要过模型与维度检查）。这里挡掉的是**噪音**
+ *   （`kp_id`、嵌入状态、文件路径），不是**危险** —— 但两者都不该给学生看。
+ */
+const showTechnical = computed(() => viewMode.isTeacher)
 
 /** 内容类型的中文名（契约里 `contentType` 是自由字符串，认不出就原样显示）。 */
 const TYPE_LABEL: Record<string, string> = {
@@ -81,6 +98,75 @@ const filtered = computed(() => {
   return rows.filter(
     (row) => row.name.includes(kw) || row.kpId.includes(kw) || row.chapterTitle.includes(kw)
   )
+})
+
+/* ── 二级导航（2026-10-01 用户裁决 D-130）─────────────────────────────
+ * 「里面知识点要加二级导航，把细分的知识点归类，而且要能做到后续导入教材洗出来知识点以后
+ *   自动加进去，根据大分类」。
+ *
+ * ★★ 分类**完全从数据算**，不维护任何清单：
+ *   一级 = 「章」（行的 `chapterTitle`）；二级 = 该章下的「内容类型」（行的 `contentType`）。
+ *   所以导入新教材、洗出新知识点之后，只要它带着自己的章与类型，就**自动落进对应分类** ——
+ *   这正是「自动加进去」的实现方式（没有需要同步的第二份真相）。
+ * ★ 章的顺序按 `第N章` 的**数字**排（全站同一条规则：不按标题、不按 rowid）；
+ *   认不出章号的排到最后，按标题兜底比较。
+ * ★ 选中项在新数据里消失时自动回落成「全部」（见下面的 watch）——
+ *   否则切学段之后会停在一个已经不存在的分类上，表格空着而导航没有高亮。
+ */
+const activeChapter = ref<string | null>(null)
+const activeType = ref<string | null>(null)
+
+/** 章号：`第12章 …` → 12；认不出给 `Number.POSITIVE_INFINITY`（排最后）。 */
+function chapterOrder(title: string): number {
+  const matched = /第\s*(\d+)\s*章/.exec(title)
+  return matched ? Number(matched[1]) : Number.POSITIVE_INFINITY
+}
+
+/** 一级：章 → 条数（顺序 = 教材序）。 */
+const chapterGroups = computed(() => {
+  const counts = new Map<string, number>()
+  for (const row of filtered.value) counts.set(row.chapterTitle, (counts.get(row.chapterTitle) ?? 0) + 1)
+  return [...counts.entries()]
+    .map(([title, count]) => ({ title, count }))
+    .sort((a, b) => chapterOrder(a.title) - chapterOrder(b.title) || a.title.localeCompare(b.title))
+})
+
+/** 当前章（未选章时是全部行）——二级与表格都基于它。 */
+const chapterRows = computed(() =>
+  activeChapter.value === null
+    ? filtered.value
+    : filtered.value.filter((row) => row.chapterTitle === activeChapter.value)
+)
+
+/** 二级：当前章下的内容类型 → 条数（按条数降序，多的在前）。 */
+const typeGroups = computed(() => {
+  const counts = new Map<string, number>()
+  for (const row of chapterRows.value) counts.set(row.contentType, (counts.get(row.contentType) ?? 0) + 1)
+  return [...counts.entries()]
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type))
+})
+
+/** 表格真正渲染的行：二级选中的类型（未选则整章）。 */
+const visible = computed(() =>
+  activeType.value === null
+    ? chapterRows.value
+    : chapterRows.value.filter((row) => row.contentType === activeType.value)
+)
+
+function selectChapter(title: string | null): void {
+  activeChapter.value = title
+  // 换章要清掉二级选择：上一条的类型在新章里可能根本不存在
+  activeType.value = null
+}
+
+watch([chapterGroups, typeGroups], () => {
+  if (activeChapter.value !== null && !chapterGroups.value.some((g) => g.title === activeChapter.value)) {
+    activeChapter.value = null
+  }
+  if (activeType.value !== null && !typeGroups.value.some((g) => g.type === activeType.value)) {
+    activeType.value = null
+  }
 })
 
 /* ---------------------------------------------------------------- 导入 */
@@ -207,9 +293,18 @@ const scope = computed(() => {
  * ★ 这一槽不能空着：`.pa__info { flex: 1 }` 是这条栏把操作推到右边的唯一依仗，
  *   槽为空会被 `.pa__info:empty { display: none }` 收掉，两个按钮就会跑到左边去。
  */
-const viewScopeLabel = computed(() =>
-  knowledge.stats?.userRebuilt ? '数据层检视视图 · 本机知识库（你重建过的那一份）' : '数据层检视视图 · 本机知识库'
-)
+const viewScopeLabel = computed(() => {
+  // ★ 分档（2026-09-30）：教师面保留技术口径（「本机知识库 / 你重建过的那一份」），
+  //   学生面说人话 —— 「数据层检视」这种词对学生没有任何意义。
+  if (!showTechnical.value) {
+    return knowledge.stats?.userRebuilt
+      ? '按学段整理的教材内容（本机已更新过）'
+      : '按学段整理的教材内容'
+  }
+  return knowledge.stats?.userRebuilt
+    ? '数据层检视视图 · 本机知识库（你重建过的那一份）'
+    : '数据层检视视图 · 本机知识库'
+})
 
 /**
  * 知识库文件的**完整路径** —— 只给技术读数块用（学生看不到这一页）。
@@ -247,7 +342,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="kb">
+  <div class="kb" :class="{ 'kb--student': !showTechnical }">
     <PageActions>
       <!-- ⚠️ `#info` 里**只留原句不重复的那一半**：「教材来源：人工编写 Markdown +
            元数据（不做 PDF 解析）」已经由下面身份行的 `meta` 承担，两处同一句话是冗余。
@@ -260,6 +355,7 @@ onMounted(() => {
         <span>{{ viewScopeLabel }}</span>
       </template>
       <input
+        v-if="showTechnical"
         ref="fileInput"
         type="file"
         accept=".md,.markdown"
@@ -267,11 +363,22 @@ onMounted(() => {
         data-testid="kb-file-input"
         @change="onFilePicked"
       />
-      <el-button :loading="knowledge.importing" :disabled="knowledge.importing" @click="fileInput?.click()">
+      <!-- ★ 两个**运维按钮**（2026-09-30 起教师档专属）：导入与重建都是重活，
+           而且它们是「往里写东西」的动作 —— 学生面留着只会让人误点。
+           `data-teacher` 是给验收脚本量的标记（与 `TeacherGate` 的约定一致）。 -->
+      <el-button
+        v-if="showTechnical"
+        data-teacher="true"
+        :loading="knowledge.importing"
+        :disabled="knowledge.importing"
+        @click="fileInput?.click()"
+      >
         <Upload v-if="!knowledge.importing" :size="14" />
         <span class="btn__label">{{ knowledge.importing ? '导入中…' : '导入教材' }}</span>
       </el-button>
       <el-button
+        v-if="showTechnical"
+        data-teacher="true"
         :loading="knowledge.rebuildPhase === 'running'"
         :disabled="knowledge.rebuildPhase === 'running'"
         @click="rebuild"
@@ -289,23 +396,50 @@ onMounted(() => {
       </el-button>
     </PageActions>
 
+    <!-- ── 操作日志卡（2026-09-30 用户裁决）────────────────────────────────
+         **位置**：PageActions 正下方、身份行之前 —— 内容流的第一块。
+         ★ 为什么置顶而不是页尾 / 浮窗：两个写操作（导入 / 重建）就在上面那条操作栏里，
+           「按了什么」与「留下了什么记录」在同一视觉序列里，不用先滚到页尾才看得到；
+           也不引第三只浮窗（浮层会压住下面那张列宽预算精确到 926 ≤ 929 的表）。
+         ★ 形态：独立圆角卡片（`SurfacePanel` 壳：白底 + 边框 + 浅投影 + r-card），
+           与下方表格卡同族，靠**位置**（顶部）与**默认折叠**区分职责。
+         ★★ 2026-10-01 用户裁决（D-129）：**取消教师档专属** ——「那个 log 窗口是要关闭教师视角
+           也要能展示的」。原先它只在 `showTechnical` 下渲染，学生视角看不到；
+           它记的虽是导入 / 重建这类运维动作，但「刚才按了什么、结果如何」对学生同样成立。
+           `data-teacher` 标记随之删掉 —— 它不再是教师内容，留着会让验收脚本误判。
+         ★ 默认折叠，展开态总高 ≤ 280px —— 折叠是这个位置能成立的前提（观感不变）。 -->
+    <OpLogPanel />
+
     <!-- 身份行（22px）：内容区的最大字号在这里，不在统计上。
-         `meta` 承接了原本写在 PageActions `#info` 里的「教材来源」口径 —— 同一句话只留一处。 -->
+         ★ 2026-09-30 起**分档**：学生面说的是「这些内容有什么用」，教师面说的是
+           「这一页能做什么（检视 / 导入 / 重建）」—— 同一页，两种读者。 -->
     <PageIdentity
-      main="库里到底有什么教材"
-      meta="教材来源：人工编写 Markdown + 元数据（不做 PDF 解析）"
-      hint="先按学段筛，再搜知识点；导入或重建前会先问一句，确认后才开始"
+      :main="showTechnical ? '库里到底有什么教材' : '教材里都有什么'"
+      :meta="
+        showTechnical
+          ? '教材来源：人工编写 Markdown + 元数据（不做 PDF 解析）'
+          : '智团团回答时会参考这些内容，按学段整理好了'
+      "
+      :hint="
+        showTechnical
+          ? '先按学段筛，再搜知识点；导入或重建前会先问一句，确认后才开始'
+          : '选一个学段，或者直接搜你想找的东西'
+      "
     />
 
-    <!-- ── 这一页是什么 ────────────────────────────────────────────────
-         学生视角下侧栏根本没有这个入口（`PAGES.knowledge.nav === 'teacher'`），
-         所以这里不必再遮技术词 —— 但要**说清这一页的位置**：
-         它是数据层检视，学生看教材的地方是「学习档案 → 章节进度」。 -->
+    <!-- ── 这一页是什么（教师档）───────────────────────────────────────
+         ★ 2026-09-30：这一页**学生也能进**了（`PAGES.knowledge.nav === true`），
+           所以表里的内部标识与运维动作必须分档 —— 这一块说的是「教师面看到的是什么」。
+           学生面那句由身份行的 `meta` 承担（「这些内容有什么用」）。 -->
     <TeacherGate label="这一页是什么">
       <p class="kb__tech">
-        这是教材知识库的**数据层检视**页（教师 / 答辩用）：表里每一行都是
-        <code>kb.sqlite</code> 里的真实记录，用来核对「教材进来了没有、向量嵌上了没有」。
-        学生看教材进度走「学习档案 → 章节进度」，不需要这一页。
+        教师 / 答辩面：这里摊开的是教材知识库的**数据层记录**（<code>kb.sqlite</code>
+        的 kp / chunk 表），用来核对「教材进来了没有、向量嵌上了没有」。
+        学生看到的是同一份内容，但去掉了 <code>kp_id</code>、嵌入状态、文件路径
+        与导入 / 重建入口。
+      </p>
+      <p class="kb__tech">
+        学生看**学习进度**走「学习档案 → 章节进度」—— 那里是按章节组织的进度视图。
       </p>
     </TeacherGate>
 
@@ -405,6 +539,10 @@ onMounted(() => {
       </p>
     </TeacherGate>
 
+    <!-- ⚠️ 2026-10-01 用户裁决（D-130）：这张卡**不加 `shine`**。
+         它是一张上万像素高的长卡（实测 10303px），任何形变/倾斜都会被跨度放大成
+         「卡片自己在移动」——用户点名「这个卡片根本不应该动」。
+         光效只留给尺寸正常的卡片（聊天卡片、页面小卡）。 -->
     <SurfacePanel class="card">
       <header class="card__head">
         <div class="card__head-text">
@@ -420,10 +558,67 @@ onMounted(() => {
         </span>
       </header>
 
+      <!-- ── 二级导航（D-130）：一级「章」/ 二级「内容类型」，两级都从数据算 ──────────
+           为什么放在工具栏**上面**：先选范围（我要看哪一章）、再搜（在里面找什么），
+           与阅读顺序一致；塞进工具栏那一行会把搜索框挤窄。
+           ⚠️ 全是 `button` 而不是 tab 组件：这里没有「面板」语义，只是筛选器，
+              用 tab 会让读屏用户以为切了视图。 -->
+      <nav class="kb-nav" data-testid="kb-nav">
+        <div class="kb-nav__row">
+          <span class="kb-nav__label">章</span>
+          <button
+            type="button"
+            class="kb-nav__chip"
+            :class="{ 'is-on': activeChapter === null }"
+            :aria-pressed="activeChapter === null"
+            data-testid="kb-nav-all"
+            @click="selectChapter(null)"
+          >
+            全部<em>{{ filtered.length }}</em>
+          </button>
+          <button
+            v-for="group in chapterGroups"
+            :key="group.title"
+            type="button"
+            class="kb-nav__chip"
+            :class="{ 'is-on': activeChapter === group.title }"
+            :aria-pressed="activeChapter === group.title"
+            :data-testid="`kb-nav-chapter-${chapterOrder(group.title)}`"
+            @click="selectChapter(group.title)"
+          >
+            {{ group.title }}<em>{{ group.count }}</em>
+          </button>
+        </div>
+        <!-- 二级只在一级选中之后出现：没选章时「细分」是空的，摆出来只会让人以为坏了。 -->
+        <div v-if="activeChapter !== null" class="kb-nav__row kb-nav__row--sub">
+          <span class="kb-nav__label">细分</span>
+          <button
+            type="button"
+            class="kb-nav__chip kb-nav__chip--sub"
+            :class="{ 'is-on': activeType === null }"
+            :aria-pressed="activeType === null"
+            @click="activeType = null"
+          >
+            全部<em>{{ chapterRows.length }}</em>
+          </button>
+          <button
+            v-for="group in typeGroups"
+            :key="group.type"
+            type="button"
+            class="kb-nav__chip kb-nav__chip--sub"
+            :class="{ 'is-on': activeType === group.type }"
+            :aria-pressed="activeType === group.type"
+            @click="activeType = group.type"
+          >
+            {{ TYPE_LABEL[group.type] ?? group.type }}<em>{{ group.count }}</em>
+          </button>
+        </div>
+      </nav>
+
       <div class="toolbar">
         <el-input
           v-model="keyword"
-          placeholder="搜索知识点、章节或 kp_id"
+          :placeholder="showTechnical ? '搜索知识点、章节或 kp_id' : '搜索知识点或章节'"
           clearable
           class="toolbar__search"
         />
@@ -435,7 +630,7 @@ onMounted(() => {
       </div>
 
       <el-table
-        :data="filtered"
+        :data="visible"
         size="small"
         class="tbl"
         :border="false"
@@ -452,7 +647,15 @@ onMounted(() => {
                 最紧的一档是 **1280 + 右栏展开**（1016 内容区 → 表体 929），
                 比 1120（右栏自动收起，内容区反而 1052）更紧 —— 容易误判成「窗口越小越紧」。
              ★ 本表当前：186+176+120+176+100+80+88 = **926 ≤ 929** ✓（改列宽前重算这一条）。 -->
-        <el-table-column prop="kpId" label="kp_id" width="186" show-overflow-tooltip>
+        <!-- ★ kp_id 是**内部标识**，2026-09-30 这一页学生可见之后只在教师档显示：
+             一串 `jr-py-data-features` 对学生没有任何意义，还白白把表挤窄。 -->
+        <el-table-column
+          v-if="showTechnical"
+          prop="kpId"
+          label="kp_id"
+          width="186"
+          show-overflow-tooltip
+        >
           <template #default="{ row }">
             <code class="mono">{{ row.kpId }}</code>
           </template>
@@ -486,9 +689,18 @@ onMounted(() => {
             <span class="type">{{ TYPE_LABEL[row.contentType] ?? row.contentType ?? '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="chunkCount" label="分块" width="80" align="right" sortable />
+        <!-- ★ 分块数 / 向量状态都是**索引口径**（技术读数）：只在教师档显示。
+             学生面去掉这两列后，知识点与章节拿回宽度，读起来宽松得多。 -->
+        <el-table-column
+          v-if="showTechnical"
+          prop="chunkCount"
+          label="分块"
+          width="80"
+          align="right"
+          sortable
+        />
         <!-- 该行有没有向量：`false` 意味着这条知识点只能靠 FTS / 大纲降级命中 -->
-        <el-table-column prop="embedded" label="向量" width="88">
+        <el-table-column v-if="showTechnical" prop="embedded" label="向量" width="88">
           <template #default="{ row }">
             <el-tag size="small" effect="plain" :type="row.embedded ? 'success' : 'warning'">
               {{ row.embedded ? '已嵌入' : '未嵌入' }}
@@ -520,16 +732,41 @@ onMounted(() => {
         </template>
       </el-table>
 
-      <p class="card__note">
+      <!-- ★ 卡脚说明分档（2026-09-30）：教师面是数据口径（表名 / chunk 策略），
+           学生面只需要知道「这些内容是哪来的、有什么用、想看进度去哪儿」。 -->
+      <p v-if="showTechnical" class="card__note">
         表内每一行都是本地知识库的真实记录（`kb.sqlite` 的 kp / chunk 表），条数不写死 ——
         表头那行口径说明里的数字就是当前库里的实际条数。
         父子 chunk 策略：小子块检索、命中回父块作上下文。
+      </p>
+      <p v-else class="card__note">
+        这些内容按学段整理好了，都是智团团回答时会参考的教材。想看自己学到哪一步，
+        去「学习档案 → 章节进度」。
       </p>
     </SurfacePanel>
   </div>
 </template>
 
 <style scoped>
+/* ── 学生面（2026-09-30）────────────────────────────────────────────────
+ * 这一页从教师专属改成学生也能看之后，**读的人变了**：原来是「一眼扫过几百行」
+ * 的运维视角，现在是「看看教材里有什么」的学生视角。所以只调两件事：
+ *   · 表格的**呼吸感**（行内边距 + 正文字号）—— 学生看得慢、看得少，挤着难读；
+ *   · 统计行的分量（它是学生唯一的技术旁白，要让人看见「这里有多少东西可看」）。
+ * ★ 颜色一律不动：配色归设计系统，`check:contrast` 盯着对比度。
+ * ★ **只在学生面生效**：教师面那套密度是**有意**的（一屏尽量多行，方便核对）。
+ */
+.kb--student .tbl :deep(.el-table__cell) {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+.kb--student .tbl :deep(.cell) {
+  font-size: var(--k12-fs-body-sm);
+}
+.kb--student .kb__scope {
+  font-size: var(--k12-fs-body-sm);
+}
+
 /* ── 教师视角里的技术说明 ────────────────────────────────────────────────
  * 与栅格里的说明同档（13px / `--k12-fs-xs`）：它们是**排障读物**，不是页面正文，
  * 但也不是 ≤4 字的角标 —— 12px（`--k12-fs-micro`）只留给角标。 */
@@ -663,6 +900,73 @@ onMounted(() => {
   flex-direction: column;
   gap: 12px;
 }
+/* ── 二级导航（D-130）────────────────────────────────────────────────
+ * 两级都是**筛选器**，所以用 chip 而不是 tab：没有面板语义，不该让读屏用户以为切了视图。
+ * chip 的视觉与全站小药丸同源（surface-2 底 + 圆角 pill）；选中态用 accent 描边 + accent-soft 底 ——
+ * 「你在哪一档」是状态，不是动作，所以不填满主色（一屏一个主色填充的纪律）。 */
+.kb-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.kb-nav__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* 二级缩进一格并加一条左侧引导线：一眼看出它属于上面选中的那一章。 */
+.kb-nav__row--sub {
+  padding-left: 12px;
+  border-left: 2px solid var(--k12-border);
+}
+.kb-nav__label {
+  flex: none;
+  font-size: var(--k12-fs-caption);
+  color: var(--k12-muted);
+}
+.kb-nav__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  padding: 4px 10px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-pill);
+  background: var(--k12-surface-2);
+  color: var(--k12-fg-2);
+  font-family: inherit;
+  font-size: var(--k12-fs-caption);
+  line-height: 1.5;
+  cursor: pointer;
+  /* 章名可能很长（「第4章 大模型与AI智能体」）：单行省略，不把这一行撑高。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kb-nav__chip em {
+  flex: none;
+  font-style: normal;
+  color: var(--k12-muted);
+  font-variant-numeric: tabular-nums;
+}
+.kb-nav__chip.is-on {
+  border-color: var(--k12-accent);
+  background: var(--k12-accent-soft);
+  color: var(--k12-accent-ink);
+  font-weight: 600;
+}
+.kb-nav__chip.is-on em {
+  color: var(--k12-accent-ink);
+}
+@media (hover: hover) and (pointer: fine) {
+  .kb-nav__chip:hover {
+    border-color: var(--k12-border-strong);
+    background: var(--k12-surface-3, var(--k12-surface-2));
+  }
+}
+
 .card__head {
   display: flex;
   align-items: center;

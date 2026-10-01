@@ -486,10 +486,14 @@ test('★ 新会话：走的是 `startNewSession`，不是「清屏」（两者�
 
 test('★★ 开场引导写成 **assistant 消息**（不是 custom_message：那会变成学生说的话）', () => {
   const source = stripComments(read(RUNTIME))
-  // ⚠️ 找**实现**而不是接口声明：`appendOpeningMessage(text: string): void` 在
-  //    `ChatRuntime` 接口里也出现一次，用 `indexOf` 会命中那一处（那里没有函数体，
-  //    断言会对着一个签名做判断 —— 而签名无法证明任何行为）。
-  const at = source.indexOf('appendOpeningMessage(text: string): void {')
+  // ⚠️ 找**实现**而不是接口声明：`appendOpeningMessage(...)` 在 `ChatRuntime` 接口里
+  //    也出现一次，用 `indexOf` 会命中那一处（那里没有函数体，断言会对着一个签名做
+  //    判断 —— 而签名无法证明任何行为）。
+  // ⚠️ 锚点必须跟着签名走（2026-09-30：多了一个可选参数 `opening`，用来把开场指向的
+  //    知识点一起落盘）—— 签名改了而这里没跟上，就会退化成"找不到实现"的假红。
+  const at = source.indexOf(
+    'appendOpeningMessage(text: string, opening?: { kpId: string; kpName: string }): void {'
+  )
   assert.ok(at > 0, '找不到 appendOpeningMessage 的实现')
   const body = source.slice(at, at + 2000)
 
@@ -513,7 +517,9 @@ test('★★ 开场引导写成 **assistant 消息**（不是 custom_message：�
 
 test('★ 开场引导写入失败**不许**冒异常（那会让「新建会话」整个失败）', () => {
   const source = stripComments(read(RUNTIME))
-  const at = source.indexOf('appendOpeningMessage(text: string): void {')
+  const at = source.indexOf(
+    'appendOpeningMessage(text: string, opening?: { kpId: string; kpName: string }): void {'
+  )
   assert.ok(at > 0, '找不到 appendOpeningMessage 的实现')
   const body = source.slice(at, at + 2000)
   assert.match(body, /catch\s*\(/, '★ 必须自兜异常：写不进去只该记日志，界面那条开场语照常显示')

@@ -71,6 +71,23 @@ export function studyMistakesPath(studentId: string): string {
   return `/api/quiz/mistakes/${encodeURIComponent(studentId)}`
 }
 
+/**
+ * 学习历史端点（`GET /api/profile/{student_id}/history`，2026-09-30）。
+ *
+ * ★ 两个数字都走查询串（本页条数 / 倒序偏移），**除学生 id 外不递任何东西** ——
+ *   与其它 study 端点同一纪律：渲染进程指不了学生、也指不了别人的库。
+ * ★ 参数在这里就规范化（正整数），端点那侧还有一道 pydantic 校验（纵深防御）。
+ */
+export function studyHistoryPath(studentId: string, limit: number, offset: number): string {
+  const safeLimit = Math.max(1, Math.floor(limit))
+  const safeOffset = Math.max(0, Math.floor(offset))
+  return (
+    `/api/profile/${encodeURIComponent(studentId)}/history` +
+    `?limit=${encodeURIComponent(String(safeLimit))}` +
+    `&offset=${encodeURIComponent(String(safeOffset))}`
+  )
+}
+
 /** 章节端点（`GET /api/knowledge/chapters/{grade_level}`，带学生就补进度）。 */
 export function studyChaptersPath(gradeLevel: string, studentId?: string): string {
   const base = `/api/knowledge/chapters/${encodeURIComponent(gradeLevel)}`

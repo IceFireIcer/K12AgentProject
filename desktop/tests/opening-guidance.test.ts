@@ -137,11 +137,77 @@ test('★★ 开场引导的判据是「学生开口了没有」，不是「会�
     '★★ 文件里已经有开场白时**不许再写一遍** —— 重复写入会让历史里出现两句招呼'
   )
 
-  // ★ kpId 只在与文件里那条**逐字相同**时才给（推荐的知识点会变，而文件里那句是当时写下的）。
+  // ★★ 目标知识点优先用**落盘时一起写下的那份**（2026-09-30 修）。
+  //    旧判据只有「重新取到的那句与文件里逐字相同」—— 推荐池随画像变化，
+  //    重启后重取的那句经常不同，于是按钮被撤掉、卡片上只剩一句点不动的邀请。
   assert.match(
     body,
-    /openingKpId:\s*fetched\.text === stored \? fetched\.kpId : ''/,
-    '★ 开场语与文件里那条对不上时必须撤掉动作按钮（宁可没有按钮，也不让卡片上的字与历史里的字不一致）'
+    /const persisted = storedOpeningKp\(instance\.restoredMessages\)/,
+    '★ 必须先从会话文件里取落盘的目标知识点（否则重启后按钮又会因为文案变了而消失）'
+  )
+  assert.match(
+    body,
+    /fetched\.text === stored \? fetched : null/,
+    '★ 老会话（没有落盘元数据）仍走「逐字相同」判据 —— 不猜、不编'
+  )
+  assert.match(
+    body,
+    /openingKpId:\s*persisted\?\.kpId\s*\?\?\s*fresh\?\.kpId\s*\?\?\s*''/,
+    '★ 取用优先级：落盘 > 逐字相同 > 空（都对不上才撤按钮）'
+  )
+  assert.match(
+    body,
+    /openingKpName:\s*persisted\?\.kpName\s*\?\?\s*fresh\?\.kpName\s*\?\?\s*''/,
+    '★★ 名字与 id 同进同退（D-072）：拿不到目标时两个都不给'
+  )
+})
+
+test('★★ 开场白的目标知识点跟着消息落盘（恢复时不再靠文案比对）', async () => {
+  // ── ① 写入侧：接口要收、消息里要真的写进去、调用方要真的递进去 ──
+  const runtime = read('src/main/agent/runtime.ts')
+  assert.match(
+    runtime,
+    /appendOpeningMessage\(text: string, opening\?: \{ kpId: string; kpName: string \}\)/,
+    '★ `appendOpeningMessage` 必须接受「这句开场指向哪个知识点」'
+  )
+  assert.match(
+    runtime,
+    /k12Opening: \{ kpId: opening\.kpId, kpName: opening\.kpName \}/,
+    '★ 目标必须真的写进那条 session 消息（Pi 的 appendMessage 原样存对象）'
+  )
+  const handlers = stripComments(read(HANDLERS))
+  assert.match(
+    handlers,
+    /appendOpeningMessage\(fetched\.text, \{ kpId: fetched\.kpId, kpName: fetched\.kpName \}\)/,
+    '★ 调用方必须把目标一起递进去 —— 只写文本等于没修'
+  )
+
+  // ── ② 读取侧：真跑 `projectTranscript`（纯函数），元数据原样读回；坏数据整条不认 ──
+  const { projectTranscript } = await import('../src/main/study/sessions.ts')
+  const base = {
+    type: 'message',
+    id: 'e1',
+    timestamp: '2026-09-30T00:00:00.000Z',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: '你好，我是智团团。要不我们从变量聊起？' }],
+      k12Opening: { kpId: 'prog-variable-jr', kpName: '变量：给数据起名字' }
+    }
+  }
+  const projected = projectTranscript([base]).messages
+  assert.deepEqual(projected[0]?.openingKp, {
+    kpId: 'prog-variable-jr',
+    kpName: '变量：给数据起名字'
+  })
+  // 坏元数据 / 老会话：一律不认（`undefined`）—— 调用方据此退回「逐字相同」判据，绝不猜
+  for (const bad of [{ kpName: '甲' }, { kpId: '' }, { kpId: 42 }, 'x', null]) {
+    const one = projectTranscript([{ ...base, message: { ...base.message, k12Opening: bad } }]).messages
+    assert.equal(one[0]?.openingKp, undefined, `坏元数据必须整条不认：${JSON.stringify(bad)}`)
+  }
+  const legacy = projectTranscript([
+    { ...base, message: { role: 'assistant', content: [{ type: 'text', text: '你好' }] } }
+  ]).messages
+  assert.equal(legacy[0]?.openingKp, undefined, '老会话没有这份元数据 → 不认（退回逐字判据）'
   )
 })
 

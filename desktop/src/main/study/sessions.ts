@@ -30,6 +30,7 @@
  */
 
 import type { SessionInfo } from '@earendil-works/pi-coding-agent'
+import type { PayloadKind } from '@shared/ipc-events'
 // ★ `isInside` 是纯路径判定（只用 `node:path`），所以可以静态引入 ——
 //   它把「这条路径真的在当前学生的会话目录里吗」收口成一个可单测的纯函数，
 //   **删除会话**（本项目唯一的破坏性文件操作）靠的正是它。
@@ -54,6 +55,37 @@ export interface SessionSummary {
 /** 一条会话消息（投影后的形态，渲染进程直接渲染）。 */
 export interface TranscriptMessage {
   role: 'user' | 'assistant'
+  /**
+   * ★★ 开场白指向的知识点（只有「开场引导」那条消息会带）。
+   *
+   * 为什么把它**写进会话文件**（2026-09-30 修）：开场引导的动作按钮要指向一个知识点，
+   * 而恢复会话时原先只能靠「重新取到的开场语与文件里那句**逐字相同**」来认它 ——
+   * 推荐池随画像变化，重启后重取的那句往往不同（模板说法 + 随机知识点都会变），
+   * 于是按钮被撤掉：卡片上留着一句「要不我们从 X 聊起？」却点不动。
+   * 现在写入时把目标一起落在消息里，恢复时**直接读**，不再依赖文案比对。
+   * 老会话没有这份元数据 → 退回原来的逐字判据（不猜、不编）。
+   */
+  openingKp?: { kpId: string; kpName: string }
+  /**
+   * ★★ 这条**助手回答**当时带来的卡片（2026-09-30 用户裁决：全部卡片都要能恢复）。
+   *
+   * 从哪来：`runtime.ts` 在轮次收尾把本轮的 `payload` 卡片写进一条 `custom` 条目
+   * （`customType: 'k12.cards'`），这里把那条条目**挂回助手消息**上。
+   *
+   * 为什么按 id 挂而不按顺序：Pi 的条目流里还混着 `model_change` /
+   * `thinking_level_change` / 开场引导 等条目，而失败或被拦下的轮次**不留助手条目** ——
+   * 「第几条」与「第几轮」会漂（本文件里已有同类的教训）。写入口落的是助手条目 id，
+   * 认不出时才退回「条目之前最近的一条助手消息」，那只是兜底、不是主判据。
+   *
+   * ★ 动画卡也在这条路上（用户裁决）：卡片是**当时交互的产物**，回看要能再看见；
+   *   动画的**重放策略**由渲染层决定（它按 kind 重新取资源），主进程只负责把当时那份
+   *   payload 原样还回去 —— 不在投影层解释它、也不改写它。
+   *
+   * ⚠️ 结构不对 / `kind` 不在白名单里的一律**跳过**（宁可少一张卡）：白名单就是
+   *   `ipc/tool-kinds.ts` 那张表的值 —— 与「发 `payload` 事件」查的是同一张表，
+   *   所以「能发出来的」与「能恢复的」恒等，不另写第三份。
+   */
+  cards?: Array<{ kind: PayloadKind; payload: unknown }>
   text: string
   /** Unix 毫秒（来自 entry 的 timestamp） */
   at: number
@@ -105,6 +137,71 @@ export function truncateChars(text: string, maxChars: number): string {
 }
 
 /**
+ * ★★ 机器 wire 标签的还原（**纯函数**；判据 v2，2026-09-30）。
+ *
+ * 为什么必须有（2026-09-30 真机实测）：从学习地图点「开始学习」时，界面会替学生发出一条
+ * **机器文本**，它第一行形如「【学习计划】kp_id=…」，于是这条文本成了会话的**首条
+ * user 消息**。Pi 在会话还没有名字时会拿首条消息当标题 —— 列表上就直接印出了这串
+ * 本来就只该发给模型的标记（学生会看到「【学习计划】kp_i…」）。同类首行还有
+ * 「【练习检验】」「【编程求助】」。
+ *
+ * ★ 判据**只看形状，不看语义，也不引入任何前缀白名单**（白名单要主进程抄一份渲染层的
+ *   常量，将来新增前缀还得回来改主进程；而形状判据对未来新前缀自动生效）。
+ *   第一行必须同时满足：
+ *     · 形状：「【」开头、「】」收尾，标签 1~12 字；
+ *     · 并命中下面两条机器特征之一：
+ *       ① 含 `kp_id=` 或 `kpId=`（【学习计划】/【练习检验】这类 wire 都带它）；
+ *       ② 含一对角括号包起来的**机器 id 形状** `「[A-Za-z0-9][A-Za-z0-9._-]{2,}」`
+ *          （纯 ASCII、无空格无汉字，例如编程求助的真实首行
+ *          `【编程求助】我在做「prog-loop-jr」这道题，卡住了…`）。
+ *
+ * ★ 为什么可以这么放宽：
+ *   · 学生自己打的「【学习计划】我想自己学」「【重要】记得复习」两条特征都不含 → 原样，
+ *     一个字不改；角括号里写成汉字（「循环结构」）同样不命中；
+ *   · 命中也只改**列表标题这一段显示文本** —— 磁盘上的会话、发给模型的原文一个字节不动，
+ *     最坏情况是把标签当成标题，属**外观级**代价；
+ *   · ⚠️ 已知边界（不假装不存在）：学生**原样引用我们的特征 token** 时会被当成标签
+ *     （手打「【笔记】看 kp_id= 那段」）—— 判据认不出「谁写的」。这条在测试里有显式断言。
+ *
+ * 返回标签本身（如「学习计划」）；认不出返回空串，由调用方**原样保留**。
+ */
+export function wireLabelOf(text: string): string {
+  const firstLine = (text ?? '').split('\n', 1)[0].trim()
+  // 先认特征再取标签：普通学生文本里的「【…】」不该被白白匹配一遍。
+  const hasKpField = /(?:kp_id=|kpId=)/.test(firstLine)
+  const hasMachineId = /「[A-Za-z0-9][A-Za-z0-9._-]{2,}」/.test(firstLine)
+  if (!hasKpField && !hasMachineId) return ''
+  return /^【([^【】]{1,12})】/.exec(firstLine)?.[1] ?? ''
+}
+
+/**
+ * 会话标题的**唯一实现**（列表标题、搜索命中标题、主进程写标题三处共用）。
+ *
+ * 优先级写死：**有名字（LLM 生成 / 会话命名）就用名字**；没有才退回首条消息，
+ * 而退回首条消息时**必须先过 `wireLabelOf`** —— 否则机器标记会从这一条缝漏到标题上。
+ * 两者都没有时保留原来的占位「（空会话）」。
+ */
+export function sessionTitleFrom(
+  name: string | undefined,
+  firstMessage: string | undefined,
+  maxChars: number = TITLE_MAX_CHARS
+): string {
+  const explicit = (name ?? '').replace(/\s+/g, ' ').trim()
+  if (explicit) return truncateChars(explicit, maxChars)
+  return truncateChars(firstMessageBody(firstMessage) || '（空会话）', maxChars)
+}
+
+/**
+ * 首条消息在**学生眼前那一行**的投影（标题与列表预览共用，避免两处口径漂移）。
+ * 空串保持空串 —— 预览允许为空（会话刚建、还没说话）；标题的空由调用方给占位。
+ */
+function firstMessageBody(firstMessage: string | undefined): string {
+  const raw = (firstMessage ?? '').replace(/\s+/g, ' ').trim()
+  if (!raw) return ''
+  return wireLabelOf(firstMessage ?? '') || raw
+}
+
+/**
  * 把 Pi 的 `SessionInfo[]` 投影成界面用的摘要列表（**纯函数**）。
  *
  * 排序：**最后修改时间倒序**（最近用过的在最上面）。平局按 id 兜底 ——
@@ -114,16 +211,14 @@ export function projectSessionList(infos: SessionInfo[]): SessionSummary[] {
   return infos
     .map((info) => ({
       id: info.id,
-      // ★ 标题优先取 Pi 的 name（会话命名功能写入的），否则退回首条消息。
-      //   两者都没有就显示一句占位，**不要**把 path 当标题（那会把宿主目录结构带到界面上）。
-      title: truncateChars(
-        (info.name || info.firstMessage || '').replace(/\s+/g, ' ').trim() || '（空会话）',
-        TITLE_MAX_CHARS
-      ),
+      // ★ 标题与预览都走**同一处投影**（`sessionTitleFrom` / `firstMessageBody`）：
+      //   name 优先；退回首条消息时先还原机器 wire 标签 —— 否则列表上会直接印出
+      //   那串只该发给模型的标记。两者都没有才显示占位，**不要**把 path 当标题。
+      title: sessionTitleFrom(info.name, info.firstMessage),
       messageCount: info.messageCount,
       modifiedAt: toMs(info.modified),
       createdAt: toMs(info.created),
-      preview: truncateChars((info.firstMessage || '').replace(/\s+/g, ' ').trim(), PREVIEW_MAX_CHARS)
+      preview: truncateChars(firstMessageBody(info.firstMessage), PREVIEW_MAX_CHARS)
     }))
     .sort((a, b) => b.modifiedAt - a.modifiedAt || a.id.localeCompare(b.id))
 }
@@ -357,10 +452,20 @@ export function projectTranscript(
 ): { messages: TranscriptMessage[]; truncated: number } {
   const limit = options.limit ?? MAX_TRANSCRIPT_MESSAGES
   const messages: TranscriptMessage[] = []
+  /** 还没挂到消息上的卡片条目（见 {@link attachCards}）。 */
+  const pendingCards: PendingCards[] = []
   for (const entry of entries) {
+    // ★ `k12.cards` 这类 `custom` 条目**不是对话**：只把卡片收下，绝不产生可见消息 ——
+    //   产出的话，回看里会多出一条没有正文的空白问答。
+    const cards = readCardsEntry(entry)
+    if (cards !== null) {
+      pendingCards.push({ ...cards, afterMessageIndex: messages.length })
+      continue
+    }
     const projected = projectEntry(entry)
     if (projected) messages.push(projected)
   }
+  attachCards(messages, pendingCards)
   if (messages.length <= limit) return { messages, truncated: 0 }
   // ★ 保留**最近**的 limit 条（学生回看通常关心最后聊了什么）
   return { messages: messages.slice(messages.length - limit), truncated: messages.length - limit }
@@ -377,6 +482,7 @@ function projectEntry(entry: unknown): TranscriptMessage | null {
   if (role !== 'user' && role !== 'assistant') return null
   const text = extractText(message.content)
   if (!text) return null
+  const openingKp = readOpeningKp(message)
   return {
     role,
     text,
@@ -384,8 +490,121 @@ function projectEntry(entry: unknown): TranscriptMessage | null {
     // ★ 缺 id 的条目用空串（老版本会话或手改过的文件）：空 id 会在分支时被挡住，
     //   而不是拿一个 `undefined` 去问 Pi（那会抛 `Entry undefined not found`）。
     entryId: typeof raw.id === 'string' ? raw.id : '',
-    entryType: raw.type
+    entryType: raw.type,
+    ...(openingKp === null ? {} : { openingKp })
   }
+}
+
+/** `custom` 条目里那份卡片载荷的 `customType`（写入口在 `runtime.ts` 的 `persistTurnCards`）。 */
+const CARDS_CUSTOM_TYPE = 'k12.cards'
+
+/**
+ * 卡片 `kind` 的白名单（**读回历史时的独立判据**）。
+ *
+ * ★ 为什么不 import 主进程那张 Tool→kind 映射表：架构守卫 G10 钉着「那张表的名字
+ *   只能出现在它自己的文件里」（连注释里提到都算违规）—— 这里改为从**契约类型**
+ *   直接展开，效果等价，且不新增一条跨模块依赖。
+ * ★ 用 Record 而不是数组是刻意的：契约以后新增一个 kind，这里会因为**缺键**
+ *   当场编译不过 —— 把「忘了同步」从「界面静默少一张卡」变成红的。
+ */
+const KNOWN_PAYLOAD_KIND_FLAGS: Record<PayloadKind, true> = {
+  animation: true,
+  coding: true,
+  quiz: true
+}
+const KNOWN_PAYLOAD_KINDS: ReadonlySet<string> = new Set(Object.keys(KNOWN_PAYLOAD_KIND_FLAGS))
+
+/** 一条待挂载的卡片条目。 */
+interface PendingCards {
+  /** 写入口记下的助手条目 id；缺 / 认不出时是空串（那时退回位置判据）。 */
+  entryId: string
+  cards: Array<{ kind: PayloadKind; payload: unknown }>
+  /** 这条 `custom` 条目出现时**已经投影出**的消息条数（= 它后面那条消息的下标）。 */
+  afterMessageIndex: number
+}
+
+/** `custom` 条目的结构（只读我们关心的三个字段，其余一律不信任）。 */
+interface RawCustomEntry {
+  type?: unknown
+  customType?: unknown
+  data?: unknown
+}
+
+/**
+ * 一条 `custom` 条目 → 卡片清单（认不出 / 结构不对 / 一张有效卡都没有 → `null`）。
+ *
+ * ★ 判据**窄**：只认 `customType === 'k12.cards'`；`cards` 必须是数组；每一项的 `kind`
+ *   必须在白名单里、`payload` 必须是对象。任何一条不满足就**跳过它** —— 宁可少一张卡，
+ *   也不要往界面塞一张渲染不出来的空卡（与渲染侧 `restoredCards` 同一个口径）。
+ */
+function readCardsEntry(
+  entry: unknown
+): { entryId: string; cards: Array<{ kind: PayloadKind; payload: unknown }> } | null {
+  if (typeof entry !== 'object' || entry === null) return null
+  const raw = entry as RawCustomEntry
+  if (raw.type !== 'custom' || raw.customType !== CARDS_CUSTOM_TYPE) return null
+  if (typeof raw.data !== 'object' || raw.data === null) return null
+  const data = raw.data as { entryId?: unknown; cards?: unknown }
+  const cards = readCardList(data.cards)
+  if (cards.length === 0) return null
+  return { entryId: typeof data.entryId === 'string' ? data.entryId : '', cards }
+}
+
+/** 卡片数组的结构检查（窄判据见 {@link readCardsEntry}）。 */
+function readCardList(value: unknown): Array<{ kind: PayloadKind; payload: unknown }> {
+  if (!Array.isArray(value)) return []
+  const out: Array<{ kind: PayloadKind; payload: unknown }> = []
+  for (const item of value) {
+    if (typeof item !== 'object' || item === null) continue
+    const record = item as { kind?: unknown; payload?: unknown }
+    if (typeof record.kind !== 'string' || !KNOWN_PAYLOAD_KINDS.has(record.kind)) continue
+    if (typeof record.payload !== 'object' || record.payload === null) continue
+    out.push({ kind: record.kind as PayloadKind, payload: record.payload })
+  }
+  return out
+}
+
+/**
+ * 把卡片挂到对应的**助手消息**上（就地改 `messages`）。
+ *
+ * ★ 主判据是 `entryId` 精确匹配（写入口落的就是它）—— **不按顺序猜**：Pi 的条目流里
+ *   混着 `model_change` / `thinking_level_change` / 开场引导，失败或被拦下的轮次也不留
+ *   助手条目，「第几条」会漂。
+ * ★ 兜底：写入口认不出助手条目时**不编** id，那时才用「这条 `custom` 之前最近的一条
+ *   助手消息」—— 诚实地说这是位置判据，只在同一条会话的同一段里成立。
+ */
+function attachCards(messages: TranscriptMessage[], pending: readonly PendingCards[]): void {
+  for (const item of pending) {
+    let index = -1
+    if (item.entryId !== '') {
+      index = messages.findIndex((message) => message.entryId !== '' && message.entryId === item.entryId)
+    }
+    if (index < 0) {
+      const before = item.afterMessageIndex - 1
+      if (before >= 0 && messages[before]?.role === 'assistant') index = before
+    }
+    const target = index >= 0 ? messages[index] : undefined
+    if (!target || target.role !== 'assistant') continue
+    // ★ 同一条助手消息可能有多批卡片（分次写入）：**合并**而不是互相覆盖。
+    target.cards = [...(target.cards ?? []), ...item.cards]
+  }
+}
+
+/**
+ * 读开场白那条消息里附带的**目标知识点**（`k12Opening`）。
+ *
+ * ★ 结构检查、不信任任何字段：`kpId` 必须是非空字符串，`kpName` 缺了就空串
+ *   （界面在名字为空时退回含糊说法，绝不把 slug 印给学生）。
+ * ★ 认不出就返回 `null` —— 这是「老会话 / 手改过的文件」的正常形态，
+ *   调用方据此退回逐字判据，而不是拿半个元数据去猜。
+ */
+function readOpeningKp(message: Record<string, unknown>): { kpId: string; kpName: string } | null {
+  const raw = message['k12Opening']
+  if (typeof raw !== 'object' || raw === null) return null
+  const record = raw as Record<string, unknown>
+  const kpId = typeof record['kpId'] === 'string' ? record['kpId'].trim() : ''
+  const kpName = typeof record['kpName'] === 'string' ? record['kpName'].trim() : ''
+  return kpId === '' ? null : { kpId, kpName }
 }
 
 /** 从 message.content 里抽纯文本（字符串直取；数组只取 `type === 'text'` 的块）。 */
@@ -502,7 +721,8 @@ export function searchSessions(
     if (at < 0) continue
     hits.push({
       id: info.id,
-      title: truncateChars((info.name || info.firstMessage || '（空会话）').trim(), TITLE_MAX_CHARS),
+      // 与列表标题同一条投影（搜索结果里同样不该出现机器标记）。
+      title: sessionTitleFrom(info.name, info.firstMessage),
       snippet: snippetAround(haystack, at, needle.length),
       modifiedAt: toMs(info.modified)
     })
