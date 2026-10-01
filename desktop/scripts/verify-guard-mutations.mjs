@@ -73,8 +73,11 @@ const MUTATIONS = [
   {
     name: '② slug 扫描：让学生看到 kp_id',
     file: 'src/renderer/src/views/Quiz.vue',
-    find: "const UNNAMED_POINT = '未命名知识点'",
-    replace: "const UNNAMED_POINT = 'ai-definition-jr'",
+    // ⚠️ 锚点跟着 2026-09-30 的左侧二级导航改造走：原来的 `UNNAMED_POINT` 常量
+    //    随「显示名统一走 kpLabel()」一起删了 —— 这里改用**页面上真实可见的那句空态文案**，
+    //    学生可见文本里出现 slug 形态的串时，扫描器必须报出来。
+    find: '还没有可以闯的关卡，教材内容准备好之后这里会一关一关地排出来。',
+    replace: '还没有可以闯的关卡（ai-definition-jr），教材内容准备好之后这里会一关一关地排出来。',
     expect: '不得出现原始 kp slug'
   },
   {
@@ -87,11 +90,15 @@ const MUTATIONS = [
     expect: '默认视角必须是学生'
   },
   {
-    name: '④ 知识库页：把 nav 改回 true（学生又看得到运维页）',
+    name: '④ 教师专属页：把 nav 改成恒可见（学生侧栏又冒出运维页）',
     file: 'src/renderer/src/stores/ui.ts',
+    // ⚠️ 2026-09-30 起「参考资料库」是**学生可见**页（`nav: true`）—— 这条变异现在改的是
+    //    仅剩的教师专属页「运行透视」，`expect` 也随之改为当下真实的用例名。
+    //    旧名（「参考资料库是教师专属页」）已经**匹配不到任何用例** → 0 个用例 = 绿的，
+    //    这条变异就静默失效了（本轮 guards:mutation 就是这么把它报出来的）。
     find: "    nav: 'teacher',",
     replace: '    nav: true,',
-    expect: '参考资料库是教师专属页'
+    expect: '上面那些判据必须'
   },
   {
     name: '⑤ CTA：把闯关页主提交键的类名换成本地皮肤',
@@ -128,7 +135,7 @@ const MUTATIONS = [
   {
     name: '⑨ 提交键：答对后仍允许「再提交一次」',
     file: 'src/renderer/src/cards/QuizCard.vue',
-    find: "return result.correct ? '已完成' : '再试一次'",
+    find: "return item.result.correct ? '已完成' : '再试一次'",
     replace: "return result === null ? '提交这题' : '再提交一次'",
     expect: '答对后提交键必须是禁用的'
   },
@@ -157,8 +164,10 @@ const MUTATIONS = [
   {
     name: '⑬ 豁免的凭据：把技术词挪进**学生**那一节（豁免是按文件给的，理由却是「只在高级区」）',
     file: 'src/renderer/src/views/Settings.vue',
-    find: '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">',
-    replace: '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">\n        <!-- 变异：假装这里多了一句给学生看的运维说明 -->\n        <p>端口号 8756，向量维度 512</p>',
+    // ⚠️ 锚点含这一行的**完整属性**（2026-09-30 漂过一次：卡片玻璃光效给这行加了 `shine`）——
+    //    再给它加属性时这里要同步，否则变异不生效、这条守卫就变成了没被验证的。
+    find: '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block" shine>',
+    replace: '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block" shine>\n        <!-- 变异：假装这里多了一句给学生看的运维说明 -->\n        <p>端口号 8756，向量维度 512</p>',
     expect: '豁免必须名副其实'
   },
   {
@@ -398,8 +407,10 @@ const MUTATIONS = [
     name: '㊵ 产物累积口子重开：撤掉 renderer 的 emptyOutDir（历史 chunk 又留在产物目录里）',
     testFile: 'tests/bundle-budget.test.ts',
     file: 'electron.vite.config.ts',
-    find: 'build: { emptyOutDir: true },',
-    replace: 'build: {},',
+    // ★ 锚点跟随 electron.vite.config.ts 的多行排版（2026-09-28 重校）：
+    //   原先写死单行 'build: { emptyOutDir: true },'，配置一旦排版就再也匹配不上。
+    find: '    build: {\n      emptyOutDir: true,',
+    replace: '    build: {',
     expect: 'G24-7'
   },
 
@@ -527,8 +538,9 @@ const MUTATIONS = [
   {
     name: '51 排版标记：把 `**加粗**` 写进学生可见文案（裸插值路径原样上屏）',
     file: 'src/renderer/src/views/Quiz.vue',
-    find: "const UNNAMED_POINT = '未命名知识点'",
-    replace: "const UNNAMED_POINT = '**未命名**知识点'",
+    // 锚点同 ②：跟着 2026-09-30 的二级导航改造，换成页面上真实可见的那句空态文案。
+    find: '还没有可以闯的关卡，教材内容准备好之后这里会一关一关地排出来。',
+    replace: '**还没有**可以闯的关卡，教材内容准备好之后这里会一关一关地排出来。',
     expect: '未渲染的 Markdown 标记'
   },
   {
@@ -541,9 +553,10 @@ const MUTATIONS = [
   {
     name: '53 例外的凭据：把高级区那处破折号搬进**学生那一节**（按文件豁免会假绿）',
     file: 'src/renderer/src/views/Settings.vue',
-    find: '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">',
+    // ⚠️ 与 ⑬ 同一个锚点（同一行），改一处要两处一起改。
+    find: '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block" shine>',
     replace:
-      '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block">\n        <!-- 变异：学生那一节多了一句带破折号的说明 -->\n        <p>学段与章节随时可以换 —— 之前学过的记录都还在</p>',
+      '<SurfacePanel class="card" data-section="grade" data-testid="settings-grade-block" shine>\n        <!-- 变异：学生那一节多了一句带破折号的说明 -->\n        <p>学段与章节随时可以换 —— 之前学过的记录都还在</p>',
     expect: '例外表必须名副其实'
   },
   {
@@ -721,8 +734,10 @@ const MUTATIONS = [
   {
     name: '69 教材引用：把折叠块改成默认展开（那一堆引用又铺满屏幕）',
     file: 'src/renderer/src/components/ChatMessage.vue',
-    find: '<details v-if="turn.citations.length > 0" class="cites" data-testid="citation-disclosure">',
-    replace: '<details open v-if="turn.citations.length > 0" class="cites" data-testid="citation-disclosure">',
+    // ★ 锚点跟随 ChatMessage.vue 的多行排版（2026-09-28 重校）：
+    //   原先写死单行，而 <details> 的属性早已各占一行 —— 锚点从写下那天起就没匹配过。
+    find: '<details\n            v-if="turn.citations.length > 0"\n            class="cites"',
+    replace: '<details\n            open\n            v-if="turn.citations.length > 0"\n            class="cites"',
     testFile: 'tests/citation-collapse.test.ts',
     expect: '教材引用默认收起'
   },
@@ -852,12 +867,16 @@ const MUTATIONS = [
     expect: '题体唯一渲染源是 visibleRows'
   },
   {
-    name: '85 进度卡：消息层不再独立渲染（退回「进度卡挂在题卡里」的世界）',
+    // ★ 2026-09-30（D-123）：进度卡**整个搬出对话**之后，这条变异也跟着换了方向 ——
+    //   旧写法是「把独立渲染关掉」（锚点 hasLevels，已不存在），
+    //   新写法是「再往卡片组里塞一张进度卡」：守卫现在钉的是**不得出现** ProgressCard。
+    name: '85 进度卡：把进度卡塞回对话（D-123 之后的禁止项）',
     file: 'src/renderer/src/components/ChatMessage.vue',
-    find: 'v-if="hasLevels(card)"',
-    replace: 'v-if="false"',
+    find: '<InlineCard v-for="card in turn.cards" :key="card.id" :card="card" />',
+    replace:
+      '<InlineCard v-for="card in turn.cards" :key="card.id" :card="card" /><ProgressCard :payload="card.payload" />',
     testFile: 'tests/card-single-question.test.ts',
-    expect: '进度卡不再嵌在练习卡里'
+    expect: '进度卡'
   },
   {
     name: '86 练习卡：把「下一题」的可用条件摘掉（没答对也能往下走）',

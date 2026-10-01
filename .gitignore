@@ -82,3 +82,9 @@ preset-content/_meta/shots/
 # === 真机探针的失败截图（报告 §5.3：失败自动截图留现场）===
 # ★ 只在断言变红时产生，跑一次体检可能出几十张 PNG；现场用来排查，不入库。
 desktop/.probe-artifacts/
+
+# === 报告插图工作区（mmd 源 + 渲染出的 PNG）===
+# ★ 本地素材区：功能/机制/架构的 Mermaid 图与截图放这里，专门给写报告时插图用。
+#   生成脚本在 architecture/_src/（architecture/ 本身也被 .git/info/exclude 排除）。
+#   图片是**产物**不是源码：每次重渲染都会重建，入库只是体积噪声。
+temp/

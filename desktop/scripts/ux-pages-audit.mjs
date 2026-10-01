@@ -138,7 +138,7 @@ function check(page, what, ok, detail = '', why = '') {
  *   自己切过「全部铺开」都会让默认档那条断言假红。跑完再切回默认档，别把偏好留在体检档。
  */
 async function auditQuizLayout(cdp) {
-  const label = '闯关挑战'
+  const label = '个性化学习'
   const probe = `(() => {
     const questions = document.querySelectorAll('[data-testid^="quiz-question-"]')
     const steps = document.querySelectorAll('[data-testid^="quiz-step-"]')
@@ -410,7 +410,7 @@ async function main() {
   //    （应用默认就是学生视角，且脚本不改视角），所以清单里不能有它 ——
   //    列了它会红成「侧栏找不到这个入口」，那是**跑法不对**而不是产品坏了。
   //    （那一页的教师侧体检由 `ux-layout-audit.mjs` 或人工走查看；它不进学生路径。）
-  const pages = ['动画讲解', '编程环境', '闯关挑战', '学习记录', '知识图谱', '设置']
+  const pages = ['动画讲解', '智码工坊', '个性化学习', '学习记录', '知识图谱', '设置']
 
   // ★★ 先把两栏展开（2026-09-22）：两栏默认收起（`stores/panels.ts`），收起时是
   //    `display: none`；本脚本逐页量版式，左栏（历史对话）在对话页参与布局 ——
@@ -438,7 +438,7 @@ async function main() {
     const st = await auditPage(cdp, label)
     summary.push({ label, textLen: st.textLen, clickable: st.clickableCount })
     // 闯关页多量一格：默认「一次一张」（这一页的行为不是通用体检能覆盖的）
-    if (label === '闯关挑战') await auditQuizLayout(cdp)
+    if (label === '个性化学习') await auditQuizLayout(cdp)
   }
 
   // 回对话页：练习卡的两格（单题渲染 / 进度卡外置）只在有卡片时量得到

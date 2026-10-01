@@ -46,6 +46,11 @@ files:
   #   ⚠️ `resources/brand/**` **必须留** —— 主进程的窗口图标亲自读它（`src/main/index.ts` 的 icon）。
   #   规矩：`resources/` 下只放**主进程亲自读**的东西；给渲染进程的资源由 vite 从 publicDir 拷。
   - '!resources/pyodide/**'
+  # ★ 字体许可副本（OFL）：vite 的 publicDir 已经把 `resources/licenses/` 整份拷进
+  #   `out/renderer/licenses/`（随包发出去 —— SIL OFL 1.1 要求「许可随字体一起分发」）。
+  #   这里再收一份是纯重复，判据与 pyodide 同：**没有任何代码读 resources/licenses/**。
+  #   守卫：tests/bundle-budget.test.ts 的 G24-8、tests/font-license.test.ts。
+  - '!resources/licenses/**'
   # ── 按架构分发（票 03）──
   # npm 把**所有平台**的可选原生包都装了下来（实测：`@esbuild/win32-arm64/esbuild.exe`
   # 10,404,864 B、`@mariozechner/clipboard-*` 11 个平台包 ≈ 14MB），与本机 win32-x64 无关。

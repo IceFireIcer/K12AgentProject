@@ -607,7 +607,8 @@ const PAGE_PROBE = `(() => {
     hasChatLog: !!document.querySelector('[data-testid="chat-log"]'),
     hasComposer: !!document.querySelector('[data-testid="composer-input"]'),
     hasSendButton: !!document.querySelector('[data-testid="composer-send"]'),
-    hasViewEntry: !!document.querySelector('[data-testid="view-entry"]'),
+    // ★ 2026-10-01（D-126）：顶栏那个三步循环按钮（view-entry）已删除，导航改看**侧栏**。
+    hasSidebarNav: !!document.querySelector('aside button, nav button'),
     hasStudyView: !!document.querySelector('[data-testid="study-view"]'),
     statusText: el && el.textContent ? el.textContent.trim().replace(/\\s+/g, '') : '',
     statusPhase: el ? el.getAttribute('data-phase') || '' : '',
@@ -634,21 +635,32 @@ if (!probe || typeof probe !== 'object') {
  * 下面 B 层的布局断言（chat-area / chat-log / composer）以及 C 层的「顶栏按钮循环」
  * （对话 → 学习档案 → 设置 → 对话）都假定应用此刻停在对话页。如果上一轮手工探针或
  * 别的证据采集把界面留在设置页，这个假定就静默不成立：布局断言报「找不到 chat-area」，
- * 之后的循环点击还会因为读不到 view-entry 直接抛异常 —— 两条**看起来像产品坏了**的失败，
+ * 之后的导航点击还会因为点不到侧栏项而失败 —— 两条**看起来像产品坏了**的失败，
  * 实际只是起点不对。所以这里先把它转回对话页再说。
  *
  * 最多点 3 次（循环一圈就是三站：对话 → 学习档案 → 设置 → 对话）；点不动就如实记下来，
  * 不假装成功 —— 那属于真问题（顶栏接线断了）。
  */
+/**
+ * 侧栏导航：按**页面标题**点（对话页标题是「问问智团团」，与 `stores/ui.ts` 的 `PAGES.title` 一致）。
+ *
+ * ★ 2026-10-01（D-126）：这里原来点的是顶栏那个三步循环按钮（`view-entry`），
+ *   用户裁决把那个按钮删了 —— 探针改成按标题点侧栏，导航能力本身没有丢。
+ */
+const clickNav = (title) =>
+  `(() => {
+    const btn = Array.from(document.querySelectorAll('aside button, nav button')).find((el) =>
+      (el.innerText || '').trim().startsWith(${JSON.stringify(title)})
+    )
+    if (!btn) return false
+    btn.click()
+    return true
+  })()`
+
 if (!probe.hasChatArea) {
   let recovered = false
   for (let attempt = 0; attempt < 3 && !recovered; attempt += 1) {
-    const clicked = await evaluate(`(() => {
-      const entry = document.querySelector('[data-testid="view-entry"]')
-      if (!entry) return false
-      entry.click()
-      return true
-    })()`)
+    const clicked = await evaluate(clickNav('问问智团团'))
     if (clicked !== true) break
     await new Promise((resolve) => setTimeout(resolve, 250))
     recovered = await evaluate(`(() => !!document.querySelector('[data-testid="chat-area"]'))()`)
@@ -704,17 +716,17 @@ check(
 )
 
 check(
-  '对话优先布局到位（对话区 / 消息区 / 输入框 / 发送按钮 / 视图切换入口）',
-  probe.hasChatArea && probe.hasChatLog && probe.hasComposer && probe.hasSendButton && probe.hasViewEntry,
-  `chat-area=${probe.hasChatArea}，chat-log=${probe.hasChatLog}，composer=${probe.hasComposer}，send=${probe.hasSendButton}，view-entry=${probe.hasViewEntry}`
+  '对话优先布局到位（对话区 / 消息区 / 输入框 / 发送按钮 / 侧栏导航）',
+  probe.hasChatArea && probe.hasChatLog && probe.hasComposer && probe.hasSendButton && probe.hasSidebarNav,
+  `chat-area=${probe.hasChatArea}，chat-log=${probe.hasChatLog}，composer=${probe.hasComposer}，send=${probe.hasSendButton}，sidebar-nav=${probe.hasSidebarNav}`
 )
 
-// ★ 顶栏按钮按「对话 → 学习档案 → 设置 → 对话」循环（顺序的唯一来源是 `stores/ui.ts`）。
-//   这里真的点两下走完整圈，并断言每一站都到位 —— 只看按钮在不在，
-//   抓不住「点了没反应」那种断线（顶栏按钮的 handler 曾整条漏接）。
+// ★ 三态导航走一遍「对话 → 学习档案 → 设置 → 对话」，并断言每一站都到位。
+//   ★ 2026-10-01（D-126）：这里原先靠顶栏那个三步循环按钮（`view-entry`）走圈 ——
+//     用户裁决删掉了它，于是改成**按标题点侧栏**（`clickNav`）。断言强度不减：
+//     仍是「真的点、真的到位」，只看入口在不在抓不住「点了没反应」那种断线。
 try {
-  const clickEntry = `(() => { document.querySelector('[data-testid="view-entry"]').click(); return true })()`
-  await evaluate(clickEntry)
+  await evaluate(clickNav('学习记录'))
   const openedStudy = await waitFor(
     `(() => !!document.querySelector('[data-testid="study-view"]'))()`,
     '学习档案视图出现',
@@ -727,7 +739,7 @@ try {
   })()`)
   const allTabs = Array.isArray(studyTabs) && studyTabs.length === 5
 
-  await evaluate(clickEntry)
+  await evaluate(clickNav('设置'))
   const openedSettings = await waitFor(
     `(() => !!document.querySelector('[data-testid="settings-view"]'))()`,
     '设置视图出现',
@@ -754,7 +766,7 @@ try {
   //   这里只断言「区块在位 + 当前章节可读 + 说清了与学段的关系」；
   //   真正点一章落库的端到端在 C3（两个入口共用同一条写路径，点哪儿效果一样）。
   //   ⚠️ 必须**在切回对话页之前**读 —— 这条曾经读成 undefined：探针写在第三次
-  //      `clickEntry`（回对话）之后，那时设置页已经不在 DOM 里了。
+  //      `clickNav('问问智团团')`（回对话）之后，那时设置页已经不在 DOM 里了。
   const settingsChapter = await evaluate(`(() => {
     const block = document.querySelector('[data-testid="settings-chapter-block"]')
     if (!block) return { present: false }
@@ -774,7 +786,7 @@ try {
     }
   })()`)
 
-  await evaluate(clickEntry)
+  await evaluate(clickNav('问问智团团'))
   const backToChat = await waitFor(
     `(() => !!document.querySelector('[data-testid="chat-area"]') && !document.querySelector('[data-testid="settings-view"]'))()`,
     '返回对话视图',
@@ -810,7 +822,7 @@ try {
   //   这里只断言「区块在位 + 当前章节可读 + 说清了与学段的关系」；
   //   真正点一章落库的端到端在 C3（两个入口共用同一条写路径，点哪儿效果一样）。
   //   ⚠️ 必须**在切回对话页之前**读 —— 这条曾经读成 undefined：探针写在第三次
-  //      `clickEntry`（回对话）之后，那时设置页已经不在 DOM 里了。
+  //      `clickNav('问问智团团')`（回对话）之后，那时设置页已经不在 DOM 里了。
   check(
     '★ 设置页有章节区块（当前章节可读；选得出时标出生效那一章）',
     settingsChapter?.present === true &&

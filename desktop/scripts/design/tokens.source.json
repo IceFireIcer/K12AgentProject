@@ -33,7 +33,10 @@
     "bad-soft": "#FDECEA",
     "bad-border": "#F5C6C0",
     "cyan": "#0E7490",
-    "cyan-soft": "#ECF9FB"
+    "cyan-soft": "#ECF9FB",
+    "amber": "#C2410C",
+    "amber-soft": "#FFF4ED",
+    "amber-border": "#F7D9C4"
   },
   "themed": {
     "page": [

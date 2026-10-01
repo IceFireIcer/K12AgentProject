@@ -35,13 +35,9 @@ export const ANCHORS = [
     expected: '1',
     description: '对话内练习卡默认只渲染 1 道题（报告 §2.3）'
   },
-  {
-    id: 'progress-detached',
-    selector: '[data-probe-id="progress-detached"]',
-    attribute: null,
-    expected: null,
-    description: '闯关进度卡由消息层独立渲染（不嵌在题卡里）'
-  },
+  // ⚠️ 2026-09-30（D-123）：原先这里有一条 `progress-detached` 锚点，钉「对话里独立渲染的闯关进度卡」。
+  //    用户裁决把那**整张卡搬出了对话**（进度看「个性化学习 / 学习记录」），元素已不存在，
+  //    锚点随之撤掉 —— 留着它会让探针永远报「找不到锚点」。
   {
     id: 'citation-collapsed',
     selector: '[data-probe-id="citation-disclosure"]',
