@@ -171,6 +171,12 @@ defineExpose({ scrollToTop: resetScroll })
    *   同属一个绘制阶段，而 `.shell__content` 在文档流里排在它后面、又是不透明的
    *   桌面色 —— 不给层级，这 3px 的投影会被整条盖掉（实测确认）。 */
   box-shadow: var(--k12-shadow-edge-bottom);
+  /* ★ 2026-10-01（D-126）：这一行自己也要有底色。
+   *   原先它是透明的（顶栏 `.tb` 与右侧动作条各自白底，左右拼起来看着是一整条），
+   *   但两块在 x 边界上各自绘制 → 亚像素取整会留出**一条 1px 的发丝竖缝**
+   *   （用户拿截图点名「那个分割线」）。给父层补上同一个底色，缝就没有了。
+   *   ⚠️ 颜色必须与 `.tb` / `.shell__actions` 同为 `--k12-surface`，否则会换一种缝。 */
+  background: var(--k12-surface);
   position: relative;
   z-index: 1;
   -webkit-app-region: drag;
@@ -182,6 +188,12 @@ defineExpose({ scrollToTop: resetScroll })
 .shell__actions {
   display: flex;
   align-items: stretch;
+  /* ★ 2026-10-01（D-126）：与左侧顶栏**重叠 1px**，消掉边界上那条发丝竖缝。
+   *   两块都是白底、紧挨着排（x=1308 处首尾相接），在分数设备像素比下会在接缝上
+   *   露出父层的底色/渲染接缝 —— 用户拿截图点名「那个分割线」。
+   *   重叠 1px 让右块盖住那条缝；`padding-left` 补回 1px，内容位置一点不动。 */
+  margin-left: -1px;
+  padding-left: 1px;
   /* ★ 12px（原 8px）：把**外壳级跳转**（`.cycle`）与窗口按钮分开。
    * 两者都是「点一下换个地方」，但一个是应用内的导航、一个是窗口 chrome ——
    * 贴在一起会读成同一组（报告 1.1 的「业务区顶到窗控正下方」）。

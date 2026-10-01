@@ -11,9 +11,20 @@
  *
  * ★ 流式期间也照常解析：模型逐字吐字时 `**` 可能只到一半，而 `parseInline` 对未闭合的
  *    星号**原样保留**，所以不会出现「字忽然消失再出现」的闪动（见 `markdown.ts`）。
+ *
+ * ── ★★ `{{student_name}}` 的替换点在这里（唯一实现）────────────────────
+ * 模型看到的提示词里只有一个占位符，真名**只在渲染进程内存里**
+ * （见 `student-name.ts`）。替换必须发生在**所有把正文送上屏的通路**上，
+ * 而对话页与历史会话回看恰好都经本组件 —— 所以替换点跟着渲染归口一起放在这里：
+ * 多一个通路就多一处「忘了替换」，而漏掉的表现是学生读到两支花括号。
+ *
+ * ★ 替换后仍出现花括号（模型没照做）时，兜底把它抹掉；到底发生过没有
+ *   只进教师视角那一行说明，学生面看不到任何机制词。
  */
 import { computed } from 'vue'
 import { parseMarkdown, type MarkdownBlock } from '../markdown'
+import { renderStudentName } from '../student-name'
+import TeacherGate from './TeacherGate.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -21,11 +32,22 @@ const props = withDefaults(
     text: string
     /** 生成中：在末尾画一个闪烁光标（对话页用；只读回看不传）。 */
     streaming?: boolean
+    /**
+     * 这次替换要用的称呼（空串 = 还没拿到，回落中性的「同学」）。
+     * ★ 传进来的是**显示名**，不是真名：真名只经 `displayName` 的投影，
+     *   永远不会作为单独一个字段穿过组件边界。
+     */
+    nameOf?: string
   }>(),
-  { streaming: false }
+  { streaming: false, nameOf: '' }
 )
 
-const blocks = computed<MarkdownBlock[]>(() => parseMarkdown(props.text))
+/**
+ * 替换过称呼的正文（**上屏的唯一来源**）。
+ * `residual` = 模型没照做（有没被替换的花括号），只给教师视角看。
+ */
+const rendered = computed(() => renderStudentName(props.text, props.nameOf))
+const blocks = computed<MarkdownBlock[]>(() => parseMarkdown(rendered.value.text))
 </script>
 
 <template>
@@ -72,6 +94,10 @@ const blocks = computed<MarkdownBlock[]>(() => parseMarkdown(props.text))
     </template>
     <!-- 流式光标：生成中的那一轮末尾（只读回看不传 `streaming`） -->
     <span v-if="streaming" class="caret" aria-hidden="true" />
+    <!-- 没替换掉的花括号被兜底抹掉了 —— 那是模型没照做，只该给老师看 -->
+    <TeacherGate v-if="rendered.residual">
+      <p class="md-residual">这段里有一处没被替换掉的称呼占位符，已就地抹掉。</p>
+    </TeacherGate>
   </div>
 </template>
 
@@ -141,6 +167,11 @@ const blocks = computed<MarkdownBlock[]>(() => parseMarkdown(props.text))
   margin: 0;
   border: 0;
   border-top: 1px solid var(--k12-border);
+}
+.md-residual {
+  margin-top: 0.5em;
+  font-size: var(--k12-fs-caption);
+  color: var(--k12-muted);
 }
 .caret {
   display: inline-block;

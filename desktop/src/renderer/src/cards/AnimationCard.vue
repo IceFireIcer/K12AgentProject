@@ -39,6 +39,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { InlineCard } from '../api/events'
 import { GRADE_LABELS } from '../labels'
 import { useDiagnosticsStore } from '../stores/diagnostics'
+// ★ 玻璃边缘光效（2026-09-30 设计执行报告 §4.3 一期）：根元素挂 k12-shine，
+//   变量由 composable 按指针位置写入 —— 本文件不碰沙箱与 iframe 那一套。
+import { useCardShine } from '../composables/useCardShine'
 import CardHeader from '../components/card/CardHeader.vue'
 import CardBody from '../components/card/CardBody.vue'
 import DiagPeekButton from '../components/diag/DiagPeekButton.vue'
@@ -140,6 +143,33 @@ const payloadId = ref<string>(
 )
 
 /**
+ * ★★ 这张卡片是不是**回看恢复**出来的（不是本轮实时生成的那一张）。
+ *
+ * ★★ 判据为什么**不是**「载荷里有没有那个托管地址 / 有没有过期时间」：
+ *   实时与回看两条路上的载荷**是同一份**（回看读的就是当初落盘的那份），
+ *   托管地址在两条路上都带着 —— 它是**持久化**的字段，而它对应凭据的有效期
+ *   并不写在载荷里（载荷没有签发时间、也没有到期时间）。也就是说载荷自身分不开
+ *   「刚生成」与「上个月生成」，任何基于载荷的猜测都是撞运气。
+ *   唯一确知这件事的地方就是**恢复这条路本身**：`restoredCards` 会给卡片打
+ *   `restored: true`（见 `api/events.ts` 的 `InlineCard.restored`）。
+ * ★ 载荷上的 `restored` 标记同样认：主进程投影将来若把标记打在载荷上，两条路都通。
+ * ★ 切到「我的」（`source === 'mine'`）**不算回看**：那是学生此刻主动取回 / 刚生成的一份，
+ *   载荷是这一秒才从库里取回来的，属新的交互，照常播。
+ * ★ 回看态不重播当时那一遍（**一次性凭据绝不复用**，见 `mountIframe` 那段纪律）：
+ *   卡片只渲染标题与文字讲解；想要现在再看，就重新生成一段（按钮走既有的生成入口）。
+ */
+const restoredSnapshot = computed<boolean>(() => {
+  if (props.source === 'mine') return false
+  if (props.card.restored === true) return true
+  const payload = props.card.payload
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    (payload as { restored?: unknown }).restored === true
+  )
+})
+
+/**
  * 挂 iframe 的条件：**载荷里有 HTML**（`shouldMountIframe`），否则直接进降级视图。
  *
  * ★★ 2026-09-27：判据补上了**容器侧**那一半（见下面 `roomForStage` / `narrow`）。
@@ -223,16 +253,26 @@ const roomForStage = ref<boolean>(true)
  * ★★ 窄容器态：载荷本来能播（`html` 非空），但卡片太窄 —— **不挂 iframe**，
  *    改「文字要点 + 全屏看动画」。全屏后容器变宽，会自动把 iframe 重新挂上
  *    （见 {@link mountStage}，**不能因为窄就不给出口**）。
+ * ★ 回看态（{@link restoredSnapshot}）**不走这一支**：它不是「放不下」，而是「不重播」，
+ *   两者给学生的话不一样（一句是「点全屏就能看」，一句是「想要新的就重做」）。
  */
-const narrow = computed<boolean>(() => mountIframe.value && !roomForStage.value)
+const narrow = computed<boolean>(
+  () => mountIframe.value && !roomForStage.value && !restoredSnapshot.value
+)
 
 /**
- * 真的挂 iframe：载荷有 HTML **且**容器放得下。
+ * 真的挂 iframe：载荷有 HTML **且**容器放得下 **且**不是回看态。
  *
  * ★ 模板的 `v-if` 与挂载/卸载路径**共用这一个判据** —— 两处各判一次的话，
  *   「界面上显示的」与「宿主以为的」迟早会对不上（那正是白屏与空转的温床）。
+ * ★★ 第三个判据（回看态）加在**这里**而不是 `mountIframe` 那一行：那一行是
+ *   「一次性地址不许绑回 iframe」那条纪律的抓手（`tests/animation-extension.test.ts` ②
+ *   与变异 60 钉着它的字面写法），**不能碰**。回看不挂沙箱是**展示策略**，不是「能不能播」——
+ *   放在可见性判据里语义也更准，`mountIframe` 保留原义（载荷本身能不能播）。
  */
-const stageVisible = computed<boolean>(() => mountIframe.value && roomForStage.value)
+const stageVisible = computed<boolean>(
+  () => mountIframe.value && roomForStage.value && !restoredSnapshot.value
+)
 
 /** 是否已进入降级视图（文字讲解）。 */
 const degraded = ref<boolean>(false)
@@ -266,6 +306,17 @@ const DEGRADED_NOTICE_TEXT = '这段动画这次没能播出来，下面这段�
  *   两句短句，各自说完一件事。
  */
 const NARROW_NOTICE_TEXT = '这里太窄了，动画放不下。点下面的按钮，全屏看动画。'
+
+/**
+ * **回看态**给学生的那句（与上面两句又是两回事，别合并）。
+ *
+ * 判据不同：这句是「动画是当时做的，现在不重播」—— 既不是坏了（不能照抄降级那句），
+ * 也不是放不下（不能照抄窄容器那句）。它要说清两件事：当时那份还在，想要新的怎么要。
+ * ★ 修复的是用户实测的观感：回看历史时旧动画被**当现场重演**一遍，学生会以为自己
+ *   刚点过什么，其实那只是「当时那一遍」的记录。
+ * ★ 不用破折号（`student-view-discipline.test.ts` 的破折号专项盯着）：两句短句各说一件事。
+ */
+const RESTORED_NOTICE_TEXT = '这段动画是当时生成的，回看不会重播。想现在再看，可以重新生成一段。'
 /** 沙箱阶段（`loading` 时显示加载提示，而不是一块空白）。 */
 const phase = ref<'loading' | 'ready' | 'degraded'>('loading')
 const progress = ref<number>(0)
@@ -284,11 +335,28 @@ const iframeAttrs = buildIframeAttributes()
  *   动画没坏，只是这块地方放不下。
  */
 const statusText = computed(() => {
+  // ★ 回看态排在最前：它既不是降级也不是窄，而 `phase` 会一直停在 loading（没有沙箱在跑）——
+  //   不先判它，胶囊就会显示「动画加载中…」，那是在等一个永远不会来的东西。
+  if (restoredSnapshot.value) return '回看当时那一份'
   if (degraded.value) return '已切换为文字讲解'
   if (narrow.value) return '这里放不下动画'
   if (phase.value === 'ready') return '动画已就绪'
   return '动画加载中…'
 })
+
+/**
+ * 要点区那一句说明：三态各有各的说法（降级 / 回看 / 窄容器）。
+ *
+ * ★ 收成一个 computed 而不是在模板里写三元：那个三元的括号一旦写错，
+ *   错的是**给学生看的话**，而不是会当场抛错的逻辑。
+ */
+const fallbackNoticeText = computed<string>(() =>
+  degraded.value
+    ? DEGRADED_NOTICE_TEXT
+    : restoredSnapshot.value
+      ? RESTORED_NOTICE_TEXT
+      : NARROW_NOTICE_TEXT
+)
 
 /** 进度百分比（整数，避免尾数抖动）。 */
 const progressPercent = computed(() => `${Math.round(progress.value * 100)}%`)
@@ -362,6 +430,9 @@ function buildHost(): AnimationSandboxHost {
 
 /** `.anim` 的根元素（ResizeObserver 观测它 —— 宽度判据量的是**卡片自己**）。 */
 const rootEl = ref<HTMLElement | null>(null)
+// ★ 光效**复用这一个 ref**：一个元素只允许挂一个 ref 属性，而 rootEl 已被
+//   ResizeObserver 占用 —— 再声明一个 rootRef 就得改写上面那条观测链，收益为零。
+useCardShine(rootEl)
 /** 容器宽度观测器（`onBeforeUnmount` 里 `disconnect`，不留下观测）。 */
 let resizeObserver: ResizeObserver | null = null
 /** 待办的那次「重新量一次」（同一轮里的多次触发合并成一次；卸载时清掉）。 */
@@ -478,6 +549,9 @@ function toggleExpand(): void {
 }
 
 onMounted(() => {
+  // ★ 回看态：不量容器、不建宿主、不注册观测 —— 这一态根本不挂沙箱
+  //   （`stageVisible` 恒为 false），走到底只会白留一个 ResizeObserver。
+  if (restoredSnapshot.value) return
   // 载荷本身就是降级产物（编排层给的 `html` 为空）：直接进降级视图
   if (!mountIframe.value) {
     degraded.value = true
@@ -542,15 +616,18 @@ watch(iframeEl, (element) => {
 </script>
 
 <template>
+  <!-- ★ 光效挂载点：静态 class 一个字都不能动（card-structure 守卫逐个钉着
+       class="k12-card anim"），所以 k12-shine 走下面 :class 叠加。 -->
   <article
     ref="rootEl"
     class="k12-card anim"
-    :class="{ 'anim--expanded': expanded, 'anim--degraded': degraded }"
+    :class="{ 'anim--expanded': expanded, 'anim--degraded': degraded, 'k12-shine': true }"
     data-testid="animation-card"
     :data-degraded="String(degraded)"
     :data-phase="phase"
     :data-narrow="narrow ? '1' : null"
     :data-payload-id="payloadId"
+    :data-restored="restoredSnapshot ? '1' : null"
   >
     <CardHeader>
       <template #title>
@@ -615,6 +692,7 @@ watch(iframeEl, (element) => {
           @click="emit('generate')"
         >{{ generating ? '正在做…' : '在线生成' }}</button>
         <button
+          v-if="!restoredSnapshot"
           type="button"
           class="btn btn--ghost"
           data-testid="animation-expand"
@@ -667,11 +745,12 @@ watch(iframeEl, (element) => {
       </div>
     </div>
 
-      <!-- ── 文字要点（**不挂 iframe 的两条路共用这一块**）──────────────────
+      <!-- ── 文字要点（**所有不挂 iframe 的情形共用这一块**）──────────────────
            · `degraded`：真的没能播（载荷本身没有 HTML / 沙箱 5 秒没就绪 / 沙箱自报错误）；
-           · `narrow`：动画好好的，只是这块地方**放不下**（卡片被两个侧栏挤窄）。
-           两条都**绝不白屏**，都在这里给出「要点 + 下一步」——
-           区别只在下面那句说明与有没有「全屏看动画」这颗出口。 -->
+           · `narrow`：动画好好的，只是这块地方**放不下**（卡片被两个侧栏挤窄）；
+           · `restoredSnapshot`：回看恢复的历史卡片，当时那一遍**不重播**（见 script 里的说明）。
+           三者都**绝不白屏**，都在这里给出「要点 + 下一步」——
+           区别只在下面那句说明、以及给的是「全屏看动画」还是「重新生成一段」。 -->
       <div v-else class="anim__fallback" data-testid="animation-fallback">
         <p class="anim__fallback-text" data-testid="animation-fallback-text">{{ view.fallbackText }}</p>
         <!-- ★ 这里原来还有一张 `<img class="anim__fallback-img">`：主进程按**同一段文案**
@@ -688,7 +767,7 @@ watch(iframeEl, (element) => {
           :data-degrade-reason="degraded ? degradeReason || null : null"
           :data-narrow-width="narrow ? containerWidth : null"
         >
-          {{ degraded ? DEGRADED_NOTICE_TEXT : NARROW_NOTICE_TEXT }}
+          {{ fallbackNoticeText }}
         </p>
         <!-- ★★ **窄容器态的出口**（本改动的关键，不能省）：全屏后 `.anim` 变成
              `position: fixed; inset: 24px`（宽度 = 视口宽 - 48），ResizeObserver 报一次
@@ -705,6 +784,21 @@ watch(iframeEl, (element) => {
           @click="toggleExpand"
         >
           {{ expanded ? '收起' : '全屏看动画' }}
+        </button>
+
+        <!-- ★★ **回看态的出口**：当时那份不重播，但学生想现在再看是正当需求 ——
+             走既有的生成入口（`emit('generate')`）现场做一份新的。它消费的是**新签发**的
+             凭据，与历史里那份无关：绝不复用旧凭据来「让历史能播」（那是红线，见 D-084）。
+             与降级态的区别：降级是「这次没得看」，回看是「那一次已经看过了」，所以这里给按钮。 -->
+        <button
+          v-if="restoredSnapshot"
+          type="button"
+          class="btn btn--primary anim__restore-cta"
+          :disabled="generating"
+          data-testid="animation-restore-generate"
+          @click="emit('generate')"
+        >
+          {{ generating ? '正在做…' : '重新生成这段动画' }}
         </button>
       </div>
     </CardBody>
@@ -1095,6 +1189,13 @@ watch(iframeEl, (element) => {
  * 它是这一态**唯一的出路**（也是主要动作）→ 与「播放」同一支配方（accent-ink 填充），
  * 不跟卡头那颗次要动作的描边样式混。与上面那段说明留出间距（`.btn` 自己只有内边距）。 */
 .anim__expand-cta {
+  margin-top: 10px;
+}
+
+/* ── 回看态里的出口按钮 ────────────────────────────────────────────────
+ * 与窄容器那颗同一落点与配方（这一态唯一的主要动作）：在这张卡片里再看一遍
+ * 只能靠**重新生成一段**，那是新的交互 —— 不靠重播当时那一遍。 */
+.anim__restore-cta {
   margin-top: 10px;
 }
 </style>

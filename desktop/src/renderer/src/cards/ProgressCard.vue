@@ -18,7 +18,7 @@
  *
  * ★ 轻量实现（§11.4）：动画只用 CSS `transition` / `@keyframes`，**不引游戏引擎、不引 Anime.js**。
  */
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import Badge from '../components/Badge.vue'
 import ProgressBar from '../components/ProgressBar.vue'
 import CardHeader from '../components/card/CardHeader.vue'
@@ -26,6 +26,8 @@ import CardBody from '../components/card/CardBody.vue'
 import CardFoot from '../components/card/CardFoot.vue'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { kpLabel } from '../study/kp-label'
+// ★ 玻璃边缘光效（2026-09-30 报告 §4.3 一期）：根元素挂 k12-shine，变量由 composable 写。
+import { useCardShine } from '../composables/useCardShine'
 
 /** 知识点在界面上的名字（**教材里的中文名**，取不到就不显示名字那一格）。 */
 const knowledge = useKnowledgeStore()
@@ -69,6 +71,10 @@ const props = defineProps<{
   /** `payload` 事件里的载荷（`unknown`，这里做白名单投影）。 */
   payload?: unknown
 }>()
+
+/** 卡片根元素（光效写 CSS 变量的落点；两条分支共用它，同时只渲染一条）。 */
+const rootRef = ref<HTMLElement | null>(null)
+useCardShine(rootRef)
 
 /** 状态 → 中文（只做展示映射，**不推导**下一个状态）。 */
 const STAGE_LABELS: Record<string, string> = {
@@ -140,9 +146,13 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
 </script>
 
 <template>
+  <!-- ★ 光效挂载点：静态 class 被 card-structure 守卫逐个钉着（不能改字符），
+       所以 k12-shine 走 :class；两条分支共用同一个 rootRef。 -->
   <article
     v-if="view.kind === 'ok'"
+    ref="rootRef"
     class="k12-card levels"
+    :class="{ 'k12-shine': true }"
     data-testid="progress-card"
     data-probe-id="progress-card"
     :data-probe-count="view.levels.length"
@@ -199,7 +209,13 @@ const earnedBadges = computed(() => view.value.levels.filter((item) => item.badg
   </article>
 
   <!-- 认不出的载荷：一句说明，绝不猜（与练习卡片同一口径） -->
-  <article v-else class="k12-card levels levels--unknown" data-testid="progress-card-unknown">
+  <article
+    v-else
+    ref="rootRef"
+    class="k12-card levels levels--unknown"
+    :class="{ 'k12-shine': true }"
+    data-testid="progress-card-unknown"
+  >
     <CardHeader>
       <template #title>
         <span class="title">闯关进度</span>

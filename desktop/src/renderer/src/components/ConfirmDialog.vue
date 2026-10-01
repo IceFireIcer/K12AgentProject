@@ -140,7 +140,9 @@ useFocusReturn(panelRef, () => props.open, {
 }
 @supports (backdrop-filter: blur(1px)) {
   .cd__box {
-    background: color-mix(in srgb, var(--k12-surface) 88%, transparent);
+    /* 76%：背后是 `--k12-fg 30%` 的遮罩 + 整页（已经压暗过），所以比抽屉更透一档；
+     * 决策文字仍落在浅底上，可读性不受影响（分档表见 base.css 的 `.k12-glass`）。 */
+    background: color-mix(in srgb, var(--k12-surface) 76%, transparent);
     backdrop-filter: blur(12px) saturate(1.4);
   }
 }

@@ -28,8 +28,10 @@
  *   与 `tests/session-tree.test.ts` 都钉着这一点，别按旧注释里的 1280 改回去。
  *
  * 三处刻意去掉的东西：
- *   1. 学生卡上的 `ChevronsUpDown` —— 它暗示「可以切换学生」，但本项目是一人一库
- *      且当前只有一个学生，那是个没有后端的假下拉。卡片改成可点，进学习档案。
+ *   1. 学生卡上的 `ChevronsUpDown` —— 它暗示「可以切换学生」，但当时是一人一库、
+ *      只有一个学生，那是个没有后端的假下拉。卡片改成可点。
+ *      ★ 2026-09-30 起卡片点开的是**账号菜单**（本机可以有多个人了），
+ *        原来的「进学习档案」变成菜单第一项 —— 去处没丢，只是多了一层。
  *   2. 底部三行服务状态 —— 三行等宽键值把侧栏底部压得很吵，且窄屏时全被折掉。
  *      合并成一行总状态（细节放 `title`）。
  *   3. 「开发工具」入口 —— 它指向的主题切换台（一个开发页）随
@@ -65,6 +67,7 @@ import { BRAND_NAME, BRAND_TAGLINE } from '@shared/brand'
 import { PAGES, PAGE_ORDER, useUiStore, visibleInSidebar } from '../stores/ui'
 import type { PageName } from '../stores/ui'
 import { useViewModeStore } from '../stores/viewMode'
+import { useAccountsStore } from '../stores/accounts'
 import { useStudentStore } from '../stores/student'
 import { useThemeStore } from '../stores/theme'
 import { useChatStore } from '../stores/chat'
@@ -75,6 +78,9 @@ import { logoUrlFor } from '../brand-logo'
 const ui = useUiStore()
 const viewMode = useViewModeStore()
 const student = useStudentStore()
+// ★ 账号菜单挂在应用根上（见 stores/accounts.ts 的说明），这里只负责把它打开 ——
+//   侧栏在窄窗口只有 68px，菜单长在这里会被裁掉。
+const accounts = useAccountsStore()
 const theme = useThemeStore()
 const chat = useChatStore()
 const sidecar = useSidecarStore()
@@ -158,7 +164,9 @@ const gradeLine = computed(() =>
 )
 
 const studentTitle = computed(() => {
-  const base = `${student.nickname} · ${gradeLine.value}（点击进入学习档案）`
+  // ⚠️ 后缀必须跟着点击行为走：这张卡现在打开账号菜单（换人 / 改名 / 导出），
+  //    仍写「点击进入学习档案」就是一句会把人带错的提示 —— 学习记录改在菜单第一项。
+  const base = `${student.nickname} · ${gradeLine.value}（点击查看账号）`
   return student.error === null ? base : `${base} · ${student.error}`
 })
 
@@ -195,9 +203,12 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
       </div>
     </div>
 
-    <!-- 学生卡：点击进学习档案（学段由系统推断或学生手动指定，不在这里改） -->
+    <!-- 学生卡：点击打开账号菜单（换人 / 新建 / 改名与学段 / 导出 / 删除）。
+         ★ 它原来那一下是「进学习档案」—— 那个去处没有丢，改在菜单第一项「看学习记录」，
+           学生在这台共用电脑上仍能一步走到自己的记录。
+         ★ 学段仍由系统推断或学生手动指定，不在这张卡上改。 -->
     <div class="sb__student-wrap">
-      <button type="button" class="sb__student" :title="studentTitle" @click="go('study')">
+      <button type="button" class="sb__student" :title="studentTitle" @click="accounts.toggleMenu()">
         <div class="sb__avatar">{{ student.avatarText }}</div>
         <div class="sb__student-text">
           <p class="sb__student-name">{{ student.nickname }}</p>

@@ -35,9 +35,14 @@
  *   学生问一句寒暄时本来就不会查教材，那时把整条链画成红的是撒谎。
  */
 import { computed, ref, watch } from 'vue'
-import { BookOpen, GitBranch, Info, Route, Sparkles, TrendingUp, X } from 'lucide-vue-next'
+// ⚠️ D-138：`BookOpen`（学段变化的标题）与 `Sparkles`（当前学段的标题）随学段整页一起删。
+import { GitBranch, Info, Route, TrendingUp, X } from 'lucide-vue-next'
 import EmptyState from './EmptyState.vue'
 import TeacherGate from './TeacherGate.vue'
+// ★ 画像标签与画像变化时间线已抽到共享组件（它的头部写了为什么不能抄两份）。
+//   本文件的 `.tags` / `.tag` 从此**只剩** k12-mark 角标那一套同名定义 ——
+//   原先画像那条 `.tag { border-left: 2px … }` 会顺带作用在角标上，抽取后自动不再叠加。
+import ProfileTags from './card/ProfileTags.vue'
 import { DEGRADE_LEVELS, TRACE_TEACHER_NOTE, isolationTeacherText } from './rail-evidence'
 import { kpLabel, kpLabelResolved } from '../study/kp-label'
 import { useChatStore } from '../stores/chat'
@@ -45,7 +50,9 @@ import { useInsightStore } from '../stores/insight'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { useTraceStore } from '../stores/trace'
 import { useUiStore } from '../stores/ui'
-import { GRADE_LABELS, GRADE_UNKNOWN_LABEL, gradeOriginLabel } from '../labels'
+// ⚠️ D-138：`gradeOriginLabel` 随学段页删除（画像页里的来源说法走 StudyPortrait 自己那份）。
+import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../labels'
+import StudyPortrait from './StudyPortrait.vue'
 import { useEscape } from '../composables/useEscape'
 import { useOnBackendReady } from '../composables/useOnBackendReady'
 import type { Degraded } from '@shared/ipc-events'
@@ -60,6 +67,7 @@ const trace = useTraceStore()
 const ui = useUiStore()
 
 /*
+/*
  * 进入右栏时取一次画像 / 推荐 / 学段证据 + 知识点名索引。
  * ★ store 各自判「已有数据就不重复请求」，所以这里不必再判。
  * ★ `ensureNames()` 只为拿到知识点显示名（画像端点只回 kpId）——
@@ -73,22 +81,30 @@ useOnBackendReady(() => {
   void chat.refreshChapter().catch(() => {})
 })
 
-type TabKey = 'context' | 'tools' | 'grade'
-const tab = ref<TabKey>('context')
+/**
+ * 右栏三页签（2026-10-01 用户裁决 D-138）：**画像 / 上下文 / 工具**。
+ *
+ * ★ 两处改动，都来自用户的原话：
+ *   ① 「学段去掉」——原第 ③ 页（当前学段 + 信号分值条 + 学段变化）整页删除；
+ *      当前学段在顶栏那枚 chip 上一直可见，右栏再放一份是重复的版面。
+ *   ② 「再做一个画像的按钮，默认是画像，展示的和学生档案那边一样」——
+ *      新增「画像」页并设为默认，内容**复用**学习记录右栏那一份（`StudyPortrait`，
+ *      含头像/称呼/学段/五行结构/最近在学/下一步）；一份画像只有一处实现，不抄第二遍。
+ */
+type TabKey = 'portrait' | 'context' | 'tools'
+const tab = ref<TabKey>('portrait')
 
 /**
- * `el-segmented` 的选项形态。
+ * 页签清单（`satisfies` 让漏项在编译期报出来）。
  *
- * ★ 文案刻意**压到 4/2/2 字**（「上下文 / 工具 / 学段」而不是「学习上下文 / 工具调用 / 学段」）：
- *   右栏只有 288px，三个等宽段各约 88px —— 五字标签会被截成「学习…」，
- *   看起来像排版坏了（实测截图里就是这样）。三段的语义在各自页内已由小标题说清
- *   （「这段回答的依据」「智团团这轮做了什么」「当前学段」），这里只需要能区分。
+ * ★ 文案一律**两字**（画像 / 上下文 / 工具）：右栏只有 288px，
+ *   页签组还整体右移（见样式里的 `margin-left: auto`），长标签会被截成「学习…」，
+ *   看起来像排版坏了（实测截图里就是这样）。三页的语义在各自页内由小标题说清。
  */
-/** 页签的取值（与 `TabKey` 同一联合，`satisfies` 让漏项在编译期报出来）。 */
 const TABS = [
+  { label: '画像', value: 'portrait' },
   { label: '上下文', value: 'context' },
-  { label: '工具', value: 'tools' },
-  { label: '学段', value: 'grade' }
+  { label: '工具', value: 'tools' }
 ] as const satisfies ReadonlyArray<{ label: string; value: TabKey }>
 
 /* ------------------------------------------------------------------ *
@@ -289,31 +305,12 @@ const traceSummary = computed(() => {
 })
 
 /* ------------------------------------------------------------------ *
- * ③ 学段
- * ------------------------------------------------------------------ */
-
-const gradeLabel = computed(() => chat.currentGradeLabel ?? GRADE_UNKNOWN_LABEL)
-/** ★ 来源说法只有 `labels.ts` 一处实现（两处各写一份映射迟早对不上）。 */
-const gradeOrigin = computed(() => gradeOriginLabel(chat.gradeOrigin))
-const gradeSignals = computed(() => insight.gradeSignals?.signals ?? [])
-const confidence = computed(() => insight.confidence)
-
-/** 各信号的显示名（四类固定信号）。 */
-const SIGNAL_LABELS: Record<string, string> = {
-  vocab: '用词水平',
-  depth: '追问深度',
-  quiz_perf: '练习表现',
-  meta_cognition: '元认知'
-}
-
-function signalLabel(type: string): string {
-  return SIGNAL_LABELS[type] ?? type
-}
-
-/** 轨迹 `source` 只有两态（`inferred` / `explicit`）；其余按系统推算显示。 */
-function historyOrigin(source: string): string {
-  return gradeOriginLabel(source === 'explicit' ? 'explicit' : 'inferred')
-}
+ * ③ 学段 —— **整页已删**（2026-10-01 用户裁决 D-138）
+ * ------------------------------------------------------------------
+ * ⚠️ 这一节的计算属性随页面一起删除（`confidence` / `signalLabel` / `historyOrigin` 等）：
+ *   留着就是没人读的死代码（`vue-tsc` 的 TS6133 会直接报出来）。
+ *   当前学段仍在顶栏那枚 chip 上；画像页（`StudyPortrait`）里也有学段一行。
+ */
 
 /* ------------------------------------------------------------------ *
  * 交互
@@ -394,8 +391,16 @@ watch(tab, () => {
       </header>
 
       <div class="rail__body">
-        <!-- ══ ① 学习上下文 ═══════════════════════════════════════════════ -->
-        <section v-if="tab === 'context'" class="sec">
+        <!-- ══ ① 画像（**默认页**，D-138）═══════════════════════════════════
+             复用学习记录右栏那一份组件：同一份画像不在两处各写一遍渲染。
+             ⚠️ 它自带 `k12-inset` 级别的卡片样式，所以这里**不再套 `.sec` 的标题**，
+                否则会出现「画像」两个标题（组件内已有小标题）。 -->
+        <section v-if="tab === 'portrait'" class="sec sec--portrait" data-testid="rail-portrait">
+          <StudyPortrait />
+        </section>
+
+        <!-- ══ ② 学习上下文 ═══════════════════════════════════════════════ -->
+        <section v-else-if="tab === 'context'" class="sec">
           <div class="sec__head">
             <Info :size="14" />
             <h3 class="sec__title">这段回答的依据</h3>
@@ -438,6 +443,14 @@ watch(tab, () => {
 
             <p v-if="isolationNotice" class="note">{{ isolationNotice.teacherText }}</p>
           </TeacherGate>
+
+          <!-- ── 我记住了什么（票 27 的画像标签卡）──────────────────────────
+               ★ 抽取成 `card/ProfileTags.vue` 的原因与三条纪律都在那个文件的头部：
+                 学习档案页开出右侧画像卡之后，同一份画像在**两处**出现，
+                 各抄一份会让「来源三档的话术」与「哪些能撤」这两条口径各自漂移。
+               ★ 这里走**默认模式**（`retractable` 开着）：对话页右栏正是学生
+                 「说一条不对就撤掉」的地方；档案页那一栏传 `false` 变只读视图。 -->
+          <ProfileTags />
 
           <div class="sec__head sec__head--gap">
             <TrendingUp :size="14" />
@@ -552,83 +565,10 @@ watch(tab, () => {
           </TeacherGate>
         </section>
 
-        <!-- ══ ③ 学段 ═════════════════════════════════════════════════════ -->
-        <section v-else class="sec">
-          <div class="sec__head">
-            <Sparkles :size="14" />
-            <h3 class="sec__title">当前学段</h3>
-          </div>
-
-          <p class="grade" data-testid="rail-grade">
-            <strong>{{ gradeLabel }}</strong>
-            <span v-if="chat.currentGrade" class="grade__origin">{{ gradeOrigin }}</span>
-            <span v-else class="grade__origin">还没判出来</span>
-          </p>
-
-          <p v-if="insight.errors.gradeSignals" class="sec__hint" data-testid="rail-signals-error">
-            {{ insight.errors.gradeSignals }}
-          </p>
-          <!-- 四类信号的分值条：学生看得懂（「用词水平 / 追问深度」），保留 -->
-          <ul v-else-if="gradeSignals.length > 0" class="signals" data-testid="rail-signals">
-            <li
-              v-for="(signal, index) in gradeSignals"
-              :key="`${signal.signalType}-${index}`"
-              class="signals__row"
-            >
-              <span class="signals__type">{{ signalLabel(signal.signalType) }}</span>
-              <span class="signals__bar">
-                <span
-                  class="signals__fill"
-                  :style="{ width: `${Math.round(Math.max(0, Math.min(1, signal.value)) * 100)}%` }"
-                />
-              </span>
-            </li>
-          </ul>
-          <p v-else class="sec__hint">系统还没从对话里攒到足够的判定依据。</p>
-
-          <!-- ★★ 教师 / 答辩视角：置信度与**原始诊断串**。
-               `signal.raw` 是 Python 的 `encode_turn_raw` 产出的排障串
-               （实测形态 `t4|答题=连对10,正确率1.0`），学生读它只会以为界面坏了；
-               而它是「判定依据看得见」的证据，所以一字不删地留在这里。 -->
-          <template v-if="confidence !== null || gradeSignals.length > 0">
-            <TeacherGate label="学段判定依据">
-              <p v-if="confidence !== null" class="sec__hint" data-testid="rail-confidence">
-                判定置信度 {{ Math.round(confidence * 100) }}%（低于 60% 时系统不会改动学段）
-              </p>
-              <ul v-if="gradeSignals.length > 0" class="raws" data-testid="rail-signals-raw">
-                <li
-                  v-for="(signal, index) in gradeSignals"
-                  :key="`raw-${signal.signalType}-${index}`"
-                  class="raws__row"
-                >
-                  <span class="raws__name">{{ signalLabel(signal.signalType) }}</span>
-                  <code class="raws__value">{{ signal.raw ?? '—' }}</code>
-                </li>
-              </ul>
-            </TeacherGate>
-          </template>
-
-          <div class="sec__head sec__head--gap">
-            <BookOpen :size="14" />
-            <h3 class="sec__title">学段变化</h3>
-          </div>
-          <p v-if="insight.historyDesc.length === 0" class="sec__hint">还没有发生过学段变化。</p>
-          <el-timeline v-else data-testid="rail-grade-history">
-            <el-timeline-item
-              v-for="(entry, index) in insight.historyDesc"
-              :key="`${entry.ts}-${index}`"
-              :timestamp="`第 ${entry.turn} 轮`"
-              placement="top"
-            >
-              <p class="hist__line">
-                {{ entry.fromLevel ? GRADE_LABELS[entry.fromLevel] : '起点' }}
-                →
-                <strong>{{ GRADE_LABELS[entry.toLevel] }}</strong>
-              </p>
-              <p class="hist__src">{{ historyOrigin(entry.source) }}</p>
-            </el-timeline-item>
-          </el-timeline>
-        </section>
+        <!-- ⚠️ 2026-10-01 用户裁决（D-138）：第 ③ 页「学段」**整页删除** ——
+             页签里不再有它；当前学段由顶栏那枚 chip 与「画像」页（StudyPortrait）承担。
+             原内容：当前学段 + 四类信号分值条 + 教师档的置信度/原始诊断串 + 学段变化时间线。
+             「画像」页复用学习记录右栏那一份（components/StudyPortrait.vue）。 -->
       </div>
     </div>
 
@@ -730,24 +670,31 @@ watch(tab, () => {
  *   轨道再铺一次 surface-2 就与条带融成一片、分段控件失去"轨道"的形态。
  *   现在的读法是「条带即轨道，选中的那一段是白药丸」——对比反而更强。 */
 .rail__tabs {
+  /* ★★ 2026-10-01 用户裁决两轮（D-138 补充）：
+   *   第一轮「剩下的标签向右移动」→ 我把它做成按内容宽度、整组靠右；
+   *   第二轮「三个按钮太别扭了，搞成还是和原来一样平均分布，每个按钮再稍微大一点」——
+   *   于是回到**三等分铺满**（`flex: 1` + 每段 `flex: 1 1 0`），并把每段整体放大一档：
+   *   容器内边距 2→3px、段间距 2→4px、段内边距 5/4→8/6px、字号 caption→body-sm。
+   *   ⚠️ 记一笔：靠右与等分是**互斥**的 —— 有 `margin-left: auto` 时 `flex: 1` 会让它算成 0（实测）。 */
   flex: 1;
   min-width: 0;
   display: flex;
-  gap: 2px;
-  padding: 2px;
+  gap: 4px;
+  padding: 3px;
   border-radius: var(--k12-r-control);
   background: transparent;
 }
 .rail__tab {
+  /* 三等分（每段等宽）；内边距与字号都比第一版大一档（用户：每个按钮再稍微大一点）。 */
   flex: 1 1 0;
   min-width: 0;
-  padding: 5px 4px;
+  padding: 8px 6px;
   border: none;
   border-radius: var(--k12-r-inset);
   background: transparent;
   color: var(--k12-muted);
   font-family: inherit;
-  font-size: var(--k12-fs-caption);
+  font-size: var(--k12-fs-body-sm);
   font-weight: 600;
   cursor: pointer;
   /* 真的放不下时**省略号**，不是硬切半个字（截断要看得出来是截断） */
@@ -809,6 +756,13 @@ watch(tab, () => {
   gap: 6px;
   color: var(--k12-muted);
 }
+/* ── 我记住了什么（画像标签卡）─────────────────────────────────────────
+ * ★★ 这一整组的样式已随模板一起搬到 `card/ProfileTags.vue`（连同那三条纪律的注释）。
+ *   本文件里**不再有一份近似定义** —— 抄第 2 份就会与档案页那一栏各自漂移。
+ * ★ 顺带修掉一处旧账：原先这里的画像 `.tag { border-left: 2px … }` 与下面
+ *   工具轨迹的 k12-mark 角标**同名**，那条竖线会顺带画在「有降级」「3 次未成功」
+ *   两个角标上。抽取后角标只剩自己那一套定义，竖线不再叠加。 */
+
 .sec__head--gap {
   margin-top: 8px;
 }

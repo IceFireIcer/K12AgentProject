@@ -57,6 +57,8 @@ import {
   retryRequestWireText,
   runRequestDisplayText
 } from './coding'
+// ★ 玻璃边缘光效（2026-09-30 报告 §4.3 一期）：根元素挂 k12-shine，变量由 composable 写。
+import { useCardShine } from '../composables/useCardShine'
 
 const props = defineProps<{ card: InlineCard }>()
 const chat = useChatStore()
@@ -66,6 +68,10 @@ const knowledge = useKnowledgeStore()
 
 const view = computed(() => readCodingCard(props.card.payload))
 const kpId = computed(() => (view.value.kind === 'unknown' ? '' : view.value.kpId))
+
+/** 卡片根元素（光效写 CSS 变量的落点；三条分支共用它，同时只渲染一条）。 */
+const rootRef = ref<HTMLElement | null>(null)
+useCardShine(rootRef)
 
 /**
  * 代码编辑器（异步组件，报告 §5.1）：只有编程卡真的渲染时才拉它的 chunk。
@@ -400,9 +406,13 @@ const interruptNotice = computed(() => {
 
 <template>
   <!-- 模板卡片：Monaco + 运行 / 求助 -->
+  <!-- ★ 光效挂载点：静态 class 被 card-structure 守卫逐个钉着（不能改字符），
+       所以 k12-shine 走 :class；三条分支共用同一个 rootRef。 -->
   <article
     v-if="view.kind === 'template'"
+    ref="rootRef"
     class="k12-card coding"
+    :class="{ 'k12-shine': true }"
     data-testid="coding-card"
     :data-kp-id="view.kpId"
     :data-tool="card.tool ?? ''"
@@ -592,7 +602,9 @@ const interruptNotice = computed(() => {
        提示正文**照后端原文**显示（卡片不生成任何提示文本），并说明它在编程卡里会累积。 -->
   <article
     v-else-if="view.kind === 'hint'"
+    ref="rootRef"
     class="k12-card coding coding--hint"
+    :class="{ 'k12-shine': true }"
     data-testid="coding-card-hint"
     :data-level="view.level"
     :data-kp-id="view.kpId"
@@ -615,7 +627,9 @@ const interruptNotice = computed(() => {
 
   <article
     v-else-if="view.kind === 'unknown'"
+    ref="rootRef"
     class="k12-card coding coding--unknown"
+    :class="{ 'k12-shine': true }"
     data-testid="coding-card-unknown"
     :data-tool="card.tool ?? ''"
     :data-detail="view.text || null"

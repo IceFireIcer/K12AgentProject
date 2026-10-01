@@ -23,6 +23,9 @@
   --k12-bad-border: #F5C6C0;
   --k12-cyan: #0E7490;
   --k12-cyan-soft: #ECF9FB;
+  --k12-amber: #C2410C;
+  --k12-amber-soft: #FFF4ED;
+  --k12-amber-border: #F7D9C4;
 }
 
 :root[data-grade="primary-low"][data-sat="vivid"] {

@@ -579,11 +579,12 @@ useFocusReturn(rootRef, () => floatPanel.open, { trap: false })
  *   （半透明底会让下层文字透上来，可读性是事故不是审美）。 */
 @supports (backdrop-filter: blur(1px)) {
   .fp {
-    /* ⚠️ 94% 而不是更低：这个窗**压在动画舞台上**，而舞台是高对比的图形 ——
-     *   真机实测 88% 时背后的节点文字（"第 4 段""流经"）会透上来，
-     *   与窗里的回答正文抢读（学生要读的是窗里的字）。
-     *   模糊负责"透出背景的存在感"，不透明度的下限由**可读性**决定。 */
-    background: color-mix(in srgb, var(--k12-surface) 94%, transparent);
+    /* ⚠️ 90%，**唯一一处不按 70–80 分档走的表面**（2026-09-30 整档下调时也只在 94→90 挪了一格）：
+     *   这个窗**压在动画舞台上**，舞台是高对比图形 + 节点文字 ——
+     *   真机实测 88% 时背后的「第 4 段 / 流经」会透上来，与窗里的回答正文抢读
+     *   （学生要读的是窗里的字）。模糊负责"透出背景的存在感"，
+     *   不透明度的下限由**可读性**决定（分档表见 base.css 的 `.k12-glass`）。 */
+    background: color-mix(in srgb, var(--k12-surface) 90%, transparent);
     backdrop-filter: blur(12px) saturate(1.4);
   }
   .fp__bar {

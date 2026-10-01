@@ -15,7 +15,7 @@
  *   回答不一样」看得见。还没判出学段时该徽章不显示（宁可不标，也不标一个假的）。
  *
  * ── 视觉：把「节奏」还给对话流 ────────────────────────────────────────────
- * 学生气泡是重点（右侧、surface-2 底 + accent 竖线），回答是**纸面上的正文**
+ * 学生气泡是重点（右侧 + accent 竖线，底色与助手纸面**同为白纸** —— 见 D-136），回答是**纸面上的正文**
  * （白底卡片、无重描边）。引用只是「依据」，整体降一档（12px，灰竖线）。
  * AI 头像属于 chrome（它是「谁在说」的标记，不是内容），所以保持浅底小尺寸。
  *
@@ -40,8 +40,8 @@ import { DEFAULT_LOGO_URL } from '../brand-logo'
 import { useDismissable } from '../composables/useDismissable'
 import { useEscape } from '../composables/useEscape'
 import { useFocusReturn } from '../composables/useFocusReturn'
+import { useCardShine } from '../composables/useCardShine'
 import InlineCard from '../cards/InlineCard.vue'
-import ProgressCard from '../cards/ProgressCard.vue'
 import MarkdownProse from './MarkdownProse.vue'
 import BlockedNotice from './BlockedNotice.vue'
 import DegradedNotice from './DegradedNotice.vue'
@@ -54,7 +54,36 @@ const props = defineProps<{
   detailOf?: (chunkId: string) => CitationDetail | null
   /** 分叉进行中（界面据此禁用按钮 + 显示「正在准备…」）。 */
   branching?: boolean
+  /**
+   * 这次正文里 `{{student_name}}` 要替换成的称呼（空串 = 回落中性的「同学」）。
+   * ★ 由页面从**后端给的显示名**取，组件自己不去问 store —— 与 `detailOf` 同一纪律
+   *   （组件不做第二处取数），也让这个组件在单测里可以脱离 store 单独渲染。
+   */
+  nameOf?: string
 }>()
+
+/**
+ * ★ 学生气泡也吃这套卡片光效（2026-09-30 用户裁决：「对话的也是相当于这种圆角矩形，你也得做啊，
+ *   只不过对话里面的你要克制一点，1°±就可以」）。
+ *
+ * 与卡片共用 `useCardShine`，但**幅度按气泡收小**（每实例参数）：
+ *   · maxDent 6px（卡片 12）—— 气泡高度只有几十像素，12px 会把角啃掉一大块；
+ *   · maxTilt 1°（卡片 2.5）—— 一屏里十几条消息都在倾斜，幅度一大就变成「整页在晃」；
+ *   · falloff 90px（卡片 120）—— 气泡更小，衰减半径也要跟着收，否则整块都在凹。
+ * 发光半径另外在样式里收（见下方 `.bubble.k12-shine`）。
+ */
+const bubbleRef = ref<HTMLElement | null>(null)
+useCardShine(bubbleRef, undefined, { maxDent: 6, maxTilt: 1, falloff: 90 })
+
+/**
+ * ★ 助手那侧也要（2026-09-30 用户裁决二次：「双方的对话都得做啊」）。
+ *   「智团团」的回答纸面 `.answer` 同样是圆角矩形（`--k12-r-card` + 边框 + 单侧投影），
+ *   但它比气泡大得多 —— 同一条克制档（1° / 6px / 90px）用在这里正好：
+ *   大面积上 2.5° 的倾斜会像整页在晃，而它的四角离指针通常更远，衰减半径收到 90px 也不会乱凹。
+ *   发光半径在样式里单独给（150px：比气泡的 130 大、比卡片的 190 小）。
+ */
+const answerRef = ref<HTMLElement | null>(null)
+useCardShine(answerRef, undefined, { maxDent: 6, maxTilt: 1, falloff: 90 })
 
 /**
  * ★★ 「从这里重新问」——把分叉点交给上层（`Chat.vue` → `chat.branchSession`）。
@@ -199,19 +228,14 @@ const sourceRows = computed(() =>
 )
 
 /**
- * 这一张卡片旁边要不要跟一张**独立的闯关进度卡**（报告 §2.3：进度/掌握度独立成卡，
- * 不嵌进题卡）。
+ * ⚠️ 这里**曾经**有一个 `hasLevels(card)` + 紧跟题卡的独立「闯关进度卡」
+ *   （报告 §2.3 把进度卡从练习卡里拆出来，那一步是对的：题卡不该被进度拉长）。
  *
- * ★ 判据只读「载荷里有没有 `levels` 数组」，**不在前端推导任何关卡状态** ——
- *   状态机在后端（`routes/quiz.py` 的 `apply_level_progress`），前端只读。
- * ★ 出题载荷（还没作答）与判分结果载荷都可能带 `levels`：前者是初始进度，
- *   后者是「进度变了」的那一份 —— 谁带就跟着谁渲染，两条路径一个规则。
+ * ★★ 2026-09-30 用户裁决（D-123）：**对话里不再出这张卡** —— 它是**当时的进度快照**，
+ *   学生真正会去看进度的地方是「个性化学习」与「学习记录」两页（那里的进度是活的、可操作的），
+ *   而对话里那张只能给出一个会过期的数字，还占掉整屏。
+ *   所以不是「塞回题卡」，而是**整个搬出对话**：题卡仍然只管题目/作答。
  */
-function hasLevels(card: { payload?: unknown }): boolean {
-  const payload = card.payload
-  if (typeof payload !== 'object' || payload === null) return false
-  return Array.isArray((payload as { levels?: unknown }).levels)
-}
 
 /**
  * 这一轮里有没有**跨学段向上兼容**取用的条目。
@@ -256,7 +280,7 @@ function pickBranch(): void {
            判据是「这一轮有没有学生的话」，不是「这条消息是谁发的」：轮次里
            assistant 那半永远有正文，user 那半可以合理地空着（开场白 / 上一轮失败）。 -->
     <div v-if="turn.userText" class="turn__user" data-testid="user-message">
-      <p class="bubble">{{ turn.userText }}</p>
+      <p ref="bubbleRef" class="bubble" :class="{ 'k12-shine': true }">{{ turn.userText }}</p>
     </div>
 
     <!-- 助手回答：头像 + 正文纸面 + 引用 + 卡片 -->
@@ -303,7 +327,7 @@ function pickBranch(): void {
         </div>
 
         <!-- 正文（delta 逐字累积，按极简 Markdown 渲染成结构化节点）。为空且还在流式时给一句「正在查教材」而不是空白。 -->
-        <div class="answer" data-testid="assistant-message">
+        <div ref="answerRef" class="answer" :class="{ 'k12-shine': true }" data-testid="assistant-message">
           <p v-if="awaiting" class="awaiting">
             正在查教材、组织讲法…
           </p>
@@ -311,7 +335,7 @@ function pickBranch(): void {
             <!-- ★★ 正文渲染归口 `MarkdownProse`（唯一实现，P1-4）：历史会话只读回看曾经
                  各自插值 `{{ text }}`，于是同一段话在档案页露出 `**粗体**` 与代码围栏。
                  模板与样式都搬去了那个组件，两处再也不会漂移。 -->
-            <MarkdownProse :text="turn.text" :streaming="streaming" />
+            <MarkdownProse :text="turn.text" :streaming="streaming" :name-of="nameOf" />
           </div>
 
           <!-- 引用：**默认收起**，点这一行才展开（用户 2026-09-26 的设计裁决）。
@@ -365,17 +389,11 @@ function pickBranch(): void {
         </div>
 
         <!-- 内联卡片组：与正文分离（先给依据、再给互动）。
-             ★★ 闯关进度卡**由这一层独立渲染**（报告 §2.3：进度卡从练习卡内移出）——
-                练习卡只管题目/作答，进度/掌握度是另一块内容，不该把题卡拉长。 -->
+             ★ 2026-09-30（D-123）：这里**只**渲染载荷自己的那张卡（题卡/动画卡/编程卡）；
+               原先紧跟题卡的「闯关进度卡」已整个搬出对话 —— 进度看「个性化学习 / 学习记录」。
+               ⚠️ 别再把它加回来：它不是「被塞进题卡」的问题，而是**对话里不该有进度快照**。 -->
         <div v-if="turn.cards.length > 0" class="cards" data-testid="inline-cards">
-          <template v-for="card in turn.cards" :key="card.id">
-            <InlineCard :card="card" />
-            <ProgressCard
-              v-if="hasLevels(card)"
-              data-probe-id="progress-detached"
-              :payload="card.payload"
-            />
-          </template>
+          <InlineCard v-for="card in turn.cards" :key="card.id" :card="card" />
         </div>
 
         <BlockedNotice v-if="turn.blocked" :notice="turn.blocked" />
@@ -514,12 +532,44 @@ function pickBranch(): void {
   display: flex;
   justify-content: flex-end;
 }
+/* ★ 气泡的光效（2026-09-30 用户裁决：对话也要，但克制）：
+ *   ⚠️ `border-radius` 必须在这条**复合规则**里再写一遍，且与 base.css 的 `.k12-shine` 逐字同源：
+ *     `.bubble` 是 scoped 样式（编译后 0,2,0），会盖掉 base.css 里单类 `.k12-shine`（0,1,0）的
+ *     `border-radius: calc(基础 + 内凹)` —— 那样四角内凹一下都不会发生（SurfacePanel 踩过同一个坑，D-124）。
+ *   `--k12-shine-r` 对齐气泡自己的圆角档（`--k12-r-inset`），发光/暗部半径一并收小。 */
+.answer.k12-shine {
+  --k12-shine-r: var(--k12-r-card);
+  --k12-shine-radius: 150px;
+  border-radius:
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-tl, 0px))
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-tr, 0px))
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-br, 0px))
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-bl, 0px));
+}
+
+.bubble.k12-shine {
+  --k12-shine-r: var(--k12-r-inset);
+  --k12-shine-radius: 130px;
+  --k12-shine-edge: 1.5px;
+  border-radius:
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-tl, 0px))
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-tr, 0px))
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-br, 0px))
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-bl, 0px));
+}
+
 .bubble {
   max-width: min(560px, 78%);
   padding: 10px 14px;
   border-radius: var(--k12-r-inset);
-  background: var(--k12-surface-2);
-  border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
+  /* ★★ 2026-10-01 用户裁决（D-136）：「对话里的卡片背景颜色统一一下」——
+   *   此前这里是 `--k12-surface-2`（一张**带色调**的次级纸），而助手纸面（`.answer`）与
+   *   各种工具卡都是 `--k12-surface`（纯白纸）→ 同一屏里两种底，看着就是不统一。
+   *   现在统一成**同一张白纸**：「这是我说的」不再靠底色，只靠右边那一笔强调色 + 右对齐
+   *   （底色一白，那句「右侧墨线代替满块着色」才真正成立）。
+   *   ⚠️ 描边也一并统一成纸面同款 `--k12-border`（原来是 70% 透明，白底上会显得更虚）。 */
+  background: var(--k12-surface);
+  border: 1px solid var(--k12-border);
   /* 右侧一道墨线代替满块着色：位置说明「这是我说的」，颜色不必喊。
    * 全页**只有这一处**用 accent 竖线 —— 引用行让位（见 .srcs__btn）。 */
   border-right: 3px solid var(--k12-accent);

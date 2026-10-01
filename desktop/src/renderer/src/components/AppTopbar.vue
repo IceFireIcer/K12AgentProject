@@ -26,8 +26,9 @@
  *   此前学段是两枚并列控件（实底 badge + 描边触发器「自己指定」），右上角于是挤着
  *   四个同级胶囊（模型 / 学段状态 / 学段动作 / 外壳级跳转），学生分不清哪个是状态。
  *   现在 `GradeIndicator` 自己把状态与动作合成**一枚**可点 chip（见该组件文件头）。
- *   外壳级跳转钮（`view-entry`）仍由 `App.vue` 塞进 actions 插槽，但它已被降权成
- *   描边小按钮 —— 它是**导航**，不与这两枚「当前环境」chip 抢同一档视觉权重。
+ *   ⚠️ 2026-10-01（D-126）：原先还有一枚「外壳级跳转钮」（`view-entry`，由 `App.vue` 塞进
+ *   actions 插槽），用户裁决连同它旁边那条竖分割线一起删了 —— 现在这一行只有
+ *   「模型 chip + 学段 chip」，导航一律走侧栏。
  *
  * ★ 顶栏是**单行 chrome**（64px，还要与外壳级动作 / 窗口按钮共处一行），所以：
  *   · 学段指示器用 `compact`（只留「学段值 + 我选年级」这一枚 chip，长说明不进这里）；
@@ -147,7 +148,12 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
    *   桌面底色（page）也是白 —— 只靠 1px 线还不足以说清「chrome 到此为止」；
    *   投影是那三个信号里的第三个（底色差 / 线 / 单侧投影），补上它边界才立住。 */
   border-bottom: 1px solid var(--k12-border-strong);
-  box-shadow: var(--k12-shadow-edge-bottom);
+  /* ★★ 2026-10-01（D-126）：这里**不要**再画一遍单侧投影。
+   *   外壳那一行（`layouts/AppShell.vue` 的 `.shell__head`，横跨顶栏 + 右侧动作带）
+   *   已经画了同一条 `--k12-shadow-edge-bottom`；顶栏再画一次，它那条投影会向右
+   *   溢出到动作带上（`.tb` 有 `z-index: 2`，压在动作带之上），在 x=1308 那个边界
+   *   留下**一条竖直的发丝缝** —— 用户拿截图点名「那个分割线」，实测就是它。
+   *   删掉这条之后下边线与投影仍由外壳那一行提供，视觉完全不变，缝没了。 */
   position: relative;
   z-index: 2;
   color: var(--k12-fg);

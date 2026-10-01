@@ -36,15 +36,36 @@
  * 对比度由 `node scripts/design/check-contrast.mjs --strict` 机器校验（300 项全过）。
  * ========================================================================== */
 
-/* ── 字体：本地自托管，禁 CDN（断网演示硬约束）──────────────────────────── */
-@import '@fontsource-variable/inter/index.css';
+/* ── 字体：本地自托管，禁 CDN（断网演示硬约束）────────────────────────────
+ * ★★ 2026-09-30 用户裁决：**两套字，按用途分**（此前全站单一字体，两次都撞墙）：
+ *
+ *   · `--k12-font-ui`（正文 / 所有小字号）＝ **Noto Sans SC**（黑体）
+ *     小字号（12–16px）要的是**笔画粗细均匀 + 真字重**：角标、侧栏、卡片说明都靠它。
+ *   · `--k12-font-display`（**只给大字**：页面身份行 32px / 首屏问候 40px）
+ *     ＝ **霞鹜文楷屏幕阅读版（LXGW WenKai Screen，GB 字形）**：圆润、柔和、学生友好。
+ *
+ * ★ 为什么必须分开（实测两次，别再合并）：
+ *   ① 先全站换文楷：**小字糊** —— 楷体笔画细、对比高，缩到 12–14px 就发虚；
+ *   ② 而该包**只有 400 一个字重**，标题的 650/700 由浏览器**合成加粗**，
+ *      小字被合成加粗后更糊（截图里侧栏 / 顶栏 chip / 卡片说明全糊成一片）。
+ *   大字（≥32px）没有这两个问题：笔画有足够像素展开，合成加粗也看不出来。
+ *   ⚠️ 想「小字也圆润」就得换一款**圆黑体**（笔画均匀的圆体）。OFL 生态里最接近的是
+ *      资源圆体（Resource Han Rounded），但它 GitHub 许可证标 NOASSERTION、只发 7z 包，
+ *      不满足「开源可核验」，本次不采用。
+ *
+ * ⚠️ 两句约束：只引 WenKai 的 **GB** 那一支（非 GB 是繁体/日式字形）；
+ *   两套字都必须是 SIL OFL 1.1，且许可副本随包发（见 tests/font-license.test.ts）。
+ * ⚠️ 字体包只进 `devDependencies`（vite 打进 out/renderer），见 tests/bundle-budget.test.ts。 */
+@import 'lxgw-wenkai-screen-webfont/lxgwwenkaigbscreen.css';
 @import '@fontsource-variable/noto-sans-sc/index.css';
 @import '@fontsource-variable/jetbrains-mono/index.css';
 @import './tokens.generated.css';
 
 :root {
-  --k12-font-ui: 'Inter Variable', 'Noto Sans SC Variable', -apple-system,
-    'Segoe UI', 'Microsoft YaHei', sans-serif;
+  --k12-font-ui: 'Noto Sans SC Variable', -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  /* 只给大字用；小字号请继续用 --k12-font-ui（见上面的取舍说明）。 */
+  --k12-font-display: 'LXGW WenKai Screen', 'Noto Sans SC Variable', -apple-system, 'Segoe UI',
+    'Microsoft YaHei', sans-serif;
   --k12-font-mono: 'JetBrains Mono Variable', 'Cascadia Code', Consolas, monospace;
 
   /* ── 字号阶梯：8 档，**正文基准 16px** ──────────────────────────────────
@@ -375,11 +396,26 @@ a {
  * （吸顶操作栏、悬浮追问窗、对话框、右栏抽屉）。
  * ★ 不给侧栏 / 顶栏：它们背后是平板色的桌面，blur 在数学上等于没效果，
  *   只多一份合成层的开销（走查实测：换成半透明后观感无差别）。
+ *
+ * ★★ 不透明度**按表面分档**（2026-09-30 用户裁决：整档下调，别再统一用 88–90）——
+ *   判据只有一条：**背后经过的内容有多抢读**。越抢读越不透明；
+ *   背后只是平板色底的，可以放到最透（70 出头），卡片感靠边框与投影撑。
+ *
+ *   | 表面 | 不透明度 | 为什么 |
+ *   | --- | --- | --- |
+ *   | `.k12-glass`（右栏抽屉 / 吸顶） | 78% | 背后真的有整页正文在滚 |
+ *   | 对话框 `.cd__box` | 76% | 背后是压暗 30% 的遮罩，透一点才有浮层感 |
+ *   | 左栏「卡住了怎么办」小卡 | 72% | 背后是平板色左栏，没有内容经过 |
+ *   | 空态的建议问题 chip `.chat__suggest` | 60% | 同上：背后是平板页面底色，最透也安全 |
+ *   | 悬浮追问窗 `.fp` | **90%** | ⚠️ 例外：它压在动画舞台上，实测 88% 时背后节点文字会抢读 |
+ *
  * ⚠️ 必须包在 @supports 里 —— 不支持 backdrop-filter 的环境要退回实色，
  *   否则半透明底会让下层文字透上来（可读性事故，不是审美问题）。 */
 @supports (backdrop-filter: blur(1px)) {
   .k12-glass {
-    background: color-mix(in srgb, var(--k12-surface) 88%, transparent);
+    /* 78%：四档里偏上的一档 —— 抽屉背后是整页正文，模糊负责"透出存在感"，
+     * 下限由正文可读性决定（见上面的分档表）。 */
+    background: color-mix(in srgb, var(--k12-surface) 78%, transparent);
     backdrop-filter: blur(12px) saturate(1.4);
   }
 }
@@ -433,6 +469,8 @@ a {
 }
 .k12-identity__main {
   /* 页面身份行 = 全页最大视觉焦点 → h1（32px，优化报告 §2.1 的 Hero 层）。 */
+  /* ★ 大字走 display 那一套（圆润的阅读体）：32px 下笔画展得开，小字那套不适用这里。 */
+  font-family: var(--k12-font-display);
   font-size: var(--k12-fs-h1);
   font-weight: 650;
   line-height: var(--k12-lh-snug);
@@ -987,6 +1025,173 @@ a {
   font-weight: 650;
   font-size: var(--k12-fs-caption);
 }
+
+/* ── 卡片玻璃光效（2026-09-30 设计执行报告）：鼠标跟随的边缘高光 + 四角内凹 ──
+ * 三个生效门：精确指针媒体查询 / 减动效（JS 侧 useCardShine 摘监听）/
+ * 指针在卡上。变量由 composables/useCardShine.ts 写入，CSS 只负责渲染。
+ *
+ * ⚠️ 命名：不叫 .k12-glass —— 那是 backdrop-filter 毛玻璃类（上方已占用）。
+ * ⚠️ 本段所有光效变量（shine 各档 + dent 四角）只在 :root 与这里出现一次
+ *    （P-158：同一自定义属性两处定义会被静默覆盖）。
+ * ⚠️ 边框/底色/投影配方一概不动 —— 光效是叠加层，皮肤唯一来源仍是
+ *    .k12-card / SurfacePanel 的既有规则（visual-edges 守卫盯着的那些）。 */
+
+:root {
+  /* 光斑半径（径向渐变），决定「阳光」打多宽 */
+  --k12-shine-radius: 190px;
+  /* 边缘环带宽：压在 1px 边框上的发光细环。
+   * ★ 2026-09-30 用户裁决「高光调多一点」：1.5px → 2px（仍是细环，但一眼看得见）。 */
+  --k12-shine-edge: 2px;
+  /* 高光色：带学段色（accent 派生混白）——学段一换，光色自动跟着换；
+   * 不写死 rgba，纪律与 --k12-shadow-* 相同（守卫 visual-edges.test.ts 的口径）。
+   * ★ 2026-09-30 用户裁决「高光调多一点」：accent 占比 42% → 62%（更亮、学段色更明确）。 */
+  --k12-shine-bright: color-mix(in srgb, var(--k12-accent) 62%, #FFFFFF);
+  /* 受压暗部：前景色派生，让内凹边缘读出「陷进阴影」 */
+  --k12-shine-shade: color-mix(in srgb, var(--k12-fg) 18%, transparent);
+  /* ⚠️ 原 `--k12-shine-wash`（内发光用的白 wash）已随内发光层一起删除（2026-09-30 用户裁决）：
+   *   发光改走卡外 box-shadow，色值仍从 `--k12-shine-bright` 派生。 */
+}
+
+/* 挂载点：谁要效果谁加 .k12-shine（opt-in，不全局默认 —— 虚拟列表里卡片多，
+ * 监听器按卡片计，让接入方自己决定范围）。需要 position: relative 放置叠加层。 */
+.k12-shine {
+  position: relative;
+  /* 四角圆角 = 基础语义档 + 内凹量。--k12-shine-r 允许接入方覆盖基础档
+   * （SurfacePanel 的 r-inset/r-control 档），默认跟卡片档。 */
+  border-radius:
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-tl, 0px))
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-tr, 0px))
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-br, 0px))
+    calc(var(--k12-shine-r, var(--k12-r-card)) + var(--k12-dent-bl, 0px));
+}
+
+/* ★ 整卡 3D 倾斜（2026-09-30 用户裁决：「3D 卡片整体往后面一个角内凹」）。
+ *   角度由 useCardShine 写进 `--k12-shine-tilt-x/-y`（±5°，带符号）：指针在哪一侧，
+ *   那一侧的角就往后倒 —— 只把圆角变大读不出「被按进去」，整卡倾斜才给得出立体感。
+ *   ⚠️ 选择器必须写成 `.k12-card.k12-shine` / `.sf.k12-shine`（0,2,0）：
+ *     `.k12-card:hover`（同特异度、源序更早）里那条 `transform: translateY(-1px)` 否则会把
+ *     单类 `.k12-shine`（0,1,0）的 transform 整条盖掉 —— 而悬停正是本效果生效的时候。
+ *   ⚠️ 不给 transform 加 transition：平滑由 JS 的 lerp 负责，CSS 再叠一层会滞后一拍。
+ *   ⚠️ 透视写在**元素自己**身上（perspective() 函数），不挂父级 perspective ——
+ *     这样不必给任何祖先加样式，也不改变子元素的定位基准。 */
+.k12-card.k12-shine,
+.sf.k12-shine {
+  transform: perspective(900px) rotateX(var(--k12-shine-tilt-x, 0deg))
+    rotateY(var(--k12-shine-tilt-y, 0deg));
+  transform-origin: 50% 50%;
+}
+
+/* 边缘环：mask 挖出「边框带」，两层径向渐变（亮环 + 受压暗部）都只画在带内。
+ * ★★ `inset: -1px`（2026-09-30 用户裁决「发光的圆角和卡片圆角一样，彻底修掉」）：
+ *   绝对定位伪元素的包含块是**内边距盒**，`inset: 0` 让它比卡片整整小一个边框宽（1px），
+ *   而 `border-radius: inherit` 给的是**边框盒**的圆角 —— 盒子小了、半径没跟着小，
+ *   两条弧在角上就错开（半径越大越明显：四角内凹后半径 20px+ 时肉眼一眼看出「鼓出来」）。
+ *   `inset: -1px` 让伪元素的盒子**正好等于边框盒**，inherit 来的圆角逐角精确重合。
+ *   ⚠️ 裁切风险已知且优雅降级：`overflow: hidden` 的卡（SurfacePanel 的 flush 档等）
+ *     会把外扩的 1px 裁掉 —— 那正好退回改动前的行为，不会出别的毛病。 */
+.k12-shine::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: var(--k12-shine-edge);
+  background:
+    /* ★ 四角专项增亮（2026-09-30 用户裁决：「四个角的时候不仅要有高光」）：
+     *   贴角时内凹越深（--k12-shine-glint 0–1，由 JS 归一化给出）→ 这束紧高光越亮；
+     *   半径 120px 比主高光（190px）更紧，读起来是「棱角上的一束光」而不是整片泛白。
+     *   ⚠️ `calc(var(--x) * 72%)` 写在 color-mix 的百分比位上（Chromium 实测可用，
+     *      已验证过计算值：0.7 × 72% → alpha 0.50）；颜色仍由 --k12-shine-bright 派生，
+     *      不引入任何写死色值。 */
+    radial-gradient(
+      circle 120px at var(--k12-shine-x, -999px) var(--k12-shine-y, -999px),
+      color-mix(
+        in srgb,
+        var(--k12-shine-bright) calc(var(--k12-shine-glint, 0) * 72%),
+        transparent
+      ),
+      transparent 72%
+    ),
+    radial-gradient(
+      circle 160px at var(--k12-shine-x, -999px) var(--k12-shine-y, -999px),
+      var(--k12-shine-shade),
+      transparent 60%
+    ),
+    radial-gradient(
+      circle var(--k12-shine-radius) at var(--k12-shine-x, -999px) var(--k12-shine-y, -999px),
+      var(--k12-shine-bright),
+      transparent 70%
+    );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity var(--k12-dur-state) var(--k12-ease-state);
+  pointer-events: none;
+  z-index: 1; /* 盖住卡面内容（含沙箱 iframe），但不接事件 */
+}
+
+/* ⚠️ 这里**曾经**有一层内发光（`::after` 白 wash）—— 2026-09-30 用户裁决删掉：
+ *   「发光你应该是卡片**外**发光，而不是内发光」。内层泛白还会让卡面上的 muted 小字发糊
+ *   （报告 §2.3 的对比度预算本来就把它列为可砍项）。发光改由下面 hover 那条
+ *   **box-shadow 外发光**承担：box-shadow 画在边框盒之外，且**不被 overflow: hidden 裁掉**
+ *   —— 这点很关键，SurfacePanel 的 flush 档就是 overflow: hidden，伪元素画不出框外。
+ *   `--k12-shine-inside`（贴边程度 0–0.5）没有浪费：它现在驱动外发光的半径与亮度。 */
+
+/* ⚠️ 减动效的**有效值**有两个来源，必须同时挡住（真机实测踩到）：
+ *   ① 系统偏好 prefers-reduced-motion: reduce —— 只挡 JS 侧监听（useCardShine 摘监听）
+ *      是不够的：CSS 的 :hover 照旧把这条环点亮 ⇒ 画面在减动效下**仍有反应**；
+ *   ② 应用自己的三档开关 —— 落在 `:root[data-k12-reduced-motion='on']`（见上方全局兜底段）。
+ *   所以这里用「媒体查询 × 属性选择器」两条一起收：与 useCardShine 的 gate 口径一致，
+ *   减动效开启时整条规则不生效（效果整体关闭，不做降级形态 —— 报告 §2.4 门 2）。 */
+@media (hover: hover) and (pointer: fine) {
+  @media (prefers-reduced-motion: no-preference) {
+    :root:not([data-k12-reduced-motion='on']) .k12-shine:hover::before {
+      opacity: 1;
+    }
+
+    /* ★★ 卡片**外**发光（2026-09-30 用户裁决两轮：「不是内发光」「要明显一点」+
+     *   「发光时候那个圆弧要和卡片圆弧一样，要不然看着会割裂」）。
+     *
+     *   ⚠️ 为什么必须用 **box-shadow**（而不是再画一个伪元素去发光）：
+     *     box-shadow 的轮廓是**从元素的 border-radius 派生**的 —— 逐角、逐帧跟着走，
+     *     所以发光弧与卡片弧**永远是同一条**，四角内凹一变它跟着变。
+     *     伪元素得自己再声明一次圆角（还得再同步一次内凹的 calc），那才会出现
+     *     「两条弧对不上」的割裂感 —— 正是这次要消除的东西。
+     *   ★★ 更隐蔽的第二个坑（用户拿截图第二次指出「角上鼓出来」）：**贴边那层不能有模糊**。
+     *     模糊会把圆角「糊圆」——半径 20px 的角上糊 7px，外缘看起来就是比卡片胖一圈。
+     *     而 `box-shadow` 的 spread 是**同比放大轮廓**（圆角半径同步 +spread，两弧同心），
+     *     所以贴边层取 **blur: 0 + spread**：弧与卡片弧**同心同形**，一点不鼓。
+     *
+     *   第 1 层 = 卡片自己的单侧投影（token 原样保留，三件套不动）
+     *   第 2 层 = 贴边硬光：**blur 0**、spread 1.5→4px、alpha 30%→160%（勾弧，同心）
+     *   第 3 层 = 外扩柔光：blur 12→48px、alpha 18%→70%（明显，但压低声量不抢弧）
+     *   三层全部由 `--k12-shine-inside`（贴边程度，JS 每帧写）与 token 派生，无写死色值。
+     *   ⚠️ `.sf--card` 用的是同一个 `--k12-shadow-card`，所以对 SurfacePanel 的 card 档
+     *     是「原样投影 + 两层外光」；tone=float 的卡片不参与本效果（shine 是 opt-in）。 */
+    :root:not([data-k12-reduced-motion='on']) .k12-shine:hover {
+      box-shadow:
+        var(--k12-shadow-card),
+        0 0 0 calc(1.5px + var(--k12-shine-inside, 0) * 2.5px)
+          color-mix(
+            in srgb,
+            var(--k12-shine-bright) calc(30% + var(--k12-shine-inside, 0) * 130%),
+            transparent
+          ),
+        0 0 calc(12px + var(--k12-shine-inside, 0) * 36px)
+          color-mix(
+            in srgb,
+            var(--k12-shine-bright) calc(18% + var(--k12-shine-inside, 0) * 52%),
+            transparent
+          );
+    }
+  }
+}
+
+/* ★ 全局减动效兜底是**辅**：base.css 既有的 reduce 规则会把所有 transition-duration
+ * 压到 0.01ms，淡入淡出自动失效；但 rAF 写的变量它们收不掉 —— JS 侧 useCardShine
+ * 读 useReducedMotion() 摘监听才是主防线（与 composables/useReducedMotion.ts 同一纪律）。 */
+
 /* ── EP 细节对齐（优化报告 §4.1 的「特殊组件适配」四条）───────────────────
  * 表格：单元格内边距与 k12 间距同源（16 的一半 = 8，即 sp-2）；
  * 表单：字段之间 16px（sp-4）、标签与控件之间 12px（sp-3）；

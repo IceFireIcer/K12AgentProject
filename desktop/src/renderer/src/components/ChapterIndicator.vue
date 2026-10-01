@@ -268,7 +268,13 @@ async function choose(title: string): Promise<void> {
   padding: 3px 10px;
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-soft);
-  border: 1px solid var(--k12-accent-border);
+  /* ★ 2026-10-01 用户裁决（D-137）：「按钮没有边界、看不出是按钮」。
+   *   这一枚是**状态** chip（显示当前章节），原来用 `--k12-accent-border`（很淡的一档），
+   *   在浅色信息条上几乎读不出边。改用本色混出的实一档 —— 仍是同一色相、
+   *   **不加投影**（投影留给真按钮，学生才能一眼分出「哪个能点」）。 */
+  /* ★ 2026-10-01 第二轮（用户：「太淡了」）：38% 混出来仍然偏淡 —— 直接用**实色强调色**描边。
+   *   它是这一行里唯一的「当前状态」，读不清等于没写；填充保持 accent-soft（不抢按钮的投影）。 */
+  border: 1px solid var(--k12-accent);
   color: var(--k12-accent-ink);
   font-size: var(--k12-fs-caption);
   font-weight: 600;
@@ -283,6 +289,9 @@ async function choose(title: string): Promise<void> {
   border-radius: var(--k12-r-pill);
   border: 1px solid var(--k12-border-strong);
   background: var(--k12-surface);
+  /* ★ D-137：与信息条那几枚按钮**同一套配方**（白底 + 描边 + 投影）。
+   *   只靠 1px 描边时，它夹在一排 chip 之间读不出「这是可以点的那个」。 */
+  box-shadow: var(--k12-shadow-card);
   color: var(--k12-fg-2);
   font: inherit;
   font-size: var(--k12-fs-caption);
