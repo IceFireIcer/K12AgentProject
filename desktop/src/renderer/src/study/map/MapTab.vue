@@ -30,6 +30,7 @@ import { useQuizStore } from '../../stores/quiz'
 import { useUiStore } from '../../stores/ui'
 import { useReducedMotion } from '../../composables/useReducedMotion'
 import { UNKNOWN_KP_LABEL, kpLabel } from '../kp-label'
+import { buildPlanRequestMessage, planRequestDisplayText } from '../plan-request'
 import { GRADE_LABELS, GRADE_UNKNOWN_LABEL } from '../../labels'
 import GraphMap from './GraphMap.vue'
 import GraphCanvas from './GraphCanvas.vue'
@@ -218,14 +219,21 @@ const quizReady = computed(() => selectedStage.value !== null)
  *     而「问一句」这条路永远通；
  *   · 「学」这件事在本项目里的主场就是对话（7×24 的 AI 教师），
  *     练习题是**检验**（次要动作用它，见 `goQuiz()`）；
- *   · 走 `chat.prepareQuestion()` 预填，学生看得见自己要问什么、也**不会**被替着消耗一次调用
- *     （与错题本的「去练一练」同一条纪律）。
+ *   · ★★ 2026-09-30 用户裁决：**推翻「只预填」**——先切到对话页、再直发一条
+ *     学习计划请求（学生气泡是 `planRequestDisplayText` 那句自然话，
+ *     真正发给模型的是带 `kp_id` 的 wire 文本，见 `study/plan-request.ts`）。
+ *     ⚠️ 错题本的「去练一练」**仍然只预填**：两条路从这里起**不再是同一条纪律**，
+ *     别再把它们当成同一条。
+ *
+ * ★ 名字取不到（中性标签）时传**空串**给 plan-request，而不是占位词 ——
+ *   占位词对模型是个它认不出的名字，空串那条路径会退化成不带名字的说法。
  */
 function goLearn(): void {
   const kpId = selected.value
   if (!kpId) return
-  chat.prepareQuestion(`我想学「${nameOf(kpId)}」这个知识点，先给我讲讲它是怎么一回事吧。`)
+  const name = nameResolved(kpId) ? nameOf(kpId) : ''
   ui.show('chat')
+  void chat.send(planRequestDisplayText(name), buildPlanRequestMessage(kpId, name))
 }
 
 /** 次要动作「去闯关练一练」：题库里这个知识点的题（判分仍在 Python）。 */

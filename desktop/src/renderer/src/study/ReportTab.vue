@@ -393,13 +393,18 @@ function originOf(source: string, decidedBy?: string | null): GradeOrigin | null
 }
 
 /* ------------------------------------------------------------------ *
- * 闯关进度（`quiz.levels` —— 服务端已按依赖图拓扑序排好，**不重排**）
+ * 闯关进度（服务端已按依赖图拓扑序排好，**不重排**）
+ *
+ * ★★ 用 `quiz.pathLevels`（**本学段关卡路径**）而不是 `quiz.levels`（整张进度表）：
+ *   这一块是「逐关进度」，摆的是**关卡**；学段换过的学生名下还有更低学段的旧行，
+ *   按整张表渲染就会同名关卡连着出现三次（与智码工坊、闯关页同一个口径）。
+ *   旧记录仍在库里、仍参与掌握度与取题兼容，只是不冒充「这一关」。
  * ------------------------------------------------------------------ */
 
-const quizLevels = computed(() => quiz.levels)
+const quizLevels = computed(() => quiz.pathLevels)
 const quizSummary = computed(() => ({
-  total: quiz.levels.length,
-  mastered: quiz.levels.filter((level) => level.stage === 'mastered').length
+  total: quiz.pathLevels.length,
+  mastered: quiz.pathLevels.filter((level) => level.stage === 'mastered').length
 }))
 
 type TagType = 'primary' | 'success' | 'warning' | 'info'

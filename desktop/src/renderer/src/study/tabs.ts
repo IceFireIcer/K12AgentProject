@@ -7,8 +7,10 @@
  *   ② 内容区用 `<component :is>` 动态渲染，`KeepAlive` 要靠组件名做缓存键，
  *      所以每页的组件必须显式写出 `name`（见下面各组件里的 `defineOptions`）。
  *
- * ★ 顺序就是界面上的顺序：**概览 → 错题本 → 章节进度 → 学习地图 → 会话**。
- *   概览放第一是因为它是「这一周学得怎么样」的总览（进来先看结论）。
+ * ★ 顺序就是界面上的顺序：**概览 → 错题本 → 章节进度 → 学习地图 → 学习历史 → 会话**。
+ *   概览放第一是因为它是「这一周学得怎么样」的总览（进来先看结论）；
+ *   **学习历史**（2026-09-30 新增）排在会话之前 —— 两者都是「回看过去」，
+ *   而流水（我做过什么）比会话（我说过什么）更靠近学习本身。
  *
  * ⚠️ **`report` 这一页是「学习报告 + 学情概览」的合体**（用户裁决，2026-09）：
  *   原型另有一张「学习档案概览」页（平均掌握度 / 7 日学习量 / 推荐 / 学段信号…），
@@ -17,6 +19,11 @@
  *   （「我现在会什么、下一步学什么」），分成两页只会让学生在两处来回找。
  *   于是 `id` 仍是 `report`（`verify-ui.mjs` 与既有测试按它取值），
  *   只把**按钮文案**换成「概览」。
+ *
+ * ⚠️ **2026-09-30 解冻一次**：用户要求加「学习历史」（逐条流水）—— 这是与
+ *   `report`（聚合）**不同的问题**，不是同一件事的第二个入口，所以这次确实该新开一页。
+ *   加一页照旧要同时改三处：`StudyTab` 联合类型（`stores/ui.ts`）、本注册表、
+ *   以及分页外壳 `Study.vue` 的取数（历史页与会话页一样**按需懒加载**，不进 `loadAll`）。
  */
 
 import type { Component } from 'vue'
@@ -25,6 +32,7 @@ import ReportTab from './ReportTab.vue'
 import MistakesTab from './MistakesTab.vue'
 import ChaptersTab from './ChaptersTab.vue'
 import MapTab from './map/MapTab.vue'
+import HistoryTab from './HistoryTab.vue'
 import SessionsTab from './SessionsTab.vue'
 
 export interface StudyTabEntry {
@@ -63,6 +71,12 @@ export const STUDY_TABS: readonly StudyTabEntry[] = [
     label: '学习地图',
     hint: '知识点的前后依赖关系：先学什么，再学什么。',
     component: MapTab
+  },
+  {
+    id: 'history',
+    label: '学习历史',
+    hint: '我做过什么：几号、几点、问了什么、练了哪道题、结果怎么样，一条一条按时间排。',
+    component: HistoryTab
   },
   {
     id: 'sessions',

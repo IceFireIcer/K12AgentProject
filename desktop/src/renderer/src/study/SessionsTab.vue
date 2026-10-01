@@ -17,9 +17,10 @@
  * ★ 回看里**只有你问的与助手答的文本**：模型的思考过程与工具调用参数不投影进来
  *   （那可能含题干与答案，且回看不需要）。
  */
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useStudyStore, type SessionTranscriptShape } from '../stores/study'
 import { useChatStore } from '../stores/chat'
+import { useProfileCardStore } from '../stores/profileCard'
 import { formatMs } from '../study/report-markdown'
 import { displaySessionTitle } from '../study/session-title'
 import MarkdownProse from '../components/MarkdownProse.vue'
@@ -30,6 +31,21 @@ defineOptions({ name: 'StudySessionsTab' })
 const study = useStudyStore()
 /** 回看历史时要借用它的「学生版译文」（见 `open()` 里的说明）。 */
 const chat = useChatStore()
+/**
+ * 回看正文里的 `{{student_name}}` 也要替换。
+ *
+ * ★ 为什么这条通路也要管：JSONL 里存的是**发给模型的原文**，而提示词要求模型
+ *   称呼学生时写占位符 —— 不替换的话，学生在档案页读自己两个月的对话时会看到
+ *   一片没被替换掉的花括号（同一段话在对话页是好的）。替换实现只有一处
+ *   （`student-name.ts`），这里只是把称呼喂给共用的渲染组件。
+ */
+const profileCard = useProfileCardStore()
+const studentName = computed(() => profileCard.identity?.displayName ?? '')
+
+onMounted(() => {
+  // 拿不到就回落中性的「同学」，这条通路不因为读失败而不显示（见 store 的降级口径）
+  if (profileCard.identity === null) void profileCard.load().catch(() => {})
+})
 
 const openTranscript = ref<SessionTranscriptShape | null>(null)
 const openId = ref<string | null>(null)
@@ -170,7 +186,7 @@ function close(): void {
                      此前这里是 `{{ message.text }}`，于是学生展开历史会话时看到的是
                      `**贴着标签的盒子**` 与 ``` ```python ``` 围栏 —— 同一段话在对话页
                      是排版好的、在档案页是带星号的原文。 -->
-                <MarkdownProse :text="message.text" class="message__text" />
+                <MarkdownProse :text="message.text" :name-of="studentName" class="message__text" />
               </li>
             </ul>
             <button class="btn btn--mini" type="button" @click="close()">收起</button>
