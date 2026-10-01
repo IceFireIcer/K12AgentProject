@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AccountMenu: typeof import('./../components/AccountMenu.vue')['default']
     AnimationCard: typeof import('./../cards/AnimationCard.vue')['default']
     AppSidebar: typeof import('./../components/AppSidebar.vue')['default']
     AppTopbar: typeof import('./../components/AppTopbar.vue')['default']
@@ -56,8 +57,11 @@ declare module 'vue' {
     MascotMark: typeof import('./../components/MascotMark.vue')['default']
     MessageComposer: typeof import('./../components/MessageComposer.vue')['default']
     ModelPicker: typeof import('./../components/ModelPicker.vue')['default']
+    OpLogPanel: typeof import('./../components/OpLogPanel.vue')['default']
     PageActions: typeof import('./../components/PageActions.vue')['default']
     PageIdentity: typeof import('./../components/PageIdentity.vue')['default']
+    PortraitFacts: typeof import('./../components/PortraitFacts.vue')['default']
+    ProfileTags: typeof import('./../components/card/ProfileTags.vue')['default']
     ProgressBar: typeof import('./../components/ProgressBar.vue')['default']
     ProgressCard: typeof import('./../cards/ProgressCard.vue')['default']
     QuizCard: typeof import('./../cards/QuizCard.vue')['default']
@@ -65,6 +69,7 @@ declare module 'vue' {
     SidecarBadge: typeof import('./../components/SidecarBadge.vue')['default']
     Skeleton: typeof import('./../components/Skeleton.vue')['default']
     SourceChips: typeof import('./../components/SourceChips.vue')['default']
+    StudyPortrait: typeof import('./../components/StudyPortrait.vue')['default']
     SurfacePanel: typeof import('./../components/SurfacePanel.vue')['default']
     TeacherGate: typeof import('./../components/TeacherGate.vue')['default']
     VirtualList: typeof import('./../components/VirtualList.vue')['default']
