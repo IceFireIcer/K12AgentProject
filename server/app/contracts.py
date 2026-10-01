@@ -18,7 +18,8 @@
 - 设置：`LlmConfig` / `LlmConfigIn` / `SettingsResponse` / `SettingsUpdateRequest`，
   **含 API Key 掩码语义**（读回恒为掩码，占位值不覆盖已存 Key，清除必须显式；
   Key 不出现在 `repr()` 里）；
-- 学生与画像：`Student` / `Mastery` / `StudentProfile` / `PreferenceUpdateRequest`
+- 学生与画像：`Student` / `StudentCreateRequest` / `StudentUpdateRequest` /
+  `StudentDeleteResult` / `Mastery` / `StudentProfile` / `PreferenceUpdateRequest`
   （学习偏好的**唯一写入口径**：封闭键词表 `PreferenceKey` + ≤ 40 字单行值）；
 - 检索与图：`Citation` / `RagSearchRequest` / `RagSearchResult` / `DepNode`；
 - 学段信号：`GradeSignal` / `GradeSignals` / `GradeOverrideRequest` / `GradeOverrideResponse`；
@@ -518,6 +519,49 @@ class StudentCreateRequest(CamelModel):
         if not stripped:
             raise ValueError("昵称不能为空白")
         return stripped
+
+
+class StudentUpdateRequest(CamelModel):
+    """``PATCH /api/students/{student_id}``：改昵称 / 学段。**两个字段都可选，省略 = 不动。**
+
+    ★ 为什么是「可选字段」而不是整份 :class:`Student`：账号管理界面可能只改名字，
+      提交整份对象意味着界面上没动过的字段（尤其是服务端自己维护的时间戳）也一起写回，
+      那是「拿旧快照覆盖新值」的经典事故 —— 省略即由服务端保留原值，前端不必先读再写。
+
+    ★ 改学段会**连带清空当前章节**：章节属于某本教材，学段一变那本教材就不存在了
+      （与 ``app/grade/rules.py`` 的学段写入同一口径，D-038）。
+    """
+
+    nickname: str | None = Field(default=None, min_length=1, max_length=32)
+    grade_level: GradeLevel | None = None
+
+    @field_validator("nickname")
+    @classmethod
+    def _strip_nickname(cls, value: str | None) -> str | None:
+        """与 :class:`StudentCreateRequest` 同一口径（空白昵称 422，不含首尾空格）。
+
+        ★ 保留 ``None`` 表示「这次不改昵称」，所以判空只在**给了值**之后做。
+        """
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("昵称不能为空白")
+        return stripped
+
+
+class StudentDeleteResult(CamelModel):
+    """``DELETE /api/students/{student_id}``：删号回执。
+
+    ★ **号不存在也回 200 + ``deleted: false``，不是 404**：删除是幂等的
+      （同一张卡片连点两次、两个窗口同时点），第二次拿到 404 会把「本来就已经没了」
+      报成「操作失败」，界面反而要为它写一段特例。调用方看 ``deleted`` 就知道
+      这次到底有没有真的删掉数据目录。
+    """
+
+    student_id: str
+    #: 这次调用是否真的删掉了一个学生目录（``false`` = 本来就不存在）。
+    deleted: bool
 
 
 class Mastery(CamelModel):
@@ -1161,6 +1205,10 @@ class LearningReport(CamelModel):
     grade_level: GradeLevel
     #: 时间窗口天数（查询参数回显，前端标题用它）
     days: int = 7
+    #: 画像摘要（§5.2 #12「教师/家长报告含画像摘要」）：该学生**自己**的标签投影。
+    #: ★ 与 ``GET /tags`` 同口径、同一道闸：parent_consent=0 → 空（G-G），因为摘要也是画像。
+    #: ★ **绝不跨学生**（禁做 #9）——「家长报告」最容易被顺手写成「和班上别人比」，那是禁止的。
+    profile_summary: list[ProfileTagOut] = Field(default_factory=list)
     #: 报告生成时间（Unix 毫秒）。★ 报告**不进 Prompt**，所以这里可以带时间
     #: （D-032 的逐字节稳定只约束注入 system prompt 的内容）。
     generated_at: int = 0
@@ -1340,6 +1388,13 @@ class CodeTemplate(CamelModel):
     scaffold: str
     #: 填完 TODO 后应当表现出的行为（面向学生，中文）
     expected_behavior: str
+    #: 这道题的**任务名**（面向学生：说清「要写什么」，例如「函数：求人工智能的特征平均值」）。
+    #: ⚠️ 与知识点名不是一回事：知识点叫「人工智能的定义」，学生看不出要写什么代码。
+    #: 缺省空串 = 老资产没这个字段，界面回落到知识点名。
+    title: str = ""
+    #: 做完以后**程序应当打印的东西**（原样，含换行）。界面用等宽块展示 ——
+    #: 「做完长什么样」比一句描述更直观，也是学生自查「我到底做对没有」的凭据。
+    expected_output: str = ""
 
 
 class CodingHint(CamelModel):
@@ -1540,6 +1595,532 @@ class ChatRequest(CamelModel):
 # 登记表（导出脚本与测试的唯一依据，**新增模型必须登记**）
 # ---------------------------------------------------------------------------
 #: 需要出现在 OpenAPI / TS 生成物里的模型。
+# --------------------------------------------------------------------------- #
+# 对话式冷启动画像（票 25 / 28）：白名单投影的契约面
+#
+# ★ 本节只放**能过桥的数据形状**。identity_local 的本地身份列（真名 / 精确年级 /
+#   学校 / 班级）**没有对应模型、也没有出头字段** —— 不是被过滤掉，是压根没有出口
+#   （G-B / G-C）。ProfileTagOut 里的 key 由服务端再过一遍白名单之后才回。
+# --------------------------------------------------------------------------- #
+
+#: 标签来源：declared（学生自己说的 L2）/ observed（系统观察 L1）/ inferred（AI 推断 L3）。
+TagSource = Literal["declared", "observed", "inferred"]
+
+#: ★ 情绪取值域（禁做 #12）：有限枚举，**不是**临床词汇，也不是自由文本。
+EmotionValue = Literal["happy", "calm", "confused", "frustrated", "angry"]
+
+#: ★★ 学习类型（`learner_style`）取值域（2026-09-30 新增，维度 13）。
+#: 封闭词表，值是**中文显示值**（要进画像卡给学生看）；与 TS 的
+#: `LEARNER_STYLE_VALUES` 逐字一致。
+LearnerStyleValue = Literal["天赋型", "努力型", "钻研型", "速通型", "均衡型"]
+
+#: ★★ 性格（`personality`）取值域（2026-09-30 新增，维度 13）。
+#: ⚠️ 它是本轮**红线最小移动**的那道闸：性格允许被 AI 推断，但值只能是这十个中性词，
+#: 医学 / 心理学词汇一个都不许进来（与 EmotionValue 同一条纪律）。
+PersonalityValue = Literal[
+    "开朗", "安静", "好奇", "沉稳", "细心", "勇敢", "急性子", "慢性子", "爱提问", "爱琢磨"
+]
+
+#: 引导流程状态（与 TS 的 ONBOARDING_STATES 同形）；只有 not_started 才弹（G-I）。
+OnboardingState = Literal["not_started", "in_progress", "done", "skipped"]
+
+#: 五问问号（与 TS 的 OnboardingQuestionId 同形）。
+OnboardingQuestionId = Literal["q1", "q2", "q3", "q4", "q5"]
+
+#: 学生面称呼的回落值（真名过脱敏后为空 / 形态可疑时的统一值）。
+STUDENT_FALLBACK_NAME = "同学"
+
+#: 称呼的展示上限：它会被拼进每一轮 Prompt（同 PREFERENCE_VALUE_MAX_CHARS 的理由）。
+DISPLAY_NAME_MAX_CHARS = 24
+
+#: 命中这些形态就不当称呼用（学校 / 班级 / 电话学号）。
+#: ★ 后端这道只是**兜底**，真正的过滤在收集侧（主进程写 identity_local 之前）。
+_NAME_FORBIDDEN_MARKERS = ("学校", "小学", "中学", "大学", "班", "老师", "电话", "地址")
+
+
+def safe_display_name(real_name: str | None) -> str:
+    """真名 → 可安全展示的称呼（取不到 / 形态可疑 → STUDENT_FALLBACK_NAME）。
+
+    ★ 为什么过滤要放在这里：{{student_name}} 占位机制下，展示名会进渲染层与 Prompt 片段，
+      而真名只在本地。后端不判断「这是不是真名」，只负责**不给可疑串任何出口**。
+    """
+    name = " ".join((real_name or "").split()).strip()
+    if not name or len(name) > DISPLAY_NAME_MAX_CHARS:
+        return STUDENT_FALLBACK_NAME
+    if any(marker in name for marker in _NAME_FORBIDDEN_MARKERS):
+        return STUDENT_FALLBACK_NAME
+    if any(char.isdigit() for char in name):
+        return STUDENT_FALLBACK_NAME
+    return name
+
+
+#: 白名单键 → 维度（1..13，见执行报告 §0.5；界面按它分组）。
+#: ★ 只登记白名单里的键：这张表本身就是「出栈键必须在这里」的又一重证据。
+TAG_DIMENSIONS: dict[str, int] = {
+    "anon_student_id": 1,
+    "grade_band": 1,
+    "subject": 2,
+    "course_module": 2,
+    "current_topic": 2,
+    "knowledge_point": 3,
+    "mastery": 3,
+    "error_type": 4,
+    "zpd_level": 4,
+    "explain_style": 7,
+    "output_length": 7,
+    "pace": 7,
+    "practice_type": 7,
+    "interest_topic": 8,
+    "emotion": 9,
+    "intensity": 9,
+    "trigger": 9,
+    "confidence": 9,
+    "tone": 10,
+    "encouragement_freq": 10,
+    "challenge_level": 10,
+    "scene": 11,
+    "task_goal": 11,
+    "safety_level": 12,
+    "boundary_topics": 12,
+    # 维度 13：学习类型与性格（2026-09-30 新增）
+    "learner_style": 13,
+    "personality": 13,
+}
+
+#: 维度序号 → 中文名（**后端唯一来源**，画像卡用它给每一组标签起小标题）。
+#: ★ 为什么要放这里：在它之前，这些维度名只以**注释**形态散在
+#:   `shared/profile-tags.ts` 与 `store/migrations.py`（「维度 7：学习偏好」），
+#:   渲染层拼不出来 —— 而画像卡按维度分组后，光有一串标签没有组标题，
+#:   学生看不出「讲解风格 / 节奏 / 练习方式」是同一类东西。与 TAG_LABELS 同一条理由：
+#:   中文名放后端，渲染层一个字符串字面量都不用写（kp-slug 守卫天然不打架）。
+#: ⚠️ 计数以 TAG_DIMENSIONS 的实际取值为准（1..13，缺 5/6 是本项目有意留空的历史槽位）。
+#: ★ 措辞是**学生面**的：这一列会直接当画像卡的小标题给学生看，
+#:   所以用「怎么讲更好」而不是「学习偏好」，用「此刻的心情」而不是「情绪与动机」。
+TAG_DIMENSION_LABELS: dict[int, str] = {
+    1: "学段与身份",
+    2: "在学什么",
+    3: "知识掌握",
+    4: "卡在哪里",
+    7: "怎么讲更好",
+    8: "兴趣与类比",
+    9: "此刻的心情",
+    10: "互动偏好",
+    11: "场景与目标",
+    12: "安全边界",
+    13: "类型与性格",
+}
+
+#: 学段 → 中文名（**后端唯一来源**，时间线/报告叙事用它拼「从 X 变成 Y」）。
+#: ★ 为什么要放这里：在它之前，这四个中文名只散落在各处的**注释与日志**里
+#:   （「调为小学低年级（0.75）」这类），没有任何可 import 的映射 ——
+#:   时间线要拼给学生看的句子，就必须有一个不靠散文的来源。
+GRADE_LEVEL_LABELS: dict[str, str] = {
+    "primary_low": "小学低年级",
+    "primary_high": "小学高年级",
+    "junior": "初中",
+    "senior": "高中",
+}
+
+#: 白名单键 → 中文名。
+#: ★ 刻意放后端（契约书 §2.1）：渲染层每个字符串字面量都会被 kp-slug 守卫扫到，
+#:   中文名从后端来，守卫与界面天然不打架。
+TAG_LABELS: dict[str, str] = {
+    "anon_student_id": "匿名标识",
+    "grade_band": "学段档位",
+    "subject": "学科",
+    "course_module": "课程模块",
+    "current_topic": "当前话题",
+    "knowledge_point": "知识点",
+    "mastery": "掌握度",
+    "error_type": "错误类型",
+    "zpd_level": "难度档",
+    "explain_style": "讲解风格",
+    "output_length": "输出长度",
+    "pace": "节奏",
+    "practice_type": "练习方式",
+    "interest_topic": "兴趣话题",
+    "emotion": "情绪",
+    "intensity": "情绪强度",
+    "trigger": "情绪来源",
+    "confidence": "置信度",
+    "tone": "语气",
+    "encouragement_freq": "鼓励频率",
+    "challenge_level": "挑战程度",
+    "scene": "场景",
+    "task_goal": "任务目标",
+    "safety_level": "安全级别",
+    "boundary_topics": "边界话题",
+    # 维度 13（2026-09-30）
+    "learner_style": "学习类型",
+    "personality": "性格",
+}
+
+#: ★★ 学习档案右栏「五行结构」的行标题与空态文案（2026-09-30 新增）。
+#:
+#: ★ 为什么放后端（不是渲染层硬编码）：本项目双视角纪律（D-063）要求**学生面每个中文字
+#:   都由后端给** —— 渲染层写死一个行标题，就等于在渲染层留了一个会被
+#:   `student-view-discipline` 守卫扫到的字符串字面量，那条守卫的口径就会被撕开。
+#:   五行是「固定行」而不是按维度分组：行的**主题**（类型 / 性格 / 偏好 / 兴趣 / 小结）
+#:   与 `TAG_DIMENSION_LABELS` 是两套口径（一行的数据可能来自多个维度，见 PORTRAIT_ROW_KEYS）。
+PORTRAIT_ROW_LABELS: dict[str, str] = {
+    "style": "类型",
+    "personality": "性格",
+    "preference": "偏好",
+    "interest": "兴趣",
+    "summary": "小结",
+}
+
+#: 每一行从哪些白名单键取数据（**唯一的映射真相**，渲染层不写任何键名分组）。
+#: ★ 顺序即展示顺序；同一行里的多个键值用「 · 」连成一句（拼接在渲染层做，
+#:   但**行标题与键名都不由渲染层决定** —— 它只按本表取数与拼接）。
+#: ★ `summary` 行**不在本表**：它的数据不是标签值，而是 AI 小结（另一条读通道），
+#:   所以下面单列一行说明。
+PORTRAIT_ROW_KEYS: dict[str, tuple[str, ...]] = {
+    "style": ("learner_style",),
+    "personality": ("personality",),
+    # 偏好 = 维度 7「怎么讲更好」（四键）+ 维度 10「互动偏好」（三键）
+    "preference": (
+        "explain_style",
+        "output_length",
+        "pace",
+        "practice_type",
+        "tone",
+        "encouragement_freq",
+        "challenge_level",
+    ),
+    # 兴趣 = 维度 8「兴趣与类比」+ 维度 11「场景与目标」
+    "interest": ("interest_topic", "scene", "task_goal"),
+}
+
+#: 五行各自的**空态文案**（没有数据时显示，说的是「下一步做什么」，不是「无数据」）。
+#: ★ 与 `StudyPortrait.vue` 既有的空态哲学一致：一个空面板会被学生读成「这里坏了」。
+#: ★ 五行里 `summary`（AI 小结）的空态由小结那条读通道自己带（它知道「还没生成」）。
+PORTRAIT_EMPTY_NOTES: dict[str, str] = {
+    "style": "还不知道你属于哪一种，多练几道题我就看出来了。",
+    "personality": "这个还没聊到，你愿意说的话我就记下来。",
+    "preference": "还不知道你喜欢我怎么讲，告诉我一声？",
+    "interest": "还没发现你喜欢什么，跟我说说你感兴趣的事吧。",
+    "summary": "我们再聊几次，我就给你写一段小结。",
+}
+
+
+class OnboardingAnswerRequest(CamelModel):
+    """POST /api/onboarding/{student_id}/answer 的请求体。
+
+    ★ question_id 与 TS 的 OnboardingQuestionId 同形：**一条回答属于哪一问由位置决定**，
+      不解析正文（见执行报告 §1.2）。
+    """
+
+    question_id: OnboardingQuestionId
+    #: 学生原话（Q5 的称呼也走它入库为 onboarding_qa；真名另由主进程脱敏后落 identity_local）。
+    answer_text: str = Field(max_length=400)
+    session_id: str | None = Field(default=None, max_length=128)
+
+
+class OnboardingStateOut(CamelModel):
+    """引导状态出参（GET state / POST answer 共用；票 31 删掉了 POST skip）。"""
+
+    onboarding_state: OnboardingState
+    #: 已收齐的问号（重答是覆盖，不追加）。
+    answered: list[OnboardingQuestionId] = Field(default_factory=list)
+    #: 下一问；None = 不该再弹了（状态 done，或五问已齐）。
+    #: ★ 票 31：done 是**唯一**终态；历史的 skipped 按「没答完」处理，照常给下一问。
+    next_question_id: OnboardingQuestionId | None = None
+    #: 供 {{student_name}} 本地替换的称呼（已过 safe_display_name）。
+    display_name: str = ""
+
+
+class OnboardingAnswerOut(CamelModel):
+    """POST answer 的回执：accepted + 最新状态（主进程据此推 onboarding:changed）。"""
+
+    accepted: bool = True
+    state: OnboardingStateOut
+
+
+class ProfileTagUpdateRequest(CamelModel):
+    """PUT /api/profile/{student_id}/tags/{key} 的请求体。"""
+
+    value: str = Field(max_length=200)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    source: TagSource = "declared"
+
+
+class RefreshApplyTag(CamelModel):
+    """一条要应用的概括结果（持续画像迭代的批量条目）。
+
+    ★ **没有 `reason` / `evidence` 字段**：概括的「为什么这么猜」是**过程**，
+      不是要长期留存的**画像**。留一个自由文本字段 = 多一个把对话正文
+      （乃至助手复述的 PII）塞进画像的侧门 —— 与 `learning_history` 不存正文同一条纪律。
+    """
+
+    #: 必须 ∈ LLM_VISIBLE_TAGS（路由层再过一遍白名单，非白名单 → 422）。
+    key: str = Field(min_length=1, max_length=64)
+    #: 值 ≤ 200 字（与 :class:`ProfileTagUpdateRequest` 同口径，单行化在存储层做）。
+    value: str = Field(min_length=1, max_length=200)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: ★ 只允许观察 / 推断两种：概括**绝不能**产生 `declared`
+    #:   （declared 只能来自五问那条真实自述路径；让 LLM 自称"学生说过"是伪造来源）。
+    source: TagSource = "inferred"
+
+    @model_validator(mode="after")
+    def _no_declared(self) -> RefreshApplyTag:
+        if self.source == "declared":
+            raise ValueError(
+                "概括结果不得声明 source='declared'（学生自述只能来自五问路径，不得伪造）"
+            )
+        return self
+
+
+class RefreshApplyRequest(CamelModel):
+    """POST /api/profile/{student_id}/tags/refresh-apply 的请求体。
+
+    批量应用一次「持续画像迭代」概括出来的标签。**逐条独立**：某一条不合法
+    （非白名单 / 取值域 / 被分档拒绝）不影响其它条 —— 与 `sync_observed_tags`
+    的「逐条独立」同一条纪律（概括是尽力而为的增强，不该整体失败）。
+    """
+
+    #: 条目上限（与 TS 的 `REFRESH_MAX_TAGS` 同口径）：持续迭代是**小步修正**，
+    #: 一次改一大片说明模型在编。超限直接 422，而不是静默截断 ——
+    #: 静默截断会让「模型编了 20 条」这件事看起来像正常（前 8 条照写）。
+    tags: list[RefreshApplyTag] = Field(min_length=1, max_length=8)
+    #: 只用于日志（这条概括是哪一轮触发的）；不入库。
+    reason: str = Field(default="", max_length=120)
+
+
+class RefreshRejectOut(CamelModel):
+    """一条被拒的概括结果（`reason` 是**封闭短标签**，不是异常文本）。"""
+
+    key: str
+    #: 白名单外 / 取值域非法 / 现有为学生自述 / 系统观察优先 / 置信度未提升 / 记忆开关已关。
+    reason: str
+
+
+class RefreshApplyOut(CamelModel):
+    """refresh-apply 的回执：逐条结果 + 应用后的最新投影。
+
+    ★ 为什么回**逐条结果**而不是只回一个计数：概括是**尽力而为**的，
+      客户端（与运维）需要看得见「哪几条被分档拒绝了、为什么」，
+      否则「模型每轮都在猜同一个键、每轮都被 declared 挡住」这类静默空转
+      永远发现不了。`rejected` 里的 `reason` 是**封闭短标签**（见
+      `app/routes/profile.py` 的 `_refresh_reject_reason`），不是自由文本。
+    """
+
+    #: 实际写入的键（去重后）。
+    applied: list[str] = Field(default_factory=list)
+    #: 被拒的 `[{key, reason}]`（白名单 / 取值域 / 分档 / memory_switch）。
+    rejected: list[RefreshRejectOut] = Field(default_factory=list)
+    #: 应用后的完整投影（与 GET /tags 同形，前端可直接换掉 store）。
+    tags: list[ProfileTagOut] = Field(default_factory=list)
+    parent_consent: bool = True
+    memory_switch: bool = True
+    #: 维度序号 → 中文名（与 `ProfileTagsOut` 同形，前端换 store 时不必再拉一次）。
+    dimension_labels: dict[str, str] = Field(default_factory=lambda: {
+        str(dim): name for dim, name in TAG_DIMENSION_LABELS.items()
+    })
+
+
+class ProfileTagOut(CamelModel):
+    """一条对外的画像标签。"""
+
+    key: str
+    value: str
+    confidence: float | None = None
+    source: TagSource
+    #: Unix **毫秒**（库里是秒，路由层用 to_contract_ms 换算）。
+    ts: int = 0
+    dimension: int = 0
+    label: str = ""
+
+
+class ProfileTagsOut(CamelModel):
+    """GET /api/profile/{student_id}/tags 的响应。
+
+    ★ parent_consent=False 时 tags **为空数组**（G-G）：落库本身不算外发，这一层才算。
+    ★ 两道闸都回给前端：设置页要据此显示开关的当前状态。
+    """
+
+    tags: list[ProfileTagOut] = Field(default_factory=list)
+    parent_consent: bool = True
+    memory_switch: bool = True
+    #: 维度序号 → 中文名（**后端唯一来源**，画像卡按它给每一组标签起小标题）。
+    #: ★ 它随 tags 一起下发，而不是让渲染层自己拼：渲染层写维度名 = 在渲染进程里
+    #:   留一批内部标识（kp-slug 守卫会当场报出来）。键是**字符串化的序号**，
+    #:   因为 JSON 对象的键只能是字符串（前端按 group.dimension 去查时转一下）。
+    #: ⚠️ 只回**有标签的那几维**的名字没必要 —— 一次全给更简单，前端按需取。
+    dimension_labels: dict[str, str] = Field(default_factory=lambda: {
+        str(dim): name for dim, name in TAG_DIMENSION_LABELS.items()
+    })
+    #: ★★ 学习档案右栏「五行结构」的展示口径（2026-09-30 新增）。三个都由后端给 ——
+    #: 双视角纪律（D-063）要求**学生面的行标题与文案不由渲染层写**：
+    #:   · `portrait_row_labels` —— 每行的标题（类型 / 性格 / 偏好 / 兴趣 / 小结）；
+    #:   · `portrait_row_keys`   —— 每行从哪些白名单键取值（**行↔键映射的唯一真相**，
+    #:     渲染层只按它取数与拼接，不自己决定「偏好包含哪些维度」）；
+    #:   · `portrait_empty_notes`—— 每行没有数据时的空态文案（说下一步，不说「无数据」）。
+    #: ⚠️ 三张表都**全量下发**（不管该生有没有对应标签）：与 dimension_labels 同一条理由 ——
+    #: 一次全给更简单，渲染层按需取；空态文案也只有在没数据时才用得上。
+    portrait_row_labels: dict[str, str] = Field(
+        default_factory=lambda: dict(PORTRAIT_ROW_LABELS)
+    )
+    portrait_row_keys: dict[str, list[str]] = Field(
+        default_factory=lambda: {key: list(keys) for key, keys in PORTRAIT_ROW_KEYS.items()}
+    )
+    portrait_empty_notes: dict[str, str] = Field(
+        default_factory=lambda: dict(PORTRAIT_EMPTY_NOTES)
+    )
+
+
+#: 学习活动类型 → **学生面中文**（唯一来源；`learning_history.activity` 的四个取值）。
+#: ★ 为什么放后端：这一列直接当「学习历史」每一条的**动作说明**给学生看 ——
+#:   渲染层写死一份映射就是第二份真相（与 `TAG_LABELS` 同一条纪律）。
+#: ★ 措辞是「他做了什么」（一句话），不是活动名 —— `qa` / `animation` 这类内部标识
+#:   一个都不出现在学生面。
+#: ⚠️ 这份字典的**键集合**就是「合法活动」的判据（守卫断言它等于 `LearningActivity`
+#:   的取值集合）—— 所以新增活动类型时改这里一处即可，不另立第二份清单。
+LEARNING_ACTIVITY_LABELS: dict[str, str] = {
+    "qa": "问了一个问题",
+    "animation": "看了一段动画",
+    "coding": "写了一段代码",
+    "quiz": "做了一道题",
+}
+
+
+class LearningEventEntry(CamelModel):
+    """一条学习记录（学习历史明细）。
+
+    ★★ 只给**结构化列**；两个库里的列刻意不给：
+      · `question` —— 恒为空串（G-K「SQLite 不存对话正文」），本来就没内容；
+      · `detail` —— 内部 JSON 摘要（闯关解锁标记等），**学生面不该看到内部载荷**。
+      能给人的只有四件事：**什么时候、做了什么、关于哪个知识点、结果如何**。
+    """
+
+    id: int
+    #: Unix **毫秒**（库里是秒，路由层用 `to_contract_ms` 换算）。
+    at: int = 0
+    activity: LearningActivity
+    #: 学生面中文（后端给；渲染层不写这份映射）。
+    activity_label: str = ""
+    #: 关联知识点；空串 = 这条不挂在具体知识点上（如纯答疑）。
+    kp_id: str = ""
+    #: 只有 `activity == "quiz"` 才有意义；其余为 `None`
+    #: （**不写 False** —— 那读起来像「答错了」，而没判分的活动根本无对错）。
+    is_correct: bool | None = None
+
+
+class LearningEventHistoryOut(CamelModel):
+    """GET /api/profile/{student_id}/history 的响应（**倒序分页**：最新的在前）。"""
+
+    student_id: str
+    events: list[LearningEventEntry] = Field(default_factory=list)
+    #: 符合条件的**总条数**（与 `events` 的长度不同：这一页只回 `limit` 条）。
+    total: int = 0
+    #: 还有没有下一页（= `offset + len(events) < total`）。
+    has_more: bool = False
+
+
+class IdentityFlagsRequest(CamelModel):
+    """PUT /api/profile/{student_id}/identity/flags 的请求体（设置页开关 + 称呼落盘）。
+
+    ★ `real_name` 为什么要挂在这里（集成期裁决）：
+      它是**身份层的一次显式写入**，与两道闸同属 `identity_local`。再开一条独立端点
+      只会让「谁在写 identity_local」多一个入口 —— 而这个模块的整个安全论证
+      建立在「身份层只有一个写入面」上（见 store/learning.py 的 set_real_name）。
+      ⚠️ 语义上它不是闸：写称呼**不看** `memory_switch`（不记画像 ≠ 忘掉称呼）。
+
+    ★★ 渲染层**拿不到**这个字段的写权限：IPC 的 `identity:flags-set`
+      只放行两道闸（`main/ipc/handlers-data.ts` 的白名单过滤），
+      写称呼的只有**主进程的引导链路**。所以「渲染进程能不能改真名」的答案是结构性的「不能」。
+    """
+
+    parent_consent: bool | None = None
+    memory_switch: bool | None = None
+    #: 学生自述的称呼（主进程已过一遍脱敏；服务端再经 safe_display_name 兜底）。
+    real_name: str | None = Field(default=None, max_length=DISPLAY_NAME_MAX_CHARS)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> IdentityFlagsRequest:
+        if self.parent_consent is None and self.memory_switch is None and self.real_name is None:
+            raise ValueError(
+                "parentConsent / memorySwitch / realName 至少要给一个（都不给等于空操作）"
+            )
+        return self
+
+
+class IdentityOut(CamelModel):
+    """GET /api/profile/{student_id}/identity 的响应。
+
+    ★ real_name 只给**渲染层做本地替换**；任何 prompt 都不许读它（G-C）。
+    ★ display_name 是 real_name 过 safe_display_name 之后的安全值（可能是「同学」）。
+    """
+
+    anon_student_id: str
+    real_name: str = ""
+    display_name: str = ""
+    parent_consent: bool = True
+    memory_switch: bool = True
+    onboarding_state: OnboardingState = "not_started"
+
+
+#: 时间线事件的类别（封闭词表）。
+#: ★ 只有三类，各自对应**一处真实存在的时间序列**（见 routes/profile.py 的 _timeline_events）。
+TimelineEventKind = Literal["grade", "tag", "onboarding"]
+
+#: 标签变更的**出处**（origin，迁移 v7，封闭词表）。
+#: ★ 与 tag 的 `source`（可信度）正交：source 说「多可信」，origin 说「从哪条路来的」。
+#: ★★ 空串是一个**真实取值**：v7 之前的旧行 origin 为 NULL（当时还没这个概念），
+#:    读取侧把它折成空串 —— 表示「这条变更发生时还没记出处」。不编造一个枚举值去填。
+TagOrigin = Literal["cold_start", "refresh", "projection", ""]
+
+
+class ProfileTimelineEvent(CamelModel):
+    """画像时间线上的一件事（§5.2 #11「画像变化时间线」）。
+
+    ★ 面向学生/家长：title 与 detail 都是**已经拼好的中文**，界面直接渲染。
+      为什么在后端拼：渲染层的每个字符串字面量都被 kp-slug 守卫扫到，
+      把「学段从小学高年级变成初中」这类句子写在渲染层等于给它开洞（契约书 §2.1 同一条理由）。
+    ★ 不含任何内部 id 作为可读正文：标识只可能出现在 key 字段里，
+      而 key 是给界面分组用的，不是给学生看的。
+    """
+
+    #: 事件时间（Unix **毫秒**，与本项目其它出参同单位）。
+    at: int
+    kind: TimelineEventKind
+    #: 一句话标题（学生面可读）。
+    title: str
+    #: 补充说明（可为空）。
+    detail: str = ""
+    #: 标签键（只有 kind=tag 才有；界面据此分组/上色，**不直接显示**）。
+    key: str = ""
+    #: 标签中文名（后端唯一来源，同 TAG_LABELS）。
+    label: str = ""
+    #: 标签变更的出处（只有 kind=tag 才有；∈ TagOrigin）。
+    #: ★ 空串 = 「这条变更发生时还没记出处」（v7 之前的旧行）或非标签事件 ——
+    #:   界面据此**不显示**出处徽标，而不是显示一个内部枚举名。
+    origin: TagOrigin = ""
+
+
+class ProfileTimeline(CamelModel):
+    """``GET /api/profile/{student_id}/timeline`` 的响应（§5.2 #11）。
+
+    ★ ``events`` **新的在前**（界面上最近发生的事在最上面）。
+    ★ 空数组是正常值：新学生还没发生过任何变化，或家长关了同意闸（G-G）。
+    ★ **不跨学生**（禁做 #9）：端点只按一个 student_id 取数，结构上没有第二名学生的位置。
+    """
+
+    student_id: str
+    events: list[ProfileTimelineEvent] = Field(default_factory=list)
+
+
+#: 五问的问句脚本（落 onboarding_qa.question_text，便于事后核对口径变更）。
+#: ★ 与 TS 的 ONBOARDING_QUESTIONS 同源：问句是「助手消息」不是卡片，这里只是审计副本。
+ONBOARDING_QUESTION_TEXTS: dict[str, str] = {
+    "q1": "你现在上几年级呀？",
+    "q2": "最近在学什么呀？有没有特别想搞懂的？",
+    "q3": "我讲的时候，你更喜欢哪种方式？",
+    "q4": "想讲快一点还是慢一点？",
+    "q5": "那我该怎么称呼你？还有什么想先告诉我的？",
+}
+
+
 class GeneratedCodeSaveRequest(CamelModel):
     """``POST /api/code/generated/{student_id}`` 的请求体（D-089）。
 
@@ -1563,6 +2144,27 @@ class GeneratedCodeSaveRequest(CamelModel):
 
 CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     GeneratedCodeSaveRequest,
+    # 对话式冷启动画像（票 25/28）：白名单投影的读写契约。
+    # ★ 没有 identity_local 的本地身份模型 —— 那些列没有出口（G-B/G-C）。
+    OnboardingAnswerRequest,
+    OnboardingStateOut,
+    OnboardingAnswerOut,
+    ProfileTagUpdateRequest,
+    ProfileTagOut,
+    ProfileTagsOut,
+    IdentityFlagsRequest,
+    IdentityOut,
+    # 画像变化时间线（§5.2 #11）：profile_tags 只存当前值，过程由历史表回答。
+    ProfileTimelineEvent,
+    ProfileTimeline,
+    # 持续画像迭代（二期）：概括结果的批量应用。
+    # ⚠️ 二期漏登记了这四个（当时只跑了 test_profile_tags，没跑 test_contracts）——
+    #    2026-09-30 三期跑全量时被 `test_every_camel_model_in_this_module_is_registered`
+    #    当场逮到（它们会静默缺席 OpenAPI/TS）。登记守卫的价值正在于此。
+    RefreshApplyTag,
+    RefreshApplyRequest,
+    RefreshRejectOut,
+    RefreshApplyOut,
     # 系统
     HealthResponse,
     # 设置
@@ -1580,6 +2182,9 @@ CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     # 学生与画像
     Student,
     StudentCreateRequest,
+    # 账号 CRUD 的另一半：改（PATCH）/ 删（DELETE）；不登记会静默缺席 OpenAPI/TS
+    StudentUpdateRequest,
+    StudentDeleteResult,
     Mastery,
     StudentProfile,
     PreferenceUpdateRequest,
@@ -1638,6 +2243,9 @@ CONTRACT_MODELS: tuple[type[BaseModel], ...] = (
     QuizGradeRequest,
     QuizResult,
     ChatRequest,
+    # 学习历史（2026-09-30）：明细出参两件套（学习档案 → 学习历史分页）。
+    LearningEventEntry,
+    LearningEventHistoryOut,
 )
 
 #: ★★ **只在 Python 侧存在的模型：绝不导出到 OpenAPI / TS。**
@@ -1668,4 +2276,20 @@ CONTRACT_ENUMS: dict[str, object] = {
     "PreferenceKey": PreferenceKey,
     # 推荐来源（`/recommendation` 与 `/opening` 共用）：前端按它决定提示语方向
     "RecommendationSource": RecommendationSource,
+    # 冷启动画像（票 25）：来源 / 情绪取值域 / 引导状态 / 问号。
+    # ★ EmotionValue 即使当前没有模型字段引用它也要登记：渲染层要用具名联合类型，
+    #   否则它只会以内联 enum 出现在别处（TS 侧只能手写一份「差不多的字符串联合」）。
+    "TagSource": TagSource,
+    "EmotionValue": EmotionValue,
+    "OnboardingState": OnboardingState,
+    "OnboardingQuestionId": OnboardingQuestionId,
+    # 画像变化时间线（§5.2 #11）：事件类别要具名，界面的分组/配色按它走。
+    "TimelineEventKind": TimelineEventKind,
+    # 标签变更出处（迁移 v7）：与 TimelineEventKind 同一条理由 ——
+    # 它是 tag 事件的第二个维度（冷启动 / 持续迭代 / 行为投影），界面的配色按它走。
+    "TagOrigin": TagOrigin,
+    # 维度 13（2026-09-30）：学习类型与性格的取值域 —— 与 EmotionValue 同一条理由，
+    # 即使当前没有模型字段直接引用它们，渲染层也要用**具名**联合类型。
+    "LearnerStyleValue": LearnerStyleValue,
+    "PersonalityValue": PersonalityValue,
 }

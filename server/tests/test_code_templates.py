@@ -548,11 +548,18 @@ class CodeRouteTests(CodeCase):
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         # 契约字段（camelCase 出参）
-        self.assertEqual(set(body.keys()), {"kpId", "language", "scaffold", "expectedBehavior"})
+        # ★ 2026-09-30：`title` / `expectedOutput` 也进契约 —— 学生看简报最需要的两样
+        #   （「要写什么」与「做完程序打印什么」）；`solution` / `hints` 仍然不出后端。
+        self.assertEqual(
+            set(body.keys()),
+            {"kpId", "language", "scaffold", "expectedBehavior", "title", "expectedOutput"},
+        )
         self.assertEqual(body["kpId"], "prog-loop-jr")
         self.assertEqual(body["language"], "python")
         self.assertIn("TODO", body["scaffold"])
         self.assertTrue(body["expectedBehavior"])
+        self.assertTrue(body["title"], "任务名必须有（面向学生说清「要写什么」）")
+        self.assertTrue(body["expectedOutput"], "期望输出必须有（「做完长什么样」）")
 
     def test_solution_never_appears_in_response(self) -> None:
         """★★ 参照实现不出后端：把哨兵写进 solution，端到端确认响应里零命中。"""
@@ -568,13 +575,20 @@ class CodeRouteTests(CodeCase):
             self.assertNotIn(SENTINEL_SOLUTION, response.text, "参照实现泄漏到了响应里")
 
     def test_projection_drops_internal_fields(self) -> None:
-        """投影是**白名单**：内部模型多出任何字段都不会带出去。"""
+        """投影是**白名单**：内部模型多出任何字段都不会带出去。
+
+        ★ 2026-09-30：`title` 与 `expected_output` **有意**从内部转成对外字段（学生看简报
+        需要「要写什么」与「做完长什么样」，见 `to_code_template` 的注释）。所以这里
+        改为断言「它们在契约里」，而参照实现（`solution`）与提示（`hints`）仍然一个都不出。
+        """
         record = load_templates(TEMPLATES_DIR).records[0]
         payload = to_code_template(record)
         self.assertFalse(hasattr(payload, "solution"))
         self.assertFalse(hasattr(payload, "hints"))
-        self.assertFalse(hasattr(payload, "expected_output"))
+        self.assertIn("expected_output", type(payload).model_fields)
+        self.assertIn("title", type(payload).model_fields)
         self.assertNotIn("solution", payload.model_dump_json())
+        self.assertNotIn("hints", payload.model_dump_json())
 
     def test_missing_template_returns_readable_404(self) -> None:
         response = self.client.get("/api/code/templates/no-such-kp")

@@ -1264,6 +1264,47 @@ class TestPathIsScopedToTheStudentsGrade(LoopCase):
             "★ 作答不该往进度里加路径外的关卡（旧行为：解锁的后继会插一行）",
         )
 
+    def test_in_path_hides_lower_grade_records_from_the_path_view(self) -> None:
+        """★★ 学段升过级的学生：更低学段的旧记录**不算路径**，路径视图里不再重名。
+
+        真机缺陷（截图）：智码工坊把整个 ``progress`` 表当学习路径渲染 —— 学段换过的
+        学生（小学低 → 小学高 → 初中）名下三个学段的同名关卡都在，同一个大章节里
+        「人工智能的定义」出现三次（名字一样、内容按学段不同）。
+        修法：服务端逐行标 ``inPath``（= P-085 的「关卡路径 = 本学段」），前端**路径视图**
+        只渲染 True；旧记录仍留在库里（P-086：读时不删行），记录视图照旧全渲染。
+        """
+        grades = self._kp_grades()
+        self.set_student("student_path_inpath")
+        # ① 小学低冷启动：进度里落下小学低那一份（此时没有路径外的行）
+        self.set_grade("primary_low")
+        before = self.progress().json()
+        self.assertTrue(
+            all(item["inPath"] for item in before["levels"]),
+            "小学低学生的进度应当全是本学段路径内的关卡",
+        )
+
+        # ② 学段升到初中：路径换成初中的 57 关，小学低那 57 行仍留在库里
+        self.set_grade("junior")
+        body = self.progress().json()
+        own = {kp for kp, value in grades.items() if value == "junior"}
+        on_path = {item["kpId"] for item in body["levels"] if item["inPath"]}
+        off_path = {item["kpId"] for item in body["levels"] if not item["inPath"]}
+        self.assertEqual(on_path, own, "★ 路径 = 本学段的知识点集合")
+        self.assertEqual(
+            off_path,
+            {kp for kp, value in grades.items() if value == "primary_low"},
+            "★ 更低学段的旧记录必须被标成**路径外**（而不是被删掉）",
+        )
+
+        # ③ 路径视图要渲染的那些关卡，**名字不得重复**（这就是用户截图里的症状）
+        names = [
+            doc.knowledge_point
+            for doc in load_library(KNOWLEDGE_DIR)
+            if doc.kp_id in on_path
+        ]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        self.assertEqual(duplicates, [], f"★ 路径视图里仍出现重名关卡：{duplicates}")
+
 
 # --------------------------------------------------------------------------- #
 # 6.6 路径外关卡的补位序（`progress_snapshot` 的 `fallback_order`）
@@ -1312,6 +1353,23 @@ class TestProgressSnapshotOrdering(unittest.TestCase):
     def test_without_fallback_order_behaviour_is_unchanged(self) -> None:
         """不传补位序时退回原行为（按 kp_id 排）—— 既有调用方字节不变。"""
         self.assertEqual(self._order(order=["z-main"]), ["z-main", "a-out", "b-out"])
+
+    def test_in_path_marks_only_the_students_own_path(self) -> None:
+        """★ ``path_kp_ids`` 是 ``inPath`` 的**唯一**判据（路径内 True / 路径外 False）。
+
+        真机缺陷形态（用户截图）：学段换过的学生进度表里同时留着小学低 / 小学高 / 初中
+        三份同名关卡，路径视图按整张表渲染 → 同一个模块里「人工智能的定义」出现三次。
+        服务端在这里逐行表态，前端**路径视图**据此只渲染 ``inPath=True`` 的那些。
+        """
+        flags = {
+            row["kpId"]: row["inPath"]
+            for row in progress_snapshot(self.store, order=["z-main"], path_kp_ids=["z-main"])
+        }
+        self.assertEqual(flags, {"z-main": True, "b-out": False, "a-out": False})
+
+    def test_in_path_is_true_when_the_path_scope_is_not_given(self) -> None:
+        """不传 ``path_kp_ids`` → **不判断**（全 True）：既有调用方与老前端行为不变。"""
+        self.assertTrue(all(row["inPath"] for row in progress_snapshot(self.store)))
 
 
 # --------------------------------------------------------------------------- #

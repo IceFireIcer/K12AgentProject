@@ -47,6 +47,8 @@ from datetime import date, datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.contracts import (
+    TAG_DIMENSIONS,
+    TAG_LABELS,
     ChapterProgress,
     DailyActivity,
     GradeHistoryEntry,
@@ -54,6 +56,7 @@ from app.contracts import (
     Mastery,
     MistakeItem,
     MistakeListResponse,
+    ProfileTagOut,
 )
 from app.routes.students import (
     as_grade_level,
@@ -201,6 +204,33 @@ def _kp_meta(data_dir: str, kp_ids: list[str]) -> dict[str, tuple[str, str]]:
 # --------------------------------------------------------------------------- #
 # 学习报告
 # --------------------------------------------------------------------------- #
+def _report_profile_summary(store, student_id: str) -> list[ProfileTagOut]:
+    """报告里的画像摘要（§5.2 #12「教师/家长报告含画像摘要」）。
+
+    ★★ 三道纪律，逐条都是这套画像体系的红线：
+      ① **同一道闸**：parent_consent=0 → 空（G-G）。摘要也是画像，不能因为「这是报告」就破例；
+      ② **只读这个学生自己的库**（禁做 #9）：「家长报告」是最容易被顺手写成
+         「和班上其他人比」的地方 —— 一旦出现跨学生聚合，禁做 #9 就破了，
+         所以本函数结构上拿不到第二个学生（签名里没有、也不去查）；
+      ③ **不返回匿名标识**（`anon_student_id`）：它是 join 钥匙，不是「孩子的特点」。
+    """
+    if not store.parent_consent(student_id):
+        return []
+    return [
+        ProfileTagOut(
+            key=record.key,
+            value=record.value,
+            confidence=record.confidence,
+            source=record.source,
+            ts=record.ts,
+            dimension=TAG_DIMENSIONS.get(record.key, 0),
+            label=TAG_LABELS.get(record.key, ""),
+        )
+        for record in store.tags(student_id)
+        if record.key != "anon_student_id"
+    ]
+
+
 @router.get(
     "/profile/{student_id}/report",
     response_model=LearningReport,
@@ -270,6 +300,10 @@ def learning_report(
             progress_rows = store.progress_rows()
             badges = store.badges()
             grade_rows = store.grade_history()
+            # ★ 画像摘要必须**在这里**取：下面的 return 在 `finally: store.close()` 之后，
+            #   到那时再读库会直接 `Cannot operate on a closed database`
+            #   （集成期实测踩到，11 个报告用例一起红）。
+            profile_summary = _report_profile_summary(store, student_id)
         except sqlite3.Error as exc:
             logger.exception("学习报告聚合失败：%s", student_id)
             raise HTTPException(status_code=503, detail=f"生成学习报告失败（本地数据库异常）：{exc}") from exc
@@ -290,6 +324,7 @@ def learning_report(
     return LearningReport(
         student_id=student_id,
         nickname=student.nickname,
+        profile_summary=profile_summary,
         grade_level=as_grade_level(student.grade_level),
         days=days,
         generated_at=to_contract_ms(now),

@@ -54,6 +54,7 @@ from app.routes.grade import router as grade_router  # noqa: E402
 from app.routes.graph import router as graph_router  # noqa: E402
 from app.routes.health import router as health_router  # noqa: E402
 from app.routes.knowledge import router as knowledge_router  # noqa: E402
+from app.routes.onboarding import router as onboarding_router  # noqa: E402
 from app.routes.profile import router as profile_router  # noqa: E402
 from app.routes.quiz import router as quiz_router  # noqa: E402
 from app.routes.rag import router as rag_router  # noqa: E402
@@ -192,6 +193,10 @@ def create_app(cfg: RuntimeConfig) -> FastAPI:
     app.include_router(rag_router)
     app.include_router(graph_router)
     app.include_router(profile_router)
+    # 对话式冷启动五问（票 25）：引导流程状态 + 五问回答。
+    # ★ 它的回答表（onboarding_qa）是「SQLite 不存对话正文」的**唯一例外**（有界、一次性），
+    #   profile 路由（普通学习记录）与 events 模块仍然不承载正文。
+    app.include_router(onboarding_router)
     app.include_router(quiz_router)
     # 学习档案（章节清单 / 学习报告 / 错题本）：只读聚合视图，
     # 与 profile（画像+推荐，写入侧）分开成两个文件 —— 它们的变更原因不同。

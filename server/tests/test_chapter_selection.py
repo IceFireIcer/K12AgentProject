@@ -592,8 +592,17 @@ class TestChapterMigration(unittest.TestCase):
             (str(r["set_name"]), int(r["version"]))
             for r in conn.execute("SELECT set_name, version FROM schema_version ORDER BY 1, 2")
         ]
-        self.assertEqual(rows, [("learning", 1), ("learning", 2), ("learning", 3), ("learning", 4)])
-        self.assertEqual(dict(rows)["learning"], 4, "learning 组当前版本必须是 4")
+        # ★ 期望值**从迁移表推导**，不写死数字（2026-09-28 集成期修正）。
+        #   原先写死 [1,2,3,4] + 「当前版本必须是 4」，于是票 25 加 v5（冷启动画像三表）时
+        #   本用例与另外四处一起红了 —— 症状是「迁移本身绿、全量测试红」，排查要翻四个文件。
+        #   改成推导：以后加迁移版本，这几处自动跟上。
+        expected_learning = [("learning", mig.version) for mig in LEARNING_MIGRATIONS]
+        self.assertEqual(rows, expected_learning)
+        self.assertEqual(
+            dict(rows)["learning"],
+            max(mig.version for mig in LEARNING_MIGRATIONS),
+            "learning 组当前版本必须是迁移表的最高版本",
+        )
         columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(student)")}
         self.assertIn("current_chapter", columns)
         history_columns = {

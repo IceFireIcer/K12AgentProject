@@ -513,6 +513,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/onboarding/{student_id}/answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 提交一问的回答（重答覆盖）
+         * @description 收下学生对某一问的回答，并推进流程状态。
+         *
+         *     - 同一 question_id 重答 = **覆盖**（onboarding_qa 上的 UNIQUE 索引 + upsert）；
+         *     - 收齐五问 → done；否则 in_progress；已经 done 的不回退；
+         *     - 空白的 answerText 直接 422（它不该被当成「答过了」）。
+         */
+        post: operations["answer_onboarding_api_onboarding__student_id__answer_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/onboarding/{student_id}/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 引导流程状态（是否该弹引导）
+         * @description 读引导状态。
+         *
+         *     冷启动不建学生行也不写库：读一次状态不该留下任何痕迹（**读路径零副作用**）。
+         *     真正落行的只有 answer（它顺带推进状态）—— 票 31 删掉 skip 之后，写路径只剩这一条。
+         */
+        get: operations["read_onboarding_state_api_onboarding__student_id__state_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/profile/{student_id}": {
         parameters: {
             query?: never;
@@ -601,6 +648,90 @@ export interface paths {
          *     「学生还没登录就先产生了学习记录」不该丢数据，也不该 500。
          */
         post: operations["record_learning_event_api_profile__student_id__events_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 学习历史（结构化活动流水，倒序分页）
+         * @description 「我做过什么」的**明细出口**（学习档案 → 学习历史）。
+         *
+         *     ★ 与 ``GET /report`` 的分工：那个是**聚合**（每天多少条、正确率、连续天数），
+         *       这个是**流水**（几点几分做了什么）。两者读同一张表，回答的是不同问题。
+         *     ★ 学生面只给结构化列 + 后端折好的**中文动作名**：``detail``（内部 JSON 摘要）
+         *       与 ``question``（恒空，G-K）**一个字节都不出**。
+         *     ★ 还没有学习记录的学生回**空列表**（不是 404）：前端要把它渲染成「还没有记录」
+         *       的空态，而 404 会让界面走错误分支、显示一句「读取失败」。
+         */
+        get: operations["learning_history_api_profile__student_id__history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/identity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 本地身份 + 两道闸（真名不出网）
+         * @description 读本地身份行与两道闸。
+         *
+         *     ★ 本端点是**本地身份唯一的读出口**，而它的字段里没有 school / class / real_grade ——
+         *       精确年级、学校、班级连出参形状都不存在（G-B 的第二种形态）。
+         */
+        get: operations["read_identity_api_profile__student_id__identity_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/identity/flags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 设置家长同意 / 记忆开关
+         * @description 写两道闸（设置页开关）+ 可选落盘一次称呼。
+         *
+         *     - parentConsent=false → 以后 GET /tags 与推荐依据一律为空（G-G）；
+         *     - memorySwitch=false → 以后**不写任何标签**（G-F）。
+         *       ★ 只影响**往后写**：已经写下的标签仍在库里（学生没说「忘掉」），
+         *         要抹掉由 DELETE 逐个撤销 —— 两个动作分开，别把开关做成静默清库。
+         *     - realName（可选）→ 写 `identity_local.real_name`（本地身份数据，永不进 prompt）。
+         *
+         *       ★★ 为什么称呼走这里（集成期修的功能死洞）：引导 Q5 问「我该怎么称呼你」，
+         *         主进程把答案脱敏后需要一条落盘路径。此前**没有**这条路径，
+         *         于是 `GET /identity` 恒回空 realName，渲染层永远把 `{{student_name}}`
+         *         替换成「同学」—— **占位机制静默失效**（模型被要求用占位符，却永远替换不出真名）。
+         *       ⚠️ 写称呼**不看** memorySwitch：不记画像 ≠ 忘掉称呼（见 store 的 set_real_name）。
+         *       ⚠️ 再过一次 safe_display_name：**入库的是脱敏后的称呼，不是学生原话**
+         *         （「XX 小学二班」这类不会进 identity_local —— 那是「学生没同意识别的信息」）。
+         */
+        put: operations["update_identity_flags_api_profile__student_id__identity_flags_put"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -730,6 +861,132 @@ export interface paths {
          *     - 学生不存在 → **404**；``days`` 越界 → **422**；库异常 → **503**。
          */
         get: operations["learning_report_api_profile__student_id__report_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/tags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 画像标签（白名单投影，已按 TTL 过滤）
+         * @description 读画像标签。
+         *
+         *     - 出栈前过白名单（G-A）与短期情绪 TTL（G-E）；
+         *     - parentConsent=false → tags 空（G-G）；
+         *     - 学生行不存在也**不建行**（读路径零副作用），回默认闸值 + 空标签。
+         */
+        get: operations["read_profile_tags_api_profile__student_id__tags_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/tags/refresh-apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 批量应用持续画像迭代的概括结果（分档写入）
+         * @description 把一次「持续画像迭代」概括出来的标签批量应用到画像（分档写入）。
+         *
+         *     ★★ 为什么是**逐条独立**而不是整体成功/失败：概括是**尽力而为**的增强 ——
+         *       某一条被白名单/取值域/分档挡下，不该让其它条一起丢。与
+         *       `sync_observed_tags` 的「逐条独立」同一条纪律。
+         *
+         *     ★★ 分档在存储层（`LearningStore.upsert_tag_from_summary`）：本端点只负责
+         *       ① 白名单先挡一道（非白名单 → 该条拒，不 500）；
+         *       ② 把存储层的 ValueError 翻成**该条被拒**（而不是整个请求 422）；
+         *       ③ 回逐条结果 + 应用后的最新投影。
+         *
+         *     ★ 为什么 422 只留给**结构性问题**（空列表 / 超上限 / source='declared'）：
+         *       那三类是「调用方写错了代码」，重试也一样；而**单条**不合法是数据问题，
+         *       应该被记录、被跳过，让其余条照常落地。
+         *
+         *     ★ memory_switch=false（G-F）：写入原语**逐条返回 False**（不写任何标签），
+         *       这里如实记进 `rejected`（reason='memory-switch-off'），端点照常 200 ——
+         *       与 `PUT /tags/{key}` 的口径一致（关闸不是错误，是有效状态）。
+         */
+        post: operations["refresh_apply_tags_api_profile__student_id__tags_refresh_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/tags/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 写一个画像标签（白名单内）
+         * @description 写 / 覆盖一个画像标签（标签纠错的写入口）。
+         *
+         *     三道闸在存储层（LearningStore.upsert_tag），这里再挡一层并把它翻成 422：
+         *     - 非白名单键 → 422（「标签表无此 key；写入端点无此参数」的可测形态）；
+         *     - source='inferred' 的非情绪/风格键 → 422（禁做 #10）；
+         *     - emotion 非有限枚举 → 422（禁做 #12）。
+         *     memory_switch=false 时**不写**（G-F），端点照常 200 —— 返回的 tags 里就是没它。
+         */
+        put: operations["update_profile_tag_api_profile__student_id__tags__key__put"];
+        post?: never;
+        /**
+         * 删一个画像标签（L3 一键撤销）
+         * @description 删一个画像标签（猜错了能救；也是信任基础）。键不在白名单 → 422（同写入口径）。
+         */
+        delete: operations["delete_profile_tag_api_profile__student_id__tags__key__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profile/{student_id}/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 画像变化时间线（学段变更 / 标签变更 / 入门问答）
+         * @description 画像**怎么变成现在这样的**（§5.2 #11）。
+         *
+         *     ★★ 这个端点回答的是一个此前**无法回答**的问题：profile_tags 的主键是
+         *       (anon_student_id, key)，它只存**当前值** —— 没有历史就回答不了「变化过程」。
+         *       迁移 v6 新增的 profile_tag_history 就是为它准备的时间序列。
+         *
+         *     ★ 三类事件各自对应一处真实存在的序列，**不从别处推断时间**：
+         *       学段变更（grade_history）、标签变更（profile_tag_history）、入门问答（onboarding_qa）。
+         *
+         *     ★ 三道闸与画像其它出口完全一致：
+         *       · parent_consent=0 → events 空（G-G）；
+         *       · 只按单个 student_id 取数，**不跨学生**（禁做 #9）；
+         *       · 短期情绪标签两处都被挡住（写入侧不记 + 读取侧再滤，禁做 #11）。
+         *
+         *     - 学生不存在 → 空时间线（**不是 404**：新学生本来就没有变化，那是正常态）；
+         *     - limit 越界 → 422；库异常 → 503。
+         */
+        get: operations["read_profile_timeline_api_profile__student_id__timeline_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1156,6 +1413,39 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/students/{student_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * 删除学生及其本地数据
+         * @description 删掉 students/<student_id>/（含学习记录库与桌面端建在里面的会话目录）。
+         *
+         *     ★ 同样在路由层先 validate_student_id；删除路径只经 student_dir() 的归口解析
+         *       （内含白名单）。这是「只删校验通过的学生目录」的落点。
+         *     ★ 号不存在 → 200 + deleted: false（幂等删除，不是 404，见 StudentDeleteResult）。
+         */
+        delete: operations["delete_student_api_students__student_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * 修改学生（昵称 / 学段）
+         * @description 改昵称 / 改学段；学段变了由存储层连带清空当前章节。
+         *
+         *     ★ validate_student_id 在**路由层**先跑一遍（存储层还会再跑）：内存占位实现不做任何
+         *       路径拼接，只有路由层这道校验才能保证 ../ 一类的 id 在**所有**实现下都是 422，
+         *       而不是「换个存储实现就放行」。
+         *     ★ 学生不存在 → 404：改名没有「幂等成功」的语义，界面需要知道这个号已经没了。
+         */
+        patch: operations["update_student_api_students__student_id__patch"];
         trace?: never;
     };
     "/health": {
@@ -1593,6 +1883,11 @@ export interface components {
         CodeTemplate: {
             /** Expectedbehavior */
             expectedBehavior: string;
+            /**
+             * Expectedoutput
+             * @default
+             */
+            expectedOutput: string;
             /** Kpid */
             kpId: string;
             /**
@@ -1603,6 +1898,11 @@ export interface components {
             language: "python";
             /** Scaffold */
             scaffold: string;
+            /**
+             * Title
+             * @default
+             */
+            title: string;
         };
         /**
          * CodingHint
@@ -1754,6 +2054,11 @@ export interface components {
          * @enum {string}
          */
         EmbeddingMode: "local_fastembed" | "cloud_api" | "none";
+        /**
+         * EmotionValue
+         * @enum {string}
+         */
+        EmotionValue: "happy" | "calm" | "confused" | "frustrated" | "angry";
         /**
          * GeneratedCodeSaveRequest
          * @description ``POST /api/code/generated/{student_id}`` 的请求体（D-089）。
@@ -2226,6 +2531,97 @@ export interface components {
             version: string;
         };
         /**
+         * IdentityFlagsRequest
+         * @description PUT /api/profile/{student_id}/identity/flags 的请求体（设置页开关 + 称呼落盘）。
+         *
+         *     ★ `real_name` 为什么要挂在这里（集成期裁决）：
+         *       它是**身份层的一次显式写入**，与两道闸同属 `identity_local`。再开一条独立端点
+         *       只会让「谁在写 identity_local」多一个入口 —— 而这个模块的整个安全论证
+         *       建立在「身份层只有一个写入面」上（见 store/learning.py 的 set_real_name）。
+         *       ⚠️ 语义上它不是闸：写称呼**不看** `memory_switch`（不记画像 ≠ 忘掉称呼）。
+         *
+         *     ★★ 渲染层**拿不到**这个字段的写权限：IPC 的 `identity:flags-set`
+         *       只放行两道闸（`main/ipc/handlers-data.ts` 的白名单过滤），
+         *       写称呼的只有**主进程的引导链路**。所以「渲染进程能不能改真名」的答案是结构性的「不能」。
+         */
+        IdentityFlagsRequest: {
+            /** Memoryswitch */
+            memorySwitch?: boolean | null;
+            /** Parentconsent */
+            parentConsent?: boolean | null;
+            /** Realname */
+            realName?: string | null;
+        };
+        /**
+         * IdentityOut
+         * @description GET /api/profile/{student_id}/identity 的响应。
+         *
+         *     ★ real_name 只给**渲染层做本地替换**；任何 prompt 都不许读它（G-C）。
+         *     ★ display_name 是 real_name 过 safe_display_name 之后的安全值（可能是「同学」）。
+         */
+        IdentityOut: {
+            /** Anonstudentid */
+            anonStudentId: string;
+            /**
+             * Displayname
+             * @default
+             */
+            displayName: string;
+            /**
+             * Memoryswitch
+             * @default true
+             */
+            memorySwitch: boolean;
+            /**
+             * Onboardingstate
+             * @default not_started
+             * @enum {string}
+             */
+            onboardingState: "not_started" | "in_progress" | "done" | "skipped";
+            /**
+             * Parentconsent
+             * @default true
+             */
+            parentConsent: boolean;
+            /**
+             * Realname
+             * @default
+             */
+            realName: string;
+        };
+        /**
+         * InterestDrift
+         * @description 兴趣漂移提示（§5.2 #7）。**只读**，不写任何标签。
+         *
+         *     ★ 为什么不叫「兴趣历史」：`profile_tags` 的主键是 `(学生, 键)` ——
+         *       同一时刻只存**一个** `interest_topic`，我们**没有**兴趣的时间序列。
+         *       所以这里不假装能比较「过去的兴趣」，只用现有数据里唯一诚实的信号：
+         *       **学生明说的兴趣** 与 **最近实际在学的主题** 对不上。
+         *     ★ 不写回标签：用推断去覆盖学生明说的兴趣，正是 D-020 反复吃过的错。
+         */
+        InterestDrift: {
+            /**
+             * Declared
+             * @default
+             */
+            declared: string;
+            /**
+             * Drifted
+             * @default false
+             */
+            drifted: boolean;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /**
+             * Recent
+             * @default
+             */
+            recent: string;
+        };
+        /**
          * IpcEventName
          * @enum {string}
          */
@@ -2406,6 +2802,11 @@ export interface components {
             vecReady: boolean;
         };
         /**
+         * LearnerStyleValue
+         * @enum {string}
+         */
+        LearnerStyleValue: "天赋型" | "努力型" | "钻研型" | "速通型" | "均衡型";
+        /**
          * LearningActivity
          * @enum {string}
          */
@@ -2426,11 +2827,67 @@ export interface components {
             ok: boolean;
         };
         /**
+         * LearningEventEntry
+         * @description 一条学习记录（学习历史明细）。
+         *
+         *     ★★ 只给**结构化列**；两个库里的列刻意不给：
+         *       · `question` —— 恒为空串（G-K「SQLite 不存对话正文」），本来就没内容；
+         *       · `detail` —— 内部 JSON 摘要（闯关解锁标记等），**学生面不该看到内部载荷**。
+         *       能给人的只有四件事：**什么时候、做了什么、关于哪个知识点、结果如何**。
+         */
+        LearningEventEntry: {
+            /**
+             * Activity
+             * @enum {string}
+             */
+            activity: "qa" | "animation" | "coding" | "quiz";
+            /**
+             * Activitylabel
+             * @default
+             */
+            activityLabel: string;
+            /**
+             * At
+             * @default 0
+             */
+            at: number;
+            /** Id */
+            id: number;
+            /** Iscorrect */
+            isCorrect?: boolean | null;
+            /**
+             * Kpid
+             * @default
+             */
+            kpId: string;
+        };
+        /**
+         * LearningEventHistoryOut
+         * @description GET /api/profile/{student_id}/history 的响应（**倒序分页**：最新的在前）。
+         */
+        LearningEventHistoryOut: {
+            /** Events */
+            events?: components["schemas"]["LearningEventEntry"][];
+            /**
+             * Hasmore
+             * @default false
+             */
+            hasMore: boolean;
+            /** Studentid */
+            studentId: string;
+            /**
+             * Total
+             * @default 0
+             */
+            total: number;
+        };
+        /**
          * LearningEventRequest
          * @description ``POST /api/profile/{student_id}/events`` 的请求体（学习记录写入）。
          *
          *     由 ``learning-log`` Extension 构造，字段全部是**从对话里提取出来的结构化信息**：
-         *     没有任何一个字段用于承载对话正文（这是有意的，见模块头）。
+         *     没有任何一个字段用于承载对话正文（这是有意的，见模块头）——
+         *     冷启动五问走 ``/api/onboarding/*`` 的另一张表，不从这里过。
          */
         LearningEventRequest: {
             /**
@@ -2494,6 +2951,8 @@ export interface components {
              * @default
              */
             nickname: string;
+            /** Profilesummary */
+            profileSummary?: components["schemas"]["ProfileTagOut"][];
             /**
              * Quizcorrect
              * @default 0
@@ -2745,6 +3204,66 @@ export interface components {
             withoutStem: number;
         };
         /**
+         * OnboardingAnswerOut
+         * @description POST answer 的回执：accepted + 最新状态（主进程据此推 onboarding:changed）。
+         */
+        OnboardingAnswerOut: {
+            /**
+             * Accepted
+             * @default true
+             */
+            accepted: boolean;
+            state: components["schemas"]["OnboardingStateOut"];
+        };
+        /**
+         * OnboardingAnswerRequest
+         * @description POST /api/onboarding/{student_id}/answer 的请求体。
+         *
+         *     ★ question_id 与 TS 的 OnboardingQuestionId 同形：**一条回答属于哪一问由位置决定**，
+         *       不解析正文（见执行报告 §1.2）。
+         */
+        OnboardingAnswerRequest: {
+            /** Answertext */
+            answerText: string;
+            /**
+             * Questionid
+             * @enum {string}
+             */
+            questionId: "q1" | "q2" | "q3" | "q4" | "q5";
+            /** Sessionid */
+            sessionId?: string | null;
+        };
+        /**
+         * OnboardingQuestionId
+         * @enum {string}
+         */
+        OnboardingQuestionId: "q1" | "q2" | "q3" | "q4" | "q5";
+        /**
+         * OnboardingState
+         * @enum {string}
+         */
+        OnboardingState: "not_started" | "in_progress" | "done" | "skipped";
+        /**
+         * OnboardingStateOut
+         * @description 引导状态出参（GET state / POST answer 共用；票 31 删掉了 POST skip）。
+         */
+        OnboardingStateOut: {
+            /** Answered */
+            answered?: ("q1" | "q2" | "q3" | "q4" | "q5")[];
+            /**
+             * Displayname
+             * @default
+             */
+            displayName: string;
+            /** Nextquestionid */
+            nextQuestionId?: ("q1" | "q2" | "q3" | "q4" | "q5") | null;
+            /**
+             * Onboardingstate
+             * @enum {string}
+             */
+            onboardingState: "not_started" | "in_progress" | "done" | "skipped";
+        };
+        /**
          * OpeningGuidance
          * @description ``GET /api/profile/{student_id}/opening``：新会话的**开场引导**。
          *
@@ -2786,6 +3305,11 @@ export interface components {
          * @enum {string}
          */
         PayloadKind: "animation" | "coding" | "quiz";
+        /**
+         * PersonalityValue
+         * @enum {string}
+         */
+        PersonalityValue: "开朗" | "安静" | "好奇" | "沉稳" | "细心" | "勇敢" | "急性子" | "慢性子" | "爱提问" | "爱琢磨";
         /**
          * PreferenceKey
          * @enum {string}
@@ -2834,6 +3358,147 @@ export interface components {
             message: string;
             /** Ok */
             ok: boolean;
+        };
+        /**
+         * ProfileTagOut
+         * @description 一条对外的画像标签。
+         */
+        ProfileTagOut: {
+            /** Confidence */
+            confidence?: number | null;
+            /**
+             * Dimension
+             * @default 0
+             */
+            dimension: number;
+            /** Key */
+            key: string;
+            /**
+             * Label
+             * @default
+             */
+            label: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "declared" | "observed" | "inferred";
+            /**
+             * Ts
+             * @default 0
+             */
+            ts: number;
+            /** Value */
+            value: string;
+        };
+        /**
+         * ProfileTagUpdateRequest
+         * @description PUT /api/profile/{student_id}/tags/{key} 的请求体。
+         */
+        ProfileTagUpdateRequest: {
+            /** Confidence */
+            confidence?: number | null;
+            /**
+             * Source
+             * @default declared
+             * @enum {string}
+             */
+            source: "declared" | "observed" | "inferred";
+            /** Value */
+            value: string;
+        };
+        /**
+         * ProfileTagsOut
+         * @description GET /api/profile/{student_id}/tags 的响应。
+         *
+         *     ★ parent_consent=False 时 tags **为空数组**（G-G）：落库本身不算外发，这一层才算。
+         *     ★ 两道闸都回给前端：设置页要据此显示开关的当前状态。
+         */
+        ProfileTagsOut: {
+            /** Dimensionlabels */
+            dimensionLabels?: {
+                [key: string]: string;
+            };
+            /**
+             * Memoryswitch
+             * @default true
+             */
+            memorySwitch: boolean;
+            /**
+             * Parentconsent
+             * @default true
+             */
+            parentConsent: boolean;
+            /** Portraitemptynotes */
+            portraitEmptyNotes?: {
+                [key: string]: string;
+            };
+            /** Portraitrowkeys */
+            portraitRowKeys?: {
+                [key: string]: string[];
+            };
+            /** Portraitrowlabels */
+            portraitRowLabels?: {
+                [key: string]: string;
+            };
+            /** Tags */
+            tags?: components["schemas"]["ProfileTagOut"][];
+        };
+        /**
+         * ProfileTimeline
+         * @description ``GET /api/profile/{student_id}/timeline`` 的响应（§5.2 #11）。
+         *
+         *     ★ ``events`` **新的在前**（界面上最近发生的事在最上面）。
+         *     ★ 空数组是正常值：新学生还没发生过任何变化，或家长关了同意闸（G-G）。
+         *     ★ **不跨学生**（禁做 #9）：端点只按一个 student_id 取数，结构上没有第二名学生的位置。
+         */
+        ProfileTimeline: {
+            /** Events */
+            events?: components["schemas"]["ProfileTimelineEvent"][];
+            /** Studentid */
+            studentId: string;
+        };
+        /**
+         * ProfileTimelineEvent
+         * @description 画像时间线上的一件事（§5.2 #11「画像变化时间线」）。
+         *
+         *     ★ 面向学生/家长：title 与 detail 都是**已经拼好的中文**，界面直接渲染。
+         *       为什么在后端拼：渲染层的每个字符串字面量都被 kp-slug 守卫扫到，
+         *       把「学段从小学高年级变成初中」这类句子写在渲染层等于给它开洞（契约书 §2.1 同一条理由）。
+         *     ★ 不含任何内部 id 作为可读正文：标识只可能出现在 key 字段里，
+         *       而 key 是给界面分组用的，不是给学生看的。
+         */
+        ProfileTimelineEvent: {
+            /** At */
+            at: number;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+            /**
+             * Key
+             * @default
+             */
+            key: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "grade" | "tag" | "onboarding";
+            /**
+             * Label
+             * @default
+             */
+            label: string;
+            /**
+             * Origin
+             * @default
+             * @enum {string}
+             */
+            origin: "cold_start" | "refresh" | "projection" | "";
+            /** Title */
+            title: string;
         };
         /**
          * ProgressStage
@@ -3108,6 +3773,24 @@ export interface components {
             hits?: components["schemas"]["RagHit"][];
         };
         /**
+         * RecommendationBasis
+         * @description 推荐依据的一条（票 28）：从**该学生自己的** ``profile_tags`` 投影出来。
+         *
+         *     ★ 只带 key / value / 中文名：界面照念「因为你喜欢先看结论」，
+         *       而不是把内部键名或置信度摊给学生看。
+         */
+        RecommendationBasis: {
+            /** Key */
+            key: string;
+            /**
+             * Label
+             * @default
+             */
+            label: string;
+            /** Value */
+            value: string;
+        };
+        /**
          * RecommendationItem
          * @description 一条推荐（**下一步学什么**）。
          *
@@ -3156,6 +3839,9 @@ export interface components {
          *     | ``empty`` | 知识库不可用且无任何学习记录（前端按空态展示，**不是错误**） |
          */
         RecommendationResponse: {
+            /** Basis */
+            basis?: components["schemas"]["RecommendationBasis"][];
+            interestDrift?: components["schemas"]["InterestDrift"] | null;
             /** Items */
             items?: components["schemas"]["RecommendationItem"][];
             /**
@@ -3176,6 +3862,87 @@ export interface components {
          * @enum {string}
          */
         RecommendationSource: "review" | "random" | "graph" | "cold_start" | "empty";
+        /**
+         * RefreshApplyOut
+         * @description refresh-apply 的回执：逐条结果 + 应用后的最新投影。
+         *
+         *     ★ 为什么回**逐条结果**而不是只回一个计数：概括是**尽力而为**的，
+         *       客户端（与运维）需要看得见「哪几条被分档拒绝了、为什么」，
+         *       否则「模型每轮都在猜同一个键、每轮都被 declared 挡住」这类静默空转
+         *       永远发现不了。`rejected` 里的 `reason` 是**封闭短标签**（见
+         *       `app/routes/profile.py` 的 `_refresh_reject_reason`），不是自由文本。
+         */
+        RefreshApplyOut: {
+            /** Applied */
+            applied?: string[];
+            /** Dimensionlabels */
+            dimensionLabels?: {
+                [key: string]: string;
+            };
+            /**
+             * Memoryswitch
+             * @default true
+             */
+            memorySwitch: boolean;
+            /**
+             * Parentconsent
+             * @default true
+             */
+            parentConsent: boolean;
+            /** Rejected */
+            rejected?: components["schemas"]["RefreshRejectOut"][];
+            /** Tags */
+            tags?: components["schemas"]["ProfileTagOut"][];
+        };
+        /**
+         * RefreshApplyRequest
+         * @description POST /api/profile/{student_id}/tags/refresh-apply 的请求体。
+         *
+         *     批量应用一次「持续画像迭代」概括出来的标签。**逐条独立**：某一条不合法
+         *     （非白名单 / 取值域 / 被分档拒绝）不影响其它条 —— 与 `sync_observed_tags`
+         *     的「逐条独立」同一条纪律（概括是尽力而为的增强，不该整体失败）。
+         */
+        RefreshApplyRequest: {
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+            /** Tags */
+            tags: components["schemas"]["RefreshApplyTag"][];
+        };
+        /**
+         * RefreshApplyTag
+         * @description 一条要应用的概括结果（持续画像迭代的批量条目）。
+         *
+         *     ★ **没有 `reason` / `evidence` 字段**：概括的「为什么这么猜」是**过程**，
+         *       不是要长期留存的**画像**。留一个自由文本字段 = 多一个把对话正文
+         *       （乃至助手复述的 PII）塞进画像的侧门 —— 与 `learning_history` 不存正文同一条纪律。
+         */
+        RefreshApplyTag: {
+            /** Confidence */
+            confidence?: number | null;
+            /** Key */
+            key: string;
+            /**
+             * Source
+             * @default inferred
+             * @enum {string}
+             */
+            source: "declared" | "observed" | "inferred";
+            /** Value */
+            value: string;
+        };
+        /**
+         * RefreshRejectOut
+         * @description 一条被拒的概括结果（`reason` 是**封闭短标签**，不是异常文本）。
+         */
+        RefreshRejectOut: {
+            /** Key */
+            key: string;
+            /** Reason */
+            reason: string;
+        };
         /**
          * RegisterVariantsRequest
          * @description ``POST /api/quiz/variants`` 的请求体：把 LLM 生成的题登记到该学生的库里。
@@ -3249,6 +4016,21 @@ export interface components {
             nickname: string;
         };
         /**
+         * StudentDeleteResult
+         * @description ``DELETE /api/students/{student_id}``：删号回执。
+         *
+         *     ★ **号不存在也回 200 + ``deleted: false``，不是 404**：删除是幂等的
+         *       （同一张卡片连点两次、两个窗口同时点），第二次拿到 404 会把「本来就已经没了」
+         *       报成「操作失败」，界面反而要为它写一段特例。调用方看 ``deleted`` 就知道
+         *       这次到底有没有真的删掉数据目录。
+         */
+        StudentDeleteResult: {
+            /** Deleted */
+            deleted: boolean;
+            /** Studentid */
+            studentId: string;
+        };
+        /**
          * StudentProfile
          * @description ``GET /api/profile/{student_id}``：画像与掌握度（§6.3）。
          *
@@ -3265,6 +4047,23 @@ export interface components {
             /** Recommendedkpids */
             recommendedKpIds?: string[];
             student: components["schemas"]["Student"];
+        };
+        /**
+         * StudentUpdateRequest
+         * @description ``PATCH /api/students/{student_id}``：改昵称 / 学段。**两个字段都可选，省略 = 不动。**
+         *
+         *     ★ 为什么是「可选字段」而不是整份 :class:`Student`：账号管理界面可能只改名字，
+         *       提交整份对象意味着界面上没动过的字段（尤其是服务端自己维护的时间戳）也一起写回，
+         *       那是「拿旧快照覆盖新值」的经典事故 —— 省略即由服务端保留原值，前端不必先读再写。
+         *
+         *     ★ 改学段会**连带清空当前章节**：章节属于某本教材，学段一变那本教材就不存在了
+         *       （与 ``app/grade/rules.py`` 的学段写入同一口径，D-038）。
+         */
+        StudentUpdateRequest: {
+            /** Gradelevel */
+            gradeLevel?: ("primary_low" | "primary_high" | "junior" | "senior") | null;
+            /** Nickname */
+            nickname?: string | null;
         };
         /**
          * SubjectiveGradeRequest
@@ -3288,6 +4087,21 @@ export interface components {
             /** Studentid */
             studentId: string;
         };
+        /**
+         * TagOrigin
+         * @enum {string}
+         */
+        TagOrigin: "cold_start" | "refresh" | "projection" | "";
+        /**
+         * TagSource
+         * @enum {string}
+         */
+        TagSource: "declared" | "observed" | "inferred";
+        /**
+         * TimelineEventKind
+         * @enum {string}
+         */
+        TimelineEventKind: "grade" | "tag" | "onboarding";
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -3989,6 +4803,72 @@ export interface operations {
             };
         };
     };
+    answer_onboarding_api_onboarding__student_id__answer_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OnboardingAnswerRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnboardingAnswerOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_onboarding_state_api_onboarding__student_id__state_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnboardingStateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     student_profile_api_profile__student_id__get: {
         parameters: {
             query?: never;
@@ -4108,6 +4988,108 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LearningEventAck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    learning_history_api_profile__student_id__history_get: {
+        parameters: {
+            query?: {
+                /** @description 这一页最多几条 */
+                limit?: number;
+                /** @description 按时间倒序跳过几条 */
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LearningEventHistoryOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_identity_api_profile__student_id__identity_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_identity_flags_api_profile__student_id__identity_flags_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IdentityFlagsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityOut"];
                 };
             };
             /** @description Validation Error */
@@ -4247,6 +5229,174 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LearningReport"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_profile_tags_api_profile__student_id__tags_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileTagsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    refresh_apply_tags_api_profile__student_id__tags_refresh_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RefreshApplyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RefreshApplyOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_profile_tag_api_profile__student_id__tags__key__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileTagUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileTagsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_profile_tag_api_profile__student_id__tags__key__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileTagsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_profile_timeline_api_profile__student_id__timeline_get: {
+        parameters: {
+            query?: {
+                /** @description 最多返回几条（新的在前） */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileTimeline"];
                 };
             };
             /** @description Validation Error */
@@ -4708,6 +5858,72 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["StudentCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Student"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_student_api_students__student_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StudentDeleteResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_student_api_students__student_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                student_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StudentUpdateRequest"];
             };
         };
         responses: {

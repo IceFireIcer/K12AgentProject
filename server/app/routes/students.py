@@ -1,4 +1,4 @@
-"""``GET`` / ``POST /api/students``（§6.3）：学生列表与新建（含学段）+ **学生目录的归口解析**。
+"""``GET`` / ``POST`` / ``PATCH`` / ``DELETE /api/students``（§6.3）：学生列表、新建、改名改学段、删号 + **学生目录的归口解析**。
 
 **薄控制器**：解析 → 调存储 → 序列化契约模型；``student_id`` 与时间戳由服务端生成。
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -34,8 +35,14 @@ from typing import Protocol, Sequence
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.contracts import GradeLevel, Student, StudentCreateRequest
-from app.store.learning import LearningStore
+from app.contracts import (
+    GradeLevel,
+    Student,
+    StudentCreateRequest,
+    StudentDeleteResult,
+    StudentUpdateRequest,
+)
+from app.store.learning import LearningStore, StudentRecord
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +117,27 @@ def to_contract_ms(seconds: int | None) -> int:
     return int(seconds or 0) * 1000
 
 
+def student_from_record(record: StudentRecord) -> Student:
+    """learning.db 的学生行 → 契约 Student（**唯一映射点**）。
+
+    ★ 归口理由：这一步同时要做两件容易各写各错的事 —— 时间戳的**秒 → 毫秒**换算
+      （to_contract_ms）与学段脏值的兜底（as_grade_level）。列表 / 读单个 / 改名读回
+      三条路都走它，少一处漏换算的形态就是「列表里某个学生的时间显示成 1970 年」。
+
+    ★ current_chapter 也在这里带上（**不是**让出参默认值回答）：改学段会清空章节，
+      PATCH 的响应要让学生看到「章节已经没了」；只改昵称时它又必须原样保留。
+      两种情况都要求把库里的真值映射出来。
+    """
+    return Student(
+        student_id=record.student_id,
+        nickname=record.nickname,
+        grade_level=as_grade_level(record.grade_level),
+        created_at=to_contract_ms(record.created_at),
+        last_active_at=to_contract_ms(record.last_active_at),
+        current_chapter=record.current_chapter,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 学生目录（归口解析）
 # --------------------------------------------------------------------------- #
@@ -182,7 +210,9 @@ class LearningDbStudentStore:
 
     - ``list_students``：逐个打开学生库读 `student` 表，**读完立刻关**（不复用连接）；
     - ``create_student``：分配下一个空闲 ``student_%03d``，建目录 + 建库 + 写学生行；
-    - ``get_student``：读单个学生行。
+    - ``get_student``：读单个学生行；
+    - ``update_student``：改名 / 改学段（学段变了连带清当前章节）；
+    - ``delete_student``：删掉该学生的整个数据目录。
 
     没有全局连接池是有意的：一人一库的意义就是任何时刻都不存在「多个学生共用一条连接」的状态。
     学生数量级是「一台机器上的几个孩子」，逐个开库的代价可以忽略。
@@ -212,13 +242,7 @@ class LearningDbStudentStore:
             store.close()
         if record is None:
             return None
-        return Student(
-            student_id=record.student_id,
-            nickname=record.nickname,
-            grade_level=as_grade_level(record.grade_level),
-            created_at=to_contract_ms(record.created_at),
-            last_active_at=to_contract_ms(record.last_active_at),
-        )
+        return student_from_record(record)
 
     # ------------------------------------------------------------ 写 --
     def create_student(self, *, nickname: str, grade_level: GradeLevel) -> Student:
@@ -230,13 +254,70 @@ class LearningDbStudentStore:
         finally:
             store.close()
         logger.info("已创建学生 %s（学段 %s），库路径 %s", student_id, grade_level, student_learning_db_path(self.data_dir, student_id))
-        return Student(
-            student_id=created.student_id,
-            nickname=created.nickname,
-            grade_level=as_grade_level(created.grade_level),
-            created_at=to_contract_ms(created.created_at),
-            last_active_at=to_contract_ms(created.last_active_at),
-        )
+        return student_from_record(created)
+
+    def update_student(
+        self,
+        student_id: str,
+        *,
+        nickname: str | None = None,
+        grade_level: GradeLevel | None = None,
+    ) -> Student | None:
+        """改昵称 / 学段；学生不存在回 None（路由据此 404）。两个字段都可省 = 只读回当前值。
+
+        ★ 写法是「读一份行 → 合并 → 用 upsert_student 写回」，而存储层的
+          touch_last_active 明确批评过这种读-改-写（并发期间会把刚生效的学段打回旧值）。
+          这里仍用它，因为**本接口就是这两个字段的显式写入口径**：合并进去的值正是调用方
+          刚提交的那一份，与自动规则引擎同刻改学段时以用户显式选择为准是预期行为。
+          ⚠️ 代价：upsert_student 会把 last_active_at 刷成现在（改个名也算「动过这号」）。
+          单列 UPDATE 的写入口径在 app/store/learning.py，不在本模块，故暂接受。
+
+        ★ current_chapter 只在**学段真的变了**之后清（与 grade/rules.py 的 _apply
+          同一判据）：只改昵称不该弄丢学生选好的章节。
+        ★ 顺序刻意是「先写学段、再清章节」：中途出错留下的是「新学段 + 旧章节」
+          （软偏好过期，只影响 Prompt 提示），而不是「章节没了、学段还没改」
+          （学生白丢一次选择，且下一轮还按旧学段讲）。
+        """
+        validate_student_id(student_id)
+        path = student_learning_db_path(self.data_dir, student_id)
+        if not path.exists():
+            return None
+        store = LearningStore(path)
+        try:
+            record = store.get_student(student_id)
+            if record is None:
+                return None
+            if nickname is not None or grade_level is not None:
+                store.upsert_student(
+                    student_id,
+                    nickname if nickname is not None else record.nickname,
+                    grade_level if grade_level is not None else record.grade_level,
+                )
+            if grade_level is not None and grade_level != record.grade_level:
+                # ★ 复用该列的**唯一**写入口径（set_current_chapter），不在本模块再拼一份
+                #   UPDATE：两处各写一份的典型后果是「一处写 NULL、一处写 ''」，两种空值。
+                store.set_current_chapter(student_id, None)
+            updated = store.get_student(student_id)
+            assert updated is not None
+        finally:
+            store.close()
+        logger.info("已更新学生 %s（昵称/学段）", student_id)
+        return student_from_record(updated)
+
+    def delete_student(self, student_id: str) -> bool:
+        """删掉该学生的整个数据目录（students/<id>/），返回是否真的删了。
+
+        ★ 路径必须经 student_dir() 拼（它内含 validate_student_id）：../ 一类的 id
+          若走到 rmtree，就是「HTTP 上的任意目录删除」。这就是「只删校验通过的学生目录」
+          这条纪律的落点 —— 拼接与删除之间不许再有分支。
+        ★ 目录不存在 = False（幂等删除，不是错误）。
+        """
+        directory = student_dir(self.data_dir, student_id)
+        if not directory.is_dir():
+            return False
+        shutil.rmtree(directory)
+        logger.info("已删除学生 %s 及其数据目录 %s", student_id, directory)
+        return True
 
     def _next_student_id(self, existing: set[str]) -> str:
         """下一个空闲 id（``student_001`` 起，跳过已被占用的号）。"""
@@ -291,6 +372,46 @@ class InMemoryStudentStore:
             self._students.append(student)
             return student
 
+    def update_student(
+        self,
+        student_id: str,
+        *,
+        nickname: str | None = None,
+        grade_level: GradeLevel | None = None,
+    ) -> Student | None:
+        """内存版与一人一库版**同语义**（学段变了清章节），供契约形状测试注入使用。"""
+        with self._lock:
+            for index, student in enumerate(self._students):
+                if student.student_id != student_id:
+                    continue
+                if nickname is None and grade_level is None:
+                    return student
+                grade_changed = grade_level is not None and grade_level != student.grade_level
+                updated = student.model_copy(
+                    update={
+                        "nickname": nickname if nickname is not None else student.nickname,
+                        "grade_level": grade_level
+                        if grade_level is not None
+                        else student.grade_level,
+                        # 与一人一库版对齐：upsert_student 会刷活跃时间
+                        "last_active_at": _now_ms(),
+                        # 学段变了 → 章节作废（空串 = 未选择）
+                        **({"current_chapter": ""} if grade_changed else {}),
+                    }
+                )
+                self._students[index] = updated
+                return updated
+            return None
+
+    def delete_student(self, student_id: str) -> bool:
+        """内存版删号：命中即移除（没有目录可删），返回是否命中。"""
+        with self._lock:
+            for index, student in enumerate(self._students):
+                if student.student_id == student_id:
+                    del self._students[index]
+                    return True
+            return False
+
 
 class StudentStore(Protocol):
     """学生存储接口（两个实现都满足；测试与其它轨通过 ``app.state`` 注入）。"""
@@ -298,6 +419,16 @@ class StudentStore(Protocol):
     def list_students(self) -> list[Student]: ...
 
     def create_student(self, *, nickname: str, grade_level: GradeLevel) -> Student: ...
+
+    def update_student(
+        self,
+        student_id: str,
+        *,
+        nickname: str | None = None,
+        grade_level: GradeLevel | None = None,
+    ) -> Student | None: ...
+
+    def delete_student(self, student_id: str) -> bool: ...
 
 
 def get_students_store(request: Request) -> StudentStore:
@@ -399,6 +530,43 @@ def create_student(payload: StudentCreateRequest, request: Request) -> Student:
     )
 
 
+@router.patch("/students/{student_id}", response_model=Student, summary="修改学生（昵称 / 学段）")
+def update_student(student_id: str, payload: StudentUpdateRequest, request: Request) -> Student:
+    """改昵称 / 改学段；学段变了由存储层连带清空当前章节。
+
+    ★ validate_student_id 在**路由层**先跑一遍（存储层还会再跑）：内存占位实现不做任何
+      路径拼接，只有路由层这道校验才能保证 ../ 一类的 id 在**所有**实现下都是 422，
+      而不是「换个存储实现就放行」。
+    ★ 学生不存在 → 404：改名没有「幂等成功」的语义，界面需要知道这个号已经没了。
+    """
+    validate_student_id(student_id)
+    updated = get_students_store(request).update_student(
+        student_id,
+        nickname=payload.nickname,
+        grade_level=payload.grade_level,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="学生不存在")
+    return updated
+
+
+@router.delete(
+    "/students/{student_id}",
+    response_model=StudentDeleteResult,
+    summary="删除学生及其本地数据",
+)
+def delete_student(student_id: str, request: Request) -> StudentDeleteResult:
+    """删掉 students/<student_id>/（含学习记录库与桌面端建在里面的会话目录）。
+
+    ★ 同样在路由层先 validate_student_id；删除路径只经 student_dir() 的归口解析
+      （内含白名单）。这是「只删校验通过的学生目录」的落点。
+    ★ 号不存在 → 200 + deleted: false（幂等删除，不是 404，见 StudentDeleteResult）。
+    """
+    validate_student_id(student_id)
+    deleted = get_students_store(request).delete_student(student_id)
+    return StudentDeleteResult(student_id=student_id, deleted=deleted)
+
+
 __all__ = [
     "DEFAULT_COLD_START_GRADE",
     "DEFAULT_STUDENT_NICKNAME",
@@ -417,6 +585,7 @@ __all__ = [
     "resolve_student_data_root",
     "router",
     "student_dir",
+    "student_from_record",
     "student_learning_db_path",
     "student_pi_agent_dir",
     "students_root",

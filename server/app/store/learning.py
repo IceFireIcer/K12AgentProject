@@ -3,6 +3,10 @@
 数据层的三处分离（执行文档 §8.1）：对话正文归 Pi 的 JSONL 会话树，
 **SQLite 不存对话内容**，这里只放从对话中提取出来的结构化学习数据。
 
+★ 唯一例外（票 25 的合规口径变更，作用域已缩小）：**冷启动五问的回答**入库，
+  落在 :data:`_IDENTITY_PROFILE_V5` 的 `onboarding_qa` 表。例外**只到这 5 条**——
+  `learning_history.question` 仍然恒为空串（G-K），quiz/动画/编程判分路径照旧不存正文。
+
 一人一库是合规硬约束：**不同学生的画像/掌握度绝不能共用一个库文件**，
 所以本模块只提供「按路径开库」的能力，不持有任何全局连接。
 
@@ -63,11 +67,20 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple, Sequence
+from typing import Any, Mapping, NamedTuple, Sequence
 
 from app.contracts import MASTERY_DELTA_LIMIT
 from app.store.connections import connect
-from app.store.migrations import Migration, ensure_learning, ensure_migrated, execute_script
+from app.store.migrations import (
+    ALLOWED_TAG_KEYS,
+    ALLOWED_TAG_KEY_SET,
+    IDENTITY_LOCAL_FIELDS,
+    JOIN_KEY,
+    Migration,
+    ensure_learning,
+    ensure_migrated,
+    execute_script,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +104,157 @@ CODE_MIGRATION_SET = "code"
 #:   （``qid`` 在 ``detail`` 的 JSON 字符串里，按它查在现有表结构下无索引可用；
 #:   加索引/加列都要动 ``migrations.py`` 的已发布迁移，超出「零迁移」的边界）。
 _ATTEMPT_SCAN_LIMIT = 200
+
+# --------------------------------------------------------------------------- #
+# 冷启动画像（迁移 v5）：白名单二次校验 + 两道闸 + 短期情绪 TTL
+# --------------------------------------------------------------------------- #
+
+#: ★ 短期情绪标签：**必须**带过期时间（执行报告 §0.6.5，禁做 #11「长期负面情绪档案」）。
+#: 把「上次考崩了、情绪低落」长期记着既伤人也可能被用来操控他 —— 所以这三个键读出来时
+#: 一律先过 TTL。与 TS 的 `EPHEMERAL_TAGS` 逐字一致。
+EPHEMERAL_TAGS: tuple[str, ...] = ("emotion", "intensity", "trigger")
+EPHEMERAL_TAG_SET: frozenset[str] = frozenset(EPHEMERAL_TAGS)
+
+#: ★ 「3 轮**或** 24 小时，取先到」。轮次口径 = `grade_signals` 的 id 差（见 `turn_mark`）；
+#: 24 小时用秒（本文件的 `ts` 全是 Unix 秒，不引第二种时间单位）。
+EPHEMERAL_TTL_TURNS = 3
+EPHEMERAL_TTL_SECONDS = 24 * 60 * 60
+
+#: 情绪取值域（禁做 #12）：**有限枚举，不是临床词汇，也不是自由文本**。
+#: 自由文本会让「我最近有点抑郁」原样进库 —— 那就从「记录情绪」变成「心理诊断」了。
+EMOTION_VALUES: tuple[str, ...] = ("happy", "calm", "confused", "frustrated", "angry")
+EMOTION_VALUE_SET: frozenset[str] = frozenset(EMOTION_VALUES)
+
+#: 情绪强度：0–3 的小整数（与 TS 的 `INTENSITY_MIN` / `INTENSITY_MAX` 同值）。
+#: 刻意不是 0–100 的分 —— 分值会诱发「优化分数」的坏文化。
+INTENSITY_MIN = 0
+INTENSITY_MAX = 3
+
+#: 标签来源（L2 声明 / L1 观察 / L3 推断，见执行报告 §5.1）。
+TAG_SOURCES: frozenset[str] = frozenset({"declared", "observed", "inferred"})
+
+#: ★ 标签变更的**来源出处**（origin，迁移 v7）—— 与 `source` 是**正交**的两个维度：
+#:   · `source` 回答「这条值**有多可信**」（declared > observed > inferred）；
+#:   · `origin` 回答「它**从哪条写入路径来的**」。
+#:
+#:   为什么两维不能合并：`observed` 同时来自两条路（行为投影 / 持续迭代概括），
+#:   而这两件事对「画像怎么变成现在这样的」是**不同的故事**。详见 migrations.py v7。
+#:
+#: ★★ 封闭词表，只有三态。**不预置「未知」值** —— 旧行（v7 前）的 origin 是 NULL，
+#:    那是「查询时还没这个概念」，由读取侧折成一句中性中文，而不是第四个枚举值。
+TAG_ORIGINS: frozenset[str] = frozenset({"cold_start", "refresh", "projection"})
+
+#: origin 的默认值：写入路径**没显式声明**时按 `source` 推断（见 `_origin_for_source`）。
+#: 「冷启动」是默认，因为唯一无 origin 的遗留写入路径是五问（declared）。
+TAG_ORIGIN_COLD_START = "cold_start"
+TAG_ORIGIN_REFRESH = "refresh"
+TAG_ORIGIN_PROJECTION = "projection"
+
+#: ★ 禁做 #10「敏感属性推断」：`source='inferred'` 只允许**白名单内的风格 / 倾向类**键。
+#: 取值 = 学习偏好（维度 7 四键）+ 情绪动机（维度 9 四键）
+#:      + 类型与性格（维度 13 两键，**2026-09-30 用户裁决新增**）。
+#: 学段 / 掌握度 / 知识点这类**客观量一律不许被推断写**：那会变成「模型觉得你懂了就改分」，
+#: 与 `PreferenceKey` 封闭词表同一条纪律（L3 永远不能写 L1）。
+#:
+#: ★★ 8 → 10 是一次**红线移动的代码面**（决策日 2026-09-30），必须记清移动的边界：
+#:   新增的两键（`learner_style` / `personality`）与既有八键**同属一类** ——
+#:   它们都是「从行为与对话里看出的**倾向**」，而不是「客观量」。
+#:   移动的是「性格可以被推断」这一条（原红线原文含「性格」），
+#:   **心理状态 / 家庭情况 / 智能水平三条禁令一字未动**；
+#:   配套的三道闸见 `personality` 的封闭词表 + 写入侧取值域校验 + G-M-7 的三断言。
+INFERRED_ALLOWED_TAG_KEYS: frozenset[str] = frozenset(
+    {
+        "explain_style",
+        "output_length",
+        "pace",
+        "practice_type",
+        "emotion",
+        "intensity",
+        "trigger",
+        "confidence",
+        # 维度 13（2026-09-30）：从对话里看出的学习倾向与性格倾向
+        "learner_style",
+        "personality",
+    }
+)
+
+#: ★ 学习类型（`learner_style`）的**封闭词表** —— 与 TS 的 `LEARNER_STYLE_VALUES` 逐字一致。
+#:
+#: 两条写入路径（分档矩阵天然仲裁，见 :meth:`LearningStore.sync_learner_style`）：
+#:   · **规则投影**（`observed` / `origin=projection`）—— 按学习数据判定，权威；
+#:   · **持续概括**（`inferred` / `origin=refresh`）—— LLM 从对话判断，候补。
+#:
+#: ⚠️ 值是**中文显示值**（与 :data:`OBSERVED_ERROR_TYPES` 同一条纪律）：
+#:   它要进画像卡给学生看。封闭性由本常量在**写入侧**保证（见 :meth:`upsert_tag`）。
+#: ⚠️「均衡型」在词表里但规则不主动打 —— 数据不显著时宁可不写（不把「没看出来」
+#:   冒充成「观察到了」，与「还没练过」不写占位值同一条纪律）。
+LEARNER_STYLE_VALUES: tuple[str, ...] = ("天赋型", "努力型", "钻研型", "速通型", "均衡型")
+LEARNER_STYLE_VALUE_SET: frozenset[str] = frozenset(LEARNER_STYLE_VALUES)
+
+#: ★ 性格（`personality`）的**封闭词表** —— 与 TS 的 `PERSONALITY_VALUES` 逐字一致。
+#: 中性、口语、无临床色彩（选词的三条约束写在 TS 那一份的文件头，此处不重复）。
+#: ★★ 它是本轮红线移动的**那道闸**：性格允许被推断，但只能落在这十个词里 ——
+#:   越界值（尤其「多动」「焦虑型」这类医学/心理学词）在写入侧直接 ValueError。
+PERSONALITY_VALUES: tuple[str, ...] = (
+    "开朗",
+    "安静",
+    "好奇",
+    "沉稳",
+    "细心",
+    "勇敢",
+    "急性子",
+    "慢性子",
+    "爱提问",
+    "爱琢磨",
+)
+PERSONALITY_VALUE_SET: frozenset[str] = frozenset(PERSONALITY_VALUES)
+
+#: 学习类型规则投影的**最小样本门槛**（总 attempts 低于它不判定）。
+#: ★ 为什么必须有：3 道题里对了 3 道就判「天赋型」，那个标签不可信、家长一问就崩。
+#:   宁可不写（画像上就没有这一条），也不给一个撑不住的结论 ——
+#:   与「读不到数据就不写」同一条纪律（那个是数据缺失，这个是数据不足）。
+LEARNER_STYLE_MIN_ATTEMPTS = 10
+
+#: 判定「天赋型」的正确率门槛（首试通过率的高位）。
+LEARNER_STYLE_GIFTED_MIN_ACCURACY = 0.85
+#: 判定「速通型」的每知识点平均尝试次数上限（一遍过为主）与正确率下界。
+LEARNER_STYLE_FAST_MAX_ATTEMPTS_PER_KP = 1.5
+LEARNER_STYLE_FAST_MIN_ACCURACY = 0.7
+#: 判定「钻研型」的每知识点平均尝试次数下界（反复打磨同一处）。
+LEARNER_STYLE_DEEP_MIN_ATTEMPTS_PER_KP = 3.0
+#: 判定「努力型」的总尝试次数下界与「错题重做占比」下界（二选一命中即可）。
+LEARNER_STYLE_DILIGENT_MIN_ATTEMPTS = 30
+LEARNER_STYLE_DILIGENT_MIN_RETRY_RATIO = 0.4
+#: 「努力型」要求正确率**低于**这个值（正确率很高就该是天赋/速通，而不是努力）。
+LEARNER_STYLE_DILIGENT_MAX_ACCURACY = 0.85
+
+#: 引导流程状态的封闭词表（与 TS 的 `ONBOARDING_STATES` 逐字一致）。
+ONBOARDING_STATES: tuple[str, ...] = ("not_started", "in_progress", "done", "skipped")
+#: 唯一允许弹引导的状态（G-I）：其余三态一律绝不弹。
+ONBOARDING_STATE_NOT_STARTED = "not_started"
+
+#: ★ 「错误模式」的**封闭词表**（计划 §1.6「判分/答题已有数据 → error_type」）。
+#:
+#: ★★ 为什么必须是封闭词表、而且值是**中文**：
+#:   ① 会**进 prompt、也进画像卡** —— 自由文本迟早会被写成「他连分数都不会」这类
+#:      **评价性**内容，那是对孩子的标签化，不是学习信号（与 emotion 走有限枚举同一个道理）；
+#:   ② 学生面不该看到 `concept_confusion` 这种标识 —— 所以库里存的就是**中文显示值**，
+#:      封闭性由本常量在写入侧保证（不在取值域里的写不进去）。
+#: ⚠️ 「还没练过」**不在此列**：没数据时我们**什么都不写**，绝不写占位值
+#:   把「不知道」冒充成「观察到了」。
+OBSERVED_ERROR_TYPES: tuple[str, ...] = ("概念混淆", "粗心")
+OBSERVED_ERROR_TYPE_SET: frozenset[str] = frozenset(OBSERVED_ERROR_TYPES)
+
+#: 连续错几次才算「概念混淆」（1 次可能是手滑，不足以定性）。
+ERROR_TYPE_CONFUSION_MIN_ATTEMPTS = 2
+#: 掌握度低于它、且**曾经做对过** → 归到「粗心」（会做但不稳）。
+ERROR_TYPE_CARELESS_MAX_SCORE = 0.6
+
+#: ★ 「安全级别」的封闭词表（计划 §1.6「safety guard → safety_level」）。
+#: ⚠️ **只记档位、不记内容**：拦截了什么话、为什么被拦，一概不进画像 ——
+#: 那属于**当轮**的处置，不属于「这个学生是什么样的人」。长期留着会变成另一种档案。
+SAFETY_LEVELS: tuple[str, ...] = ("正常", "需留意")
+SAFETY_LEVEL_SET: frozenset[str] = frozenset(SAFETY_LEVELS)
 
 #: ``generated_question`` 表：LLM 生成的变式题（**含标准答案**，见模块头第 2 条）。
 _QUIZ_V1 = """
@@ -400,6 +564,91 @@ class SavedAnimationRecord:
     uses: int
 
 
+@dataclass(frozen=True)
+class IdentityRecord:
+    """``identity_local`` 的一行（**永不过桥**：主进程读它决定行为，不进任何 prompt）。
+
+    ``parent_consent`` / ``memory_switch`` 是**闸**不是信息；
+    ``real_name`` / ``real_grade`` / ``school`` / ``class_name`` 是本地身份列，
+    除 join 钥匙外一个都不在白名单里（G-B）。
+    ``class_name`` 映射库里的 ``class`` 列（``class`` 是 Python 关键字，不能当字段名）。
+    """
+
+    anon_student_id: str
+    real_name: str
+    real_grade: str
+    school: str
+    class_name: str
+    parent_consent: bool
+    memory_switch: bool
+    onboarding_state: str
+
+
+@dataclass(frozen=True)
+class ProfileTagRecord:
+    """``profile_tags`` 的一行（**已过 TTL 与白名单**，见 :meth:`LearningStore.tags`）。"""
+
+    key: str
+    value: str
+    confidence: float | None
+    source: str
+    #: Unix 秒（路由层用 ``to_contract_ms`` 换算成毫秒给出参）。
+    ts: int
+
+
+@dataclass(frozen=True)
+class ProfileTagHistoryRecord:
+    """``profile_tag_history`` 的一行 —— 画像标签的**一次变更**（§5.2 #11 时间线的原料）。
+
+    ★ 已过**白名单**与**短期情绪排除**（见 :meth:`LearningStore.tag_history`）：
+      出栈的每一条都是「可以长期留着的画像事实」。
+    """
+
+    id: int
+    key: str
+    value: str
+    #: 变更前的值；``None`` = 这个键**第一次**出现（不是「从空值变过来」）。
+    previous_value: str | None
+    source: str
+    confidence: float | None
+    #: 变更**出处**（迁移 v7，∈ :data:`TAG_ORIGINS`）；``None`` = v7 之前的旧行。
+    #: ★ 与 :attr:`source` 正交：source 是「多可信」，origin 是「从哪条路来的」。
+    origin: str | None
+    #: Unix 秒（路由层用 ``to_contract_ms`` 换算成毫秒给出参）。
+    ts: int
+
+
+@dataclass(frozen=True)
+class HistoryRecord:
+    """``learning_history`` 的一行（**学习历史**分页的原料，2026-09-30）。
+
+    ★ 只有**结构化列**：``question`` 恒为空串（G-K，SQLite 不存对话正文）、
+      ``detail`` 是内部 JSON 摘要 —— 两者都**不在这个记录里**
+      （读不到就不会漏出去；「读了再过滤」多一道会写错的关卡）。
+    """
+
+    id: int
+    #: Unix 秒（路由层用 ``to_contract_ms`` 换算成毫秒给出参）。
+    ts: int
+    kp_id: str
+    #: qa | animation | coding | quiz（合法性由合同层过滤，见 ``routes/profile.py``）。
+    activity: str
+    #: ``None`` = 这条记录**没有对错**（答疑 / 看动画 / 写代码）；
+    #: ``False`` = 答错了。★ 两者绝不能混为一谈（见 :meth:`LearningStore.history_page`）。
+    is_correct: bool | None
+
+
+@dataclass(frozen=True)
+class OnboardingAnswerRecord:
+    """``onboarding_qa`` 的一行（冷启动五问的一问一答）。"""
+
+    question_id: str
+    question_text: str
+    answer_text: str
+    session_id: str
+    answered_at: int
+
+
 class AttemptRecord(NamedTuple):
     """某道题**最近一次**作答（:meth:`LearningStore.question_attempt` 的返回）。
 
@@ -437,6 +686,809 @@ class LearningStore:
         self._code_ready = False
         self.code_version = 0
         self.animation_version = 0
+
+    # ------------------------------------------- 冷启动画像（迁移 v5） --
+    # ★★ 这一段是两张**物理隔离**表的唯一读写口：
+    #   identity_local（永不过桥）与 profile_tags（白名单守卫）。
+    #   路由层不许自己拼 SQL —— 两道闸（memory_switch / parent_consent）与白名单
+    #   校验集中在这里，才谈得上「关掉就立刻生效」，也才有唯一的 G-A/G-F 落点。
+
+    def _current_turn_mark(self) -> int:
+        """当前「轮次位标」= grade_signals 的最大 id（单调、跨会话连续）。
+
+        ★ 用它把 TTL 的「3 轮」变成可算的量（见 v5 DDL 的 turn_mark）。迁移 v3 已经
+          确认过这条性质：每个轮次至少写一行读数，所以 id 差 ≈ 真实轮数。
+        ★ 读不到（坏库 / 表被外力删）就回 0 —— TTL 退化成只剩 24 小时口径，不因此报错。
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT COALESCE(MAX(id), 0) AS mark FROM grade_signals"
+            ).fetchone()
+        except sqlite3.Error:  # pragma: no cover - 坏库
+            return 0
+        return int(row["mark"] or 0) if row is not None else 0
+
+    def identity(self, student_id: str) -> IdentityRecord | None:
+        """读身份行；**没有就返回 None**（不在这里建行，见 identity_or_default）。"""
+        row = self.conn.execute(
+            "SELECT anon_student_id, real_name, real_grade, school, class, "
+            "parent_consent, memory_switch, onboarding_state FROM identity_local "
+            "WHERE anon_student_id = ?",
+            (student_id,),
+        ).fetchone()
+        return None if row is None else _identity_from_row(row)
+
+    def identity_or_default(self, student_id: str) -> IdentityRecord:
+        """读身份行；没有行就用**默认值**（两道闸默认开、状态 not_started）。
+
+        ★ 默认值 = 用户裁决的选项 B（默认同意，家长可在设置页关）。读路径**不落行**：
+          「读一次设置」不该在库里留下一行；真正需要留痕的是写
+          （set_identity_flags / set_onboarding_state）。
+        """
+        return self.identity(student_id) or IdentityRecord(
+            anon_student_id=student_id,
+            real_name="",
+            real_grade="",
+            school="",
+            class_name="",
+            parent_consent=True,
+            memory_switch=True,
+            onboarding_state=ONBOARDING_STATE_NOT_STARTED,
+        )
+
+    def _ensure_identity_row(self, student_id: str) -> None:
+        # 写之前先保证行在（默认值由 DDL 给，这里不重复写一遍默认值 —— 两处默认值会漂）。
+        self.conn.execute(
+            "INSERT OR IGNORE INTO identity_local(anon_student_id) VALUES(?)", (student_id,)
+        )
+
+    def set_identity_flags(
+        self,
+        student_id: str,
+        *,
+        parent_consent: bool | None = None,
+        memory_switch: bool | None = None,
+    ) -> None:
+        """写两道闸；None = 本次不动那一项（设置页可能只翻其中一个开关）。"""
+        if parent_consent is None and memory_switch is None:
+            return
+        self._ensure_identity_row(student_id)
+        if parent_consent is not None:
+            self.conn.execute(
+                "UPDATE identity_local SET parent_consent = ? WHERE anon_student_id = ?",
+                (1 if parent_consent else 0, student_id),
+            )
+        if memory_switch is not None:
+            self.conn.execute(
+                "UPDATE identity_local SET memory_switch = ? WHERE anon_student_id = ?",
+                (1 if memory_switch else 0, student_id),
+            )
+        self.conn.commit()
+
+    def set_real_name(self, student_id: str, real_name: str) -> None:
+        """写本地真名（★ **永不过桥**：只给渲染层做 `{{student_name}}` 本地替换，永不进 prompt）。
+
+        ★★ 为什么必须存在这个原语（集成期发现的功能死洞）：
+           Q5 问「我该怎么称呼你」，主进程把答案脱敏成称呼、也把 `displayName` 交给了
+           引导 Prompt —— 但**没有任何路径把它写进库**。后果是 `GET /identity` 恒回空
+           `real_name`，渲染层于是永远把 `{{student_name}}` 替换成「同学」：
+           **模型被要求用占位符，而占位符永远替换不出真名**。占位机制看起来在工作，
+           实际上是静默失效的。
+
+        ⚠️ 与两道闸的关键区别：这是**身份数据**，不是闸。所以它**不看** `memory_switch` ——
+           「不再记学习画像」不等于「忘掉学生叫什么」；把两件事绑在一起，会让
+           关掉记忆开关的学生连称呼都丢掉（那不是隐私保护，是功能坏了）。
+        ⚠️ 它仍然**只在本地**：G-C 保证没有任何 prompt 拼装路径读这一列。
+        ⚠️ 空串是合法写入（= 学生没给称呼）—— 读取端把空串统一折算成回落值。
+        """
+        self._ensure_identity_row(student_id)
+        self.conn.execute(
+            "UPDATE identity_local SET real_name = ? WHERE anon_student_id = ?",
+            (real_name, student_id),
+        )
+        self.conn.commit()
+
+    def parent_consent(self, student_id: str) -> bool:
+        """家长同意闸：False 时**不外发任何画像**（G-G，由路由层把 tags 出参清空）。"""
+        return self.identity_or_default(student_id).parent_consent
+
+    def memory_switch(self, student_id: str) -> bool:
+        """记忆闸：False 时**不写任何标签**（G-F，写入原语里直接 return）。"""
+        return self.identity_or_default(student_id).memory_switch
+
+    def onboarding_state(self, student_id: str) -> str:
+        """读引导流程状态（无行 = not_started）。"""
+        return self.identity_or_default(student_id).onboarding_state
+
+    def set_onboarding_state(self, student_id: str, state: str) -> None:
+        """写引导流程状态（封闭词表；非法值直接 ValueError，不静默落库）。"""
+        if state not in ONBOARDING_STATES:
+            raise ValueError(f"onboarding_state 非法：{state!r}（只允许 {ONBOARDING_STATES}）")
+        self._ensure_identity_row(student_id)
+        self.conn.execute(
+            "UPDATE identity_local SET onboarding_state = ? WHERE anon_student_id = ?",
+            (state, student_id),
+        )
+        self.conn.commit()
+
+    # ------------------------------------------------------------ 标签 --
+    def upsert_tag(
+        self,
+        student_id: str,
+        key: str,
+        value: str,
+        *,
+        confidence: float | None = None,
+        source: str = "declared",
+        ts: int | None = None,
+        origin: str | None = None,
+    ) -> bool:
+        """写一条画像标签。返回**是否真的落库**（False = 被 memory_switch 挡住）。
+
+        ★★ 三道闸都在这里，**调用方绕不过去**：
+
+        ① **白名单**（G-A）：不在 ALLOWED_TAG_KEYS 直接 ValueError ——
+           这是「禁做 #2–6、#8」在**存储层**的实现（家庭收入 / 父母职业 / 消费画像 /
+           广告 ID / 精确位置 / 社交关系都没有对应键）；
+        ② **memory_switch=0**（G-F）：**不写任何标签**，直接 return False；
+        ③ **敏感属性推断**（禁做 #10）：source='inferred' 只允许情绪/风格类键。
+
+        另有取值域校验：emotion 只认有限枚举（禁做 #12），intensity 只认 0..3。
+
+        :param origin: 变更出处（迁移 v7，∈ :data:`TAG_ORIGINS`）。**只影响时间线**，
+            不参与任何分档/校验判断。``None`` = 由调用方按 source 推断：
+            ``declared`` → ``cold_start``（五问是唯一写 declared 的路），其余 → ``refresh``。
+            知道的调用点请**显式传**（行为投影传 ``projection``，概括传 ``refresh``）——
+            因为 ``observed`` 的自动推断会落到 ``refresh``，那对投影是错的。
+        """
+        if key not in ALLOWED_TAG_KEY_SET:
+            raise ValueError(f"标签键不在白名单里：{key!r}（G-A）")
+        if source not in TAG_SOURCES:
+            raise ValueError(f"标签来源非法：{source!r}（只允许 {sorted(TAG_SOURCES)}）")
+        if source == "inferred" and key not in INFERRED_ALLOWED_TAG_KEYS:
+            raise ValueError(
+                f"source='inferred' 只能写风格/倾向类键（禁做 #10），收到：{key!r}"
+            )
+        if origin is not None and origin not in TAG_ORIGINS:
+            raise ValueError(f"标签出处非法：{origin!r}（只允许 {sorted(TAG_ORIGINS)}）")
+
+        text = " ".join(str(value).split())
+        if key == "emotion" and text not in EMOTION_VALUE_SET:
+            raise ValueError(
+                f"emotion 只认有限枚举 {EMOTION_VALUES}（禁做 #12），收到：{value!r}"
+            )
+        # ★ 维度 13（2026-09-30）：两个新键都是**封闭词表**，理由分两层 ——
+        #   learner_style 与 OBSERVED_ERROR_TYPES 同一条（会展示给学生，不许出现评价性长句）；
+        #   personality 是**本轮红线移动的那道闸**（性格可被推断，但只能落在这十个词里，
+        #   医学/心理学词一个都不许进来）。两处的词表与 TS 侧逐字一致。
+        if key == "learner_style" and text not in LEARNER_STYLE_VALUE_SET:
+            raise ValueError(
+                f"learner_style 只认封闭词表 {LEARNER_STYLE_VALUES}，收到：{value!r}"
+            )
+        if key == "personality" and text not in PERSONALITY_VALUE_SET:
+            raise ValueError(
+                f"personality 只认封闭词表 {PERSONALITY_VALUES}，收到：{value!r}"
+            )
+        if key == "intensity":
+            try:
+                number = int(text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"intensity 只认 {INTENSITY_MIN}..{INTENSITY_MAX} 的整数，收到：{value!r}"
+                ) from exc
+            if not (INTENSITY_MIN <= number <= INTENSITY_MAX):
+                raise ValueError(
+                    f"intensity 只认 {INTENSITY_MIN}..{INTENSITY_MAX} 的整数，收到：{value!r}"
+                )
+            text = str(number)
+
+        if not self.memory_switch(student_id):
+            return False
+
+        now = int(time.time() if ts is None else ts)
+        # ★ 变更时间线（§5.2 #11）：**写之前**先读旧值，否则 upsert 之后旧值就没了。
+        previous = self._tag_value(student_id, key)
+        self.conn.execute(
+            "INSERT INTO profile_tags(anon_student_id, key, value, confidence, source, ts, turn_mark) "
+            "VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(anon_student_id, key) DO UPDATE SET value=excluded.value, "
+            "confidence=excluded.confidence, source=excluded.source, ts=excluded.ts, "
+            "turn_mark=excluded.turn_mark",
+            (
+                student_id,
+                key,
+                text,
+                None if confidence is None else float(confidence),
+                source,
+                now,
+                self._current_turn_mark(),
+            ),
+        )
+        # ★ 同一事务里追加一笔变更（值没变则不记，见 _append_tag_history）
+        #   出处（origin）在这里按 source 兜底推断：知道的调用点早已显式传入。
+        self._append_tag_history(
+            student_id, key, text, previous, source, confidence, now, origin
+        )
+        self.conn.commit()
+        return True
+
+    def tags(self, student_id: str, *, now: int | None = None) -> list[ProfileTagRecord]:
+        """读该学生的全部标签（按 key 排序）；**TTL 过滤就在这一层**。
+
+        ★ emotion / intensity / trigger 超过 **3 轮或 24 小时（取先到）**
+          → 当作不存在（G-E）。轮次用「当前 mark − 写入时 mark」算（见 turn_mark）。
+        ★ 出栈前**再过一次白名单**（G-A）：库里就算被外部工具塞了别的键，也不会流出去。
+        ★ now 只给测试注入时间用；生产路径不传，取系统时钟。
+        """
+        now_s = int(time.time() if now is None else now)
+        current_mark = self._current_turn_mark()
+        rows = self.conn.execute(
+            "SELECT key, value, confidence, source, ts, turn_mark FROM profile_tags "
+            "WHERE anon_student_id = ? ORDER BY key",
+            (student_id,),
+        ).fetchall()
+        records: list[ProfileTagRecord] = []
+        for row in rows:
+            key = str(row["key"])
+            if key not in ALLOWED_TAG_KEY_SET:  # G-A：出栈再过一遍
+                continue
+            ts = int(row["ts"] or 0)
+            if key in EPHEMERAL_TAG_SET:
+                if now_s - ts > EPHEMERAL_TTL_SECONDS:
+                    continue
+                mark = row["turn_mark"]
+                if mark is not None and current_mark - int(mark) > EPHEMERAL_TTL_TURNS:
+                    continue
+            records.append(
+                ProfileTagRecord(
+                    key=key,
+                    value=str(row["value"] or ""),
+                    confidence=None if row["confidence"] is None else float(row["confidence"]),
+                    source=str(row["source"] or "declared"),
+                    ts=ts,
+                )
+            )
+        return records
+
+    def _tag_value(self, student_id: str, key: str) -> str | None:
+        """读一个键的**当前值**（不存在返回 None）。供变更时间线取「变更前」用。"""
+        row = self.conn.execute(
+            "SELECT value FROM profile_tags WHERE anon_student_id = ? AND key = ?",
+            (student_id, key),
+        ).fetchone()
+        return None if row is None else str(row["value"] or "")
+
+    def _append_tag_history(
+        self,
+        student_id: str,
+        key: str,
+        value: str,
+        previous: str | None,
+        source: str,
+        confidence: float | None,
+        now: int,
+        origin: str | None = None,
+    ) -> bool:
+        """把一次标签变更追加进时间线（§5.2 #11）。返回是否真的记了一笔。
+
+        ★★★ 两道闸，缺一不可（理由详见迁移 v6 的注释）：
+
+          ① **短期情绪标签永不记**。emotion / intensity / trigger 在读取侧有 TTL
+             （3 轮或 24 小时）。TTL 存在的**全部意义**是不让「上次考崩了、情绪低落」
+             被长期记着（禁做 #11「长期负面情绪档案」）。
+             一旦历史表把它们记下来，读取侧的 TTL 就被**彻底架空** ——
+             当前值过期了，历史里却一行不少：档案照样存在，而且更隐蔽
+             （看主表看不见，翻历史才看得见）。所以这里显式排除。
+
+          ② **键必须仍在白名单里**。历史记录的是过去的**值**，不是过去的**身份** ——
+             真名 / 精确年级 / 学校 / 班级任何时候都不许出现在这里，与主表同一条纪律。
+
+        ★ **值没变就不记**：自动投影（sync_observed_tags）每一轮都会 upsert 一遍，
+          不做这个判断的话时间线会被同一件事的重复噪音塞满，真正的变化反而淹没在里面。
+
+        ★ ``origin``（迁移 v7）：这条变更的**出处**。``None`` = 调用方没声明 →
+          按 :meth:`_origin_for_source` 推断。**落库前一律解析成具体值**（不留 NULL）——
+          NULL 在历史表里**只**表示「v7 之前的旧行」（见迁移 v7 的回填说明）。
+        """
+        if key in EPHEMERAL_TAG_SET:
+            return False
+        if key not in ALLOWED_TAG_KEY_SET:
+            return False
+        if previous == value:
+            return False
+        resolved_origin = self._origin_for_source(source) if origin is None else origin
+        self.conn.execute(
+            "INSERT INTO profile_tag_history("
+            "ts, anon_student_id, key, value, previous_value, source, confidence, origin"
+            ") VALUES(?,?,?,?,?,?,?,?)",
+            (
+                now,
+                student_id,
+                key,
+                value,
+                previous,
+                source,
+                None if confidence is None else float(confidence),
+                resolved_origin,
+            ),
+        )
+        return True
+
+    @staticmethod
+    def _origin_for_source(source: str) -> str:
+        """按 `source` 推断变更出处（**:meth:`_append_tag_history` 的兜底**）。
+
+        ★ 只在调用方**没显式声明** origin 时用，判据是实测出来的唯一映射：
+          · ``declared`` —— 全项目**只有**五问冷启动写（契约层 RefreshApplyTag
+            明确禁止概括声明 declared），所以它必然是 ``cold_start``；
+          · 其余（``observed`` / ``inferred``）—— 兜底取 ``refresh``。
+
+        ⚠️ 兜底**不等于**正确：``observed`` 也可能是**行为投影**（sync_observed_tags），
+          而投影会显式传 ``projection``（见该函数），所以实际走到这条兜底的
+          ``observed`` 只剩「五问之外、未被显式标注」的历史遗留调用点。把这里
+          说清楚是为了：**新增写入路径时必须想清楚自己是哪一种，别默认吃 refresh**。
+        """
+        return TAG_ORIGIN_COLD_START if source == "declared" else TAG_ORIGIN_REFRESH
+
+    def tag_history(
+        self, student_id: str, *, limit: int = 200
+    ) -> list[ProfileTagHistoryRecord]:
+        """读画像标签的变更时间线（**新的在前**，§5.2 #11）。
+
+        ★ 出栈前**再过一遍白名单 + 短期情绪排除**：与 :meth:`tags` 同一条纵深防御 ——
+          库里就算被外部工具塞了别的键，也不会从这条出口流出去。
+        ★ **不在这里过滤 parent_consent**：那是路由层的闸（G-G），与 tags() 的分工一致
+          （存储层管「读得到什么」，路由层管「能不能外发」）。
+        """
+        rows = self.conn.execute(
+            "SELECT id, ts, key, value, previous_value, source, confidence, origin "
+            "FROM profile_tag_history WHERE anon_student_id = ? "
+            "ORDER BY ts DESC, id DESC LIMIT ?",
+            (student_id, max(1, int(limit))),
+        ).fetchall()
+        records: list[ProfileTagHistoryRecord] = []
+        for row in rows:
+            key = str(row["key"])
+            if key not in ALLOWED_TAG_KEY_SET or key in EPHEMERAL_TAG_SET:
+                continue
+            previous = row["previous_value"]
+            # ★ origin 过一遍封闭词表（纵深防御，与 key 的白名单过滤同一纪律）：
+            #   库里被外部塞了脏值也不流出去 —— 脏值一律当「不知道」（None），
+            #   由读取侧折成中性中文，而不是把内部枚举名当人话显示。
+            raw_origin = row["origin"]
+            origin = str(raw_origin) if raw_origin in TAG_ORIGINS else None
+            records.append(
+                ProfileTagHistoryRecord(
+                    id=int(row["id"]),
+                    key=key,
+                    value=str(row["value"] or ""),
+                    previous_value=None if previous is None else str(previous),
+                    source=str(row["source"] or "declared"),
+                    confidence=None if row["confidence"] is None else float(row["confidence"]),
+                    origin=origin,
+                    ts=int(row["ts"] or 0),
+                )
+            )
+        return records
+
+    def sync_observed_tags(
+        self,
+        student_id: str,
+        *,
+        kp_names: Mapping[str, str] | None = None,
+        now: int | None = None,
+    ) -> dict[str, str]:
+        """把**该生已有的数据**投影成 `source='observed'` 的画像标签（计划 §1.6 的数据源映射）。
+
+        ★★ 为什么必须有这个函数（2026-09-28 集成期发现的**功能缺口**）：
+          计划 §1.6 的表格明写三条数据源**早就有、只是从没被整理成标签**：
+            · 贯穿全程「判分/答题已有数据」 → `knowledge_point / mastery / error_type`
+            · 当轮「`signals.py` 元认知路（已有！）」 → `emotion / intensity`
+            · 「已有 safety guard」 → `safety_level`
+          但在此之前，全项目 `upsert_tag` **只有人工纠错一个调用点** ——
+          也就是说除了五问那条路，画像**从来不会自己长**，「系统观察」那一层是空的。
+
+        ★★ 为什么收敛成**一个**函数，而不是在 quiz / grade / safety 三处各写一遍：
+          三处各写一遍的后果是同一件事有三个口径 —— 错题归类的词表会漂、TTL 语义会漂、
+          `memory_switch` 的检查会漏一处。收敛之后**只有一条写路径**，守卫也只需盯这一条。
+
+        ★ 四条纪律：
+          ① 所有写入走 :meth:`upsert_tag`（白名单 G-A / `memory_switch` G-F / 推断限键 禁做#10 /
+             取值域 禁做#12 全在那里，**绕不过去**）；
+          ② **读不到数据就不写** —— 绝不写占位默认值，那会把「不知道」冒充成「观察到了」；
+          ③ **绝不跨学生**：只读 `student_id` 自己的库（禁做 #9）；
+          ④ **逐条独立**：某一条不合法/被闸挡住，不影响其它条。
+
+        ⚠️ `kp_names` 由调用方给（学生库里没有知识点中文名，清单在只读的 `kb.sqlite`）：
+          拿不到名字时**不写** `knowledge_point` —— 宁可少一条，也不把 `jr-py-data-features`
+          这种内部 id 写进会进 prompt / 进画像卡的地方。
+
+        返回**实际写入**的 `{键: 值}`（调用方可据此记日志，测试可据此断言）。
+        """
+        now_s = int(time.time() if now is None else now)
+        written: dict[str, str] = {}
+
+        def put(key: str, value: str, confidence: float | None = None) -> None:
+            try:
+                if self.upsert_tag(
+                    student_id,
+                    key,
+                    value,
+                    confidence=confidence,
+                    source="observed",
+                    ts=now_s,
+                    # ★ 显式声明出处（迁移 v7）：投影**不是**持续迭代概括，
+                    #   两者都写 observed，只有 origin 分得开（这就是加 origin 的全部理由）。
+                    origin=TAG_ORIGIN_PROJECTION,
+                ):
+                    written[key] = value
+            except ValueError:
+                # 取值域/白名单不合法：丢这一条，不影响其它（逐条独立）
+                logger.warning("观察标签被拒（不影响其它）：%s=%r", key, value)
+
+        # ── ① 最近练过的知识点 + 掌握度（判分/答题的已有数据）─────────────
+        row = self.conn.execute(
+            "SELECT kp_id, score, attempts, correct FROM mastery "
+            "WHERE attempts > 0 ORDER BY last_seen_at DESC LIMIT 1"
+        ).fetchone()
+        if row is not None:
+            kp_id = str(row["kp_id"])
+            score = float(row["score"] or 0.0)
+            attempts = int(row["attempts"] or 0)
+            correct = int(row["correct"] or 0)
+            put("mastery", f"{score:.2f}", score)
+            name = (kp_names or {}).get(kp_id, "")
+            if name:
+                put("knowledge_point", name, score)
+            # ── ② 错误模式（同样是判分数据，只是要归类）───────────────────
+            if correct == 0 and attempts >= ERROR_TYPE_CONFUSION_MIN_ATTEMPTS:
+                # 反复错、从没对过 → 概念没建立（不是手滑）
+                put("error_type", "概念混淆", min(1.0, attempts / 4.0))
+            elif correct > 0 and score < ERROR_TYPE_CARELESS_MAX_SCORE:
+                # 曾经做对过、现在却不稳 → 会做但粗心
+                put("error_type", "粗心", 0.5)
+
+        # ── ③ 情绪 / 强度：signals.py 的元认知路（**早就有**，从没被整理成标签）──
+        signal = self.conn.execute(
+            "SELECT raw FROM grade_signals WHERE signal_type = 'meta_cognition' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if signal is not None:
+            raw = str(signal["raw"] or "")
+            # ⚠️ 只认元认知路**自己**的措辞（「受挫=」/「求复述=」），不另起一套关键词表：
+            #   两套词表迟早会漂，而漂的表现是「信号说受挫、标签说平静」。
+            if "受挫" in raw:
+                put("emotion", "frustrated", 0.6)
+                put("intensity", "2")
+            elif "求复述" in raw:
+                put("emotion", "confused", 0.5)
+                put("intensity", "1")
+
+        # ── ④ 安全级别：只记档位、不记内容 ──────────────────────────────
+        history = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM learning_history"
+        ).fetchone()
+        if history is not None and int(history["n"] or 0) > 0:
+            # 有学习记录才谈「观察到的安全级别」——没记录时说「正常」是凭空断言
+            flagged = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM learning_history "
+                "WHERE detail LIKE '%拦截%' OR detail LIKE '%安全%'"
+            ).fetchone()
+            caution = flagged is not None and int(flagged["n"] or 0) > 0
+            put("safety_level", "需留意" if caution else "正常", 0.8)
+
+        # ── ⑤ 学习类型（维度 13，2026-09-30）：一次聚合判定 ─────────────────
+        #   ★ 挂在这里而不是在 quiz 路由里另加一次调用：本函数就是「把该生已有数据
+        #     投影成标签」的**唯一收口**（见它的 docstring 第二条）。多挂一处 =
+        #     多一个可能漏调的调用点。判定口径全在 sync_learner_style 里。
+        style = self.sync_learner_style(student_id, now=now_s)
+        if style is not None:
+            written["learner_style"] = style
+
+        return written
+
+    def sync_learner_style(self, student_id: str, *, now: int | None = None) -> str | None:
+        """把学习数据投影成 `learner_style`（`observed` / `origin=projection`）。
+
+        ★★ 这是「预置分类标签」的**权威路**（2026-09-30）。它与持续概括那条路
+        （`inferred` / `origin=refresh`）的关系由既有分档矩阵自动仲裁：
+          · 本函数写 `observed` → 概括的 `inferred` **推不翻**它（分档②）；
+          · 数据不足时本函数**不写**，概括的 `inferred` 先占位；
+            等数据够了本函数写出 `observed` → **升级**（分档③把推断挤掉）。
+
+        ★ 为什么用规则而不是让模型判：分类的依据是**行为数据**（练了多少、对了多少、
+          是不是反复打磨同一处），这些量本就在库里，算出来可解释、可复现、可断言；
+          交给模型判会有两个问题 —— 每次概括可能翻转（标签不稳定），
+          且「模型觉得你聪明」这种东西没有可审计的依据。
+
+        ★ 四条纪律（与 :meth:`sync_observed_tags` 同一套）：
+          ① 写入走 :meth:`upsert_tag`（白名单 / 闸 / 取值域 / 推断限键全在那里）；
+          ② **样本不足就不写** —— 绝不用 3 道题的数据给人分类（见
+             :data:`LEARNER_STYLE_MIN_ATTEMPTS`）；
+          ③ **绝不跨学生**：只读 `student_id` 自己的库（禁做 #9）；
+          ④ **特征不显著就不写**（判不出就留空，不写「均衡型」当垫底）。
+
+        :returns: 实际写入的类型（``None`` = 没写：样本不足 / 特征不显著 / 被闸挡住）。
+        """
+        now_s = int(time.time() if now is None else now)
+
+        # ── 一次聚合读全量掌握度（不逐 kp 查库：这条投影每次判分后都会跑）──
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(attempts), 0) AS attempts, "
+            "COALESCE(SUM(correct), 0) AS correct, "
+            "COUNT(*) AS kp_count, "
+            "COALESCE(SUM(CASE WHEN attempts > 1 THEN 1 ELSE 0 END), 0) AS retry_kp_count "
+            "FROM mastery WHERE attempts > 0"
+        ).fetchone()
+        attempts = int(row["attempts"] or 0) if row is not None else 0
+        correct = int(row["correct"] or 0) if row is not None else 0
+        kp_count = int(row["kp_count"] or 0) if row is not None else 0
+        retry_kp_count = int(row["retry_kp_count"] or 0) if row is not None else 0
+
+        if kp_count <= 0 or attempts < LEARNER_STYLE_MIN_ATTEMPTS:
+            # 样本不足：**不写**（不是写「均衡型」）—— 不把「没看出来」冒充成「观察到了」
+            return None
+
+        accuracy = correct / attempts
+        per_kp = attempts / kp_count
+        retry_ratio = retry_kp_count / kp_count
+
+        # ── 顺序判定：第一个命中即定（重叠时的优先级是有意的）──────────────
+        #   天赋 > 钻研 > 速通 > 努力。
+        #   「准确率高位」是最强的信号，放在最前；「反复打磨同一处」比「总练习量大」
+        #   更具体，所以钻研在努力之前。都不命中 → 不写（见上）。
+        style: str | None = None
+        if accuracy >= LEARNER_STYLE_GIFTED_MIN_ACCURACY:
+            style = "天赋型"
+        elif per_kp >= LEARNER_STYLE_DEEP_MIN_ATTEMPTS_PER_KP:
+            style = "钻研型"
+        elif (
+            per_kp <= LEARNER_STYLE_FAST_MAX_ATTEMPTS_PER_KP
+            and accuracy >= LEARNER_STYLE_FAST_MIN_ACCURACY
+        ):
+            style = "速通型"
+        elif (
+            attempts >= LEARNER_STYLE_DILIGENT_MIN_ATTEMPTS
+            or retry_ratio >= LEARNER_STYLE_DILIGENT_MIN_RETRY_RATIO
+        ) and accuracy < LEARNER_STYLE_DILIGENT_MAX_ACCURACY:
+            style = "努力型"
+
+        if style is None:
+            return None
+
+        try:
+            written = self.upsert_tag(
+                student_id,
+                "learner_style",
+                style,
+                # 把握程度：样本越多越有把握（10 次 → 0.6，30 次及以上 → 0.8）。
+                confidence=min(0.8, 0.6 + attempts / 100.0),
+                source="observed",
+                ts=now_s,
+                # ★ 显式声明出处：这条是**行为投影**，不是持续迭代概括（两者都写
+                #   observed，只有 origin 分得开 —— 与 sync_observed_tags 同一条理由）。
+                origin=TAG_ORIGIN_PROJECTION,
+            )
+        except ValueError:
+            # 取值域 / 白名单不合法（理论上不会：值来自本文件的封闭词表）：
+            # 丢这一条，不影响其它（与 sync_observed_tags 的 put() 同一条纪律）。
+            logger.warning("学习类型投影被拒（不影响其它）：%s", style)
+            return None
+        return style if written else None
+
+    def upsert_tag_from_summary(
+        self,
+        student_id: str,
+        key: str,
+        value: str,
+        *,
+        source: str = "inferred",
+        confidence: float | None = None,
+        reason: str = "",
+        ts: int | None = None,
+    ) -> bool:
+        """带**来源分档**的写入（持续画像迭代专用入口，计划 §2.3）。
+
+        ★★ 与 :meth:`upsert_tag` 的关系（**为什么是"加一个"而不是"改那个"**）：
+          本函数**内部仍调 upsert_tag** —— 白名单（G-A）/ `memory_switch`（G-F）/
+          推断限键（禁做 #10）/ 取值域（禁做 #12）四道校验一条不少，全部照过。
+          它**只多一道**「这条该不该覆盖现有那条」的前置判断。
+
+          不把分档逻辑写进 `upsert_tag` 的原因：那个函数有 6 个调用点，其中
+          「人工纠错」（`PUT /profile/{sid}/tags/{key}`）的**语义就是"学生明确要求改"**
+          —— 那是唯一**允许**覆盖 declared 的路径。把分档塞进去会把纠错一起挡掉，
+          那是功能倒退（学生说了不算，猜测反倒说了算）。
+
+        ★★★ 分档矩阵（用户裁决：「自述不覆盖，其余可更新」）：
+
+          | 现有 source | 新来 source | 处理                       |
+          | ----------- | ----------- | -------------------------- |
+          | declared    | 任意        | **绝不覆盖**（安全底线）    |
+          | observed    | observed    | 可更新（值没变时 upsert_tag 内部也不记账） |
+          | observed    | inferred    | **不覆盖**（量到的 > 猜的） |
+          | inferred    | observed    | **可覆盖**（观察坐实猜测）  |
+          | inferred    | inferred    | 置信度**更高才**写          |
+          | （无）       | 任意        | 新增                        |
+
+        ★ 为什么「现有是 declared 就永不覆盖」单独放在最前面：它是整条回路的安全
+          底线 —— 学生亲口说的偏好/兴趣是他的真相，模型从对话里**猜**出来的东西
+          不得推翻它。这一条必须独立可测（G-M-1）。
+
+        ★ 为什么「现有 observed + 新来 inferred」要挡：observed 是**系统量到的**
+          （判分结果投影、行为事实），inferred 是**模型猜的**。让猜的覆盖量的，
+          等于「模型觉得你懂了就改分」，与 :data:`INFERRED_ALLOWED_TAG_KEYS` 的
+          设计意图（L3 永远压不过 L1）同一条纪律。
+
+        ★ 为什么 inferred 之间要比 confidence：猜测可以被**更好的猜测**取代，
+          但同分/更低分的重复猜测不该把更可信的那条挤掉；同时若无脑覆盖，
+          每一轮概括都会写一遍（时间线被噪音塞满，且 turn_mark 被无意义地刷新，
+          影响短期情绪 TTL 的轮次口径）。
+
+        :param reason: **只用于日志**（可观测这条标签是"哪次概括"带进来的）。
+            不入库 —— `profile_tags` 没有这一列，也不该有：多一列自由文本
+            就多一个「把对话正文塞进画像」的侧门。
+        :returns: 是否真的写了（False = 被 memory_switch 挡 / 分档拒绝 / 值无变化）。
+        """
+        if source not in TAG_SOURCES:
+            raise ValueError(f"标签来源非法：{source!r}（只允许 {sorted(TAG_SOURCES)}）")
+        # ★ 白名单校验放在最前：不属于白名单的键连「查现有值」都不必做，
+        #   直接按 upsert_tag 的同一口径抛 ValueError（调用方/端点翻成 422）。
+        if key not in ALLOWED_TAG_KEY_SET:
+            raise ValueError(f"标签键不在白名单里：{key!r}（G-A）")
+
+        current_source = self._tag_source(student_id, key)
+
+        # ── 分档①：现有是 declared → 永不覆盖（安全底线，必须最先判）─────────
+        if current_source == "declared":
+            logger.info(
+                "画像概括写入被拒（现有为学生自述，不得覆盖）：学生=%s 键=%s 来源=%s 缘由=%s",
+                student_id,
+                key,
+                source,
+                reason or "-",
+            )
+            return False
+
+        # ── 分档②：现有 observed + 新来 inferred → 不覆盖（量的 > 猜的）─────
+        if current_source == "observed" and source == "inferred":
+            logger.info(
+                "画像概括写入被拒（系统观察优先于推断）：学生=%s 键=%s 缘由=%s",
+                student_id,
+                key,
+                reason or "-",
+            )
+            return False
+
+        # ── 分档③：inferred → inferred 且置信度没更高 → 不覆盖（保留更可信的猜测）──
+        if current_source == "inferred" and source == "inferred":
+            current_confidence = self._tag_confidence(student_id, key)
+            if current_confidence is not None and (
+                confidence is None or float(confidence) <= current_confidence
+            ):
+                logger.info(
+                    "画像概括写入被拒（推断置信度未提升）：学生=%s 键=%s 现有=%.2f 新来=%s",
+                    student_id,
+                    key,
+                    current_confidence,
+                    "None" if confidence is None else f"{float(confidence):.2f}",
+                )
+                return False
+
+        # ── 通过分档 → 走既有写原语（四道校验照过）─────────────────────────
+        written = self.upsert_tag(
+            student_id,
+            key,
+            value,
+            confidence=confidence,
+            source=source,  # type: ignore[arg-type]
+            ts=ts,
+            # ★ 显式声明出处（迁移 v7）：这条路**就是**持续画像迭代，
+            #   与五问冷启动（cold_start）/ 行为投影（projection）区分开。
+            origin=TAG_ORIGIN_REFRESH,
+        )
+        if written:
+            logger.info(
+                "画像概括写入：学生=%s 键=%s 来源=%s 缘由=%s",
+                student_id,
+                key,
+                source,
+                reason or "-",
+            )
+        return written
+
+    def _tag_source(self, student_id: str, key: str) -> str:
+        """读一个键当前的**来源层**（不存在返回空串）。
+
+        ★ 与 :meth:`_tag_value` 成对：分档判断要看的是**来源**（谁写的）而不是
+          值本身 —— 「同一个值、不同来源」在分档里待遇完全不同。
+        ★ 脏值（库里被外力塞了不在 :data:`TAG_SOURCES` 里的来源）一律当**空串**
+          处理，即"没有可信来源"→ 允许写入。这是刻意的：把未知来源当成最高优先级
+          保护起来，会让一条坏行把一个键**永久锁死**（再也写不进去），
+          而 :meth:`upsert_tag` 下一次写入就会把来源规整成合法值 —— 自愈。
+        """
+        row = self.conn.execute(
+            "SELECT source FROM profile_tags WHERE anon_student_id = ? AND key = ?",
+            (student_id, key),
+        ).fetchone()
+        if row is None:
+            return ""
+        value = str(row["source"] or "")
+        return value if value in TAG_SOURCES else ""
+
+    def tag_source_of(self, student_id: str, key: str) -> str:
+        """:meth:`_tag_source` 的**公开读口**（路由层诊断「为什么这条被分档拒绝」用）。
+
+        ★ 为什么开这个口而不是让路由层直接调 `_tag_source`：跨模块读私有方法会让
+          「分档判据」出现第二处知识 —— 哪天判据改了，路由层的诊断文案会静默失真。
+          公开一个只读投影，语义上就是「这条标签现在是什么来源」，与判据解耦。
+        """
+        return self._tag_source(student_id, key)
+
+    def _tag_confidence(self, student_id: str, key: str) -> float | None:
+        """读一个键当前的置信度（不存在 / 为 NULL 返回 None）。供 inferred 分档比较用。"""
+        row = self.conn.execute(
+            "SELECT confidence FROM profile_tags WHERE anon_student_id = ? AND key = ?",
+            (student_id, key),
+        ).fetchone()
+        if row is None or row["confidence"] is None:
+            return None
+        return float(row["confidence"])
+
+    def delete_tag(self, student_id: str, key: str) -> bool:
+        """删一个标签（L3 一键撤销）；返回是否真的删掉了。
+
+        ★ 不校验白名单：删一个本来就不该存在的键是无害的 no-op，回 False 就够
+          （校验留给写入路径 —— 能写进去的才需要挡住）。
+        """
+        cursor = self.conn.execute(
+            "DELETE FROM profile_tags WHERE anon_student_id = ? AND key = ?",
+            (student_id, key),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    # ---------------------------------------------------- 冷启动五问审计 --
+    def save_onboarding_answer(
+        self,
+        *,
+        question_id: str,
+        question_text: str,
+        answer_text: str,
+        session_id: str = "",
+    ) -> None:
+        """写一问的回答（**幂等**：同一 question_id 覆盖，不追加）。
+
+        ★ 本表是「SQLite 不存对话正文」这条不变量的**唯一例外**（见模块头与
+          routes/profile.py 的合规章节）：有界、一次性、明确知道写了什么，
+          作用域不扩大到普通对话。UNIQUE(question_id) 是覆盖语义的落点。
+        """
+        now = int(time.time())
+        self.conn.execute(
+            "INSERT INTO onboarding_qa(ts, session_id, question_id, question_text, answer_text, answered_at) "
+            "VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(question_id) DO UPDATE SET ts=excluded.ts, session_id=excluded.session_id, "
+            "question_text=excluded.question_text, answer_text=excluded.answer_text, "
+            "answered_at=excluded.answered_at",
+            (now, session_id, question_id, question_text, answer_text, now),
+        )
+        self.conn.commit()
+
+    def onboarding_answers(self) -> list[OnboardingAnswerRecord]:
+        """读冷启动五问已收的回答（按 question_id 排序，天然 q1..q5）。"""
+        rows = self.conn.execute(
+            "SELECT question_id, question_text, answer_text, session_id, answered_at "
+            "FROM onboarding_qa ORDER BY question_id"
+        ).fetchall()
+        return [
+            OnboardingAnswerRecord(
+                question_id=str(row["question_id"]),
+                question_text=str(row["question_text"] or ""),
+                answer_text=str(row["answer_text"] or ""),
+                session_id=str(row["session_id"] or ""),
+                answered_at=int(row["answered_at"] or 0),
+            )
+            for row in rows
+        ]
 
     # ------------------------------------------------------------ 学生 --
     def upsert_student(self, student_id: str, nickname: str, grade_level: str) -> StudentRecord:
@@ -1073,11 +2125,48 @@ class LearningStore:
     #   构成 ``learning_history`` 这一张表唯一的读写对 —— 路由层不再自己拼 SQL，
     #   两处各写一份 ``SELECT`` 迟早会在「要不要过滤 activity」这类地方分叉。
     #
-    # ⚠️ 这里刻意**没有**「读全部学习记录」的原语（``history_rows``）：写过一版，
-    #   但报告用 ``daily_activity`` 按天聚合、错题本用 ``mistakes`` 按知识点聚合，
-    #   没有任何调用方需要原始行 —— 零引用的读原语就是零测试覆盖的死代码
-    #   （实测：给它注入「``is_correct`` 的 NULL 与 False 混为一谈」这种回归，
-    #   全部测试依然绿，因为根本没走到）。要加就等真的有调用方时再加。
+    # ⚠️ 「读全部学习记录」的原语（``history_rows``）当时**刻意没加**：零引用的读原语
+    #   就是零测试覆盖的死代码（实测：给它注入「``is_correct`` 的 NULL 与 False
+    #   混为一谈」这种回归，全部测试依然绿，因为根本没走到）。
+    # ★★ 2026-09-30 **调用方来了**（学习档案 → 学习历史分页，见 :meth:`history_page`）——
+    #   于是按当时的约定「等真的有调用方时再加」补上，并把当初用来论证「不加」的
+    #   那条 NULL/False 回归**钉成断言**（现在它有调用方了，必须被测试覆盖）。
+    #   ⚠️ 加的是**分页**读原语（不是「读全部」）：学生的历史会长到几千条，
+    #   一次读全表只为了显示前 30 条，是拿内存换一个没人在乎的完整性。
+    def history_page(self, *, limit: int, offset: int) -> list[HistoryRecord]:
+        """读一页学习记录（**按时间倒序**，最新的在前）—— 「学习历史」分页的原料。
+
+        ★ 只取**结构化列**：``question``（恒空）与 ``detail``（内部 JSON）**不读出来**。
+        ★ 排序 ``ts DESC, id DESC``：``ts`` 是**秒**，同一秒内的多条（一轮里连做几道题、
+          判分与解锁写两行）靠自增 ``id`` 定先后 —— 少了它翻页会出现重复 / 丢失。
+        """
+        rows = self.conn.execute(
+            "SELECT id, ts, kp_id, activity, is_correct FROM learning_history "
+            "ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?",
+            (max(0, int(limit)), max(0, int(offset))),
+        ).fetchall()
+        out: list[HistoryRecord] = []
+        for row in rows:
+            raw_correct = row["is_correct"]
+            out.append(
+                HistoryRecord(
+                    id=int(row["id"]),
+                    ts=int(row["ts"] or 0),
+                    kp_id=str(row["kp_id"] or ""),
+                    activity=str(row["activity"] or ""),
+                    # ★★ NULL → None（这条没有对错），0 → False（答错了）。
+                    #    混为一谈的后果是界面上「答错了」与「没判分」长得一模一样 ——
+                    #    这正是当初不加这条读原语的理由，现在是断言（见上）。
+                    is_correct=None if raw_correct is None else bool(int(raw_correct)),
+                )
+            )
+        return out
+
+    def history_count(self) -> int:
+        """该生学习记录的总条数（分页用；与 :meth:`history_page` 读同一张表）。"""
+        row = self.conn.execute("SELECT COUNT(*) AS n FROM learning_history").fetchone()
+        return int(row["n"] or 0) if row is not None else 0
+
     def question_attempt(self, qid: str) -> AttemptRecord | None:
         """**这道题答过没有**：返回 ``detail.qid == qid`` 的最近一次作答，没有则 ``None``。
 
@@ -1290,6 +2379,20 @@ class LearningStore:
         self.conn.close()
 
 
+def _identity_from_row(row: sqlite3.Row) -> IdentityRecord:
+    """identity_local 行 → 记录（列全是标量；class 列映射成 class_name）。"""
+    return IdentityRecord(
+        anon_student_id=str(row["anon_student_id"]),
+        real_name=str(row["real_name"] or ""),
+        real_grade=str(row["real_grade"] or ""),
+        school=str(row["school"] or ""),
+        class_name=str(row["class"] or ""),
+        parent_consent=bool(int(row["parent_consent"] or 0)),
+        memory_switch=bool(int(row["memory_switch"] or 0)),
+        onboarding_state=str(row["onboarding_state"] or ONBOARDING_STATE_NOT_STARTED),
+    )
+
+
 def _qid_from_detail(detail: str) -> str:
     """从 ``learning_history.detail`` 的 JSON 里取题号（取不到就返回空串）。
 
@@ -1396,16 +2499,34 @@ def _saved_animation_from_row(row: sqlite3.Row) -> SavedAnimationRecord:
 
 
 __all__ = [
+    "ALLOWED_TAG_KEYS",
+    "ALLOWED_TAG_KEY_SET",
     "ANIMATION_MIGRATIONS",
     "ANIMATION_MIGRATION_SET",
     "AttemptRecord",
+    "EMOTION_VALUES",
+    "EPHEMERAL_TAGS",
     "GeneratedQuestionRecord",
+    "HistoryRecord",
+    "IDENTITY_LOCAL_FIELDS",
+    "INFERRED_ALLOWED_TAG_KEYS",
+    "IdentityRecord",
+    "JOIN_KEY",
+    "LEARNER_STYLE_VALUES",
     "LearningStore",
     "MASTERY_DELTA_LIMIT",
+    "OBSERVED_ERROR_TYPES",
+    "ONBOARDING_STATES",
+    "OnboardingAnswerRecord",
+    "PERSONALITY_VALUES",
+    "ProfileTagHistoryRecord",
+    "ProfileTagRecord",
     "ProgressRecord",
     "QUIZ_MIGRATIONS",
     "QUIZ_MIGRATION_SET",
+    "SAFETY_LEVELS",
     "SavedAnimationRecord",
     "StudentRecord",
+    "TAG_ORIGINS",
     "new_saved_animation_id",
 ]

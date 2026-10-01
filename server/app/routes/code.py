@@ -559,6 +559,11 @@ def to_code_template(record: CodeTemplateRecord) -> CodeTemplate:
         language="python",
         scaffold=record.scaffold,
         expected_behavior=record.expected_behavior,
+        # ★ 2026-09-30：任务名与期望输出也投影出去 —— 学生看简报时最需要的就是这两样
+        #   （「要写什么」与「做完长什么样」），而它们此前只躺在 record 里没人用。
+        #   `solution` / `hints` 仍然一个都不出这个函数（见 docstring 的白名单口径）。
+        title=record.title,
+        expected_output=record.expected_output,
     )
 
 

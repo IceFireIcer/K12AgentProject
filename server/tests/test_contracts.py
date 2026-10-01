@@ -310,9 +310,25 @@ class TestAnswerLeak(unittest.TestCase):
 
         source = ts_path.read_text(encoding="utf-8")
         self.assertNotIn("QuizQuestion:", source)
-        # 唯一允许的 answer 在判分请求里（学生提交的作答）
+        # ★★ 判据从「以 answer 开头」收窄为「字段名恰好是 answer」（2026-09-28 集成期修正）。
+        #
+        #   前缀匹配会把三种**方向相反**的东西混为一谈：
+        #     · answerText  —— 学生**自己写的**引导回答（学生产出，不是题目自带答案）
+        #     · answered    —— 「答过哪几问」的进度字段
+        #     · answer_...  —— 路径键（URL 片段，根本不是字段声明）
+        #   而 §8.1 禁的是**题目自带的**标准答案。前者是学生产出的内容，后者是题目的答案 ——
+        #   方向正好相反。前缀判断一旦把前者误报成后者，维护者的第一反应是「把守卫放宽」，
+        #   那才是真正的风险（红线守卫被稀释，比误报本身危险得多）。
+        #
+        #   所以这里改成**按字段名精确匹配**：只认 `answer:` 这一种声明形态。
+        #   （`referenceAnswer` / `solution` 是既有的、经答案属性白名单批准的出参，
+        #     由 OpenAPI 侧 ANSWER_PROPERTY_ALLOWLIST 那条守卫负责，不在这里重复判。）
         self.assertEqual(
-            [line.strip() for line in source.splitlines() if line.strip().startswith("answer")],
+            [
+                line.strip()
+                for line in source.splitlines()
+                if line.strip().startswith("answer:")
+            ],
             ["answer: string | string[];"],
             "生成的 TS 类型里出现了非预期方向的 answer 字段",
         )

@@ -44,7 +44,7 @@ import secrets
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Collection, Iterable, Sequence
+from typing import Collection, Iterable, Mapping, Sequence
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import Field, field_validator
@@ -992,11 +992,18 @@ def _known_kp_ids(request: Request) -> set[str] | None:
 #: 单槽足够 —— 同一进程只会服务一个 data-dir（多学生共用同一份 kb）。
 _KNOWN_KP_CACHE: dict[str, object] = {}
 
+# ★★ ``inPath`` 的口径（P-085：**关卡路径 = 本学段**）：
+#   同一条 ``progress`` 表里混着两种行 —— ① 学生**本学段**的关卡（= 该练什么，路径）；
+#   ② 更低学段的旧记录（学段换过之后留下的；取题允许向上兼容，所以它们合法）。
+#   智码工坊 / 闯关页把整张表当路径渲染时，②让同一个概念出现三次（**同名、内容按学段不同**）。
+#   所以由服务端逐行表态，前端**路径视图**只渲染 ``inPath=True``；
+#   「学习记录」那种记录视图照旧全渲染 —— 记录还在库里（P-086：读时不删行）。
 def progress_snapshot(
     store: LearningStore,
     *,
     kp_ids: Sequence[str] | None = None,
     order: Sequence[str] | None = None,
+    path_kp_ids: Collection[str] | None = None,
     fallback_order: Sequence[str] | None = None,
     known_kp_ids: Collection[str] | None = None,
 ) -> list[dict[str, object]]:
@@ -1022,6 +1029,9 @@ def progress_snapshot(
       一律命中 fallback → 学生看到「明明练过的一关却排在所有旧关之后」。
       截断已经去掉（治本）；补位序是同一类场景的第二道保险
       （旧库里指向已改学段的进度行也走这条路）。
+    - ★★ ``path_kp_ids`` = **本学段关卡路径**（:func:`_default_level_order` 的产物）：
+      给了就逐行标 ``inPath``（这一行在不在路径上）；``None`` = 不判断，全标 True。
+      空集合**不等于**「没有路径」（那会把冷启动兜底关卡全标成路径外）—— 调用方自己判。
     - ★★ ``known_kp_ids`` 给了就**只保留教材里真的存在的那几关**
       （``None`` = 不过滤，保留原行为）。
 
@@ -1038,6 +1048,7 @@ def progress_snapshot(
     """
     mastery = store.mastery_map()
     wanted = set(kp_ids) if kp_ids is not None else None
+    path = set(path_kp_ids) if path_kp_ids is not None else None
     rank = {kp_id: index for index, kp_id in enumerate(order or ())}
     # 补位序只填**主序里没有的** kp（``setdefault``）：主序的相对次序一个字不动，
     # 否则「学生自己的学段」会被更低学段的补位序挤开。
@@ -1058,6 +1069,8 @@ def progress_snapshot(
             "stage": row.stage,
             "badge": row.badge,
             "mastery": round(float(mastery.get(row.kp_id, 0.0)), 4),
+            # 在不在**本学段关卡路径**上（前端路径视图只渲染 True；见本函数上方的注释）
+            "inPath": path is None or row.kp_id in path,
         }
         for row in rows
     ]
@@ -1258,6 +1271,9 @@ def grade_quiz(request: Request, body: QuizGradeRequest) -> QuizResult:
             stem=question.stem,
             repeat=repeat,
         )
+        # 把这一次判分的结果投影成画像标签（计划 §1.6：判分/答题已有数据 → 标签）。
+        # ★ 非致命：见 _sync_observed_tags_safely 的 docstring。
+        _sync_observed_tags_safely(request, store, body.student_id, question.kp_id)
     finally:
         store.close()
 
@@ -1581,6 +1597,8 @@ def grade_subjective(request: Request, body: SubjectiveGradeRequest) -> QuizResu
             extra={"llmScore": round(float(body.score), 4)},
             repeat=repeat,
         )
+        # 同上：主观题判分也投影一次（两条判分路径**共用同一个收敛函数**）。
+        _sync_observed_tags_safely(request, store, body.student_id, generated.kp_id)
     finally:
         store.close()
 
@@ -1659,10 +1677,16 @@ def read_progress(
         #    ⚠️ 白名单用**全库 kp**（不限学段），不是 `order`：
         #      `order` 只是本学段的关卡路径，而学生可能合法地持有更低学段的练习记录
         #      （取题允许向上兼容），拿 `order` 当白名单会把那些**真实存在的**记录也藏掉。
+        # ★ ``order`` 就是本学段关卡路径 → 作为 ``inPath`` 的判据（前端「智码工坊 / 闯关」
+        #   只渲染路径内的关卡：学段换过的学生名下会同时留着更低学段的旧行，
+        #   同名概念会重复三遍）。
+        #   ⚠️ ``order`` 为空（知识库缺失时的冷启动兜底路径）→ 传 ``None`` **不判断**：
+        #   拿空集合当判据会把兜底关卡全标成路径外，界面反而空了。
         rows = progress_snapshot(
             store,
             kp_ids=wanted,
             order=order,
+            path_kp_ids=order or None,
             fallback_order=scope_order,
             known_kp_ids=_known_kp_ids(request),
         )
@@ -1873,6 +1897,40 @@ def _current_outcome(store: LearningStore, kp_id: str) -> LevelOutcome:
         badge=existing.badge,
         correct_count=correct_count_from_badge(existing.badge),
     )
+
+
+def _sync_observed_tags_safely(
+    request: Request, store: LearningStore, student_id: str, kp_id: str
+) -> None:
+    """判分之后，把**已有数据**投影成画像标签（计划 §1.6 的数据源映射）。
+
+    ★★ 为什么是**非致命**的：这一句挂在判分主链路上，而判分是学生最不能失败的动作。
+      画像标签只是「让系统更懂他一点」，它挂了**绝不能**让学生看不到自己的分数。
+      所以整段包 try/except，失败只记一行日志。
+
+    ★ 知识点中文名要从只读的 `kb.sqlite` 取（学生库里只有 `kp_id`）。
+      拿不到名字就**不写** `knowledge_point` —— 绝不把 `jr-py-data-features`
+      这种内部 id 写进会进 prompt / 进画像卡的地方。
+    ★ kb 用**惰性 import** 打开：quiz 与 graph 之间有模块级互相引用，顶层 import 会踩循环依赖。
+    """
+    try:
+        names: Mapping[str, str] | None = None
+        try:
+            from app.routes.graph import open_kb_readonly
+            from app.store import kb as kb_repo
+
+            conn = open_kb_readonly(request)
+            try:
+                record = kb_repo.get_kp(conn, kp_id)
+                if record is not None and record.name:
+                    names = {kp_id: str(record.name)}
+            finally:
+                conn.close()
+        except Exception:  # pragma: no cover - kb 缺失/损坏只是少一条标签
+            names = None
+        store.sync_observed_tags(student_id, kp_names=names)
+    except Exception:  # pragma: no cover - 见 docstring：判分绝不被它拖垮
+        logger.warning("观察标签同步失败（判分照常）：%s", student_id, exc_info=True)
 
 
 def _record_attempt(

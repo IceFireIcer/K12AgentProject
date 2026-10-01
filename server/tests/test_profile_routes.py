@@ -298,9 +298,12 @@ class TestLearningEvents(ProfileCase):
         #   v3 =「学段轨迹的信号位标」（grade_history.signal_mark，冷却按真实轮数计算要用它）。
         #   断言的是**整张账本**（重复开库不许把任何一行写第二遍），
         #   而不是「只剩最新一条」—— 已发布过的迁移行不许被抹掉。
+        from app.store.migrations import LEARNING_MIGRATIONS  # 局部 import：与 test_store 同一惯例
+
         self.assertEqual(
             [(r["set_name"], r["version"]) for r in rows],
-            [("learning", 1), ("learning", 2), ("learning", 3), ("learning", 4)],
+            # ★ 从迁移表推导（2026-09-28 集成期修正）：写死 [1..4] 会在下次加迁移时再红一遍。
+            [("learning", mig.version) for mig in LEARNING_MIGRATIONS],
         )
         tables = {
             r["name"]
@@ -444,6 +447,127 @@ class TestLearningEvents(ProfileCase):
 # --------------------------------------------------------------------------- #
 # 学习偏好写入（`profile_pref` 的唯一生产写入口）
 # --------------------------------------------------------------------------- #
+class TestLearningHistory(ProfileCase):
+    """学习历史（2026-09-30 新增）：``GET /api/profile/{id}/history`` 的读端点。
+
+    这一组盯三件事：
+      ① **倒序分页**（最新的在前；`limit`/`offset` 与 `total`/`hasMore` 对得上）；
+      ② **学生面只给结构化列**（`detail` / `question` 一个字节都不出 —— 回执键集合钉死）；
+      ③ **``NULL`` 与 ``False`` 必须分得开**：这是当初「不加读原语」的论证
+         （见 ``learning.py`` 里那段注释），现在有调用方了，它必须有断言。
+    """
+
+    def fetch_history(self, student_id: str, **params: int) -> object:
+        query = "&".join(f"{key}={value}" for key, value in params.items())
+        url = f"/api/profile/{student_id}/history" + (f"?{query}" if query else "")
+        return self.client.get(url)
+
+    def test_empty_student_returns_empty_page_not_404(self) -> None:
+        """★ 还没有记录的学生回**空页**（不是 404）：前端要把它渲染成空态，
+        而 404 会让界面走错误分支、显示一句「读取失败」。"""
+        student_id = self.create_student("空历史", "junior")["studentId"]
+        response = self.fetch_history(student_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["events"], [])
+        self.assertEqual(payload["total"], 0)
+        self.assertFalse(payload["hasMore"])
+
+    def test_newest_first_and_labels_come_from_backend(self) -> None:
+        student_id = self.create_student("倒序", "junior")["studentId"]
+        for activity in ("qa", "animation", "quiz"):
+            self.assertEqual(
+                self.post_event(student_id, activity=activity, kpId="prog-loop-jr").status_code,
+                200,
+            )
+
+        payload = self.fetch_history(student_id).json()
+        self.assertEqual(
+            [event["activity"] for event in payload["events"]],
+            ["quiz", "animation", "qa"],
+            "最新的必须在最前（倒序）",
+        )
+        self.assertEqual(payload["total"], 3)
+        self.assertFalse(payload["hasMore"])
+        # ★ 动作中文名由**后端**给（渲染层不写这份映射 —— 双视角纪律）
+        self.assertEqual(payload["events"][0]["activityLabel"], "做了一道题")
+        self.assertEqual(payload["events"][2]["activityLabel"], "问了一个问题")
+        self.assertEqual(payload["events"][0]["kpId"], "prog-loop-jr")
+        # 时间是**毫秒**（库里是秒，路由层换算）
+        self.assertGreater(payload["events"][0]["at"], 1_000_000_000_000)
+
+    def test_pagination_and_has_more(self) -> None:
+        student_id = self.create_student("分页", "junior")["studentId"]
+        for index in range(5):
+            self.post_event(student_id, activity="qa", detail=f"第{index}条")
+
+        first = self.fetch_history(student_id, limit=2).json()
+        self.assertEqual(len(first["events"]), 2)
+        self.assertEqual(first["total"], 5)
+        self.assertTrue(first["hasMore"], "还有 3 条没读，hasMore 必须为真")
+
+        last = self.fetch_history(student_id, limit=2, offset=4).json()
+        self.assertEqual(len(last["events"]), 1)
+        self.assertFalse(last["hasMore"], "最后一页 hasMore 必须为假")
+
+    def test_is_correct_distinguishes_null_from_false(self) -> None:
+        """★★ 这条正是当初「不加读原语」的论证（NULL 与 False 混为一谈会让
+        「答错了」和「没判分」在界面上长得一模一样）—— 现在有调用方，必须被钉住。"""
+        student_id = self.create_student("对错", "junior")["studentId"]
+        self.post_event(student_id, activity="quiz", kpId="prog-loop-jr", isCorrect=False)
+        self.post_event(student_id, activity="qa")
+
+        payload = self.fetch_history(student_id).json()
+        by_activity = {event["activity"]: event["isCorrect"] for event in payload["events"]}
+        self.assertIs(by_activity["quiz"], False, "答错必须回 False")
+        self.assertIsNone(by_activity["qa"], "没判分的活动回 null（**不是** False）")
+
+    def test_response_never_carries_internal_payload(self) -> None:
+        """★★ 学生面只给六件事：id / 时间 / 活动 / 中文动作名 / 知识点 / 对错 ——
+        `detail`（内部 JSON 摘要）与 `question`（恒空）一个都不许出。"""
+        student_id = self.create_student("载荷", "junior")["studentId"]
+        self.post_event(
+            student_id, activity="quiz", kpId="prog-loop-jr", isCorrect=True, detail="提交作答"
+        )
+
+        event = self.fetch_history(student_id).json()["events"][0]
+        self.assertEqual(
+            set(event),
+            {"id", "at", "activity", "activityLabel", "kpId", "isCorrect"},
+            "回执字段集合必须恰好这六个（多一个字段就是多一条出学生的信息）",
+        )
+
+    def test_dirty_activity_row_is_skipped(self) -> None:
+        """脏行跳过（而不是把端点打成 500）：`activity` 是 Literal，
+        认不出的值塞进模型会 500 —— 与画像标签出栈那处同一条口径。"""
+        student_id = self.create_student("脏行", "junior")["studentId"]
+        self.post_event(student_id, activity="qa")
+        self.exec_sql(
+            student_id,
+            "INSERT INTO learning_history(ts, session_id, kp_id, activity, question, is_correct, detail) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (int(time.time()), "", "", "bogus", "", None, ""),
+        )
+        response = self.fetch_history(student_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()["events"]), 1, "认不出的活动被跳过，合法的照常返回")
+
+    def test_limit_out_of_range_is_422(self) -> None:
+        student_id = self.create_student("越界", "junior")["studentId"]
+        self.assertEqual(self.fetch_history(student_id, limit=0).status_code, 422)
+        self.assertEqual(self.fetch_history(student_id, limit=500).status_code, 422)
+        self.assertEqual(self.fetch_history(student_id, offset=-1).status_code, 422)
+
+    def test_never_crosses_students(self) -> None:
+        """★ 禁做 #9：只读自己的库。"""
+        mine = self.create_student("我", "junior")["studentId"]
+        other = self.create_student("他", "junior")["studentId"]
+        self.post_event(other, activity="quiz", kpId="prog-loop-jr")
+
+        payload = self.fetch_history(mine).json()
+        self.assertEqual(payload["events"], [], "别人的学习记录一条都不许出现在我的历史里")
+
+
 class TestPreferenceWrite(ProfileCase):
     """★ 补上「兴趣偏好」这条断头路：表建好了、读接口有了，但生产代码此前从不写它。
 

@@ -609,9 +609,15 @@ class TestMigrationSet(LibraryCase):
             (str(r["set_name"]), int(r["version"]))
             for r in conn.execute("SELECT set_name, version FROM schema_version ORDER BY 1, 2")
         ]
+        from app.store.migrations import LEARNING_MIGRATIONS  # 局部 import：与 test_store 同一惯例
+
         self.assertEqual(
             rows,
-            [("animation", 1), ("learning", 1), ("learning", 2), ("learning", 3), ("learning", 4)],
+            # ★ 从迁移表推导（2026-09-28 集成期修正）：本文件顶部那句
+            #   「另有五条测试断言账本恰为 learning 1..4」正是在描述这个易碎点 ——
+            #   票 25 加 v5 时它如期碎了。推导之后不再随版本号漂移。
+            [("animation", 1)]
+            + [("learning", mig.version) for mig in LEARNING_MIGRATIONS],
         )
 
     def test_animation_table_is_absent_until_it_is_used(self) -> None:

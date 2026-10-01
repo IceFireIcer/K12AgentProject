@@ -229,10 +229,11 @@ CREATE TABLE IF NOT EXISTS mastery (
 CREATE TABLE IF NOT EXISTS learning_history (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   ts         INTEGER,
-  session_id TEXT,                                -- ★ 关联 Pi JSONL 会话，不存对话正文
+  session_id TEXT,                                -- ★ 关联 Pi JSONL 会话；本表不存对话正文，
+                                                  --   唯一例外见 onboarding_qa（迁移 v5）
   kp_id      TEXT,
   activity   TEXT,                                -- qa | animation | coding | quiz
-  question   TEXT,
+  question   TEXT,                                -- ★ 恒为空串（G-K）：五问回答走 onboarding_qa
   is_correct INTEGER,
   detail     TEXT
 );
@@ -372,6 +373,259 @@ def _apply_grade_decided_by_v4(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE grade_history ADD COLUMN decided_by TEXT")
 
 
+# --------------------------------------------------------------------------- #
+# ★ 对话式冷启动画像（迁移 v5）：白名单真源的 Python 镜像 + 两张物理隔离的表
+# --------------------------------------------------------------------------- #
+
+#: ★★ 模型可见标签的**白名单**（执行报告 §0.6.2 / §0.6.3）。
+#:
+#: 真源是 `desktop/src/shared/profile-tags.ts` 的 `LLM_VISIBLE_TAGS`；这里是它在
+#: Python 侧的**逐字镜像**，两边一致由 `tests/test_profile_tags.py` 断言
+#: （那条测试既写死这份清单，又直接解析 TS 源文件逐字比对）。
+#:
+#: 为什么后端也要有一份：**所有写入原语都要过它**（G-A），而 store 层不依赖 TS ——
+#: 只改一边（比如前端顺手加个 `parent_income`）会立刻红，而不是等脏键进了库才发现。
+#: ⚠️ `parent_consent` / `memory_switch` **不在**白名单里：它们是闸，不是信息。
+ALLOWED_TAG_KEYS: tuple[str, ...] = (
+    "anon_student_id",
+    # 维度 2：学段与课程
+    "grade_band",
+    "subject",
+    "course_module",
+    "current_topic",
+    # 维度 3：AI 通识知识掌握
+    "knowledge_point",
+    "mastery",
+    # 维度 4：错误模式与最近发展区
+    "error_type",
+    "zpd_level",
+    # 维度 7：学习偏好
+    "explain_style",
+    "output_length",
+    "pace",
+    "practice_type",
+    # 维度 8：兴趣类比
+    "interest_topic",
+    # 维度 9：短期情绪与动机
+    "emotion",
+    "intensity",
+    "trigger",
+    "confidence",
+    # 维度 10：交互偏好
+    "tone",
+    "encouragement_freq",
+    "challenge_level",
+    # 维度 11：场景与目标
+    "scene",
+    "task_goal",
+    # 维度 12：安全边界与反馈
+    "safety_level",
+    "boundary_topics",
+    # 维度 13：学习类型与性格（2026-09-30 新增；这一节的加键伴随一次
+    #   禁做红线的**最小移动**，见 learning.py 的 LEARNER_STYLE_VALUES 注释）
+    "learner_style",
+    "personality",
+)
+
+#: 运行期集合形态（写原语与出栈过滤用这个，别再 includes 一遍）。
+ALLOWED_TAG_KEY_SET: frozenset[str] = frozenset(ALLOWED_TAG_KEYS)
+
+#: `identity_local` 的列（与 TS 的 `IDENTITY_LOCAL_FIELDS` 同形）。
+#: ★ **除 :data:`JOIN_KEY` 外，这些列一个都不在白名单里**（G-B）——
+#:   两张表的唯一交集就是那把 join 钥匙（口径裁决见 TS 文件头的 G-B 修正）。
+IDENTITY_LOCAL_FIELDS: tuple[str, ...] = (
+    "anon_student_id",
+    "real_name",
+    "real_grade",
+    "school",
+    "class",
+    "parent_consent",
+    "memory_switch",
+    "onboarding_state",
+)
+
+#: 两表唯一共有的 join 钥匙（随机串，模型看到它也还原不出任何真人）。
+JOIN_KEY = "anon_student_id"
+
+
+#: 迁移 v5 的 DDL。三段各自的「为什么」：
+#:
+#: ① `identity_local` = 本地身份层，**永不过桥**（代码里没有「读它再拼 prompt」的路径）。
+#:    两道闸默认 1 —— 本轮裁决 = 选项 B「默认同意，家长可在设置页关」。
+#:    默认值不是隐私边界本身：边界由「关掉立刻生效的两道闸 + 白名单」兜住。
+#: ② `profile_tags` = 只有白名单字段可能出现的标签层，主键 (学生, key)。
+#:    `turn_mark` = 写入时 `grade_signals` 的最大 id（单调、跨会话连续）—— TTL 的
+#:    「3 轮」那一半靠它算。报告 §0.6.5 的伪代码只写了 `ts`，表达不了轮次；
+#:    不加这一列则「3 轮或 24 小时，取先到」只能实现一半（24 小时）。`NULL` = 只有时钟口径。
+#: ③ `onboarding_qa` = 冷启动五问的原始回答，是「SQLite 不存对话正文」这条不变量里
+#:    **唯一被推翻的一处**（作用域只到这 5 条，见 `learning_history` 的 DDL 注释）。
+#:    `question_id` 上的 UNIQUE 保证一问一答：重答是**覆盖**不是追加。
+_IDENTITY_PROFILE_V5 = """
+CREATE TABLE IF NOT EXISTS identity_local (
+  anon_student_id  TEXT PRIMARY KEY,
+  real_name        TEXT,
+  real_grade       TEXT,
+  school           TEXT,
+  class            TEXT,
+  parent_consent   INTEGER NOT NULL DEFAULT 1,
+  memory_switch    INTEGER NOT NULL DEFAULT 1,
+  onboarding_state TEXT NOT NULL DEFAULT 'not_started'
+);
+
+CREATE TABLE IF NOT EXISTS profile_tags (
+  anon_student_id TEXT NOT NULL,
+  key             TEXT NOT NULL,
+  value           TEXT,
+  confidence      REAL,
+  source          TEXT,
+  ts              INTEGER,
+  turn_mark       INTEGER,
+  PRIMARY KEY (anon_student_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_tags_key ON profile_tags(key);
+
+CREATE TABLE IF NOT EXISTS onboarding_qa (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts            INTEGER,
+  session_id    TEXT,
+  question_id   TEXT,
+  question_text TEXT,
+  answer_text   TEXT,
+  answered_at   INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_onboarding_q ON onboarding_qa(question_id);
+"""
+
+
+def _apply_identity_profile_v5(conn: sqlite3.Connection) -> None:
+    """v5：冷启动画像地基（`identity_local` / `profile_tags` / `onboarding_qa`）。
+
+    ★ 只**新建**三张表，不动任何既有表/列 —— 老库与新库跑完 v5 的结果一致。
+      为什么不用 `set_name="profile"` 那条并行通道：这三张表是**画像主轨**的一部分
+      （票 25 的验收就是 `learning` 组到 v5），而 quiz/animation/code 那几条通道
+      开给的是「只有真用到才建表」的功能性附属表。
+    ★ 用 `execute_script`（逐条 `conn.execute`）而不是 `conn.executescript`：
+      后者会**隐式提交**，让「失败整体回滚」失效（见本文件模块头那条纪律）。
+    """
+    execute_script(conn, _IDENTITY_PROFILE_V5)
+
+
+# --------------------------------------------------------------------------- #
+# v6：画像标签的**变更时间线**（§5.2 #11）
+# --------------------------------------------------------------------------- #
+#
+# ★★ 为什么必须新开一张表：profile_tags 的主键是 (anon_student_id, key) ——
+#    它是**当前值**的快照，同一时刻一个键只有一行。所以「画像怎么变成现在这样的」
+#    这个问题在旧结构里**根本无法回答**（没有历史）。时间线要么另存一份序列，
+#    要么就得承认做不了。
+#
+# ★★★ 两条硬约束（写错任何一条都会毁掉既有红线）：
+#
+#   ① **短期情绪标签绝不进这张表**。emotion / intensity / trigger 在读取侧有 TTL
+#      （3 轮或 24 小时，§0.6.5），TTL 存在的**全部意义**就是不让「上次考崩了、情绪低落」
+#      被长期记着（禁做清单第 11 条「长期负面情绪档案」）。
+#      如果历史表把它们记下来，读取侧的 TTL 就**完全被架空了** ——
+#      当前值过期了，但历史里一行不少，「长期档案」照样成立，而且是**更隐蔽的**成立
+#      （主表看不见，翻历史才看得见）。所以这张表的写入侧**必须**排除它们，
+#      见 LearningStore._append_tag_history 的显式判断。
+#
+#   ② **键必须仍在白名单里**（G-A）。历史是「过去的值」，但**不是**「过去的身份」——
+#      真名 / 精确年级 / 学校 / 班级任何时候都不许出现在这里，与主表同一条纪律。
+#
+# ⚠️ 这张表是 **append-only**：只插不改不删（学生撤销一个标签时，历史里留下的正是
+#    「他撤销过」这件事，抹掉它反而是丢信息）。
+
+_PROFILE_HISTORY_V6 = """
+CREATE TABLE IF NOT EXISTS profile_tag_history (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts              INTEGER,                -- 变更时间（Unix 秒，与本模块其它 ts 同单位）
+  anon_student_id TEXT NOT NULL,
+  key             TEXT NOT NULL,          -- 必须 ∈ ALLOWED_TAG_KEYS，且**不含**短期情绪标签
+  value           TEXT,                   -- 变更**后**的值
+  previous_value  TEXT,                   -- 变更**前**的值（NULL = 这个键第一次出现）
+  source          TEXT,                   -- declared | observed | inferred
+  confidence      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_tag_history_student ON profile_tag_history(anon_student_id, ts);
+"""
+
+
+def _apply_profile_history_v6(conn: sqlite3.Connection) -> None:
+    """v6：画像标签的变更时间线（§5.2 #11）。
+
+    ★ **不改已发布的 v1~v5**（本模块的纪律）：老库只跑 v6，新库 v1~v6 一起跑，结果一致。
+    ★ 表是 append-only，没有回填 —— **历史无法追溯**：这张表从 v6 这一刻开始记，
+      在此之前发生过的变更（如果有）已经不可考，回填任何猜测值都是在替过去编造。
+    """
+    execute_script(conn, _PROFILE_HISTORY_V6)
+
+
+# --------------------------------------------------------------------------- #
+# v7：画像标签变更时间线的**来源出处**（origin：冷启动 / 持续迭代 / 行为投影）
+# --------------------------------------------------------------------------- #
+#
+# ★★ 为什么单靠已有的 `source` 不够（三期实测结论，2026-09-30）：
+#
+#   `source` 回答的是「这条值**有多可信**」（declared/observed/inferred 三档），
+#   不是「它**从哪条路来的**」。这两件事在**两条写入路径**上会撞车：
+#
+#     · `declared`  —— 现在**只有**五问冷启动能写（契约层 RefreshApplyTag 明确
+#       禁止概括声明 declared）。所以它天然等于「冷启动」。
+#     · `inferred`  —— 现在**只有**持续迭代概括能写。所以它天然等于「持续迭代」。
+#     · `observed`  —— **两条路都会写**：行为投影（sync_observed_tags，学生在题库
+#       作答时由判分数据投影）与持续迭代概括（学生自己在对话里表达过）。
+#       光看 source 分不出这两者，但它们对「画像怎么变成这样的」是两回事：
+#       一个是「系统看着你练」，一个是「系统听你说了再调整」。
+#
+#   所以 origin 是必要的：它把**写入路径**这一维度补上，与 source（可信度维度）
+#   正交。二者合起来才能把时间线讲清楚。
+#
+# ★★★ 回填策略（**只对能确定的回填，不确定的留 NULL** —— 与 v6「历史无法追溯」同一条纪律）：
+#
+#     · source='declared'  → origin='cold_start'（唯一来源是五问，可确定）
+#     · source='inferred'  → origin='refresh'（唯一来源是持续迭代，可确定）
+#     · source='observed'  → **NULL**（投影与持续迭代都可能，无法区分 ——
+#       绝不猜一个，宁可留空让读取侧如实显示成「系统根据你的使用调整的」）
+#
+#   ⚠️ 这与 v6「历史无法追溯」是同一条纪律的延续：v6 之前的历史已经不可考，
+#      这里也不拿一个猜测值去填它。留 NULL 是**如实**，不是「没做完」。
+#
+# ★ 列可空、无默认值：NULL = 「这条变更发生时还没记 origin」（v7 之前的旧行）。
+#   读取侧（routes/profile.py）把 NULL 折成一个中性的中文句子，不显示内部枚举名。
+#   新写入一律显式带 origin（见 LearningStore.upsert_tag / _append_tag_history）。
+
+
+def _apply_profile_origin_v7(conn: sqlite3.Connection) -> None:
+    """v7：给 ``profile_tag_history`` 补 ``origin`` 列（变更的来源出处）。
+
+    ★ **幂等 ALTER**（模板 = ``_apply_chapter_v2`` / v3 / v4）：先 ``PRAGMA table_info``
+      看列在不在，再 ``ALTER TABLE ... ADD COLUMN``。SQLite 的 ``ADD COLUMN``
+      **没有** ``IF NOT EXISTS``，直接写会在重复执行时报 ``duplicate column name``；
+      而迁移器虽然按 ``schema_version`` 记账跳过了，但**已建过 v1~v6 的库**
+      （v6 已记账、v7 还没）必须靠这条补列。
+
+    ★ **不改 v6**（本模块的纪律：不要改已发布的那条）：v6 是建表基线，「老库跑 v7 补列、
+      新库 v1~v7 一起跑」—— 两条路的结果一致（新库建表后用同一条 UPDATE 回填，
+      但新库此刻没有历史行，回填是 no-op）。
+
+    ★ 回填**只做能确定的映射**（declared→cold_start、inferred→refresh），
+      observed 留 NULL —— 理由见本节上方注释，不在迁移里替过去编造。
+    """
+    columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(profile_tag_history)").fetchall()
+    }
+    if "origin" not in columns:
+        conn.execute("ALTER TABLE profile_tag_history ADD COLUMN origin TEXT")
+        # 回填：只对**唯一可确定**的两类来源填，observed 留给读取侧如实显示。
+        conn.execute(
+            "UPDATE profile_tag_history SET origin = 'cold_start' WHERE source = 'declared'"
+        )
+        conn.execute(
+            "UPDATE profile_tag_history SET origin = 'refresh' WHERE source = 'inferred'"
+        )
+
+
 KB_MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="kb 核心表 + FTS5(trigram)", apply=_apply_kb_v1),
     # 后续新增教材相关表在此追加（version 递增），不要改已发布的那条
@@ -389,6 +643,21 @@ LEARNING_MIGRATIONS: tuple[Migration, ...] = (
         version=4,
         name="学段轨迹的判定层（grade_history.decided_by，规则 / LLM）",
         apply=_apply_grade_decided_by_v4,
+    ),
+    Migration(
+        version=5,
+        name="冷启动画像地基（identity_local / profile_tags / onboarding_qa，两表物理隔离）",
+        apply=_apply_identity_profile_v5,
+    ),
+    Migration(
+        version=6,
+        name="画像标签变更时间线（profile_tag_history，append-only，§5.2 #11）",
+        apply=_apply_profile_history_v6,
+    ),
+    Migration(
+        version=7,
+        name="画像标签变更的来源出处（profile_tag_history.origin：冷启动 / 持续迭代 / 行为投影）",
+        apply=_apply_profile_origin_v7,
     ),
 )
 

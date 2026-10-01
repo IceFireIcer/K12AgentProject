@@ -18,8 +18,17 @@
   非空标题必须命中该生**当前学段**的教材清单（``kb.sqlite``），学段一变由
   ``app/grade/rules.py`` 清空（那本教材已经不存在了）。
 
-★★ 合规红线（§8.1 / §12）：**SQLite 不存对话正文**。
-   本模块只接受「活动类型 + 知识点 id + 对错 + 一句固定口径的说明 + 时间戳」；
+★★ 合规红线（§8.1 / §12）：**SQLite 不存对话正文** —— ★ 唯一例外是
+   **冷启动五问的回答**（`onboarding_qa` 表，见 `app/store/migrations.py` 的迁移 v5 与
+   `app/routes/onboarding.py`）。例外**只对那 5 条回答生效**：
+
+   | 路径 | 口径 |
+   | --- | --- |
+   | 本模块的 `/events`（普通学习记录） | 仍**不承载**正文：`learning_history.question` 恒为空 |
+   | quiz / animation / coding 判分路径 | 仍不存学生原话与代码片段 |
+   | 冷启动五问（`onboarding_qa`） | ★ 例外：存学生原话（有界、一次性、明确知道写了什么） |
+
+   除这 5 条以外，本模块只接受「活动类型 + 知识点 id + 对错 + 一句固定口径的说明 + 时间戳」；
    学生原话、模型回答、代码片段一律不入库 —— 对话正文归 Pi 的 JSONL 会话树，
    两者靠 ``studentId`` + ``sessionId`` 关联。契约上的两道闸门：
    ① ``CamelModel`` 的 ``extra="forbid"``：多带一个 ``question`` / ``text`` 字段直接 422；
@@ -45,24 +54,50 @@ from __future__ import annotations
 from datetime import date
 import random
 import logging
+import re
 import sqlite3
-from typing import Collection
+from typing import Collection, Sequence
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import Field, field_validator
 
 from app.contracts import (
+    GRADE_LEVEL_LABELS,
+    LEARNING_ACTIVITY_LABELS,
+    TAG_DIMENSIONS,
+    TAG_LABELS,
     CamelModel,
     ChapterStateOut,
     ChapterUpdateRequest,
     GradeLevel,
+    IdentityFlagsRequest,
+    IdentityOut,
     LearningActivity,
+    LearningEventEntry,
+    LearningEventHistoryOut,
     Mastery,
     OpeningGuidance,
     PreferenceUpdateRequest,
+    ProfileTagOut,
+    ProfileTagUpdateRequest,
+    ProfileTagsOut,
+    ProfileTimeline,
+    ProfileTimelineEvent,
     RecommendationSource,
+    RefreshApplyOut,
+    RefreshApplyRequest,
+    RefreshRejectOut,
+    STUDENT_FALLBACK_NAME,
     Student,
     StudentProfile,
+    safe_display_name,
+)
+# ★ 白名单与词表从**存储层**的常量 import（它是 TS 那份的唯一 Python 镜像）：
+#   路由层只做「出栈再过一遍 + 入参先挡一道」，不自己再抄一份键表。
+from app.store.learning import (
+    ALLOWED_TAG_KEY_SET,
+    ONBOARDING_STATES,
+    TAG_SOURCES,
 )
 from app.routes.students import (
     DEFAULT_COLD_START_GRADE,
@@ -92,6 +127,9 @@ KP_ID_MAX_CHARS = 64
 #: 推荐条数上限（按顺序回给前端 / 注入 Prompt；太多等于没推荐）。
 RECOMMEND_LIMIT = 3
 
+#: 推荐依据最多带几条（票 28）：依据是「一句话解释」，列多了等于把画像整张倒给界面。
+_RECOMMEND_BASIS_LIMIT = 5
+
 #: ★ 「该重练」的掌握度上限：低于它、且**已经作答过**的知识点会被排到推荐最前面。
 #: 这就是票 15/20 要求的「连续答错某知识点 → 下一轮更可能再考它」——**可演示的数据流**：
 #: 同一份代码，只要 ``mastery.score`` 掉到这条线以下，推荐的第一位就换成它。
@@ -106,7 +144,8 @@ class LearningEventRequest(CamelModel):
     """``POST /api/profile/{student_id}/events`` 的请求体（学习记录写入）。
 
     由 ``learning-log`` Extension 构造，字段全部是**从对话里提取出来的结构化信息**：
-    没有任何一个字段用于承载对话正文（这是有意的，见模块头）。
+    没有任何一个字段用于承载对话正文（这是有意的，见模块头）——
+    冷启动五问走 ``/api/onboarding/*`` 的另一张表，不从这里过。
     """
 
     #: `qa | animation | coding | quiz`（契约冻结的四类活动）。
@@ -163,6 +202,77 @@ class RecommendationItem(CamelModel):
     reason: str = ""
 
 
+class RecommendationBasis(CamelModel):
+    """推荐依据的一条（票 28）：从**该学生自己的** ``profile_tags`` 投影出来。
+
+    ★ 只带 key / value / 中文名：界面照念「因为你喜欢先看结论」，
+      而不是把内部键名或置信度摊给学生看。
+    """
+
+    key: str
+    value: str
+    label: str = ""
+
+
+class InterestDrift(CamelModel):
+    """兴趣漂移提示（§5.2 #7）。**只读**，不写任何标签。
+
+    ★ 为什么不叫「兴趣历史」：`profile_tags` 的主键是 `(学生, 键)` ——
+      同一时刻只存**一个** `interest_topic`，我们**没有**兴趣的时间序列。
+      所以这里不假装能比较「过去的兴趣」，只用现有数据里唯一诚实的信号：
+      **学生明说的兴趣** 与 **最近实际在学的主题** 对不上。
+    ★ 不写回标签：用推断去覆盖学生明说的兴趣，正是 D-020 反复吃过的错。
+    """
+
+    #: 是否提示更新（False 时其余字段仍回填，便于界面判断要不要显示）
+    drifted: bool = False
+    #: 学生明说的兴趣（interest_topic，可能为空）
+    declared: str = ""
+    #: 最近实际在学的主题（current_topic / 最近知识点，可能为空）
+    recent: str = ""
+    #: 一句可读中文（界面直接用，不在前端拼）
+    message: str = ""
+
+
+#: 兴趣漂移的判据下限：主题太短（1 个字）没法判断是否「不一样」，不提示。
+_DRIFT_MIN_CHARS = 2
+
+
+def _interest_drift(store, student_id: str) -> InterestDrift:
+    """兴趣漂移检测（§5.2 #7「20 轮后兴趣变了，提示更新」）。
+
+    ★★ 判据只有一个，而且是刻意选的：**学生明说的兴趣**（interest_topic，L2）
+      与 **最近实际在学的主题**（current_topic / 最近知识点，L1）对不上。
+      为什么不比较「过去的兴趣 vs 现在的兴趣」：`profile_tags` 的键是唯一的，
+      同一时刻只存一个值 —— **没有时间序列可比**。假装能比就是在编造数据。
+
+    ★ **只读**：不写回任何标签。用一次推断去覆盖学生明说的兴趣，是 D-020 反复吃过的教训；
+      这里只把「可能变了」摆出来，改不改是学生的动作。
+    ★ parent_consent=0 → 一切为空（G-G：提示也是画像）。
+    """
+    empty = InterestDrift()
+    if not store.parent_consent(student_id):
+        return empty
+    by_key = {record.key: record.value for record in store.tags(student_id)}
+    declared = (by_key.get("interest_topic", "") or "").strip()
+    recent = (by_key.get("current_topic", "") or by_key.get("knowledge_point", "") or "").strip()
+    if len(declared) < _DRIFT_MIN_CHARS or len(recent) < _DRIFT_MIN_CHARS:
+        # 一边缺数据就不提示：宁可不说，也不要拿半截数据下结论
+        return InterestDrift(declared=declared, recent=recent)
+    # 双向子串命中视为「同一方向」（与 _match_interest 同一套宽读，避免两套判据漂移）
+    if declared in recent or recent in declared:
+        return InterestDrift(declared=declared, recent=recent)
+    return InterestDrift(
+        drifted=True,
+        declared=declared,
+        recent=recent,
+        message=(
+            "你之前说对「" + declared + "」感兴趣，最近一直在学「" + recent + "」——"
+            "要不要把兴趣也更新一下？"
+        ),
+    )
+
+
 class RecommendationResponse(CamelModel):
     """``GET /api/profile/{student_id}/recommendation`` 的响应（票 20）。
 
@@ -181,8 +291,13 @@ class RecommendationResponse(CamelModel):
     student_id: str
     source: RecommendationSource
     items: list[RecommendationItem] = Field(default_factory=list)
+    #: 推荐依据（票 28）：本学生画像标签的投影，**不跨学生聚合**（禁做 #9）。
+    #: 空数组是正常值（新学生还没标签，或家长关了同意闸）。
+    basis: list[RecommendationBasis] = Field(default_factory=list)
     #: 一句总述（可读中文，用于对话里的一句话引导）
     summary: str = ""
+    #: 兴趣漂移提示（§5.2 #7）：只在「说的」与「做的」对不上时才有意义，故可空。
+    interest_drift: InterestDrift | None = None
 
 
 def _load_kb_connection(request: Request):
@@ -222,6 +337,55 @@ def _kp_names(conn, kp_ids: list[str]) -> dict[str, str]:
         return {}
 
 
+#: ★ 兴趣类标签的优先级（§5.2 #9 的输入）：先看学生**明说**的兴趣，再看最近在学的主题/学科。
+#: 顺序即优先级 —— 三个键都可能有值时，interest_topic 最能代表「他想学什么」。
+_INTEREST_TAG_KEYS: tuple[str, ...] = ("interest_topic", "current_topic", "subject")
+
+#: 兴趣词参与匹配的最短长度。
+#: ⚠️ 单字（「数」「力」）会把「数据」「重力」全都命中 —— 那叫噪声，不叫个性化。
+_INTEREST_MIN_CHARS = 2
+
+
+def _interest_terms(store, student_id: str) -> tuple[str, ...]:
+    """从画像标签里取「兴趣方向」（§5.2 #9 冷启动推荐按兴趣过滤的输入）。
+
+    ★ 只读**学生自己**的标签（一人一库，禁做 #9）；`parent_consent=0` 时返回空
+      —— 与 `_recommendation_basis` 同一道闸、同一口径（依据也是画像）。
+    ★ 值可能是「数学、物理」这种连写（Q2 是自由回答），所以**切开**再逐词匹配。
+    """
+    if not store.parent_consent(student_id):
+        return ()
+    by_key = {record.key: record.value for record in store.tags(student_id)}
+    terms: list[str] = []
+    for key in _INTEREST_TAG_KEYS:
+        for part in re.split(r"[、,，/;；\s]+", by_key.get(key, "")):
+            part = part.strip()
+            if len(part) >= _INTEREST_MIN_CHARS and part not in terms:
+                terms.append(part)
+    return tuple(terms[:6])
+
+
+def _match_interest(conn, pool: Sequence[str], terms: Sequence[str]) -> list[str]:
+    """池子里**名字命中兴趣**的那些（顺序沿用已打乱的 `pool`，所以结果仍是随机的）。
+
+    ★★ 命中规则刻意**保守**：中文双向子串命中（「恐龙」命中「恐龙的种类」，「分数」命中「分数的加减」），
+      并且**命中不了就返回空**。空的意思不是「没有兴趣」，而是「这次不加权」——
+      宁可退回纯随机，也不要为了「看起来个性化」而推错方向。
+    """
+    cleaned = [t.strip() for t in terms if isinstance(t, str) and len(t.strip()) >= _INTEREST_MIN_CHARS]
+    if not cleaned:
+        return []
+    names = _kp_names(conn, pool)
+    hits: list[str] = []
+    for kp_id in pool:
+        name = names.get(kp_id, "")
+        if not name:
+            continue
+        if any(term in name or name in term for term in cleaned):
+            hits.append(kp_id)
+    return hits
+
+
 def _learnable_kp_ids(
     conn,
     *,
@@ -229,6 +393,7 @@ def _learnable_kp_ids(
     exclude: Collection[str] = (),
     limit: int = RECOMMEND_LIMIT,
     rng: "random.Random",
+    interest_terms: Sequence[str] = (),
 ) -> list[str]:
     """随机挑几个「可以学」的知识点（**推荐与开场白共用的唯一实现**，D-074）。
 
@@ -257,6 +422,15 @@ def _learnable_kp_ids(
     except sqlite3.Error:  # pragma: no cover - 坏库
         return []
     rng.shuffle(pool)
+    if interest_terms:
+        # ★★ §5.2 #9「冷启动推荐按兴趣过滤」——但**兴趣只加权，不取代随机**。
+        #   为什么不能「只推兴趣」：D-074 是**用户裁决**（原话「每次随机换一个知识点」），
+        #   兴趣过滤是锦上添花，不是把随机推翻成一条他可能早就腻了的窄路。
+        #   所以做法是「命中的排前面 + 其余的跟在后面」，而不是「先过滤再随机」。
+        wanted = _match_interest(conn, pool, interest_terms)
+        if wanted:
+            wanted_set = set(wanted)
+            pool = wanted + [kp_id for kp_id in pool if kp_id not in wanted_set]
     return pool[:limit]
 
 
@@ -357,6 +531,7 @@ def build_recommendation(
         # ⚠️ 这里原先分两段：② 依赖图后继（掌握 A → 推 A 的后继 B）、③ 冷启动入口节点
         #    （依赖图里入度为 0 的那些）。两段都含「顺序」主张，用户明确要去掉。
         #    现在只剩一条：**从本学段里随机挑没学过的**。
+        interest_terms = _interest_terms(store, student_id)
         if conn is not None and len(items) < RECOMMEND_LIMIT:
             learnable = _learnable_kp_ids(
                 conn,
@@ -370,6 +545,8 @@ def build_recommendation(
                 },
                 limit=RECOMMEND_LIMIT - len(items),
                 rng=rng,
+                # ★ 兴趣来自学生自己的标签（§5.2 #9）；读不到就是空元组 → 退回纯随机。
+                interest_terms=interest_terms,
             )
             names.update(_kp_names(conn, learnable))
             for kp_id in learnable:
@@ -403,8 +580,164 @@ def build_recommendation(
         "、".join(item.kp_id for item in items) or "无",
     )
     return RecommendationResponse(
-        student_id=student_id, source=source, items=items, summary=summary
+        student_id=student_id,
+        source=source,
+        items=items,
+        # ★ 推荐依据读的是**这个学生自己**的标签（一人一库）—— 禁做 #9 的落点。
+        basis=_recommendation_basis(store, student_id),
+        summary=summary,
+        interest_drift=_interest_drift(store, student_id),
     )
+
+
+#: 时间线默认/最大条数。
+#: ★ 为什么有上限：时间线是给人**看**的（学生/家长），列 500 条不是「更完整」，是「没人看」。
+TIMELINE_DEFAULT_LIMIT = 50
+TIMELINE_MAX_LIMIT = 200
+
+#: 学习历史（2026-09-30）：单页条数的默认值与上限。
+#: ★ 上限 100 —— 一次拉太多对学生没意义（他会往下翻），却把载荷撑大。
+HISTORY_DEFAULT_LIMIT = 30
+HISTORY_MAX_LIMIT = 100
+
+#: grade_history.source → 学生面措辞（封闭词表）。
+#: ★ 认不出的来源**不编词**：回一句中性的话，而不是把内部枚举名当人话显示。
+_GRADE_SOURCE_NOTES: dict[str, str] = {
+    "explicit": "你自己设定的",
+    "confirmed": "你确认过的",
+    "inferred": "系统根据你的提问自动调整的",
+    "rules": "系统根据你的提问自动调整的",
+    "llm": "系统根据你的提问自动调整的",
+}
+
+#: 标签变更出处（origin）→ 学生面措辞（封闭词表，迁移 v7）。
+#: ★ 认不出的出处**不编词**：回一句中性的话（而不是把内部枚举名当人话显示）——
+#:   与 _GRADE_SOURCE_NOTES 同一条纪律。
+#: ★ 空串（旧行 origin 为 NULL）也有对应措辞：「系统调整的」是中性的兜底，
+#:   既不说「你自己说的」也不说「系统猜的」，如实表达「不知道是哪条路带的」。
+_TAG_ORIGIN_NOTES: dict[str, str] = {
+    "cold_start": "刚认识你的时候记下的",
+    "refresh": "聊天里慢慢了解到的",
+    "projection": "根据你的练习情况记下的",
+    "": "系统调整的",
+}
+
+
+def _timeline_events(store, student_id: str, *, limit: int) -> list[ProfileTimelineEvent]:
+    """把三处**真实存在的时间序列**汇成一条画像时间线（§5.2 #11）。
+
+    ★★ 为什么只有三处，而不是「所有标签的历史」：
+      · grade_history —— 学段本来就是时间序列（每次变化一行，有 ts 有前后值）；
+      · profile_tag_history —— 画像标签的变更序列（迁移 v6 起新增）；
+      · onboarding_qa —— 每问有作答时间，那是画像的**起点**。
+      除此之外本项目**没有**别的可考序列：mastery 只有 last_seen_at（一个点，不是序列），
+      profile_pref 是键值对。所以不做第四处，**也不从别处推断时间** ——
+      时间线上每一行都必须对应库里真实存在的一条记录。
+
+    ★ 只读**这个学生自己**的库（禁做 #9）：签名里只有一个 student_id，
+      结构上没有第二名学生的位置。
+    ★ 短期情绪标签**不会**出现在这里：写入侧根本没记（见 LearningStore 的
+      _append_tag_history），读取侧再挡一次（tag_history）—— 两处都挡，是因为这条红线
+      一旦破了，毁掉的是「不给孩子建长期负面情绪档案」这个承诺（禁做 #11）。
+    ★ parent_consent=0 → 空（G-G）：时间线是画像，与 GET /tags 同一道闸。
+    """
+    if not store.parent_consent(student_id):
+        return []
+    events: list[ProfileTimelineEvent] = []
+
+    # ① 学段变更
+    for record in store.grade_history(limit=limit):
+        from_label = GRADE_LEVEL_LABELS.get(str(record.from_level or ""), "")
+        to_label = GRADE_LEVEL_LABELS.get(str(record.to_level or ""), "")
+        if not to_label:
+            # 认不出的学段值：不编句子，跳过（而不是显示一个内部枚举名）
+            continue
+        if from_label and from_label != to_label:
+            title = "学段从" + from_label + "变成" + to_label
+        elif from_label:
+            # 前后同值 = 不是「变化」（历史里可能有这种行），不进时间线
+            continue
+        else:
+            title = "开始按" + to_label + "讲"
+        events.append(
+            ProfileTimelineEvent(
+                at=to_contract_ms(record.ts) or 0,
+                kind="grade",
+                title=title,
+                detail=_GRADE_SOURCE_NOTES.get(str(record.source or ""), ""),
+            )
+        )
+
+    # ② 画像标签变更
+    for record in store.tag_history(student_id, limit=limit):
+        label = TAG_LABELS.get(record.key, record.key)
+        # ★ 出处说明（迁移 v7）：拼进 detail 的一句中性中文 —— 学生面**只**读
+        #   title/detail 这两句现成中文，不认枚举值（双视角纪律 D-063）。
+        origin_note = _TAG_ORIGIN_NOTES.get(record.origin or "", _TAG_ORIGIN_NOTES[""])
+        if record.previous_value is None:
+            title = "记下了「" + label + "」：" + record.value
+            detail = origin_note + "。"
+        else:
+            title = "把「" + label + "」改成了「" + record.value + "」"
+            detail = "原来是「" + record.previous_value + "」；" + origin_note + "。"
+        events.append(
+            ProfileTimelineEvent(
+                at=to_contract_ms(record.ts) or 0,
+                kind="tag",
+                title=title,
+                detail=detail,
+                key=record.key,
+                label=label,
+                # ★ 出处（迁移 v7）：结构化字段（界面可据它上色/分组），
+                #   而 detail 里已经把同一件事讲成人话了。
+                origin=record.origin or "",
+            )
+        )
+
+    # ③ 入门问答（画像的起点）
+    answers = store.onboarding_answers()
+    if answers:
+        first_at = min((item.answered_at for item in answers if item.answered_at), default=0)
+        if first_at:
+            events.append(
+                ProfileTimelineEvent(
+                    at=to_contract_ms(first_at) or 0,
+                    kind="onboarding",
+                    title="完成了入门问答",
+                    detail="一共答了 " + str(len(answers)) + " 个问题，画像就是从那时候开始的。",
+                )
+            )
+
+    # 新的在前；同刻的事件按 kind 再排一次，避免每次请求顺序抖动
+    events.sort(key=lambda event: (event.at, event.kind), reverse=True)
+    return events[:limit]
+
+
+def _recommendation_basis(store, student_id: str) -> list[RecommendationBasis]:
+    """推荐依据（票 28）：把该学生自己的画像标签投影成可展示的三元组。
+
+    ★ 不做跨学生聚合（禁做 #9）：只读当前这一份 ``learning.db``（一人一库），
+      没有 GROUP BY / 排名 / 对比 —— 端点上不存在「别人怎么样」这个信息。
+    ★ parent_consent=0 → 空（G-G）：与 ``GET /tags`` 同一道闸，因为依据也是画像。
+    ★ 只给中文名与值，不给 confidence/source：界面要的是「为什么推荐」，不是内部元数据。
+    """
+    if not store.parent_consent(student_id):
+        return []
+    basis: list[RecommendationBasis] = []
+    for record in store.tags(student_id):
+        if record.key == "anon_student_id":
+            # 匿名标识是 join 钥匙，不是「依据」——列出去等于给学生看一串随机码。
+            continue
+        basis.append(
+            RecommendationBasis(
+                key=record.key,
+                value=record.value,
+                label=TAG_LABELS.get(record.key, ""),
+            )
+        )
+        if len(basis) >= _RECOMMEND_BASIS_LIMIT:
+            break
+    return basis
 
 
 #: 开场白的几种说法（**随机选一种**，D-074）。
@@ -751,7 +1084,8 @@ def record_learning_event(
                 kp_id=payload.kp_id,
                 activity=payload.activity,
                 session_id=payload.session_id or "",
-                # ★ 不写 question（对话正文不进 SQLite）：这一列保持为空字符串
+                # ★ 不写 question（正文不进 SQLite；冷启动五问走另一张表 onboarding_qa）：
+                #   这一列保持为空字符串（G-K）
                 question="",
                 is_correct=payload.is_correct,
                 detail=payload.detail,
@@ -772,6 +1106,70 @@ def record_learning_event(
         return LearningEventAck(ok=True)
     finally:
         store.close()
+
+
+@router.get(
+    "/profile/{student_id}/history",
+    response_model=LearningEventHistoryOut,
+    summary="学习历史（结构化活动流水，倒序分页）",
+)
+def learning_history(
+    request: Request,
+    student_id: str,
+    limit: int = Query(
+        HISTORY_DEFAULT_LIMIT, ge=1, le=HISTORY_MAX_LIMIT, description="这一页最多几条"
+    ),
+    offset: int = Query(0, ge=0, description="按时间倒序跳过几条"),
+) -> LearningEventHistoryOut:
+    """「我做过什么」的**明细出口**（学习档案 → 学习历史）。
+
+    ★ 与 ``GET /report`` 的分工：那个是**聚合**（每天多少条、正确率、连续天数），
+      这个是**流水**（几点几分做了什么）。两者读同一张表，回答的是不同问题。
+    ★ 学生面只给结构化列 + 后端折好的**中文动作名**：``detail``（内部 JSON 摘要）
+      与 ``question``（恒空，G-K）**一个字节都不出**。
+    ★ 还没有学习记录的学生回**空列表**（不是 404）：前端要把它渲染成「还没有记录」
+      的空态，而 404 会让界面走错误分支、显示一句「读取失败」。
+    """
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
+
+    store = open_learning_store(data_dir, student_id)
+    try:
+        if store.get_student(student_id) is None:
+            # 冷启动（学生行还没建）：一条记录都还没有，回空页
+            return LearningEventHistoryOut(student_id=student_id)
+        rows = store.history_page(limit=limit, offset=offset)
+        total = store.history_count()
+    except sqlite3.Error as exc:
+        logger.exception("学习历史读取失败：%s", student_id)
+        raise HTTPException(status_code=503, detail=f"读取学习历史失败（本地数据库异常）：{exc}") from exc
+    finally:
+        store.close()
+
+    events: list[LearningEventEntry] = []
+    for record in rows:
+        # ★ 脏行跳过（而不是兜一个默认活动）：`activity` 是 Literal，塞一个认不出的
+        #   值进模型会把整个端点打成 500 —— 与画像标签出栈那处的「脏值跳过」同一条口径。
+        if record.activity not in LEARNING_ACTIVITY_LABELS:
+            continue
+        events.append(
+            LearningEventEntry(
+                id=record.id,
+                at=to_contract_ms(record.ts),
+                activity=record.activity,  # type: ignore[arg-type]
+                activity_label=LEARNING_ACTIVITY_LABELS[record.activity],
+                kp_id=record.kp_id,
+                is_correct=record.is_correct,
+            )
+        )
+    return LearningEventHistoryOut(
+        student_id=student_id,
+        events=events,
+        total=total,
+        # ★ 用 `len(rows)`（读到的原始行数）而不是 `len(events)`：脏行被跳过时，
+        #   用过滤后的条数会让 has_more 假阴性（明明还有却说到头了）。
+        has_more=offset + len(rows) < total,
+    )
 
 
 @router.put(
@@ -968,6 +1366,436 @@ def write_chapter(
             ) from exc
         logger.info("已设定当前章节：学生=%s 学段=%s 章节=%s", student_id, grade_level, title)
         return _chapter_state(store, student_id)
+    finally:
+        store.close()
+
+
+# --------------------------------------------------------------------------- #
+# 画像标签 / 本地身份（票 25 / 28）：白名单投影的读写
+# --------------------------------------------------------------------------- #
+def _tags_view(store, student_id: str) -> ProfileTagsOut:
+    """拼 tags 出参（三个标签端点共用这一处构造）。
+
+    ★ parent_consent=0 → tags **空数组**（G-G）：落库本身不算外发，这个读出口才算。
+      两道闸照实回 —— 设置页要显示开关当前状态，不能因为闸关了就什么都不给。
+    """
+    parent_consent = store.parent_consent(student_id)
+    memory_switch = store.memory_switch(student_id)
+    tags: list[ProfileTagOut] = []
+    if parent_consent:
+        for record in store.tags(student_id):
+            # 出栈再过一遍白名单（G-A）：store.tags 里已过一次，这里是路由层的兜底 ——
+            # 宁可重复一次，也不让「某天有人在 store 里加了个不过滤的读路径」漏出去。
+            if record.key not in ALLOWED_TAG_KEY_SET:
+                continue
+            # 出参模型的 source 是 Literal：库里被外力塞了别的值就跳过，
+            # 不让一条脏行把整个读取端点打成 500（与白名单同一个防御口径）。
+            if record.source not in TAG_SOURCES:
+                continue
+            tags.append(
+                ProfileTagOut(
+                    key=record.key,
+                    value=record.value,
+                    confidence=record.confidence,
+                    source=record.source,  # type: ignore[arg-type]
+                    ts=to_contract_ms(record.ts),
+                    dimension=TAG_DIMENSIONS.get(record.key, 0),
+                    # 中文名由后端给（唯一来源）：渲染层不写这些字面量，kp-slug 守卫不打架。
+                    label=TAG_LABELS.get(record.key, ""),
+                )
+            )
+    return ProfileTagsOut(tags=tags, parent_consent=parent_consent, memory_switch=memory_switch)
+
+
+def _identity_out(store, student_id: str) -> IdentityOut:
+    """拼 identity 出参（读 / 写 flags 共用）。
+
+    ★ real_name 只给**渲染层做本地替换**；代码里不存在「读它再拼 prompt」的路径（G-C）。
+      display_name 是它过 safe_display_name 后的安全值（可能是「同学」）。
+    """
+    identity = store.identity_or_default(student_id)
+    # 状态也是 Literal：库里被外力塞了非法值时按「还没开始」回，不 500。
+    state = identity.onboarding_state if identity.onboarding_state in ONBOARDING_STATES else "not_started"
+    return IdentityOut(
+        anon_student_id=student_id,
+        real_name=identity.real_name,
+        display_name=safe_display_name(identity.real_name),
+        parent_consent=identity.parent_consent,
+        memory_switch=identity.memory_switch,
+        onboarding_state=state,  # type: ignore[arg-type]
+    )
+
+
+@router.get(
+    "/profile/{student_id}/tags",
+    response_model=ProfileTagsOut,
+    summary="画像标签（白名单投影，已按 TTL 过滤）",
+)
+def read_profile_tags(request: Request, student_id: str) -> ProfileTagsOut:
+    """读画像标签。
+
+    - 出栈前过白名单（G-A）与短期情绪 TTL（G-E）；
+    - parentConsent=false → tags 空（G-G）；
+    - 学生行不存在也**不建行**（读路径零副作用），回默认闸值 + 空标签。
+    """
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
+    store = open_learning_store(data_dir, student_id)
+    try:
+        return _tags_view(store, student_id)
+    except sqlite3.Error as exc:
+        logger.exception("读取画像标签失败：%s", student_id)
+        raise HTTPException(
+            status_code=503, detail=f"读取画像标签失败（本地数据库异常）：{exc}"
+        ) from exc
+    finally:
+        store.close()
+
+
+@router.put(
+    "/profile/{student_id}/tags/{key}",
+    response_model=ProfileTagsOut,
+    summary="写一个画像标签（白名单内）",
+)
+def update_profile_tag(
+    request: Request, student_id: str, key: str, body: ProfileTagUpdateRequest
+) -> ProfileTagsOut:
+    """写 / 覆盖一个画像标签（标签纠错的写入口）。
+
+    三道闸在存储层（LearningStore.upsert_tag），这里再挡一层并把它翻成 422：
+    - 非白名单键 → 422（「标签表无此 key；写入端点无此参数」的可测形态）；
+    - source='inferred' 的非情绪/风格键 → 422（禁做 #10）；
+    - emotion 非有限枚举 → 422（禁做 #12）。
+    memory_switch=false 时**不写**（G-F），端点照常 200 —— 返回的 tags 里就是没它。
+    """
+    validate_student_id(student_id)
+    if key not in ALLOWED_TAG_KEY_SET:
+        raise HTTPException(
+            status_code=422,
+            detail=f"标签键不在白名单里：{key}（画像只收 LLM_VISIBLE_TAGS 里的键）",
+        )
+    data_dir = _require_data_dir(request)
+    store = open_learning_store(data_dir, student_id)
+    try:
+        try:
+            store.upsert_tag(
+                student_id,
+                key,
+                body.value,
+                confidence=body.confidence,
+                source=body.source,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except sqlite3.Error as exc:
+            logger.exception("画像标签写入失败：%s", student_id)
+            raise HTTPException(
+                status_code=503, detail=f"画像标签写入失败（本地数据库异常）：{exc}"
+            ) from exc
+        return _tags_view(store, student_id)
+    finally:
+        store.close()
+
+
+@router.delete(
+    "/profile/{student_id}/tags/{key}",
+    response_model=ProfileTagsOut,
+    summary="删一个画像标签（L3 一键撤销）",
+)
+def delete_profile_tag(request: Request, student_id: str, key: str) -> ProfileTagsOut:
+    """删一个画像标签（猜错了能救；也是信任基础）。键不在白名单 → 422（同写入口径）。"""
+    validate_student_id(student_id)
+    if key not in ALLOWED_TAG_KEY_SET:
+        raise HTTPException(status_code=422, detail=f"标签键不在白名单里：{key}")
+    data_dir = _require_data_dir(request)
+    store = open_learning_store(data_dir, student_id)
+    try:
+        try:
+            store.delete_tag(student_id, key)
+        except sqlite3.Error as exc:
+            logger.exception("画像标签删除失败：%s", student_id)
+            raise HTTPException(
+                status_code=503, detail=f"画像标签删除失败（本地数据库异常）：{exc}"
+            ) from exc
+        return _tags_view(store, student_id)
+    finally:
+        store.close()
+
+
+@router.post(
+    "/profile/{student_id}/tags/refresh-apply",
+    response_model=RefreshApplyOut,
+    summary="批量应用持续画像迭代的概括结果（分档写入）",
+)
+def refresh_apply_tags(
+    request: Request, student_id: str, body: RefreshApplyRequest
+) -> RefreshApplyOut:
+    """把一次「持续画像迭代」概括出来的标签批量应用到画像（分档写入）。
+
+    ★★ 为什么是**逐条独立**而不是整体成功/失败：概括是**尽力而为**的增强 ——
+      某一条被白名单/取值域/分档挡下，不该让其它条一起丢。与
+      `sync_observed_tags` 的「逐条独立」同一条纪律。
+
+    ★★ 分档在存储层（`LearningStore.upsert_tag_from_summary`）：本端点只负责
+      ① 白名单先挡一道（非白名单 → 该条拒，不 500）；
+      ② 把存储层的 ValueError 翻成**该条被拒**（而不是整个请求 422）；
+      ③ 回逐条结果 + 应用后的最新投影。
+
+    ★ 为什么 422 只留给**结构性问题**（空列表 / 超上限 / source='declared'）：
+      那三类是「调用方写错了代码」，重试也一样；而**单条**不合法是数据问题，
+      应该被记录、被跳过，让其余条照常落地。
+
+    ★ memory_switch=false（G-F）：写入原语**逐条返回 False**（不写任何标签），
+      这里如实记进 `rejected`（reason='memory-switch-off'），端点照常 200 ——
+      与 `PUT /tags/{key}` 的口径一致（关闸不是错误，是有效状态）。
+    """
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
+    store = open_learning_store(data_dir, student_id)
+    try:
+        applied: list[str] = []
+        rejected: list[RefreshRejectOut] = []
+        seen: set[str] = set()
+        for item in body.tags:
+            key = item.key.strip()
+            # ① 白名单（G-A）：路由层先挡一道 —— 与 PUT /tags/{key} 同一口径，
+            #    但这里是**该条拒**而不是整体 422（见 docstring）。
+            if key not in ALLOWED_TAG_KEY_SET:
+                rejected.append(RefreshRejectOut(key=key, reason="whitelist"))
+                continue
+            # ② 同一次请求内同键重复 → 留第一条（与 parseSummaryTags 去重口径一致）。
+            if key in seen:
+                rejected.append(RefreshRejectOut(key=key, reason="duplicate"))
+                continue
+            seen.add(key)
+            try:
+                written = store.upsert_tag_from_summary(
+                    student_id,
+                    key,
+                    item.value,
+                    source=item.source,
+                    confidence=item.confidence,
+                    reason=body.reason,
+                )
+            except ValueError as exc:
+                # 取值域非法（emotion/intensity）/ 推断限键（禁做 #10）等 → 该条拒。
+                logger.info("概括条目被拒：学生=%s 键=%s：%s", student_id, key, exc)
+                rejected.append(
+                    RefreshRejectOut(key=key, reason=_refresh_reject_reason(str(exc)))
+                )
+                continue
+            if written:
+                applied.append(key)
+            else:
+                # written=False 有两种来源：memory_switch 挡住，或**分档拒绝**。
+                # 用 memory_switch 现状把它区分开（分档拒绝的细节已由存储层记日志）。
+                reason = (
+                    "memory-switch-off"
+                    if not store.memory_switch(student_id)
+                    else _refresh_skip_reason(store, student_id, key, item.source, item.confidence)
+                )
+                rejected.append(RefreshRejectOut(key=key, reason=reason))
+        view = _tags_view(store, student_id)
+        logger.info(
+            "概括结果已应用：学生=%s 写入=%d 拒绝=%d 缘由=%s",
+            student_id,
+            len(applied),
+            len(rejected),
+            body.reason or "-",
+        )
+        return RefreshApplyOut(
+            applied=applied,
+            rejected=rejected,
+            tags=view.tags,
+            parent_consent=view.parent_consent,
+            memory_switch=view.memory_switch,
+            dimension_labels=view.dimension_labels,
+        )
+    except sqlite3.Error as exc:
+        logger.exception("概括结果应用失败：%s", student_id)
+        raise HTTPException(
+            status_code=503, detail=f"概括结果应用失败（本地数据库异常）：{exc}"
+        ) from exc
+    finally:
+        store.close()
+
+
+def _refresh_reject_reason(detail: str) -> str:
+    """把存储层 ValueError 的**详情**折成**封闭短标签**（供回执/前端展示）。
+
+    ★ 为什么要有这个折叠：`ValueError` 的文案是给人看的**句子**（含取值域、收到的值），
+      直接回给客户端既不稳定（文案一改契约就变）也不安全（可能回显非法输入）。
+      回执里只放**封闭词表**里的短标签，真正的细节走日志。
+
+    ★★ 判据必须**与 learning.py 抛错时的措辞一一对应**、且互不重叠：
+      · G-H-10 那条含「禁做 #10」（唯一标识）—— 先判，否则会被 "inferred" 泛匹配吃掉；
+      · 取值域四条分别含「emotion」「intensity」「learner_style」「personality」
+        （后两个是 2026-09-30 维度 13 新增的封闭词表键）；
+      · 白名单那条含「白名单」（G-A）。
+    兜底 'rejected' 是**故意留的**：宁可回一个笼统标签，也不让一条没见过的错把端点打成 500。
+    """
+    if "禁做 #10" in detail:
+        return "inferred-not-allowed"
+    if "白名单" in detail:
+        return "whitelist"
+    if (
+        "emotion" in detail
+        or "intensity" in detail
+        or "learner_style" in detail
+        or "personality" in detail
+    ):
+        return "value-out-of-range"
+    return "rejected"
+
+
+def _refresh_skip_reason(
+    store, student_id: str, key: str, source: str, confidence: float | None
+) -> str:
+    """分档拒绝时，回一个封闭短标签（诊断用；真正的原因在存储层日志里）。
+
+    ★ 时序注意：这里读的是**写入尝试之后**的现状。分档拒绝时值没被改动，
+      所以读到的仍是「挡住它的那条」的来源/置信度 —— 判据与
+      `upsert_tag_from_summary` 的内部分档一一对应。
+    """
+    current_source = store.tag_source_of(student_id, key)
+    if current_source == "declared":
+        return "declared-protected"
+    if current_source == "observed" and source == "inferred":
+        return "observed-wins"
+    if current_source == "inferred" and source == "inferred":
+        return "confidence-not-higher"
+    # 兜底：值没变（upsert_tag 内部虽仍返回 True，但理论上也可能走到这里）
+    return "skipped"
+
+
+@router.get(
+    "/profile/{student_id}/identity",
+    response_model=IdentityOut,
+    summary="本地身份 + 两道闸（真名不出网）",
+)
+def read_identity(request: Request, student_id: str) -> IdentityOut:
+    """读本地身份行与两道闸。
+
+    ★ 本端点是**本地身份唯一的读出口**，而它的字段里没有 school / class / real_grade ——
+      精确年级、学校、班级连出参形状都不存在（G-B 的第二种形态）。
+    """
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
+    store = open_learning_store(data_dir, student_id)
+    try:
+        return _identity_out(store, student_id)
+    except sqlite3.Error as exc:
+        logger.exception("读取本地身份失败：%s", student_id)
+        raise HTTPException(
+            status_code=503, detail=f"读取本地身份失败（本地数据库异常）：{exc}"
+        ) from exc
+    finally:
+        store.close()
+
+
+@router.get(
+    "/profile/{student_id}/timeline",
+    response_model=ProfileTimeline,
+    summary="画像变化时间线（学段变更 / 标签变更 / 入门问答）",
+)
+def read_profile_timeline(
+    request: Request,
+    student_id: str,
+    limit: int = Query(
+        TIMELINE_DEFAULT_LIMIT,
+        ge=1,
+        le=TIMELINE_MAX_LIMIT,
+        description="最多返回几条（新的在前）",
+    ),
+) -> ProfileTimeline:
+    """画像**怎么变成现在这样的**（§5.2 #11）。
+
+    ★★ 这个端点回答的是一个此前**无法回答**的问题：profile_tags 的主键是
+      (anon_student_id, key)，它只存**当前值** —— 没有历史就回答不了「变化过程」。
+      迁移 v6 新增的 profile_tag_history 就是为它准备的时间序列。
+
+    ★ 三类事件各自对应一处真实存在的序列，**不从别处推断时间**：
+      学段变更（grade_history）、标签变更（profile_tag_history）、入门问答（onboarding_qa）。
+
+    ★ 三道闸与画像其它出口完全一致：
+      · parent_consent=0 → events 空（G-G）；
+      · 只按单个 student_id 取数，**不跨学生**（禁做 #9）；
+      · 短期情绪标签两处都被挡住（写入侧不记 + 读取侧再滤，禁做 #11）。
+
+    - 学生不存在 → 空时间线（**不是 404**：新学生本来就没有变化，那是正常态）；
+    - limit 越界 → 422；库异常 → 503。
+    """
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
+    store = open_learning_store(data_dir, student_id)
+    try:
+        return ProfileTimeline(
+            student_id=student_id,
+            events=_timeline_events(store, student_id, limit=limit),
+        )
+    except sqlite3.Error as exc:
+        logger.exception("读取画像时间线失败：%s", student_id)
+        raise HTTPException(
+            status_code=503, detail=f"读取画像时间线失败（本地数据库异常）：{exc}"
+        ) from exc
+    finally:
+        store.close()
+
+
+@router.put(
+    "/profile/{student_id}/identity/flags",
+    response_model=IdentityOut,
+    summary="设置家长同意 / 记忆开关",
+)
+def update_identity_flags(
+    request: Request, student_id: str, body: IdentityFlagsRequest
+) -> IdentityOut:
+    """写两道闸（设置页开关）+ 可选落盘一次称呼。
+
+    - parentConsent=false → 以后 GET /tags 与推荐依据一律为空（G-G）；
+    - memorySwitch=false → 以后**不写任何标签**（G-F）。
+      ★ 只影响**往后写**：已经写下的标签仍在库里（学生没说「忘掉」），
+        要抹掉由 DELETE 逐个撤销 —— 两个动作分开，别把开关做成静默清库。
+    - realName（可选）→ 写 `identity_local.real_name`（本地身份数据，永不进 prompt）。
+
+      ★★ 为什么称呼走这里（集成期修的功能死洞）：引导 Q5 问「我该怎么称呼你」，
+        主进程把答案脱敏后需要一条落盘路径。此前**没有**这条路径，
+        于是 `GET /identity` 恒回空 realName，渲染层永远把 `{{student_name}}`
+        替换成「同学」—— **占位机制静默失效**（模型被要求用占位符，却永远替换不出真名）。
+      ⚠️ 写称呼**不看** memorySwitch：不记画像 ≠ 忘掉称呼（见 store 的 set_real_name）。
+      ⚠️ 再过一次 safe_display_name：**入库的是脱敏后的称呼，不是学生原话**
+        （「XX 小学二班」这类不会进 identity_local —— 那是「学生没同意识别的信息」）。
+    """
+    validate_student_id(student_id)
+    data_dir = _require_data_dir(request)
+    store = open_learning_store(data_dir, student_id)
+    try:
+        try:
+            store.set_identity_flags(
+                student_id,
+                parent_consent=body.parent_consent,
+                memory_switch=body.memory_switch,
+            )
+            if body.real_name is not None:
+                # ★ 入库存**安全值**：safe_display_name 命中可疑形态就回落「同学」，
+                #   所以库里的 real_name 恒等于一个可安全展示的称呼；回落值存空串，
+                #   读取端把空串统一折算回回落值（只有一种「空」）。
+                safe = safe_display_name(body.real_name)
+                store.set_real_name(
+                    student_id, "" if safe == STUDENT_FALLBACK_NAME else safe
+                )
+        except sqlite3.Error as exc:
+            logger.exception("身份闸写入失败：%s", student_id)
+            raise HTTPException(
+                status_code=503, detail=f"身份闸写入失败（本地数据库异常）：{exc}"
+            ) from exc
+        logger.info(
+            "身份闸已更新：学生=%s parent_consent=%s memory_switch=%s",
+            student_id,
+            body.parent_consent,
+            body.memory_switch,
+        )
+        return _identity_out(store, student_id)
     finally:
         store.close()
 

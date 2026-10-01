@@ -711,6 +711,11 @@
             "title": "Expectedbehavior",
             "type": "string"
           },
+          "expectedOutput": {
+            "default": "",
+            "title": "Expectedoutput",
+            "type": "string"
+          },
           "kpId": {
             "title": "Kpid",
             "type": "string"
@@ -723,6 +728,11 @@
           },
           "scaffold": {
             "title": "Scaffold",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
             "type": "string"
           }
         },
@@ -998,6 +1008,17 @@
           "none"
         ],
         "title": "EmbeddingMode",
+        "type": "string"
+      },
+      "EmotionValue": {
+        "enum": [
+          "happy",
+          "calm",
+          "confused",
+          "frustrated",
+          "angry"
+        ],
+        "title": "EmotionValue",
         "type": "string"
       },
       "GeneratedCodeSaveRequest": {
@@ -1917,6 +1938,122 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "IdentityFlagsRequest": {
+        "additionalProperties": false,
+        "description": "PUT /api/profile/{student_id}/identity/flags 的请求体（设置页开关 + 称呼落盘）。\n\n★ `real_name` 为什么要挂在这里（集成期裁决）：\n  它是**身份层的一次显式写入**，与两道闸同属 `identity_local`。再开一条独立端点\n  只会让「谁在写 identity_local」多一个入口 —— 而这个模块的整个安全论证\n  建立在「身份层只有一个写入面」上（见 store/learning.py 的 set_real_name）。\n  ⚠️ 语义上它不是闸：写称呼**不看** `memory_switch`（不记画像 ≠ 忘掉称呼）。\n\n★★ 渲染层**拿不到**这个字段的写权限：IPC 的 `identity:flags-set`\n  只放行两道闸（`main/ipc/handlers-data.ts` 的白名单过滤），\n  写称呼的只有**主进程的引导链路**。所以「渲染进程能不能改真名」的答案是结构性的「不能」。",
+        "properties": {
+          "memorySwitch": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memoryswitch"
+          },
+          "parentConsent": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parentconsent"
+          },
+          "realName": {
+            "anyOf": [
+              {
+                "maxLength": 24,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Realname"
+          }
+        },
+        "title": "IdentityFlagsRequest",
+        "type": "object"
+      },
+      "IdentityOut": {
+        "additionalProperties": false,
+        "description": "GET /api/profile/{student_id}/identity 的响应。\n\n★ real_name 只给**渲染层做本地替换**；任何 prompt 都不许读它（G-C）。\n★ display_name 是 real_name 过 safe_display_name 之后的安全值（可能是「同学」）。",
+        "properties": {
+          "anonStudentId": {
+            "title": "Anonstudentid",
+            "type": "string"
+          },
+          "displayName": {
+            "default": "",
+            "title": "Displayname",
+            "type": "string"
+          },
+          "memorySwitch": {
+            "default": true,
+            "title": "Memoryswitch",
+            "type": "boolean"
+          },
+          "onboardingState": {
+            "default": "not_started",
+            "enum": [
+              "not_started",
+              "in_progress",
+              "done",
+              "skipped"
+            ],
+            "title": "Onboardingstate",
+            "type": "string"
+          },
+          "parentConsent": {
+            "default": true,
+            "title": "Parentconsent",
+            "type": "boolean"
+          },
+          "realName": {
+            "default": "",
+            "title": "Realname",
+            "type": "string"
+          }
+        },
+        "required": [
+          "anonStudentId"
+        ],
+        "title": "IdentityOut",
+        "type": "object"
+      },
+      "InterestDrift": {
+        "additionalProperties": false,
+        "description": "兴趣漂移提示（§5.2 #7）。**只读**，不写任何标签。\n\n★ 为什么不叫「兴趣历史」：`profile_tags` 的主键是 `(学生, 键)` ——\n  同一时刻只存**一个** `interest_topic`，我们**没有**兴趣的时间序列。\n  所以这里不假装能比较「过去的兴趣」，只用现有数据里唯一诚实的信号：\n  **学生明说的兴趣** 与 **最近实际在学的主题** 对不上。\n★ 不写回标签：用推断去覆盖学生明说的兴趣，正是 D-020 反复吃过的错。",
+        "properties": {
+          "declared": {
+            "default": "",
+            "title": "Declared",
+            "type": "string"
+          },
+          "drifted": {
+            "default": false,
+            "title": "Drifted",
+            "type": "boolean"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          },
+          "recent": {
+            "default": "",
+            "title": "Recent",
+            "type": "string"
+          }
+        },
+        "title": "InterestDrift",
+        "type": "object"
+      },
       "IpcEventName": {
         "enum": [
           "delta",
@@ -2211,6 +2348,17 @@
         "title": "KnowledgeStats",
         "type": "object"
       },
+      "LearnerStyleValue": {
+        "enum": [
+          "天赋型",
+          "努力型",
+          "钻研型",
+          "速通型",
+          "均衡型"
+        ],
+        "title": "LearnerStyleValue",
+        "type": "string"
+      },
       "LearningActivity": {
         "enum": [
           "qa",
@@ -2234,9 +2382,93 @@
         "title": "LearningEventAck",
         "type": "object"
       },
+      "LearningEventEntry": {
+        "additionalProperties": false,
+        "description": "一条学习记录（学习历史明细）。\n\n★★ 只给**结构化列**；两个库里的列刻意不给：\n  · `question` —— 恒为空串（G-K「SQLite 不存对话正文」），本来就没内容；\n  · `detail` —— 内部 JSON 摘要（闯关解锁标记等），**学生面不该看到内部载荷**。\n  能给人的只有四件事：**什么时候、做了什么、关于哪个知识点、结果如何**。",
+        "properties": {
+          "activity": {
+            "enum": [
+              "qa",
+              "animation",
+              "coding",
+              "quiz"
+            ],
+            "title": "Activity",
+            "type": "string"
+          },
+          "activityLabel": {
+            "default": "",
+            "title": "Activitylabel",
+            "type": "string"
+          },
+          "at": {
+            "default": 0,
+            "title": "At",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "isCorrect": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iscorrect"
+          },
+          "kpId": {
+            "default": "",
+            "title": "Kpid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "activity"
+        ],
+        "title": "LearningEventEntry",
+        "type": "object"
+      },
+      "LearningEventHistoryOut": {
+        "additionalProperties": false,
+        "description": "GET /api/profile/{student_id}/history 的响应（**倒序分页**：最新的在前）。",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/LearningEventEntry"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "hasMore": {
+            "default": false,
+            "title": "Hasmore",
+            "type": "boolean"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          },
+          "total": {
+            "default": 0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "studentId"
+        ],
+        "title": "LearningEventHistoryOut",
+        "type": "object"
+      },
       "LearningEventRequest": {
         "additionalProperties": false,
-        "description": "``POST /api/profile/{student_id}/events`` 的请求体（学习记录写入）。\n\n由 ``learning-log`` Extension 构造，字段全部是**从对话里提取出来的结构化信息**：\n没有任何一个字段用于承载对话正文（这是有意的，见模块头）。",
+        "description": "``POST /api/profile/{student_id}/events`` 的请求体（学习记录写入）。\n\n由 ``learning-log`` Extension 构造，字段全部是**从对话里提取出来的结构化信息**：\n没有任何一个字段用于承载对话正文（这是有意的，见模块头）——\n冷启动五问走 ``/api/onboarding/*`` 的另一张表，不从这里过。",
         "properties": {
           "activity": {
             "enum": [
@@ -2370,6 +2602,13 @@
             "default": "",
             "title": "Nickname",
             "type": "string"
+          },
+          "profileSummary": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileTagOut"
+            },
+            "title": "Profilesummary",
+            "type": "array"
           },
           "quizCorrect": {
             "default": 0,
@@ -2695,6 +2934,144 @@
         "title": "MistakeListResponse",
         "type": "object"
       },
+      "OnboardingAnswerOut": {
+        "additionalProperties": false,
+        "description": "POST answer 的回执：accepted + 最新状态（主进程据此推 onboarding:changed）。",
+        "properties": {
+          "accepted": {
+            "default": true,
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "state": {
+            "$ref": "#/components/schemas/OnboardingStateOut"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "OnboardingAnswerOut",
+        "type": "object"
+      },
+      "OnboardingAnswerRequest": {
+        "additionalProperties": false,
+        "description": "POST /api/onboarding/{student_id}/answer 的请求体。\n\n★ question_id 与 TS 的 OnboardingQuestionId 同形：**一条回答属于哪一问由位置决定**，\n  不解析正文（见执行报告 §1.2）。",
+        "properties": {
+          "answerText": {
+            "maxLength": 400,
+            "title": "Answertext",
+            "type": "string"
+          },
+          "questionId": {
+            "enum": [
+              "q1",
+              "q2",
+              "q3",
+              "q4",
+              "q5"
+            ],
+            "title": "Questionid",
+            "type": "string"
+          },
+          "sessionId": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessionid"
+          }
+        },
+        "required": [
+          "questionId",
+          "answerText"
+        ],
+        "title": "OnboardingAnswerRequest",
+        "type": "object"
+      },
+      "OnboardingQuestionId": {
+        "enum": [
+          "q1",
+          "q2",
+          "q3",
+          "q4",
+          "q5"
+        ],
+        "title": "OnboardingQuestionId",
+        "type": "string"
+      },
+      "OnboardingState": {
+        "enum": [
+          "not_started",
+          "in_progress",
+          "done",
+          "skipped"
+        ],
+        "title": "OnboardingState",
+        "type": "string"
+      },
+      "OnboardingStateOut": {
+        "additionalProperties": false,
+        "description": "引导状态出参（GET state / POST answer 共用；票 31 删掉了 POST skip）。",
+        "properties": {
+          "answered": {
+            "items": {
+              "enum": [
+                "q1",
+                "q2",
+                "q3",
+                "q4",
+                "q5"
+              ],
+              "type": "string"
+            },
+            "title": "Answered",
+            "type": "array"
+          },
+          "displayName": {
+            "default": "",
+            "title": "Displayname",
+            "type": "string"
+          },
+          "nextQuestionId": {
+            "anyOf": [
+              {
+                "enum": [
+                  "q1",
+                  "q2",
+                  "q3",
+                  "q4",
+                  "q5"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nextquestionid"
+          },
+          "onboardingState": {
+            "enum": [
+              "not_started",
+              "in_progress",
+              "done",
+              "skipped"
+            ],
+            "title": "Onboardingstate",
+            "type": "string"
+          }
+        },
+        "required": [
+          "onboardingState"
+        ],
+        "title": "OnboardingStateOut",
+        "type": "object"
+      },
       "OpeningGuidance": {
         "additionalProperties": false,
         "description": "``GET /api/profile/{student_id}/opening``：新会话的**开场引导**。\n\n需求原文：「学生可主动提问对话，**智能体也能主动发起对话引导学习章节内容**。」\n这是全项目**唯一一处「AI 先开口」**的机制 —— 其余所有交互都是「学生问 → AI 答」。\n\n★★ 为什么它必须是一个**契约模型**而不是一句硬编码的欢迎语：开场语的内容来自\n  「依赖图 + 掌握度 + 冷启动」的推荐结论（``routes/profile.py`` 的\n  :func:`build_recommendation`，那是推荐路径的**唯一实现**）。写死的欢迎语\n  对谁都成立，等于没有引导 —— 而「针对性引导到合适的内容」才是这项功能的价值。\n\n★ ``source == \"empty\"`` 时 ``text`` **必须是空串**：前端据此**不发**开场，\n  而不是弹一句「今天想学什么？」这种对谁都成立的废话（没有依据的开场白\n  与随机挑一个知识点没有区别）。\n\n★ 它**不参与 6 事件词表**：开场语不是「一轮对话的流式事件」，而是\n  「会话建立」这一步的产物 —— 主进程在新建会话时取一次，作为一条独立消息\n  推给界面（与 `trace:changed` 同一性质：独立通道，不是第 7 个事件）。",
@@ -2749,6 +3126,22 @@
           "quiz"
         ],
         "title": "PayloadKind",
+        "type": "string"
+      },
+      "PersonalityValue": {
+        "enum": [
+          "开朗",
+          "安静",
+          "好奇",
+          "沉稳",
+          "细心",
+          "勇敢",
+          "急性子",
+          "慢性子",
+          "爱提问",
+          "爱琢磨"
+        ],
+        "title": "PersonalityValue",
         "type": "string"
       },
       "PreferenceKey": {
@@ -2821,6 +3214,235 @@
           "message"
         ],
         "title": "ProbeResult",
+        "type": "object"
+      },
+      "ProfileTagOut": {
+        "additionalProperties": false,
+        "description": "一条对外的画像标签。",
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "dimension": {
+            "default": 0,
+            "title": "Dimension",
+            "type": "integer"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "declared",
+              "observed",
+              "inferred"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "ts": {
+            "default": 0,
+            "title": "Ts",
+            "type": "integer"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value",
+          "source"
+        ],
+        "title": "ProfileTagOut",
+        "type": "object"
+      },
+      "ProfileTagUpdateRequest": {
+        "additionalProperties": false,
+        "description": "PUT /api/profile/{student_id}/tags/{key} 的请求体。",
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "source": {
+            "default": "declared",
+            "enum": [
+              "declared",
+              "observed",
+              "inferred"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 200,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "ProfileTagUpdateRequest",
+        "type": "object"
+      },
+      "ProfileTagsOut": {
+        "additionalProperties": false,
+        "description": "GET /api/profile/{student_id}/tags 的响应。\n\n★ parent_consent=False 时 tags **为空数组**（G-G）：落库本身不算外发，这一层才算。\n★ 两道闸都回给前端：设置页要据此显示开关的当前状态。",
+        "properties": {
+          "dimensionLabels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Dimensionlabels",
+            "type": "object"
+          },
+          "memorySwitch": {
+            "default": true,
+            "title": "Memoryswitch",
+            "type": "boolean"
+          },
+          "parentConsent": {
+            "default": true,
+            "title": "Parentconsent",
+            "type": "boolean"
+          },
+          "portraitEmptyNotes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Portraitemptynotes",
+            "type": "object"
+          },
+          "portraitRowKeys": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Portraitrowkeys",
+            "type": "object"
+          },
+          "portraitRowLabels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Portraitrowlabels",
+            "type": "object"
+          },
+          "tags": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileTagOut"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "title": "ProfileTagsOut",
+        "type": "object"
+      },
+      "ProfileTimeline": {
+        "additionalProperties": false,
+        "description": "``GET /api/profile/{student_id}/timeline`` 的响应（§5.2 #11）。\n\n★ ``events`` **新的在前**（界面上最近发生的事在最上面）。\n★ 空数组是正常值：新学生还没发生过任何变化，或家长关了同意闸（G-G）。\n★ **不跨学生**（禁做 #9）：端点只按一个 student_id 取数，结构上没有第二名学生的位置。",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileTimelineEvent"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId"
+        ],
+        "title": "ProfileTimeline",
+        "type": "object"
+      },
+      "ProfileTimelineEvent": {
+        "additionalProperties": false,
+        "description": "画像时间线上的一件事（§5.2 #11「画像变化时间线」）。\n\n★ 面向学生/家长：title 与 detail 都是**已经拼好的中文**，界面直接渲染。\n  为什么在后端拼：渲染层的每个字符串字面量都被 kp-slug 守卫扫到，\n  把「学段从小学高年级变成初中」这类句子写在渲染层等于给它开洞（契约书 §2.1 同一条理由）。\n★ 不含任何内部 id 作为可读正文：标识只可能出现在 key 字段里，\n  而 key 是给界面分组用的，不是给学生看的。",
+        "properties": {
+          "at": {
+            "title": "At",
+            "type": "integer"
+          },
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "key": {
+            "default": "",
+            "title": "Key",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "grade",
+              "tag",
+              "onboarding"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "origin": {
+            "default": "",
+            "enum": [
+              "cold_start",
+              "refresh",
+              "projection",
+              ""
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "kind",
+          "title"
+        ],
+        "title": "ProfileTimelineEvent",
         "type": "object"
       },
       "ProgressStage": {
@@ -3260,6 +3882,31 @@
         "title": "RagSearchResult",
         "type": "object"
       },
+      "RecommendationBasis": {
+        "additionalProperties": false,
+        "description": "推荐依据的一条（票 28）：从**该学生自己的** ``profile_tags`` 投影出来。\n\n★ 只带 key / value / 中文名：界面照念「因为你喜欢先看结论」，\n  而不是把内部键名或置信度摊给学生看。",
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "default": "",
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "RecommendationBasis",
+        "type": "object"
+      },
       "RecommendationItem": {
         "additionalProperties": false,
         "description": "一条推荐（**下一步学什么**）。\n\n字段全部是**可展示**的：``kp_id`` 是机器口径，``name`` 是给学生看的名字\n（由依赖图的 ``kp`` 表解析出来）；``reason`` 是一句可直接照念的中文。",
@@ -3318,6 +3965,23 @@
         "additionalProperties": false,
         "description": "``GET /api/profile/{student_id}/recommendation`` 的响应（票 20）。\n\n``source`` 说明这一批推荐是怎么来的 —— 前端据此决定提示语，\n也是验收时「冷启动 / 依赖图 / 待重练」三种形态的**可断言标志**：\n\n| source | 含义 |\n| --- | --- |\n| ``review`` | 优先重练（掌握度不足且练过） |\n| ``random`` | 从「本学段、还没学过」的知识点里**随机**挑（D-074 起的主要来源） |\n| ``graph`` | *历史值*：依赖图后继 —— **D-074 起不再产出**（保留取值以免旧客户端/旧测试炸） |\n| ``cold_start`` | *历史值*：图里的入口知识点 —— **D-074 起不再产出**（同上） |\n| ``empty`` | 知识库不可用且无任何学习记录（前端按空态展示，**不是错误**） |",
         "properties": {
+          "basis": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendationBasis"
+            },
+            "title": "Basis",
+            "type": "array"
+          },
+          "interestDrift": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InterestDrift"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/RecommendationItem"
@@ -3363,6 +4027,145 @@
         ],
         "title": "RecommendationSource",
         "type": "string"
+      },
+      "RefreshApplyOut": {
+        "additionalProperties": false,
+        "description": "refresh-apply 的回执：逐条结果 + 应用后的最新投影。\n\n★ 为什么回**逐条结果**而不是只回一个计数：概括是**尽力而为**的，\n  客户端（与运维）需要看得见「哪几条被分档拒绝了、为什么」，\n  否则「模型每轮都在猜同一个键、每轮都被 declared 挡住」这类静默空转\n  永远发现不了。`rejected` 里的 `reason` 是**封闭短标签**（见\n  `app/routes/profile.py` 的 `_refresh_reject_reason`），不是自由文本。",
+        "properties": {
+          "applied": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Applied",
+            "type": "array"
+          },
+          "dimensionLabels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Dimensionlabels",
+            "type": "object"
+          },
+          "memorySwitch": {
+            "default": true,
+            "title": "Memoryswitch",
+            "type": "boolean"
+          },
+          "parentConsent": {
+            "default": true,
+            "title": "Parentconsent",
+            "type": "boolean"
+          },
+          "rejected": {
+            "items": {
+              "$ref": "#/components/schemas/RefreshRejectOut"
+            },
+            "title": "Rejected",
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileTagOut"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "title": "RefreshApplyOut",
+        "type": "object"
+      },
+      "RefreshApplyRequest": {
+        "additionalProperties": false,
+        "description": "POST /api/profile/{student_id}/tags/refresh-apply 的请求体。\n\n批量应用一次「持续画像迭代」概括出来的标签。**逐条独立**：某一条不合法\n（非白名单 / 取值域 / 被分档拒绝）不影响其它条 —— 与 `sync_observed_tags`\n的「逐条独立」同一条纪律（概括是尽力而为的增强，不该整体失败）。",
+        "properties": {
+          "reason": {
+            "default": "",
+            "maxLength": 120,
+            "title": "Reason",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "$ref": "#/components/schemas/RefreshApplyTag"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tags"
+        ],
+        "title": "RefreshApplyRequest",
+        "type": "object"
+      },
+      "RefreshApplyTag": {
+        "additionalProperties": false,
+        "description": "一条要应用的概括结果（持续画像迭代的批量条目）。\n\n★ **没有 `reason` / `evidence` 字段**：概括的「为什么这么猜」是**过程**，\n  不是要长期留存的**画像**。留一个自由文本字段 = 多一个把对话正文\n  （乃至助手复述的 PII）塞进画像的侧门 —— 与 `learning_history` 不存正文同一条纪律。",
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "key": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Key",
+            "type": "string"
+          },
+          "source": {
+            "default": "inferred",
+            "enum": [
+              "declared",
+              "observed",
+              "inferred"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "title": "RefreshApplyTag",
+        "type": "object"
+      },
+      "RefreshRejectOut": {
+        "additionalProperties": false,
+        "description": "一条被拒的概括结果（`reason` 是**封闭短标签**，不是异常文本）。",
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "reason"
+        ],
+        "title": "RefreshRejectOut",
+        "type": "object"
       },
       "RegisterVariantsRequest": {
         "additionalProperties": false,
@@ -3515,6 +4318,26 @@
         "title": "StudentCreateRequest",
         "type": "object"
       },
+      "StudentDeleteResult": {
+        "additionalProperties": false,
+        "description": "``DELETE /api/students/{student_id}``：删号回执。\n\n★ **号不存在也回 200 + ``deleted: false``，不是 404**：删除是幂等的\n  （同一张卡片连点两次、两个窗口同时点），第二次拿到 404 会把「本来就已经没了」\n  报成「操作失败」，界面反而要为它写一段特例。调用方看 ``deleted`` 就知道\n  这次到底有没有真的删掉数据目录。",
+        "properties": {
+          "deleted": {
+            "title": "Deleted",
+            "type": "boolean"
+          },
+          "studentId": {
+            "title": "Studentid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "studentId",
+          "deleted"
+        ],
+        "title": "StudentDeleteResult",
+        "type": "object"
+      },
       "StudentProfile": {
         "additionalProperties": false,
         "description": "``GET /api/profile/{student_id}``：画像与掌握度（§6.3）。\n\n``recommended_kp_ids`` 由依赖图 + 掌握度算出（§8.6 用途一，票 12/20 填充）——\n**推荐必须来自依赖图**，不是随机取或按顺序取下一个。",
@@ -3548,6 +4371,44 @@
           "student"
         ],
         "title": "StudentProfile",
+        "type": "object"
+      },
+      "StudentUpdateRequest": {
+        "additionalProperties": false,
+        "description": "``PATCH /api/students/{student_id}``：改昵称 / 学段。**两个字段都可选，省略 = 不动。**\n\n★ 为什么是「可选字段」而不是整份 :class:`Student`：账号管理界面可能只改名字，\n  提交整份对象意味着界面上没动过的字段（尤其是服务端自己维护的时间戳）也一起写回，\n  那是「拿旧快照覆盖新值」的经典事故 —— 省略即由服务端保留原值，前端不必先读再写。\n\n★ 改学段会**连带清空当前章节**：章节属于某本教材，学段一变那本教材就不存在了\n  （与 ``app/grade/rules.py`` 的学段写入同一口径，D-038）。",
+        "properties": {
+          "gradeLevel": {
+            "anyOf": [
+              {
+                "enum": [
+                  "primary_low",
+                  "primary_high",
+                  "junior",
+                  "senior"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gradelevel"
+          },
+          "nickname": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nickname"
+          }
+        },
+        "title": "StudentUpdateRequest",
         "type": "object"
       },
       "SubjectiveGradeRequest": {
@@ -3596,6 +4457,34 @@
         ],
         "title": "SubjectiveGradeRequest",
         "type": "object"
+      },
+      "TagOrigin": {
+        "enum": [
+          "cold_start",
+          "refresh",
+          "projection",
+          ""
+        ],
+        "title": "TagOrigin",
+        "type": "string"
+      },
+      "TagSource": {
+        "enum": [
+          "declared",
+          "observed",
+          "inferred"
+        ],
+        "title": "TagSource",
+        "type": "string"
+      },
+      "TimelineEventKind": {
+        "enum": [
+          "grade",
+          "tag",
+          "onboarding"
+        ],
+        "title": "TimelineEventKind",
+        "type": "string"
       },
       "ValidationError": {
         "properties": {
@@ -4725,6 +5614,102 @@
         ]
       }
     },
+    "/api/onboarding/{student_id}/answer": {
+      "post": {
+        "description": "收下学生对某一问的回答，并推进流程状态。\n\n- 同一 question_id 重答 = **覆盖**（onboarding_qa 上的 UNIQUE 索引 + upsert）；\n- 收齐五问 → done；否则 in_progress；已经 done 的不回退；\n- 空白的 answerText 直接 422（它不该被当成「答过了」）。",
+        "operationId": "answer_onboarding_api_onboarding__student_id__answer_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OnboardingAnswerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingAnswerOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "提交一问的回答（重答覆盖）",
+        "tags": [
+          "onboarding"
+        ]
+      }
+    },
+    "/api/onboarding/{student_id}/state": {
+      "get": {
+        "description": "读引导状态。\n\n冷启动不建学生行也不写库：读一次状态不该留下任何痕迹（**读路径零副作用**）。\n真正落行的只有 answer（它顺带推进状态）—— 票 31 删掉 skip 之后，写路径只剩这一条。",
+        "operationId": "read_onboarding_state_api_onboarding__student_id__state_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "引导流程状态（是否该弹引导）",
+        "tags": [
+          "onboarding"
+        ]
+      }
+    },
     "/api/profile/{student_id}": {
       "get": {
         "description": "读某学生的画像：基本身份 + 掌握度 + 偏好 + **依赖图推荐**（票 20 填充）。\n\n- 学生不存在 → **404**（空画像会让学生以为「我没学过任何东西」，两者必须区分）；\n- ``studentId`` 非法 → **422**（它会被拼进文件系统路径）；\n- 库读写失败 → **503**（可读中文；上层 Tool 会把它转成 `error` 事件而不是崩）。\n\n★ ``recommended_kp_ids`` 自票 20 起**不再是空的**：它由 :func:`build_recommendation`\n  算出（依赖图 + 掌握度 + 冷启动兜底）。**不要**在别处再算一份 ——\n  两套推荐算法会给出两个不同的「下一步」，而学生只会看到其中一个。",
@@ -4910,6 +5895,172 @@
           }
         },
         "summary": "学习记录写入（答题/代码/动画观看/答疑）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/history": {
+      "get": {
+        "description": "「我做过什么」的**明细出口**（学习档案 → 学习历史）。\n\n★ 与 ``GET /report`` 的分工：那个是**聚合**（每天多少条、正确率、连续天数），\n  这个是**流水**（几点几分做了什么）。两者读同一张表，回答的是不同问题。\n★ 学生面只给结构化列 + 后端折好的**中文动作名**：``detail``（内部 JSON 摘要）\n  与 ``question``（恒空，G-K）**一个字节都不出**。\n★ 还没有学习记录的学生回**空列表**（不是 404）：前端要把它渲染成「还没有记录」\n  的空态，而 404 会让界面走错误分支、显示一句「读取失败」。",
+        "operationId": "learning_history_api_profile__student_id__history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "这一页最多几条",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "description": "这一页最多几条",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "按时间倒序跳过几条",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "按时间倒序跳过几条",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LearningEventHistoryOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "学习历史（结构化活动流水，倒序分页）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/identity": {
+      "get": {
+        "description": "读本地身份行与两道闸。\n\n★ 本端点是**本地身份唯一的读出口**，而它的字段里没有 school / class / real_grade ——\n  精确年级、学校、班级连出参形状都不存在（G-B 的第二种形态）。",
+        "operationId": "read_identity_api_profile__student_id__identity_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "本地身份 + 两道闸（真名不出网）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/identity/flags": {
+      "put": {
+        "description": "写两道闸（设置页开关）+ 可选落盘一次称呼。\n\n- parentConsent=false → 以后 GET /tags 与推荐依据一律为空（G-G）；\n- memorySwitch=false → 以后**不写任何标签**（G-F）。\n  ★ 只影响**往后写**：已经写下的标签仍在库里（学生没说「忘掉」），\n    要抹掉由 DELETE 逐个撤销 —— 两个动作分开，别把开关做成静默清库。\n- realName（可选）→ 写 `identity_local.real_name`（本地身份数据，永不进 prompt）。\n\n  ★★ 为什么称呼走这里（集成期修的功能死洞）：引导 Q5 问「我该怎么称呼你」，\n    主进程把答案脱敏后需要一条落盘路径。此前**没有**这条路径，\n    于是 `GET /identity` 恒回空 realName，渲染层永远把 `{{student_name}}`\n    替换成「同学」—— **占位机制静默失效**（模型被要求用占位符，却永远替换不出真名）。\n  ⚠️ 写称呼**不看** memorySwitch：不记画像 ≠ 忘掉称呼（见 store 的 set_real_name）。\n  ⚠️ 再过一次 safe_display_name：**入库的是脱敏后的称呼，不是学生原话**\n    （「XX 小学二班」这类不会进 identity_local —— 那是「学生没同意识别的信息」）。",
+        "operationId": "update_identity_flags_api_profile__student_id__identity_flags_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentityFlagsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "设置家长同意 / 记忆开关",
         "tags": [
           "profile"
         ]
@@ -5162,6 +6313,271 @@
         "summary": "学习报告（周窗口活动量 + 掌握度 + 闯关 + 章节 + 学段轨迹）",
         "tags": [
           "study"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/tags": {
+      "get": {
+        "description": "读画像标签。\n\n- 出栈前过白名单（G-A）与短期情绪 TTL（G-E）；\n- parentConsent=false → tags 空（G-G）；\n- 学生行不存在也**不建行**（读路径零副作用），回默认闸值 + 空标签。",
+        "operationId": "read_profile_tags_api_profile__student_id__tags_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileTagsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "画像标签（白名单投影，已按 TTL 过滤）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/tags/refresh-apply": {
+      "post": {
+        "description": "把一次「持续画像迭代」概括出来的标签批量应用到画像（分档写入）。\n\n★★ 为什么是**逐条独立**而不是整体成功/失败：概括是**尽力而为**的增强 ——\n  某一条被白名单/取值域/分档挡下，不该让其它条一起丢。与\n  `sync_observed_tags` 的「逐条独立」同一条纪律。\n\n★★ 分档在存储层（`LearningStore.upsert_tag_from_summary`）：本端点只负责\n  ① 白名单先挡一道（非白名单 → 该条拒，不 500）；\n  ② 把存储层的 ValueError 翻成**该条被拒**（而不是整个请求 422）；\n  ③ 回逐条结果 + 应用后的最新投影。\n\n★ 为什么 422 只留给**结构性问题**（空列表 / 超上限 / source='declared'）：\n  那三类是「调用方写错了代码」，重试也一样；而**单条**不合法是数据问题，\n  应该被记录、被跳过，让其余条照常落地。\n\n★ memory_switch=false（G-F）：写入原语**逐条返回 False**（不写任何标签），\n  这里如实记进 `rejected`（reason='memory-switch-off'），端点照常 200 ——\n  与 `PUT /tags/{key}` 的口径一致（关闸不是错误，是有效状态）。",
+        "operationId": "refresh_apply_tags_api_profile__student_id__tags_refresh_apply_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshApplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshApplyOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "批量应用持续画像迭代的概括结果（分档写入）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/tags/{key}": {
+      "delete": {
+        "description": "删一个画像标签（猜错了能救；也是信任基础）。键不在白名单 → 422（同写入口径）。",
+        "operationId": "delete_profile_tag_api_profile__student_id__tags__key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileTagsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "删一个画像标签（L3 一键撤销）",
+        "tags": [
+          "profile"
+        ]
+      },
+      "put": {
+        "description": "写 / 覆盖一个画像标签（标签纠错的写入口）。\n\n三道闸在存储层（LearningStore.upsert_tag），这里再挡一层并把它翻成 422：\n- 非白名单键 → 422（「标签表无此 key；写入端点无此参数」的可测形态）；\n- source='inferred' 的非情绪/风格键 → 422（禁做 #10）；\n- emotion 非有限枚举 → 422（禁做 #12）。\nmemory_switch=false 时**不写**（G-F），端点照常 200 —— 返回的 tags 里就是没它。",
+        "operationId": "update_profile_tag_api_profile__student_id__tags__key__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileTagUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileTagsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "写一个画像标签（白名单内）",
+        "tags": [
+          "profile"
+        ]
+      }
+    },
+    "/api/profile/{student_id}/timeline": {
+      "get": {
+        "description": "画像**怎么变成现在这样的**（§5.2 #11）。\n\n★★ 这个端点回答的是一个此前**无法回答**的问题：profile_tags 的主键是\n  (anon_student_id, key)，它只存**当前值** —— 没有历史就回答不了「变化过程」。\n  迁移 v6 新增的 profile_tag_history 就是为它准备的时间序列。\n\n★ 三类事件各自对应一处真实存在的序列，**不从别处推断时间**：\n  学段变更（grade_history）、标签变更（profile_tag_history）、入门问答（onboarding_qa）。\n\n★ 三道闸与画像其它出口完全一致：\n  · parent_consent=0 → events 空（G-G）；\n  · 只按单个 student_id 取数，**不跨学生**（禁做 #9）；\n  · 短期情绪标签两处都被挡住（写入侧不记 + 读取侧再滤，禁做 #11）。\n\n- 学生不存在 → 空时间线（**不是 404**：新学生本来就没有变化，那是正常态）；\n- limit 越界 → 422；库异常 → 503。",
+        "operationId": "read_profile_timeline_api_profile__student_id__timeline_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "最多返回几条（新的在前）",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "最多返回几条（新的在前）",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileTimeline"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "画像变化时间线（学段变更 / 标签变更 / 入门问答）",
+        "tags": [
+          "profile"
         ]
       }
     },
@@ -5869,6 +7285,100 @@
           }
         },
         "summary": "新建学生（含学段）",
+        "tags": [
+          "students"
+        ]
+      }
+    },
+    "/api/students/{student_id}": {
+      "delete": {
+        "description": "删掉 students/<student_id>/（含学习记录库与桌面端建在里面的会话目录）。\n\n★ 同样在路由层先 validate_student_id；删除路径只经 student_dir() 的归口解析\n  （内含白名单）。这是「只删校验通过的学生目录」的落点。\n★ 号不存在 → 200 + deleted: false（幂等删除，不是 404，见 StudentDeleteResult）。",
+        "operationId": "delete_student_api_students__student_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StudentDeleteResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "删除学生及其本地数据",
+        "tags": [
+          "students"
+        ]
+      },
+      "patch": {
+        "description": "改昵称 / 改学段；学段变了由存储层连带清空当前章节。\n\n★ validate_student_id 在**路由层**先跑一遍（存储层还会再跑）：内存占位实现不做任何\n  路径拼接，只有路由层这道校验才能保证 ../ 一类的 id 在**所有**实现下都是 422，\n  而不是「换个存储实现就放行」。\n★ 学生不存在 → 404：改名没有「幂等成功」的语义，界面需要知道这个号已经没了。",
+        "operationId": "update_student_api_students__student_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "student_id",
+            "required": true,
+            "schema": {
+              "title": "Student Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StudentUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Student"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "修改学生（昵称 / 学段）",
         "tags": [
           "students"
         ]

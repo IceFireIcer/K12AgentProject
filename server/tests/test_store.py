@@ -275,7 +275,9 @@ class TestMigrations(SqliteCase):
             (str(r["set_name"]), int(r["version"]))
             for r in conn.execute("SELECT set_name, version FROM schema_version")
         }
-        self.assertEqual(rows, {(KB, 1), (LEARNING, 1), (LEARNING, 2), (LEARNING, 3), (LEARNING, 4)})
+        # ★ 从迁移表推导（2026-09-28 集成期修正）：见 test_chapter_selection 同处的说明。
+        expected = {(KB, 1)} | {(LEARNING, mig.version) for mig in LEARNING_MIGRATIONS}
+        self.assertEqual(rows, expected)
         self.assertEqual(
             {str(r["set_name"]) for r in conn.execute("SELECT set_name FROM schema_version WHERE version > 1")},
             {LEARNING},
@@ -431,9 +433,10 @@ class TestMigrations(SqliteCase):
         for round_index in range(3):
             with ThreadPoolExecutor(max_workers=3) as pool:
                 versions = [f.result() for f in [pool.submit(open_and_migrate, i) for i in range(3)]]
+            latest = max(mig.version for mig in LEARNING_MIGRATIONS)
             self.assertEqual(
                 versions,
-                [4, 4, 4],
+                [latest, latest, latest],
                 f"第 {round_index + 1} 轮：并发首迁必须全部成功且都到最新版，实际 {versions}",
             )
 
