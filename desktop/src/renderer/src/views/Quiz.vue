@@ -1,25 +1,28 @@
 <script setup lang="ts">
 /**
- * 闯关练习页 —— 对话内联闯关卡的**展开视图**。
+ * 个性化学习页（内部 id 仍是 `quiz`）—— 对话内联闯关卡的**展开视图**。
  *
  * ── 版式（骨架，不是装饰）────────────────────────────────────────────
- * 旧版是「四块同权」：左侧 320px 关卡列表 + 右侧 1.7fr 题目卡 + 1fr 掌握度面板，
- * 真正的主对象（题目）被三面包围；而内容区最大的 22px 落在侧栏的标题上，
- * 题目反而不是焦点。现在改成**单列流**：
+ * 旧版两个极端都走过：先是「四块同权」（左 320px 关卡列表 + 1.7fr 题目 + 1fr 掌握度，
+ * 主对象被三面包围），后来改成单列流（关卡条横向铺在页面顶部）。现在：
+ * **左 268px 二级导航（教材章节 → 该章小知识点）+ 右主区**。
  *
- *   身份行 → 关卡进度条（横向） → 当前关卡标题 → **题目（全宽）**
+ *   左栏：关卡总览（大块可折叠，块内一个知识点 = 一关）
+ *   右栏：身份行 → 当前关卡标题 → **题目（全宽）**
  *          → 掌握度（题目下方横向铺开） → 判分说明（折叠）
  *
- * 于是全页唯一的 22px 是 `PageIdentity`（契约 §4：内容区最大字号必须是主对象那一层），
+ * 于是全页唯一的 22px 仍是 `PageIdentity`（契约 §4：内容区最大字号必须是主对象那一层），
  * 关卡名降为 16px（块标题档），掌握度/进度是 13px 与 12px。
- * 关卡切换是**页面级选择**，按契约 §7 放在页面顶部（而不是被塞进侧栏）。
+ * 关卡切换从「页面顶部横向 chip 条」搬进左栏（与智码工坊同一形态），
+ * 分块规则与那一页**共用** `study/workshop-path.ts`（不重排、不自己定义知识体系）。
  *
  * ── 数据来源（全部来自 `useQuizStore`，本页不再自带任何样本数据）──────
  *   关卡与阶段 `GET /api/quiz/progress` → `levels`（**服务端已按依赖图拓扑序排好**，
  *              所以这里一行排序都不做；`stage` / `badge` / `mastery` 原样来自 learning.db）
  *   题目       `GET /api/quiz/bank`     → `bank`（`QuizQuestionOut`：**结构上没有 `answer`**）
  *   判分       `POST /api/quiz/grade`   → `attempts[qid].result`（`QuizResult`）
- *   kp 中文名  教材知识点清单（`levels` 只给 kpId，中文名要另取；见下方 `kpNames`）
+ *   kp 中文名  教材知识点清单（`levels` 只给 kpId，中文名要另取；见 `study/kp-label.ts`）
+ *   章节      教材知识点清单的 `chapterTitle`（`knowledge.kpChapterOf`；见左栏分块）
  *
  * ★★ 三条纪律（改这个文件前先读）：
  *  1. **前端没有答案、也不判分**：题库载荷里没有 `answer`，本页也**不渲染 `explanation`**
@@ -46,7 +49,17 @@
  *     要么退回中性占位（`未命名知识点`）—— 界面上摆 `ai-definition-jr` 是开发期产物。
  */
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { Trophy, Circle, PlayCircle, CheckCircle2, History, X, Info, RotateCcw } from 'lucide-vue-next'
+import {
+  Trophy,
+  Circle,
+  PlayCircle,
+  CheckCircle2,
+  ChevronRight,
+  History,
+  X,
+  Info,
+  RotateCcw
+} from 'lucide-vue-next'
 import { useQuizStore, type QuizAttempt } from '../stores/quiz'
 import { useQuizLayoutStore, type QuizLayout } from '../stores/quizLayout'
 import { useFloatPanel } from '../stores/floatPanel'
@@ -54,6 +67,13 @@ import TeacherGate from '../components/TeacherGate.vue'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { QUIZ_TYPE_LABELS, SCORED_BY_LABELS, formatMasteryDelta } from '../labels'
 import { isBlankAnswer, optionLetter, type QuizQuestionType } from '../cards/quiz'
+// ★ 「一个知识点在界面上叫什么」的口径不写在本页：有中文名用中文名，取不到用中性的
+//   「未命名知识点」，**绝不退回 `ai-definition-jr` 这种 slug**（学生看到只会以为报错）。
+//   与智码工坊 / 学习档案共用 `study/kp-label.ts` 这一份实现。
+import { kpLabel } from '../study/kp-label'
+// ★ 关卡按**教材章节**分块的口径同样不写在本页：与智码工坊共用
+//   `study/workshop-path.ts` 的纯函数（顺带保证「两页的分块一模一样」，且它有单测）。
+import { groupLevelsByChapter, type WorkshopLevel } from '../study/workshop-path'
 import type { QuizResultView } from '../api/data'
 import { useEscape } from '../composables/useEscape'
 import { useFocusReturn } from '../composables/useFocusReturn'
@@ -82,7 +102,7 @@ const layoutStore = useQuizLayoutStore()
  *
  * ★★ 2026-09-25 去掉关卡锁定：不再有「还没解锁」这一档，**所有关卡都能点进去做题**。
  *   阶段只剩三种进度标记 —— 学习中 / 已闯关 / 已掌握，它们是**反馈**，不是门禁。
- * ★ 卡片上的状态只靠**图标 + 颜色 + 状态词**区分（`.stg__ico[data-stage]` 三档），
+ * ★ 左栏每一关的状态只靠**图标 + 颜色 + 状态词**区分（`.qpath__ico[data-stage]` 三档），
  *   不再挂百分比（报告 2.3 / 0.2）：一排 `0%` 不携带信息，只制造焦虑。
  */
 const stageMeta: Record<string, { label: string; icon: unknown }> = {
@@ -105,37 +125,94 @@ function stageView(stage: string): { label: string; icon: unknown } {
 
 /* ---------------------------------------------------------------- 关卡 */
 
-const levels = computed(() => quiz.levels)
+/**
+ * ★ 关卡条 = **本学段关卡路径**（`quiz.pathLevels`），不是整张进度表：
+ *   学段换过的学生名下会留着更低学段的旧关卡，整张表渲染出来就是同名关卡并排好几条。
+ *   口径见 `study/workshop-path.ts` 的 `pathLevelsOf`（服务端逐行标的 `inPath`）。
+ */
+const levels = computed(() => quiz.pathLevels)
 
 /**
- * kp_id → 中文名。
+ * 知识点显示名（教材里的中文名）。
  *
- * ⚠️ 关卡进度只给 `kpId`（没有名字），而界面上不能只摆 `ai-definition-jr` 这种标识。
- *    中文名的来源是**教材知识点清单**（与依赖图谱同一个 `kb.sqlite`）。
+ * ★★ 口径**不写在本页**：`study/kp-label.ts` 的 `kpLabel()` 是全站唯一实现
+ *   （与智码工坊、学习档案同一份）：有中文名用中文名，取不到时给中性的
+ *   「未命名知识点」，**绝不退回 `ai-definition-jr` 这种 slug**。
+ *   为什么不能退回 `kpId`（评审发现：界面上出现过 `ai-definition-jr`）：
+ *   它是我们内部的标识，不是学生的语言 —— 学生看到的是「一个读不懂的机器串」，
+ *   而且它把「我们怎么给知识点编号」摆给了不该关心这件事的人。
+ *   名字的来源仍是教材知识点清单（`knowledge.kpNameOf`，与依赖图谱同一个 `kb.sqlite`）。
  */
-const kpNames = computed(() => {
+function nameOf(kpId: string): string {
+  return kpLabel(kpId, null, (id) => knowledge.kpNameOf(id))
+}
+
+/* ---------------------------------------------------------------- 关卡导航 */
+
+/**
+ * 关卡的**二级导航**：大块 = 教材的一章，块内 = 该章的小知识点。
+ *
+ * ★★ 分块规则不写在本页（与智码工坊**同一个纯函数**，`study/workshop-path.ts`）：
+ *   块名来自教材的 `chapterTitle`（`knowledge.kpChapterOf`），块序与块内关序
+ *   全部听服务端给的路径顺序（依赖图拓扑序），本页**一行排序都不做** ——
+ *   教材加一章这里就自动多一块，不会静默错位。
+ * ★ 数据源是 `quiz.pathLevels`（本学段路径），不是整张进度表：学段换过的学生
+ *   名下会留着更低学段的旧关卡，整张表渲染出来就是同名关卡并排好几条。
+ */
+const modules = computed(() =>
+  groupLevelsByChapter(
+    levels.value.map((level): WorkshopLevel => ({ kpId: level.kpId, stage: level.stage })),
+    (kpId) => knowledge.kpChapterOf(kpId)
+  )
+)
+
+/**
+ * 大块的展开状态。
+ *
+ * ★ 默认展开的是 ① 当前这一关所在的块、② 第一个还没走完的块 ——
+ *   学生一进来看到的就是「我在哪」与「接下来做什么」，其余收起（几十关平铺是一堵墙）。
+ * ★ 手动点过之后以手动为准（`moduleOverrides`）：默认值会随换关而变，
+ *   不记这一份的话，学生刚展开的块会在下一次换关时被系统收回去。
+ */
+const moduleOverrides = ref<Record<string, boolean>>({})
+
+/** 默认展开的块键（当前关所在块 + 第一个未走完的块）。 */
+const defaultOpenKeys = computed(() => {
+  const keys = new Set<string>()
+  const current = modules.value.find((mod) =>
+    mod.levels.some((level) => level.kpId === quiz.activeKpId)
+  )
+  if (current) keys.add(current.key)
+  const pending = modules.value.find((mod) => mod.doneCount < mod.total)
+  if (pending) keys.add(pending.key)
+  return keys
+})
+
+/** 这一块现在是展开还是收起（手动优先，没手动过用默认值）。 */
+function isModuleOpen(key: string): boolean {
+  return moduleOverrides.value[key] ?? defaultOpenKeys.value.has(key)
+}
+
+function toggleModule(key: string): void {
+  moduleOverrides.value = { ...moduleOverrides.value, [key]: !isModuleOpen(key) }
+}
+
+/**
+ * kpId → 服务端徽章文本（形如「熟练-3」）。
+ *
+ * ★ 为什么要单独一张表：分块后的 `mod.levels` 只保留 `kpId + stage`
+ *   （`WorkshopLevel` 是分组用的最小形状），而徽章只有 `quiz.pathLevels` 上有。
+ *   不把徽章塞进分组函数，是为了不让「按章节分组」这件事知道徽章的存在。
+ */
+const badges = computed(() => {
   const map = new Map<string, string>()
-  for (const point of knowledge.points?.points ?? []) map.set(point.kpId, point.name)
+  for (const level of levels.value) if (level.badge) map.set(level.kpId, level.badge)
   return map
 })
 
-/** 查不到中文名时的中性占位（**不是** kp_id，见下）。 */
-const UNNAMED_POINT = '未命名知识点'
-
-/**
- * 知识点中文名；查不到时给**中性占位**，绝不退回 kp_id 原文。
- *
- * ★★ 为什么不能退回 `kpId`（评审发现：界面上出现过 `ai-definition-jr`）：
- *   它是我们内部的标识（slug），不是学生的语言 —— 学生看到的是「一个读不懂的机器串」，
- *   而且它把「我们怎么给知识点编号」摆给了不该关心这件事的人。
- *   查不到名字只剩两种情形（服务端已按当前教材白名单过滤掉已删除知识点，
- *   见 `routes/quiz.py` 的 `progress_snapshot(known_kp_ids=…)`）：
- *     ① 知识点清单还没取回来（那一小段窗口）；
- *     ② 清单里真的没有它。
- *   两种都该说「我暂时不知道它叫什么」，而不是把 slug 顶上去。
- */
-function nameOf(kpId: string): string {
-  return kpNames.value.get(kpId) ?? UNNAMED_POINT
+/** 徽章文本；没有就返回空串（模板据此决定渲不渲染）。 */
+function badgeOf(kpId: string): string {
+  return badges.value.get(kpId) ?? ''
 }
 
 /**
@@ -193,6 +270,10 @@ const localHint = ref('')
  *   「重做」的语义就是**回到未作答的状态**，两处必须一起清。
  * ★ 不清 `localHint` 之外的东西：题目本身、关卡进度、已落库的判分结果都不动
  *   （那些是服务端的事实，restart 从来不动它们）。
+ * ★★ 生成题（D-088）与教材题共用 `attempts` / `drafts` 两处状态，所以这里的
+ *   `quiz.restart()` + 清空循环**天然覆盖生成题**：不存在第二种「生成题专用」的
+ *   状态要另外清（那正是把它们合并进同一条做题链路的收益）。重做后所有题都回
+ *   未作答态，已落库的判分结果一个字不动。
  */
 function restartLevel(): void {
   quiz.restart()
@@ -204,6 +285,15 @@ function restartLevel(): void {
 }
 
 /**
+ * 「还想再练练」是否已经被点过 —— 自动阶段的 20 上限据此解除。
+ *
+ * ★ 为什么这个标记住在**页面**而不是 store：20 是这一页的**展示策略**（计划 §4.3：
+ *   截断放在渲染层投影，不改数据层）；store 只回答「这个学生有哪些题」。
+ * ★ 换关卡由下面那条 `watch(activeKpId)` 复位：新的一关重新进入自动阶段。
+ */
+const moreUnlocked = ref(false)
+
+/**
  * 本页要做的题 = 教材配套题 + **智团团给这个学生出过的题**（D-088）。
  *
  * ★ 为什么合成一条列表：两者的作答 / 判分 / 反馈**完全是同一条链路**
@@ -211,16 +301,56 @@ function restartLevel(): void {
  *   单开一块只会让学生以为自己要做两遍。
  * ★ 去重按 `qid`：生成题的 qid 带 `gen-` 前缀，与题库真题不可能同名
  *   （服务端登记时就整批拒过撞名的），所以去重在这里只是防「同一道生成题取回来两次」。
+ * ★★ 自动阶段截断（20 上限）是本页的展示策略，说明见函数体里的注释。
  */
 const questions = computed(() => {
   const banked = quiz.bank?.questions ?? []
   const seen = new Set(banked.map((question) => question.qid))
   const extra = quiz.generated.filter((question) => !seen.has(question.qid))
-  return [...banked, ...extra]
+  // ★★ 自动阶段截断（计划 §4.3）：还没点过「还想再练练」时，生成题只取到上限为止，
+  //   让「内置 + 生成 ≤ 20」在**屏幕上**成立（后端一行不改）。
+  //   取**前** quota 道：`GET /api/quiz/generated` 的列表本来就是「最近登记的在前」
+  //   （服务端把最近 limit 道倒过来发），所以前 quota 道 = 最近登记优先。
+  //   点过按钮即解除截断 —— 学生主动要更多了，20 不再是这一阶段的边界。
+  const quota = Math.max(0, quiz.autoPhaseLimit - banked.length)
+  const visibleExtra = moreUnlocked.value ? extra : extra.slice(0, quota)
+  return [...banked, ...visibleExtra]
 })
 
 /** 哪些 qid 是「智团团出的」——题头那枚标签靠它。 */
 const generatedQids = computed(() => new Set(quiz.generated.map((question) => question.qid)))
+
+/**
+ * 本关「智团团出的题」在**合并去重之后**还剩几道。
+ *
+ * ★ 为什么数合并后的列表而不是 `quiz.generated.length`：去重是这一页做的
+ *   （见 `questions` 的说明），拿原始条数会让计数与屏幕上真有的题对不上。
+ */
+const generatedCount = computed(
+  () => questions.value.filter((question) => generatedQids.value.has(question.qid)).length
+)
+
+/**
+ * 关卡头部那条**来源计数**（D-088：让学生看见生成题真的落到了这一关）。
+ *
+ * ★ 与题头角标同一条判据（{@link generatedQids}），但这里是**整关口径**：
+ *   「本关 3 道教材题 + 2 道智团团出的题」比一句「共 5 题」多告诉他一件真事 ——
+ *   后两题不是凭空多出来的，是智团团照着他自己的薄弱点出的。
+ * ★ 一道生成题都没有时**退回旧写法 `N 题`**：绝不摆「0 道智团团出的题」这种空计数
+ *   （凭空多一行，还会让学生以为生成失败了）。
+ * ★ 题还没取到时返回空串，整枚标签不渲染（与「空数据不摆仪表盘」同一条纪律）。
+ */
+const questionCountLabel = computed(() => {
+  const total = questions.value.length
+  if (total === 0) return ''
+  if (generatedCount.value === 0) return `${total} 题`
+  const bankCount = total - generatedCount.value
+  const parts: string[] = []
+  // 题库那半为 0 时省略：「0 道教材题」是不携带信息的一截。
+  if (bankCount > 0) parts.push(`${bankCount} 道教材题`)
+  parts.push(`${generatedCount.value} 道智团团出的题`)
+  return `本关 ${parts.join(' + ')}`
+})
 
 /**
  * 题区（`SurfacePanel.quiz__card`）要不要渲染。
@@ -490,6 +620,8 @@ watch(
   () => {
     cursorQid.value = ''
     finished.value = false
+    // ★ 新的一关重新进入自动阶段：20 上限的解除状态跟着关卡走（`moreUnlocked` 的说明）。
+    moreUnlocked.value = false
   }
 )
 
@@ -507,6 +639,44 @@ async function submit(qid: string, index: number) {
   //   （那正是这一版新增的节奏：一题做完，再由他决定什么时候换卡）。
   if (quiz.attempts[qid]?.result?.correct === true && layout.value === 'list') {
     await advanceAfterCorrect(index)
+  }
+}
+
+/* ── 「还想再练练」：这一屏的题都判过分之后再要一批 ────────────────────────
+ * 落点**两处**（计划 §4.5）：列表模式跟在题目列表之后（DOM 顺序天然随列表末端移动），
+ * 单卡模式进收尾卡的动作区。两处都必须是 `el-button`（次要动作）——
+ * 收尾卡里已经有 `.k12-cta`（去下一关），一屏只允许一个主色填充，
+ * 而且 `scripts/verify-guard-mutations.mjs` 的 ⑤ 只替换第一处 `.k12-cta`。
+ * ------------------------------------------------------------------------ */
+
+/**
+ * 按钮的出现条件：**屏幕上这一份题**全部判分过（不要求全对，与自动触发同口径）。
+ *
+ * ★ 判据用截断后的 `questions`，不是全量：被 20 上限挡在屏幕外的历史题学生根本
+ *   做不了，要求它们也判分过会让按钮永远不出现。
+ */
+const canRequestMore = computed(
+  () =>
+    questions.value.length > 0 &&
+    questions.value.every((question) => quiz.attempts[question.qid]?.result != null)
+)
+
+/** 失败后同一个按钮就是重试（不另起第二个控件，收尾卡的次要动作位也只留一个）。 */
+const moreButtonLabel = computed(() => (quiz.moreError !== null ? '再试一次' : '还想再练练'))
+
+/**
+ * 点「还想再练练」：先解除 20 上限（学生主动要更多了），再交给 store 生成。
+ *
+ * ★ 生成中 / 失败 / 降级三种状态全部**读 store**（`moreGenerating` / `moreError` /
+ *   `moreNotice`）—— 本页再养一份必然与它过期（与答题状态同一条纪律）。
+ * ★ 单卡模式点完回到题流：新题追加后收尾卡不再成立，走既有的 `goTo`（它顺手复位
+ *   `finished`），与「回去接着做」是同一个入口。
+ */
+async function requestMore(): Promise<void> {
+  moreUnlocked.value = true
+  await quiz.generateMore()
+  if (layout.value === 'single' && finished.value && firstUnsettledIndex.value >= 0) {
+    goTo(firstUnsettledIndex.value)
   }
 }
 
@@ -646,6 +816,118 @@ onMounted(() => {
 
 <template>
   <div class="quiz">
+    <!-- ── 左：二级导航（大块 = 教材章节，块内 = 该章的小知识点）──────────
+         ★ 数据只来自服务端：关卡顺序是 `quiz.pathLevels`（服务端拓扑序），
+           章节名来自教材知识点清单（`knowledge.kpChapterOf`），
+           分块规则住在 `study/workshop-path.ts`（与智码工坊同一个纯函数）——
+           本页**一行排序都不做**，块序 = 各章在服务端路径里第一次出现的位置。
+         ★ 窄窗口：左栏宽度钉死、块名与知识点名一律 ellipsis，右栏 `min-width: 0`，
+           不允许出现横向滚动。 -->
+    <aside class="quiz__nav">
+      <section class="qnav" aria-label="关卡">
+        <header class="qnav__head">
+          <Trophy :size="14" class="qnav__ico" />
+          <span class="qnav__label">关卡</span>
+          <span v-if="quiz.progressLoading && levels.length === 0" class="qnav__state">读取中…</span>
+          <!-- 「边做边问」：打开悬浮追问窗（与动画页 / 编程页同一个入口形态）。
+               它是**次要动作**，走 chip 形态而不是 `.k12-cta`。 -->
+          <button
+            type="button"
+            class="qnav__ask"
+            data-testid="quiz-view-ask"
+            title="打开追问窗，边做边问"
+            @click="askAboutLevel"
+          >
+            边做边问
+          </button>
+        </header>
+
+        <!-- `data-testid="quiz-levels"` 仍落在**关卡容器的外层**：
+             「这一页有没有关卡可点」这个判断与分块细节无关。 -->
+        <div v-if="levels.length > 0" class="qmods" data-testid="quiz-levels">
+          <section v-for="(mod, modIndex) in modules" :key="mod.key" class="qmod" :data-key="mod.key">
+            <!-- 大块头：可点的折叠开关（键盘可达，`aria-expanded` 如实报状态） -->
+            <button
+              type="button"
+              class="qmod__head k12-tap"
+              :aria-expanded="isModuleOpen(mod.key)"
+              :data-open="isModuleOpen(mod.key)"
+              :data-testid="'quiz-module-' + modIndex"
+              @click="toggleModule(mod.key)"
+            >
+              <ChevronRight
+                :size="13"
+                class="qmod__ico"
+                :data-open="isModuleOpen(mod.key)"
+                aria-hidden="true"
+              />
+              <span class="qmod__title">{{ mod.title }}</span>
+              <span class="qmod__count k12-num">{{ mod.doneCount }} / {{ mod.total }}</span>
+            </button>
+            <ul v-show="isModuleOpen(mod.key)" class="qpath">
+              <li
+                v-for="level in mod.levels"
+                :key="level.kpId"
+                class="qpath__item"
+                :data-stage="level.stage"
+                :class="{ 'qpath__item--on': quiz.activeKpId === level.kpId }"
+              >
+                <button
+                  type="button"
+                  class="qpath__btn"
+                  :data-testid="'quiz-level-' + level.kpId"
+                  :data-active="quiz.activeKpId === level.kpId ? 'true' : 'false'"
+                  :aria-current="quiz.activeKpId === level.kpId ? 'step' : undefined"
+                  :title="nameOf(level.kpId) + ' · ' + stageView(level.stage).label"
+                  @click="quiz.selectLevel(level.kpId)"
+                >
+                  <component
+                    :is="stageView(level.stage).icon"
+                    :size="13"
+                    class="qpath__ico"
+                    :data-stage="level.stage"
+                  />
+                  <span class="qpath__name">{{ nameOf(level.kpId) }}</span>
+                  <span class="qpath__stage">{{ stageView(level.stage).label }}</span>
+                  <!-- 徽章是服务端字段（`progress.badge`，形如「熟练-3」），没有就不渲染。
+                       卡片上**没有百分比**（报告 2.3）：状态由图标 + 状态词说。 -->
+                  <span v-if="badgeOf(level.kpId)" class="qpath__badge" :title="badgeOf(level.kpId)">{{ badgeTier(badgeOf(level.kpId)) }}</span>
+                </button>
+              </li>
+            </ul>
+          </section>
+        </div>
+        <!-- 空态：**对学生只说他的处境**（现在没有可闯的关卡），机制另说（见下） -->
+        <p v-else-if="!quiz.progressLoading" class="qnav__empty" data-testid="quiz-levels-empty">
+          还没有可以闯的关卡，教材内容准备好之后这里会一关一关地排出来。
+        </p>
+
+        <!-- 关卡是怎么来的（**教师 / 答辩视角**）：这是实现说明，不是给学生的解释。
+             学生视角整段不渲染；教师视角里它一直可见（评委要看这条链路）。 -->
+        <TeacherGate label="关卡是怎么来的">
+          <p class="qnav__note">
+            服务端会在首次打开闯关页时按依赖图播种关卡路径；知识库为空时这里是空的。
+          </p>
+        </TeacherGate>
+
+        <!-- ★★ 契约映射说明（**教师 / 答辩视角**）—— 缺陷现场：这段 memo 原本直接印在
+             学生页面上（「『连对 / 经验』在契约里没有对应模型……」「关卡徽章取服务端的
+             progress.badge」）。它只说明**缺的是什么**：契约里没有「连对 / 经验」这类模型，
+             所以这两个数不渲染；徽章是真实字段，有就显示。教师视角**一个字没删**。 -->
+        <TeacherGate label="为什么不显示「连对 / 经验」">
+          <p class="qnav__note qnav__note--row">
+            <Info :size="13" />
+            <span>
+              「连对 / 经验」在契约里没有对应模型（只有掌握度与学习记录），本页不显示这两个数；
+              关卡徽章取服务端的 <code>progress.badge</code>，没有时为空。
+            </span>
+          </p>
+        </TeacherGate>
+      </section>
+    </aside>
+
+    <!-- ── 右：主区。PageActions 在这个滚动容器内 → 吸顶有效。 ────────────── -->
+    <section class="quiz__main">
     <PageActions>
       <template #info>
         <!-- ★ 进度数字**只有一种格式**（报告 2.3）：`已掌握 N / M`。
@@ -685,77 +967,6 @@ onMounted(() => {
       <el-button size="small" @click="quiz.loadProgress(true)">重试</el-button>
     </div>
 
-    <!-- ── 关卡进度条：页面级选择，横向排开（窄屏横向滚动，不换行挤压）── -->
-    <section class="stages" aria-label="关卡">
-      <header class="stages__head">
-        <Trophy :size="14" class="stages__ico" />
-        <span class="stages__label">关卡</span>
-        <span v-if="quiz.progressLoading && levels.length === 0" class="stages__state">读取中…</span>
-        <!-- 「边做边问」：打开悬浮追问窗（与动画页 / 编程页同一个入口形态）。
-             它是**次要动作**，所以走 chip 形态而不是 `.k12-cta` ——
-             这一屏的主色填充属于提交 / 下一题那个主行动。 -->
-        <button
-          type="button"
-          class="stages__ask"
-          data-testid="quiz-view-ask"
-          title="打开追问窗，边做边问"
-          @click="askAboutLevel"
-        >
-          边做边问
-        </button>
-      </header>
-
-      <div v-if="levels.length > 0" class="stages__track" data-testid="quiz-levels">
-        <button
-          v-for="level in levels"
-          :key="level.kpId"
-          type="button"
-          class="stg"
-          :class="{ 'stg--on': quiz.activeKpId === level.kpId }"
-          :aria-current="quiz.activeKpId === level.kpId ? 'step' : undefined"
-          :data-testid="`quiz-level-${level.kpId}`"
-          :data-stage="level.stage"
-          @click="quiz.selectLevel(level.kpId)"
-        >
-          <component :is="stageView(level.stage).icon" :size="14" class="stg__ico" :data-stage="level.stage" />
-          <span class="stg__name">{{ nameOf(level.kpId) }}</span>
-          <span class="stg__stage">{{ stageView(level.stage).label }}</span>
-          <!-- 卡片上**没有百分比**（报告 2.3）：状态由图标 + 状态词说，
-               掌握度去下面的明细面板看（那里才是点开后的细节）。 -->
-          <!-- 徽章是服务端字段（`progress.badge`，文本形如「熟练-3」），没有就不渲染 -->
-          <span v-if="level.badge" class="stg__badge" :title="level.badge">{{ badgeTier(level.badge) }}</span>
-        </button>
-      </div>
-      <!-- 空态：**对学生只说他的处境**（现在没有可闯的关卡），机制另说（见下） -->
-      <p v-else-if="!quiz.progressLoading" class="stages__empty" data-testid="quiz-levels-empty">
-        还没有可以闯的关卡，教材内容准备好之后这里会一关一关地排出来。
-      </p>
-
-      <!-- 关卡是怎么来的（**教师 / 答辩视角**）：这是实现说明，不是给学生的解释。
-           学生视角整段不渲染；教师视角里它一直可见（评委要看这条链路）。 -->
-      <TeacherGate label="关卡是怎么来的">
-        <p class="stages__gate">
-          服务端会在首次打开闯关页时按依赖图播种关卡路径；知识库为空时这里是空的。
-        </p>
-      </TeacherGate>
-
-      <!-- ★★ 契约映射说明（**教师 / 答辩视角**）——
-           缺陷现场：这段 memo 原本直接印在学生页面上（「『连对 / 经验』在契约里没有对应
-           模型……」「关卡徽章取服务端的 progress.badge」），学生看到的是我们写给自己的
-           一张便条。它只说明**缺的是什么**：契约里没有「连对 / 经验」这类模型，所以这两个数
-           不渲染（没有数据源的数字画出来就是假统计）；徽章是真实字段，有就显示在关卡条上。
-           教师视角**一个字没删**（设计合理性那 25% 的证据就在这），只是不再给学生看。 -->
-      <TeacherGate label="为什么不显示「连对 / 经验」">
-        <p class="stages__note">
-          <Info :size="13" />
-          <span>
-            「连对 / 经验」在契约里没有对应模型（只有掌握度与学习记录），本页不显示这两个数；
-            关卡徽章取服务端的 <code>progress.badge</code>，没有时为空。
-          </span>
-        </p>
-      </TeacherGate>
-    </section>
-
     <!-- ── 当前关卡标题（16px 块标题档：不得追平身份行的 22px）──────────
          ★ 一关都没有时整块不渲染（报告 1.6）：空数据下摆一行「当前关卡 / 还没选关卡」
            是仪表盘读数，不是给学生看的东西。 -->
@@ -768,7 +979,7 @@ onMounted(() => {
         <el-tag v-if="activeLevel.badge" size="small" effect="plain" round :title="activeLevel.badge">
           徽章 {{ badgeTier(activeLevel.badge) }}
         </el-tag>
-        <el-tag v-if="quiz.bank" size="small" effect="plain" round>{{ questions.length }} 题</el-tag>
+        <el-tag v-if="questionCountLabel" size="small" effect="plain" round data-testid="quiz-source-count">{{ questionCountLabel }}</el-tag>
         <el-tag v-if="sourceLabel" size="small" effect="plain" round>{{ sourceLabel }}</el-tag>
         <!-- kp_id：**教师 / 答辩视角**才有。学生视角里去掉它 ——
              标题已经写着这一关的中文名，裸 slug（`ai-definition-jr`）是内部标识，不是他的语言。 -->
@@ -781,7 +992,7 @@ onMounted(() => {
     <!-- ── 题目：全宽。作答草稿在页面里，判分状态在 store 里 ───────────────
          ★ 一关都没有时**整块不渲染**（见 `showQuestionPanel`）：那时这张卡只能写
            「先选一关」，而上面根本没有关卡可选 —— 空态留给关卡区那一句灰字。 -->
-    <SurfacePanel v-if="showQuestionPanel" class="quiz__card">
+    <SurfacePanel v-if="showQuestionPanel" class="quiz__card" shine>
       <!-- ① 进度没读上来 / 读取中 / 还没选关卡：三种"题区为空"的原因分开说，
            不让取数失败看起来像"学生还没选关卡"。 -->
       <EmptyState
@@ -890,7 +1101,7 @@ onMounted(() => {
                 round
                 type="warning"
                 data-testid="quiz-generated-badge"
-              >智团团出的</el-tag>
+              >智团团出的题</el-tag>
               <span v-if="row.attempt?.result" class="qitem__done">已判分</span>
             </div>
 
@@ -968,6 +1179,28 @@ onMounted(() => {
 
         <p v-if="localHint" class="qlist__hint" data-testid="quiz-hint">{{ localHint }}</p>
 
+        <!-- 「还想再练练」：列表模式渲染在题目列表**之后** —— 题变长，按钮跟着列表末端
+             走（DOM 顺序天然如此，没有任何定位 / 测量逻辑）。单卡模式见收尾卡的动作区。 -->
+        <div v-if="layout === 'list' && canRequestMore" class="qmore" data-testid="quiz-more-list">
+          <el-button
+            :loading="quiz.moreGenerating"
+            :disabled="quiz.moreGenerating"
+            data-testid="quiz-more-list-btn"
+            @click="requestMore()"
+          >
+            {{ moreButtonLabel }}
+          </el-button>
+          <p v-if="quiz.moreNotice" class="qmore__note">{{ quiz.moreNotice }}</p>
+          <p v-if="quiz.moreError" class="qmore__error" role="alert">{{ quiz.moreError }}</p>
+          <TeacherGate label="「还想再练练」的题从哪来">
+            <p class="qmore__note">
+              点这个按钮会把本轮全部题目的作答轨迹随请求上行；主进程据此现场生成 10 道续练题，
+              先登记到这名学生自己的题库（先登记、后下发），再把无答案的题目追加到列表尾部。
+              自动阶段的配额是 20（内置 + 生成），点过这个按钮之后解除。
+            </p>
+          </TeacherGate>
+        </div>
+
         <!-- 卡脚：单卡模式的「上一题 / 下一题」。
              ★ 它们**不用** `.k12-cta`：一屏只允许一个主色填充（这一屏的主行动是「提交这题」），
                而且 `scripts/verify-guard-mutations.mjs` 的 ⑤ 只替换第一处 `.k12-cta` ——
@@ -1022,7 +1255,20 @@ onMounted(() => {
             >
               去下一关：{{ nameOf(nextLevel.kpId) }}
             </button>
+            <!-- ★ 次要动作必须用 el-button：这个动作区里已经有 `.k12-cta`（去下一关），
+                 一屏只允许一个主色填充，且变异脚本 ⑤ 只替换第一处 `.k12-cta`。 -->
+            <el-button
+              v-if="canRequestMore"
+              :loading="quiz.moreGenerating"
+              :disabled="quiz.moreGenerating"
+              data-testid="quiz-more-single"
+              @click="requestMore()"
+            >
+              {{ moreButtonLabel }}
+            </el-button>
           </div>
+          <p v-if="quiz.moreNotice" class="qmore__note">{{ quiz.moreNotice }}</p>
+          <p v-if="quiz.moreError" class="qmore__error" role="alert">{{ quiz.moreError }}</p>
         </div>
       </template>
     </SurfacePanel>
@@ -1086,6 +1332,7 @@ onMounted(() => {
         </el-collapse-item>
       </el-collapse>
     </SurfacePanel>
+    </section>
 
     <!-- 本轮小结抽屉：二级界面。遮罩 + 从右滑入的实色面板。 -->
     <Teleport to="body">
@@ -1157,14 +1404,57 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* 单列流：页面自己只在 `.shell__content` 里纵向排块，不建内层滚动容器 ——
- * 于是 PageActions 的吸顶基准仍是 `.shell__content`，且内边距 18/22 与
- * 它的默认 `--pa-pad-y/x` 一致（无需覆盖那两个变量）。 */
+/* 两栏：左侧二级导航（大块 = 教材章节 → 小知识点）+ 右侧主区。
+ * 每栏各自滚动，所以右栏的 PageActions 吸顶基准是 `.quiz__main`；
+ * 内边距 18/22 与它的默认 `--pa-pad-y/x` 一致（无需覆盖那两个变量）。 */
 .quiz {
+  /* 左导航 + 右主区：两栏各自滚动（与智码工坊同一形态）。
+   * ⚠️ 根容器必须给确定高度（.shell__content 是 flex 子项、有确定高度），
+   *   否则右栏的 overflow-y: auto 不会生效。 */
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── 左：二级导航（大块 = 教材章节，块内 = 该章的小知识点）─────────────
+ * 与智码工坊 .code__brief 同一形态：左栏只回答「我在哪 / 接下来去哪」，
+ * 右栏才是这一页的主对象（题目）。
+ * ★ 宽度钉死、内容一律 ellipsis，右栏 min-width: 0 —— 窄窗口压的是右栏，
+ *   不允许出现横向滚动。 */
+.quiz__nav {
+  width: 268px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 14px;
+  border-right: 1px solid var(--k12-border);
+  background: var(--k12-surface-2);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ── 右：主区（PageActions 在这个滚动容器内 → 吸顶有效）───────────────
+ * ⚠️ 内边距必须与 PageActions 的默认 --pa-pad-y / --pa-pad-x（18 / 22）一致，
+ *   否则吸顶时会漏出 / 盖住内容。 */
+.quiz__main {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--k12-gap);
   padding: 18px 22px 24px;
+  overflow-y: auto;
+}
+/* ★★ 列里的每一块**不许被压扁**（2026-09-30 修，用户报「底部那条白条是什么」）。
+ *   flex 列的默认 `flex-shrink: 1`：内容比容器高时，浏览器先**压缩子项**而不是
+ *   让它溢出滚动 —— 实测最后那块「判分与掌握度说明」被从 56px 压成 **21px**，
+ *   而它内部的折叠标题仍有 48px 且被卡片的圆角裁掉 ⇒ 屏幕上只剩一条**没有任何字的
+ *   白条**（看起来像删代码留下的残渣，其实是布局被压缩）。
+ *   判据：`overflow-y: auto` 的 flex 列里，子项一律 `flex: none` —— 空间不够时
+ *   **滚动**，不许改写子项的高度。 */
+.quiz__main > * {
+  flex: none;
 }
 
 /* PageActions 里的按钮文字与计数 */
@@ -1207,34 +1497,35 @@ onMounted(() => {
   color: var(--k12-fg-2);
 }
 
-/* ── 关卡进度条 ──────────────────────────────────────────────────────── */
-.stages {
+/* ── 二级导航：大块（教材的一章）→ 块内小知识点 ────────────────────────
+ * ★ 块名来自教材 chapterTitle，块序与块内关序来自服务端的路径顺序
+ *   （study/workshop-path.ts 的 groupLevelsByChapter），本页不排序。 */
+.qnav {
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-width: 0;
 }
-.stages__head {
+.qnav__head {
   display: flex;
   align-items: center;
   gap: 7px;
   color: var(--k12-muted);
 }
-.stages__ico {
+.qnav__ico {
   flex: none;
 }
-.stages__label {
+.qnav__label {
   font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   color: var(--k12-fg-2);
 }
-.stages__state {
+.qnav__state {
   font-size: var(--k12-fs-caption);
   color: var(--k12-muted-2);
 }
-/* 「边做边问」：与关卡标签同一行的**次要动作**（描边 chip 形态）。
- * `margin-left: auto` 把它推到右端 —— 它是页面级动作，不该挤在「关卡」标签旁边。 */
-.stages__ask {
+/* 「边做边问」：与关卡标签同一行的次要动作（描边 chip 形态），推到左栏右端。 */
+.qnav__ask {
   margin-left: auto;
   padding: 4px 10px;
   border: 1px solid var(--k12-border);
@@ -1247,78 +1538,155 @@ onMounted(() => {
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
-  .stages__ask:hover {
+  .qnav__ask:hover {
     border-color: var(--k12-accent-ink);
     color: var(--k12-accent-ink);
   }
 }
-/* 横向排开：窄屏靠横向滚动兜住，不换行挤压（卡片是「图标 + 关卡名 + 状态词」三件套，
- * 没有百分比 —— 见报告 2.3） */
-.stages__track {
-  display: flex;
-  gap: 8px;
-  min-width: 0;
-  overflow-x: auto;
-  padding-bottom: 2px;
-}
-.stages__empty {
+/* 空态：对学生只说他的处境（现在没有可闯的关卡），机制在 TeacherGate 里。 */
+.qnav__empty {
   padding: 8px 11px;
   border-radius: var(--k12-r-inset);
-  background: var(--k12-surface-2);
+  background: var(--k12-surface);
   font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
-.stg {
-  flex: none;
+.qmods {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.qmod {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+/* 大块头：可点的折叠开关（.k12-tap 保底 28px 触控高度）。 */
+.qmod__head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
   border: 1px solid var(--k12-border);
-  border-radius: var(--k12-r-card);
-  background: var(--k12-surface-2);
-  cursor: pointer;
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface);
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-body-sm);
+  font-weight: 650;
   text-align: left;
+  cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
-  .stg:hover:not(:disabled) {
-    border-color: var(--k12-accent-ink);
+  .qmod__head:hover {
+    border-color: var(--k12-accent-border);
+    color: var(--k12-accent-ink);
   }
 }
-.stg--on {
+.qmod__head[data-open='true'] {
   background: var(--k12-accent-soft);
-  border-color: var(--k12-accent-ink);
-}
-/* 三档进度：颜色 + 图标形状（`stageMeta` 的 icon）一起区分 —— 卡片上**没有数字**，
- * 这一条（连同左边的状态词）就是学生判断「这一关到哪一步了」的全部依据。
- * ★ 2026-09-25 去掉关卡锁定后不再有锁态配色：每一关都是可点的正常卡片。 */
-.stg__ico {
-  flex: none;
-}
-.stg__ico[data-stage='mastered'] {
-  color: var(--k12-good);
-}
-.stg__ico[data-stage='quizzed'] {
+  border-color: var(--k12-accent-border);
   color: var(--k12-accent-ink);
 }
-.stg__ico[data-stage='learning'] {
-  color: var(--k12-warn);
+/* 箭头：收起时向右、展开时向下 —— 形状本身说明「里面还有东西」。 */
+.qmod__ico {
+  flex: none;
+  color: var(--k12-muted);
+  transition: transform var(--k12-dur-state) var(--k12-ease-state);
 }
-.stg__name {
-  font-size: var(--k12-fs-body-sm);
-  font-weight: 600;
-  color: var(--k12-fg);
+.qmod__head[data-open='true'] .qmod__ico {
+  color: var(--k12-accent-ink);
+}
+.qmod__ico[data-open='true'] {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-k12-reduced-motion='off']) .qmod__ico {
+    transition: none;
+  }
+}
+.qmod__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 状态词是 meta —— 12px，不是 11px（11px 只许给角标） */
-.stg__stage {
+.qmod__count {
+  flex: none;
+  font-size: var(--k12-fs-caption);
+  font-weight: 600;
+  color: var(--k12-muted);
+}
+.qmod__head[data-open='true'] .qmod__count {
+  color: var(--k12-accent-ink);
+}
+.qpath {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.qpath__item {
+  min-width: 0;
+}
+.qpath__btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--k12-r-inset);
+  background: transparent;
+  color: var(--k12-fg-2);
+  font-size: var(--k12-fs-body-sm);
+  text-align: left;
+  cursor: pointer;
+  min-height: 30px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .qpath__btn:hover {
+    background: var(--k12-surface);
+    border-color: var(--k12-border);
+  }
+}
+/* 三档进度：颜色 + 图标形状（stageMeta 的 icon）一起区分（与旧关卡条同一口径）。 */
+.qpath__ico {
+  flex: none;
+}
+.qpath__ico[data-stage='mastered'] {
+  color: var(--k12-good);
+}
+.qpath__ico[data-stage='quizzed'] {
+  color: var(--k12-accent-ink);
+}
+.qpath__ico[data-stage='learning'] {
+  color: var(--k12-warn);
+}
+.qpath__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 状态词是 meta —— 12px，不是 11px（11px 只许给角标）。 */
+.qpath__stage {
+  flex: none;
   font-size: var(--k12-fs-caption);
   color: var(--k12-muted);
   white-space: nowrap;
 }
-/* 徽章：**≤4 字的角标** —— 11px 只在这一档允许（契约 §1），原始文本在 title 里 */
-.stg__badge {
+/* 徽章：≤4 字的角标 —— 11px 只在这一档允许，原始文本在 title 里。 */
+.qpath__badge {
+  flex: none;
   padding: 1px 6px;
   border-radius: var(--k12-r-flat);
   background: var(--k12-accent-soft);
@@ -1327,32 +1695,37 @@ onMounted(() => {
   font-weight: 650;
   white-space: nowrap;
 }
-/* 选中项整体走 accent-ink：它在 accent-soft 上是达标的文字色（对比度机器校验） */
-.stg--on .stg__name,
-.stg--on .stg__stage {
+/* 选中：整行 accent-soft 底 + accent 边（沿用原关卡 chip 的选中材质）。 */
+.qpath__item--on .qpath__btn {
+  background: var(--k12-accent-soft);
+  border-color: var(--k12-accent-border);
+}
+.qpath__item--on .qpath__name {
+  color: var(--k12-accent-ink);
+  font-weight: 650;
+}
+.qpath__item--on .qpath__stage {
   color: var(--k12-accent-ink);
 }
-/* ── 教师 / 答辩视角里那两段说明（学生视角整块不渲染，见 `.stages` 的模板）────
- * ⚠️ 里面**不再自带底色 / 内边距**：`<TeacherGate label>` 已经给了一个浅底虚线框，
- *   再叠一层同色底等于白叠（卡中卡同色 = 看不出层次，E3 那条纪律）。
- *   文字样式与页面其它 meta 一致（12px / muted），尺寸不靠 `padding` 撑。 */
-.stages__gate,
-.stages__note {
+/* ── 教师 / 答辩视角里那两段说明（学生视角整块不渲染）─────────────────
+ * ⚠️ 里面**不自带底色 / 内边距**：TeacherGate 已经给了一个浅底虚线框，
+ *   再叠一层同色底等于白叠。文字样式与页面其它 meta 一致（12px / muted）。 */
+.qnav__note {
   font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);
   color: var(--k12-muted);
 }
-.stages__note {
+.qnav__note--row {
   display: flex;
   align-items: flex-start;
   gap: 7px;
 }
-.stages__note svg {
+.qnav__note--row svg {
   flex: none;
   margin-top: 2px;
   color: var(--k12-muted-2);
 }
-.stages__note code {
+.qnav__note code {
   font-family: var(--k12-font-mono);
   font-size: var(--k12-fs-caption);
   color: var(--k12-accent-ink);
@@ -1602,6 +1975,27 @@ onMounted(() => {
 .qlist__hint {
   font-size: var(--k12-fs-caption);
   color: var(--k12-warn);
+}
+
+/* ── 「还想再练练」（列表尾部 / 收尾卡动作区共用）─────────────────────────
+ * 次要动作走 el-button（不用 .k12-cta）；列表模式下它就是一个普通块级元素，
+ * 跟在 .qlist 之后 → 题目追加后天然随列表末端下移，不需要任何定位逻辑。 */
+.qmore {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+/* 降级 / 失败的行内说明（不摆错误卡）：一句学生能读懂的话。 */
+.qmore__note {
+  font-size: var(--k12-fs-caption);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-muted);
+}
+.qmore__error {
+  font-size: var(--k12-fs-caption);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-bad);
 }
 
 /* ── 卡脚：单卡模式的上一题 / 下一题 ──────────────────────────────────────

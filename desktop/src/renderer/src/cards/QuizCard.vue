@@ -26,6 +26,7 @@ import { useKnowledgeStore } from '../stores/knowledge'
 import { useViewModeStore } from '../stores/viewMode'
 import type { InlineCard } from '../api/events'
 import { kpLabel } from '../study/kp-label'
+import { useCardShine } from '../composables/useCardShine'
 import CardHeader from '../components/card/CardHeader.vue'
 import CardBody from '../components/card/CardBody.vue'
 import CardFoot from '../components/card/CardFoot.vue'
@@ -44,6 +45,10 @@ const knowledge = useKnowledgeStore()
 const viewMode = useViewModeStore()
 
 const view = computed(() => readQuizCard(props.card.payload))
+
+/** 卡片根元素（光效把指针位置写成 CSS 变量的落点；三条分支共用它）。 */
+const rootRef = ref<HTMLElement | null>(null)
+useCardShine(rootRef)
 
 /**
  * 卡片头那个知识点 chip 的文字（**教材里的中文名**，不是 slug）。
@@ -265,9 +270,13 @@ function submitCurrent(): void {
        三段结构 = 卡头（题号 + 步骤条 + 对象级动作）/ 卡身（当前这一题）/ 卡脚（上一题 / 提交 / 下一题）。
        ★★ 三段走 `components/card/` 的子组件（类名直通 base.css 的 `.k12-card-*`，皮肤唯一来源）；
           卡片根元素只给 `k12-card`（白面 + 边框 + 圆角 + 投影）—— 本文件不再自带卡片皮肤。 -->
+  <!-- ★ 光效挂载点：静态 class 被 card-structure 守卫逐个钉着（不能改字符），
+       所以 k12-shine 走 :class；三条分支共用同一个 rootRef（同时只渲染一条）。 -->
   <article
     v-if="view.kind === 'questions'"
+    ref="rootRef"
     class="k12-card quiz"
+    :class="{ 'k12-shine': true }"
     data-testid="quiz-card"
     data-quiz="questions"
     :data-kp-id="view.kpId"
@@ -409,12 +418,11 @@ function submitCurrent(): void {
         </div>
       </div>
 
-      <!-- ★ 脚注只讲**对学生有意义**的两件事：答案不摆在界面上（这是功能上的承诺，
-           学生知道自己不会被"抄答案"这条路带偏），结果会出现在题目下面（他知道去哪找）。
-           旧文案里那句「判分由本地题库完成」是实现细节，已去。 -->
-      <p class="quiz__foot">
-        答案不会摆在界面上，这样你才是在自己练。批改结果与掌握度变化会显示在题目下面。
-      </p>
+      <!-- ⚠️ 2026-09-30 用户裁决：这里**曾经**有一条脚注「答案不会摆在界面上，这样你才是
+           在自己练。批改结果与掌握度变化会显示在题目下面。」—— 已删除，不要再加回来：
+           答题卡上学生要看的是题目本身，这类「我们是怎么安排的」说明属于自我表白；
+           「结果在题目下面」这件事由界面本身说明（作答后反馈就出现在那里）。
+           若将来确实需要交代口径，放到设置页/帮助里，不要占题卡的脚注位。 -->
       </template>
 
       <p v-if="localHint" class="quiz__hint" data-testid="quiz-hint">{{ localHint }}</p>
@@ -462,7 +470,9 @@ function submitCurrent(): void {
   <!-- 批改结果：单题的结论卡片 -->
   <article
     v-else-if="view.kind === 'result'"
+    ref="rootRef"
     class="k12-card quiz quiz--result"
+    :class="{ 'k12-shine': true }"
     data-quiz="result"
     :data-qid="view.qid"
     :data-correct="String(view.correct)"
@@ -501,7 +511,9 @@ function submitCurrent(): void {
          `agent/extensions/quiz.ts` 里有一句注释引用了旧串，那句注释会跟着过期。） -->
   <article
     v-else
+    ref="rootRef"
     class="k12-card quiz quiz--unknown"
+    :class="{ 'k12-shine': true }"
     data-quiz="unknown"
     :data-tool="card.tool ?? ''"
     :data-detail="view.text || null"
@@ -846,13 +858,6 @@ function submitCurrent(): void {
   word-break: break-word;
 }
 
-.quiz__foot {
-  margin-top: 12px;
-  /* 卡片脚注（判分口径说明）→ meta 档 */
-  font-size: var(--k12-fs-caption);
-  line-height: 1.6;
-  color: var(--k12-muted-2);
-}
 
 .quiz__hint {
   margin-top: 8px;
