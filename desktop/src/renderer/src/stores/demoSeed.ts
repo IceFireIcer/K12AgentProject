@@ -43,6 +43,9 @@ import {
   type DemoSeedCard,
   type DemoSeedState
 } from '../../../shared/demo-seed'
+// ★ 拦截判定（归一化 + 子串匹配，与 Python 的 guard 同口径）住在自己那个模块里：
+//   它要能被单测直接加载，而本文件与 chat store 互相 import（进不了纯 node 的测试）。
+import { matchBlockedWord } from './demo-safety'
 import {
   DIAGNOSTICS_TURN_LIMIT,
   type RuntimeSpan,
@@ -145,8 +148,28 @@ interface ScriptedPlayback {
   shown: number
   cards: readonly DemoSeedCard[]
   cardsPushed: boolean
-  /** 这一轮对应的脚本轮（收尾时要把它的信封交给驾驶舱）。 */
-  turn: DemoScriptTurn
+  /**
+   * 这一轮对应的脚本轮（收尾时要把它的信封交给驾驶舱）。
+   *
+   * ★ 拦截轮是 `null`：它不属于脚本（是学生原话触发的一条分支），
+   *   信封也另在 `envelope` 里单独给。
+   */
+  turn: DemoScriptTurn | null
+  /**
+   * 拦截轮的**收尾方式**：不回放正文，只投一条 `blocked`。
+   *
+   * ★ `undefined` = 普通脚本轮（照常逐字回放）；有值 = 拦截轮。
+   *   拦截轮的"正文"是安全回执，由 `blocked` 事件自己带（`safeText`），
+   *   所以它不需要逐字流式 —— 真实链路里输入侧命中也是**立刻**给回执、没有流。
+   */
+  blocked?: { safeText: string; reason: string }
+  /**
+   * 收尾时要交给驾驶舱的信封（`null` = 这一轮不交给它）。
+   *
+   * ★ 拦截轮给 `null`：它的信封在主进程、要经 `demo:script` 才拿得到，
+   *   本 store 不为了时间轴多拉一条通道（见 `playBlockedTurn` 的说明）。
+   */
+  envelope: TurnDiagnostics | null
 }
 
 /**
@@ -212,6 +235,15 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
    * ★ 它只增不减（`resetProgress()` 也不重置）：屏幕上那些轮次还在，同名 id 就会撞。
    */
   let pass = 0
+
+  /**
+   * 拦截轮放了几次（只增不减）。
+   *
+   * ★ 与 `pass` 同一个理由：`requestId` 撞名会让 `startTurn` 不建轮
+   *   （界面上表现为「按了发送、什么都没发生」）。拦截轮不带脚本轮次号，
+   *   所以它自己需要一个后缀来源。
+   */
+  let blockedPass = 0
 
   /**
    * 取数代次：每次「问状态 / 改状态」都 +1。
@@ -368,6 +400,12 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
    *   两条路各写一份收尾的话，迟早出现「取消后少一个 done（气泡永远在转）」。
    */
   function deliverRemainder(current: ScriptedPlayback): void {
+    // ★★ 拦截轮：**不投正文**。它整轮只有一条 `blocked`（原文被换成安全回执），
+    //   与真实链路里"输入侧命中 → 立刻给回执、没有流式正文"逐字同形。
+    if (current.blocked !== undefined) {
+      finishBlocked(current)
+      return
+    }
     const rest = current.answer.slice(current.shown)
     if (rest.length > 0) {
       current.shown = current.answer.length
@@ -384,7 +422,7 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
       name: 'done',
       data: { requestId: current.requestId, messageId: '' }
     })
-    publishEnvelope(current.turn)
+    if (current.envelope !== null) publishEnvelope(current.envelope)
   }
 
   /**
@@ -449,9 +487,9 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
     publishSnapshot()
   }
 
-  /** 把一轮脚本信封交给驾驶舱（接在历史轮次后面）。 */
-  function publishEnvelope(turn: DemoScriptTurn): void {
-    publishedTurns.push(withDemoSpans(turn.diagnostics))
+  /** 把一轮信封交给驾驶舱（接在历史轮次后面）。 */
+  function publishEnvelope(envelope: TurnDiagnostics): void {
+    publishedTurns.push(withDemoSpans(envelope))
     publishSnapshot()
   }
 
@@ -491,6 +529,28 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
     cursor.value = 0
   }
 
+  /**
+   * 拦截轮的收尾：投一条 `blocked`（+ `done`）把这一轮结掉。
+   *
+   * ★★ 为什么不用 `delta` 把回执"流"出来：真实链路里输入侧命中是**立刻**给回执的
+   *   （没有模型、没有流），而 `blocked` 事件的语义就是「正文换成安全提示」——
+   *   渲染侧因此会挂上撤回说明（那颗红色气泡），这正是演示要展示的东西。
+   * ★ `messageId` 恒空串：脚本轮次一个字节都没写进会话文件（与其余轮同一条纪律）。
+   */
+  function finishBlocked(current: ScriptedPlayback): void {
+    const blocked = current.blocked
+    if (blocked === undefined) return
+    chatStore().pushScriptedEvent({
+      name: 'blocked',
+      data: { requestId: current.requestId, reason: blocked.reason, safeText: blocked.safeText }
+    })
+    chatStore().pushScriptedEvent({
+      name: 'done',
+      data: { requestId: current.requestId, messageId: '' }
+    })
+    if (current.envelope !== null) publishEnvelope(current.envelope)
+  }
+
   /** 逐字推一个字；推到 70% 处投卡片；推完收尾。 */
   function pushNextChunk(): void {
     const current = playback
@@ -516,6 +576,47 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
   }
 
   /**
+   * 放一个**拦截轮**：学生真打的那句话 + 安全回执。
+   *
+   * ★★ 与脚本轮**共用同一个建轮出口**（`chat.beginScriptedTurn`）：气泡样式、滚动、
+   *   「正在回答」的判定都只看 `ChatTurn`，所以这条拦截轮与真实被拦下的那一轮
+   *   在界面上完全同形（含那颗红气泡与撤回说明）。
+   * ★ 学生气泡显示的是**演示者真打的那句话**（不打码）—— 这是本演示唯一一处
+   *   不显示脚本原话的轮次，因为要被看见的正是"这就是被拦下的输入"。
+   * ★ 它**不推进脚本游标**：拦截不是脚本里的一格，拦完接着从原来那一轮讲。
+   */
+  function playBlockedTurn(requestId: string, typed: string, safeText: string): boolean {
+    const chat = chatStore()
+    try {
+      chat.beginScriptedTurn(requestId, typed)
+    } catch (error) {
+      warnWiring(
+        'demoSeed.blocked',
+        `拦截轮建轮失败：${error instanceof Error ? error.message : String(error)}`
+      )
+      return false
+    }
+    playing.value = true
+    playback = {
+      requestId,
+      answer: '',
+      shown: 0,
+      cards: [],
+      cardsPushed: true,
+      // ⚠️ 拦截轮**不进驾驶舱的轮次时间轴**：它的信封住在主进程
+      //   （`main/demo/script.ts` 的 `buildBlockedTurnEnvelope()`），而本 store
+      //   只驱动本机回放。要把它也画上时间轴得再走一条通道 —— 那是另一件事，
+      //   眼下这条演示要的是环回里那颗红气泡（真实渲染路径，不是编的）。
+      turn: null,
+      envelope: null,
+      blocked: { safeText, reason: '命中内容安全词表' }
+    }
+    // 不逐字、不投卡片：立刻给回执（与真实链路里"输入侧命中即拦"同形）。
+    later(0, () => finishPlayback())
+    return true
+  }
+
+  /**
    * ★★ 放下一轮（学生按了发送、而沙箱开着时由 `chat.send()` 调到这里）。
    *
    * 返回 `false` = **这次没放**（没开沙箱 / 正在放 / 脚本还没拿到）——
@@ -531,6 +632,17 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
     if (!seeded.value || playing.value) return false
     const payload = script.value
     if (payload === null || payload.turns.length === 0) return false
+
+    // ★★ 拦截优先：学生真打的那句话命中词表 → 走拦截分支；否则照常推进脚本。
+    //   判据是**原话**，与第几轮无关 —— 打「机器学习到底是什么」永远不会被拦。
+    const hit = matchBlockedWord(typed ?? '', payload.blockedWords ?? [])
+    if (hit !== null) {
+      const requestId = `${DEMO_REQUEST_PREFIX}blocked${blockedPass === 0 ? '' : `.${blockedPass}`}`
+      blockedPass += 1
+      // ★ 拦截轮**不推进脚本游标**：它不是脚本里的一格，拦完接着从原来那一轮讲。
+      return playBlockedTurn(requestId, typed ?? '', hit.safeText)
+    }
+
     const turn = payload.turns[cursor.value % payload.turns.length]
     if (turn === undefined) return false
     cursor.value = (cursor.value + 1) % payload.turns.length
@@ -570,7 +682,8 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
       shown: 0,
       cards: turn.cards,
       cardsPushed: false,
-      turn
+      turn,
+      envelope: turn.diagnostics
     }
     // t=0：引用与档位先亮 —— 走的是与真实轮次**同一批**投影函数（右栏 / 来源标签照常）。
     chat.pushScriptedEvent({

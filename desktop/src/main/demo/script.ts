@@ -61,6 +61,7 @@ import type { Citation, CitationDetail, Degraded, GradeLevel, PayloadKind } from
 //   `stores/demoSeed.ts` 用同一条写法 import 同一个模块。
 import { DEMO_SCRIPT_TURN_COUNT } from '../../shared/demo-seed.ts'
 import type {
+  DemoBlockedWord,
   DemoHistorySession,
   DemoScriptPayload,
   DemoScriptTurn,
@@ -765,7 +766,59 @@ function retrievalTrace(input: RetrievalInput): DiagRetrieval {
 const GRADE_FILTER = "grade_level IN ('senior','junior','primary_high','primary_low')"
 
 /* ------------------------------------------------------------------ *
- * 五轮脚本
+ * 拦截演示：触发词样本（渲染侧据它决定「打了才拦」）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 四个类目的**回执文案**（逐字取自 `server/resources/sensitive-words.json` 的
+ * `categories[*].safeText`）。
+ *
+ * ★★ 绝不在这里现编任何安全文案：这几句是面向学生的正式回执，
+ *   抄错一个字就是「界面上的说法与真实链路不一致」。守卫逐字核对。
+ * ★ 类目顺序 = 词表里的书写顺序（`illegal` 在最前，演示默认打它）。
+ */
+const DEMO_SAFE_TEXT: Readonly<Record<string, string>> = {
+  illegal:
+    '这类内容我不能提供，也不能帮你查找。如果你是对相关新闻有疑问，我们可以聊聊「AI 在安全领域能做什么」。',
+  violence:
+    '这个话题我不能接着讲。如果你是因为看到或遇到了让人害怕的事，请一定告诉老师或爸爸妈妈，他们能真正帮上忙。我们可以换个问题，比如「AI 能不能帮忙发现危险」。',
+  self_harm:
+    '我很在意你刚刚说的这句话。这件事比今天的课更重要，请你现在就告诉身边信任的大人：爸爸妈妈、老师，或者拨打 12356 心理援助热线。你愿意说给我听的，我都在。',
+  personal_info:
+    '我不会向你索要姓名、住址、电话、密码这些东西，你也不要发给任何人或别的 AI 助手。只留一个昵称就够我们上课了，这也是在保护你自己。'
+}
+
+/**
+ * 沙箱拦截演示的**触发词样本**（词 + 类目 + 该类目的回执）。
+ *
+ * ★★ 每一条的词、类目、回执都**逐字取自** `server/resources/sensitive-words.json`，
+ *   由 `tests/demo-seed.test.ts` 对着那份随包词表逐条核对 —— 塞一个词表里没有的词、
+ *   或者抄错一个字的回执，守卫当场变红。
+ * ★★ **只取 `severity: "block"` 的词**：`flag` 类只记日志、不打断对话
+ *   （例如 `血腥` 就是 flag），拿它演示会当场露馅。
+ * ★ 只放这一小撮而不是整份词表：演示要的是「打这句必中」，
+ *   这几个是文档点名的推荐演示词（都能稳定命中，不随词表小幅更新失效）。
+ * ★★ 真实链路一个字都没改：沙箱态下学生的话**根本不进主进程**（由本机脚本接手），
+ *   所以这份样本不会成为任何真实输入的判定依据；它只决定**演示里要不要演那一段**。
+ */
+export const DEMO_BLOCKED_WORDS: readonly DemoBlockedWord[] = [
+  // ── illegal（演示默认打这一类：既展示拦截生效，合规口径也最稳）──────
+  { word: '制作炸药', category: 'illegal', safeText: DEMO_SAFE_TEXT.illegal ?? '' },
+  { word: '买枪', category: 'illegal', safeText: DEMO_SAFE_TEXT.illegal ?? '' },
+  { word: '制毒', category: 'illegal', safeText: DEMO_SAFE_TEXT.illegal ?? '' },
+  // ── violence ─────────────────────────────────────────────────────
+  { word: '砍死', category: 'violence', safeText: DEMO_SAFE_TEXT.violence ?? '' },
+  { word: '打死你', category: 'violence', safeText: DEMO_SAFE_TEXT.violence ?? '' },
+  // ── self_harm ────────────────────────────────────────────────────
+  { word: '自杀', category: 'self_harm', safeText: DEMO_SAFE_TEXT.self_harm ?? '' },
+  { word: '自残', category: 'self_harm', safeText: DEMO_SAFE_TEXT.self_harm ?? '' },
+  // ── personal_info ────────────────────────────────────────────────
+  { word: '你的手机号', category: 'personal_info', safeText: DEMO_SAFE_TEXT.personal_info ?? '' },
+  { word: '身份证号是多少', category: 'personal_info', safeText: DEMO_SAFE_TEXT.personal_info ?? '' }
+]
+
+/* ------------------------------------------------------------------ *
+ * 四轮脚本
  * ------------------------------------------------------------------ */
 
 /** 五轮的固定轮次号与请求号前缀（与 `stores/demoSeed.ts` 的约定一致）。 */
@@ -796,22 +849,22 @@ export const DEMO_HISTORY_TURN_COUNT = 9
 /**
  * 轮次号的**偏移**：缓冲区里的第 N 轮 = 这个学生的累计第 `N + DEMO_TURN_OFFSET` 轮。
  *
- * ★★ 为什么是这个数：缓冲区里一共 14 轮（预置历史 9 + 脚本 5），而演示的学段状态体
- *   （`demo/data.ts` 的 `demoGradeStateBody()`）写着这个学生**累计第 32 轮** ——
- *   32 − 14 = 18，于是**最后一轮**（第 14 轮 = 脚本第 5 轮）正好落在累计第 32 轮，
- *   与状态体的 `lastTurn: 32` / `lastChangeTurn: 27` / `cooldownRemainingTurns: 0`
- *   一一对应：改判发生在脚本之前（累计第 27 轮），到缓冲区末轮正好过了 5 轮，
- *   自动冷却窗口（`COOLDOWN_TURNS`）刚好走完。
+ * ★★ 为什么是这个数：缓冲区里一共 13 轮（预置历史 9 + 脚本 4），而演示的学段状态体
+ *   （`demo/data.ts` 的 `demoGradeStateBody()`）写着这个学生**累计第 31 轮** ——
+ *   31 − 13 = 18，于是**最后一轮**（第 13 轮 = 脚本第 4 轮）正好落在累计第 31 轮，
+ *   与状态体的 `lastTurn: 31` / `lastChangeTurn: 27` / `cooldownRemainingTurns: 0`
+ *   一一对应：改判发生在脚本之前（累计第 27 轮），到缓冲区末轮过了 4 轮，
+ *   自动冷却窗口（`COOLDOWN_TURNS` = 5）已走完。
  * ★ 偏移**全缓冲区统一**：预置历史的信封也用它，所以那些轮次的累计数（19..27）
- *   都排在「现在」（32）前面 —— 历史不会跑到当前会话的后面去。
+ *   都排在「现在」（31）前面 —— 历史不会跑到当前会话的后面去。
  * ★★ 表达式里的脚本轮数**必须引 `DEMO_SCRIPT_TURN_COUNT`**，不能再写一个裸的 3：
  *   脚本从三轮扩到五轮时，写死的那个数不会报错，只会让每一条信封的累计轮次整体偏 2
  *   （而界面上「第几轮」与学段状态体的 `lastTurn` 就再也对不上了）。
  */
-const DEMO_TURN_OFFSET = 32 - (DEMO_HISTORY_TURN_COUNT + DEMO_SCRIPT_TURN_COUNT)
+const DEMO_TURN_OFFSET = 31 - (DEMO_HISTORY_TURN_COUNT + DEMO_SCRIPT_TURN_COUNT)
 
 /**
- * 五轮的**学生原话与助手正文**（纯常量，不依赖任何取数）。
+ * 四轮的**学生原话与助手正文**（纯常量，不依赖任何取数）。
  *
  * ★★ 为什么单独抽出来而不是写在 `buildDemoScript()` 里：
  *   这两段字是**学生看得见的**，必须过 `student-view-discipline.test.ts` 那三条同一口径的
@@ -821,7 +874,12 @@ const DEMO_TURN_OFFSET = 32 - (DEMO_HISTORY_TURN_COUNT + DEMO_SCRIPT_TURN_COUNT)
  * ★ 它们的 `turn` 是**缓冲区里的轮次号**（不是 1..5）：前面 9 个号被预置历史占了
  *   （见 {@link DEMO_HISTORY_TURN_COUNT}），第一轮脚本接在第 10 轮上。
  *   这个号同时进 `requestId`（`script-10`）与时间轴上的「第 N 轮」，改它要一起想清楚。
- * ★ 脚本**循环播放**：放完第 5 轮回到第 1 轮（第 5 轮是拦截轮，循环结点）。
+ * ★ 脚本**循环播放**：放完第 4 轮回到第 1 轮。
+ * ★★ **拦截轮不在这个数组里**（2026-10-02 改）：它曾经是第 5 条、并且带
+ *   `studentTextFromInput: true` —— 那等于「打到第 5 下必然出拦截回执」，
+ *   演示者打「机器学习到底是什么」也会被拦，环回被吃掉。
+ *   现在拦截是一条**由学生原话决定的分支**（命中随包词表才走，见
+ *   {@link DEMO_BLOCKED_WORDS}），与脚本推进互不占位。
  */
 export const DEMO_SCRIPT_TEXT: readonly {
   turn: number
@@ -852,12 +910,6 @@ export const DEMO_SCRIPT_TEXT: readonly {
     answer:
       '嘿，能这么自信挺好的。机器学习这块挺绕的，你能这么利索地走完三步，说明三类学习的边界你已经分清了，这是大多数人会卡住的地方。\n\n不过嘴上说不算数，做三道题我看看。我按你的画像出了三题，第一题是基础对照，第二题是教育场景应用，第三题稍微难点，是过拟合的控制。都做对，这一关就算你过了。'
   },
-  {
-    turn: DEMO_HISTORY_TURN_COUNT + 5,
-    studentText: '这类问题应该怎么理解？',
-    answer:
-      '这类内容我不能提供，也不能帮你查找。如果你是对相关新闻有疑问，我们可以聊聊「AI 在安全领域能做什么」。'
-  }
 ]
 
 /**
@@ -1028,52 +1080,89 @@ export async function buildDemoScript(): Promise<DemoScriptPayload> {
         status: 'done',
         ok: true
       }
-    ),
-    build(
-      4,
-      // 这一轮**没有任何卡片**：输入侧就被拦下了，模型根本没开口，也就没有内容态可取。
-      { citations: [], cards: [] },
-      {
-        turn: DEMO_HISTORY_TURN_COUNT + 5,
-        requestId: `${DEMO_REQUEST_PREFIX}${DEMO_HISTORY_TURN_COUNT + 5}`,
-        // ★★ 第 5 轮是**拦截轮**：学生气泡显示演示者真正打进去的那句话
-        //   （不预置、不打码），助手气泡显示 `illegal` 类的 `safeText`。
-        //   `studentText` 在这里只是一句占位（信封的 `input.text` 会被覆盖成真打的字，
-        //   见 `stores/demoSeed.ts` 的 `advance(typed)`）——但**不能留空**，
-        //   因为 `isDemoScriptPayload` 的判据是「去空白后还有字」。
-        studentText: DEMO_SCRIPT_TEXT[4]?.studentText ?? '',
-        at: now + 240_000,
-        previousContextHash: contextHash,
-        // ★ 没工具：拦在工具调用之前。
-        tools: [],
-        // ★ 没查教材：输入侧就拦了，这一轮从没走到检索。
-        retrieval: null,
-        // ★★ 演示里**唯一**一条真实且自洽的拦截记录（见 `02-安全审查拦截演示.md`）：
-        //   `source: 'wordlist'` = 词表命中（与 `guard.py` 的 `source` 同源），
-        //   `reason` 那句与真实判定里拼出来的那句逐字同形。
-        //   ⚠️ 不往这里塞 `stage` / `category` / `label`：`DiagInterception` 只有
-        //   `source` / `reason` / `detail` 三个字段（见 `@shared/diagnostics`），
-        //   而「拦在入口」这件事由同轮 `safetyFinal.stages` 的 `{stage:'input', verdict:'blocked'}`
-        //   如实承载 —— 两处说的是同一件事，且都不越出既有类型。
-        interceptions: [
-          {
-            source: 'wordlist',
-            reason: '命中内容安全规则：违法与危险品（制作炸药）'
-          }
-        ],
-        // ★ 输入侧命中即拦，没发模型请求 —— 所以首字延迟是 0，总耗时也只有一个来回。
-        firstTokenMs: 0,
-        totalMs: 80,
-        status: 'blocked',
-        ok: false
-      }
     )
   ]
 
   return {
     turns,
+    // ★ 渲染侧据它决定「打了才拦」—— 见 `src/renderer/src/stores/demo-safety.ts`。
+    blockedWords: [...DEMO_BLOCKED_WORDS],
     sessionsWithCards: [DEMO_LOOP_SESSION_ID, DEMO_CODE_SESSION_ID, DEMO_QUIZ_SESSION_ID],
     history: await buildDemoHistory(diagnostics, studentContextBlock, systemPrompt, contextHash)
+  }
+}
+
+/**
+ * **拦截轮**的诊断信封（演示里那条红气泡的"证据底座"）。
+ *
+ * ★★ 它曾经是脚本第 5 轮，于是"打到第 5 下必然拦截"—— 打正常的话也被拦。
+ *   现在它**不在脚本轮次里**：只有学生原话真的命中词表时，驾驶舱才多出这一轮。
+ * ★ 三个"没有"是这一轮的全部证据：没拼提示词（输入侧就拦了）、没出工具、没查教材；
+ *   安全三阶段的结论也跟着变（入口 blocked、后两档 skipped、终审一次没跑）。
+ * ★ `studentText` 由调用方给（演示者真打的那句），因为信封里记的就是它。
+ */
+export function buildBlockedTurnEnvelope(
+  input: {
+    studentText: string
+    at?: number
+    /** 命中那一条的回执文案（长度进 `bufferedChars`）。 */
+    safeText?: string
+    /** 命中那一条的类目 id（进拦截记录的 reason）。 */
+    category?: string
+  }
+): TurnDiagnostics {
+  const at = input.at ?? Date.now()
+  const turn = DEMO_HISTORY_TURN_COUNT + DEMO_SCRIPT_TURN_COUNT + 1
+  const requestId = `${DEMO_REQUEST_PREFIX}blocked`
+  return {
+    turn,
+    requestId,
+    at,
+    input: { text: input.studentText, safetyInput: { verdict: 'blocked' } },
+    grade: {
+      applied: DEMO_GRADE_LEVEL,
+      decidedBy: 'llm',
+      layer2: 'used',
+      pending: null,
+      cumulativeTurns: turn + DEMO_TURN_OFFSET,
+      cooldownRemainingTurns: 0,
+      note: 'AI 引擎复核判定为高中：近几轮的用词、提问深度与练习表现合起来看，稳定落在高中。'
+    },
+    // ★★ 没拼过提示词：输入侧命中即拦，模型根本没被调用（与真实链路的
+    //   `decideGate` 在 inputVerdict.allowed === false 时那条分支同源）。
+    prompt: {
+      chars: 0,
+      totalTokens: 0,
+      gradeTemplate: DEMO_GRADE_LEVEL,
+      segments: [],
+      overrides: [],
+      hostPathClean: true
+    },
+    // 这一轮没有正文，也就没有画像注入的时机（真实链路里画像在 prompt 之前就注入了，
+    // 而这一轮压根没走到 prompt）。
+    studentContext: { injected: false, chars: 0, byteHash: '', sameAsPrev: false, text: '', truncated: false },
+    reasoning: { available: false, filtered: '', note: '本轮没有拿到模型推理增量。' },
+    tools: [],
+    retrieval: null,
+    safetyFinal: {
+      // ★★ 三阶段与其余轮**必须不同**：入口 blocked、后两档 skipped、终审一次没跑。
+      //   写成三阶段全 pass 就会与下面那条 interceptions 正面打架。
+      stages: [
+        { stage: 'input', verdict: 'blocked', reason: '入口预检拦下：这句话命中了安全词表，原话没有发给模型。' },
+        { stage: 'stream', verdict: 'skipped', reason: '没有生成过正文，这一阶段无从执行。' },
+        { stage: 'final', verdict: 'skipped', reason: '没有生成过正文，终审也无从执行。' }
+      ],
+      finalizations: 0,
+      retractions: 0,
+      bufferedChars: input.safeText?.length ?? 0
+    },
+    interceptions: [
+      {
+        source: 'wordlist',
+        reason: `命中内容安全规则（${input.category ?? 'illegal'}）`
+      }
+    ],
+    done: { ok: false, status: 'blocked', totalMs: 80, firstTokenMs: 0 }
   }
 }
 

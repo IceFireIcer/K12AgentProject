@@ -44,6 +44,31 @@ export type DemoSeedState = 'inactive' | 'seeded'
 export const DEMO_BLOCKED_MESSAGE = '这一项在当前状态下暂不可用。'
 
 /**
+ * 沙箱拦截演示用的一条**触发词**（词 + 类目）。
+ *
+ * ★★ 为什么沙箱要自带一份：真词表在 Python（`server/resources/sensitive-words.json`），
+ *   判定也在 Python（`guard.check_input`）—— 而沙箱态**不保证 sidecar 在线**
+ *   （断网演示是明确要支持的场景）。演示又必须能"打了才拦"，所以这一小份随脚本下发。
+ *
+ * ★★ 它**不是**安全判定的真源，只是演示触发用的样本：
+ *   - 判定规则与 Python 的 `normalize_for_matching` 对齐（NFKC → 去零宽 → 吃掉 CJK 间的空白/标点），
+ *     见 `src/renderer/src/stores/demo-safety.ts`；
+ *   - **词表内容由守卫钉住**：`tests/demo-seed.test.ts` 会拿这里的每个词去
+ *     `server/resources/sensitive-words.json` 里核对，并断言类目与 `safeText` 逐字一致 ——
+ *     往这里塞一个真词表里没有的词，守卫当场变红。
+ *   - 真实链路一个字都没改：沙箱态下学生的话**根本不进主进程**（由本机脚本接手），
+ *     所以这份样本不会成为任何真实输入的判定依据。
+ */
+export interface DemoBlockedWord {
+  /** 触发词（逐字取自随包词表）。 */
+  word: string
+  /** 类目 id（与词表的 `categories` 键同源）。 */
+  category: string
+  /** 该类目的面向学生的回执文案（逐字取自词表的 `safeText`）。 */
+  safeText: string
+}
+
+/**
  * 一张内联卡片的**预置载荷**。
  *
  * ★ 与 6 事件的 `payload` 事件同形（`kind` + 原始载荷）：渲染侧**不新写一套卡片渲染**，
@@ -142,6 +167,14 @@ export interface DemoHistorySession {
 export interface DemoScriptPayload {
   turns: DemoScriptTurn[]
   /**
+   * 拦截演示的**触发词样本**（见 {@link DemoBlockedWord}）。
+   *
+   * ★ 渲染侧据它决定「这一条要不要放拦截回执」—— 打了才拦、没打就照常推进脚本。
+   *   空数组 = 这份载荷没带（老载荷 / 构建到一半），那就**一律不拦**（宁可少演一段，
+   *   也不要把正常输入误判成敏感词）。
+   */
+  blockedWords: DemoBlockedWord[]
+  /**
    * 预置历史会话的**会话 id**（侧栏点开哪一条能回看到卡片）。
    * 空数组 = 没有任何预置会话带卡片。
    */
@@ -160,11 +193,14 @@ export interface DemoScriptPayload {
 /**
  * 脚本的轮数（渲染侧据它做循环；写成导出的常量而不是猜数组长度）。
  *
- * ★ 2026-10-02 从 3 扩到 5：多了「我会了」与**拦截轮**两拍（见 `docs/preset-redesign/`）。
+ * ★ 2026-10-02：3 → 5（加了「我会了」与拦截轮），同一天又 5 → **4** ——
+ *   拦截轮被移出脚本：它按**轮次**强制触发时，演示者打「机器学习到底是什么」
+ *   也会被拦（环回被吃掉）。现在拦截是一条**由原话决定**的分支
+ *   （命中随包词表才走，见 `DEMO_BLOCKED_WORDS`），不该占脚本里的一格。
  * ★ 它同时被 `main/demo/script.ts` 的轮次偏移引用 —— 扩轮时只改这里，
  *   偏移表达式跟着走（写死一个裸数字会让每条信封的累计轮次整体偏掉）。
  */
-export const DEMO_SCRIPT_TURN_COUNT = 5
+export const DEMO_SCRIPT_TURN_COUNT = 4
 
 /**
  * 运行期浅校验：`demo:script` 的下发载荷。
@@ -180,10 +216,19 @@ export const DEMO_SCRIPT_TURN_COUNT = 5
  */
 export function isDemoScriptPayload(value: unknown): value is DemoScriptPayload {
   if (typeof value !== 'object' || value === null) return false
-  const record = value as { turns?: unknown; sessionsWithCards?: unknown; history?: unknown }
+  const record = value as {
+    turns?: unknown
+    blockedWords?: unknown
+    sessionsWithCards?: unknown
+    history?: unknown
+  }
   if (!Array.isArray(record.turns) || record.turns.length === 0) return false
   if (!Array.isArray(record.sessionsWithCards)) return false
   if (!isDemoHistory(record.history)) return false
+  // ★ 拦截词表是**可选地带的**那一段（老载荷没有它），但一旦在就必须条条完整：
+  //   缺 `safeText` 的词会在界面上显示成一个空回执 —— 那比不拦还糟
+  //   （学生看到一颗空的红气泡，不知道发生了什么）。
+  if (!isDemoBlockedWords(record.blockedWords)) return false
   return record.turns.every((turn) => {
     if (typeof turn !== 'object' || turn === null) return false
     const item = turn as { turn?: unknown; studentText?: unknown; answer?: unknown; cards?: unknown }
@@ -196,6 +241,32 @@ export function isDemoScriptPayload(value: unknown): value is DemoScriptPayload 
       typeof item.answer === 'string' &&
       item.answer.trim() !== '' &&
       Array.isArray(item.cards)
+    )
+  })
+}
+
+/**
+ * 拦截词表那一段的形状检查（`undefined` = 这份载荷没带它，容忍；给了就必须条条完整）。
+ *
+ * ★ 判据是「三样都在且非空」：词、类目、回执文案。少任何一样，拦截演示要么不触发
+ *   （词为空）、要么显示一个没有来路的类目、要么弹一颗空的红气泡。
+ * ★ 语义上的**真伪**不在这里管（词是不是真在随包词表里、回执有没有抄错），
+ *   那是 `tests/demo-seed.test.ts` 对着 `sensitive-words.json` 逐条核对的事 ——
+ *   这里是运行期浅校验，只挡半截对象。
+ */
+function isDemoBlockedWords(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!Array.isArray(value)) return false
+  return value.every((entry) => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const item = entry as { word?: unknown; category?: unknown; safeText?: unknown }
+    return (
+      typeof item.word === 'string' &&
+      item.word.trim() !== '' &&
+      typeof item.category === 'string' &&
+      item.category.trim() !== '' &&
+      typeof item.safeText === 'string' &&
+      item.safeText.trim() !== ''
     )
   })
 }

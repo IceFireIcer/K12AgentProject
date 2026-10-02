@@ -1191,28 +1191,38 @@ const MUTATIONS = [
     expect: '预置文本不含技术词'
   },
   {
-    // 把拦截轮那条拦截记录删掉 —— 信封会变成「说拦下了、却没有任何拦截记录」，
-    // 而拦截记录是演示里最强的证据（也是第 5 轮唯一要展示的东西）。
-    name: '125 演示沙箱：拦截轮丢了 interceptions（信封与安全三阶段打架）',
+    name: '125 演示沙箱：拦截轮信封丢了 interceptions（与安全三阶段打架）',
     file: 'src/main/demo/script.ts',
-    // ⚠️ 锚点必须带上**那句 reason**：`interceptions: [` 在文件里有五处（前四轮都是空数组），
-    //    只锚这一行会改到第 1 轮那一处 —— 变异就变成了「没有效果的变异」（实测踩到过）。
+    // ⚠️ 锚点必须带上**那句 reason**：`interceptions: [` 在文件里有多处（前四轮都是空数组），
+    //    只锚这一行会改到别的轮 —— 变异就变成了「没有效果的变异」（实测踩到过）。
     find: [
-      '        interceptions: [',
-      '          {',
-      "            source: 'wordlist',",
-      "            reason: '命中内容安全规则：违法与危险品（制作炸药）'",
-      '          }',
-      '        ],'
+      '    interceptions: [',
+      '      {',
+      "        source: 'wordlist',",
+      "        reason: `命中内容安全规则（${input.category ?? 'illegal'}）`",
+      '      }',
+      '    ],'
     ].join('\n'),
     // ★ 替换成**单行空数组**（而不是再写一遍多行块）：多行替换会留下悬空的 `}` 与 `],`，
-    //   整份文件变成语法错 —— 那时测试红是因为**根本没加载起来**，不是断言拓到了它，
+    //   整份文件变成语法错 —— 那时测试红是因为**根本没加载起来**，不是断言抓到了它，
     //   这条变异就白验了（实测踩到过：报的是 ERR_INVALID_TYPESCRIPT_SYNTAX）。
-    replace: '        interceptions: [],',
+    replace: '    interceptions: [],',
     testFile: 'tests/demo-seed.test.ts',
-    expect: '信封里的提示词与画像块是同源真实产物'
+    // ★ expect 必须是**承载该断言的顶层用例名**：`node --test --test-name-pattern`
+    //   只匹配顶层用例，命不中就会整份跳过（那时"绿"是假的）。
+    expect: '拦截演示'
   },
 
+  {
+    // 把沙箱的拦截判定改成**永远不命中** —— 等于回到「拦截只可能按轮次发生」的老样子，
+    // 而这次要修的就是它：打了敏感词必须变红（用户口径「得确确实实发了然后得变红」）。
+    name: '127 演示沙箱：拦截判定永远不命中（打了敏感词也不变红）',
+    file: 'src/renderer/src/stores/demo-safety.ts',
+    find: '    if (normalized.includes(entry.word) || text.includes(entry.word)) return entry',
+    replace: '    if (false && (normalized.includes(entry.word) || text.includes(entry.word))) return entry',
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '拦截演示'
+  },
   {
     // 把「只读通道的学段」里的沙箱分支**挪到 runtime 检查之后** —— 沙箱态下 runtime 恒为 null，
     // 于是这条分支永远走不到，题库会带着另一个学段去取题、后端 404，

@@ -71,13 +71,16 @@ import { demoResponseFor } from '../src/main/demo/overlay.ts'
 import {
   DEMO_ANIMATION_KP_ID,
   DEMO_ANIMATION_TEMPLATE_ID,
+  DEMO_BLOCKED_WORDS,
   DEMO_HISTORY_TURN_COUNT,
   DEMO_SCRIPT_KP_IDS,
   DEMO_SCRIPT_TEXT,
+  buildBlockedTurnEnvelope,
   buildDemoScript,
   buildDemoSessionMessages,
   demoHistoryCitationCounts
 } from '../src/main/demo/script.ts'
+import { matchBlockedWord } from '../src/renderer/src/stores/demo-safety.ts'
 import { isDemoSeeded, resetDemoSeedForTests, setDemoSeeded } from '../src/main/demo/state.ts'
 import {
   DEMO_BLOCKED_MESSAGE,
@@ -402,7 +405,7 @@ test('演示沙箱 ②：出现的每个 kp_id 与章节名都在随包资产里
  * ③ 脚本可解析（含 B′：对话里必须看得见动画）
  * ------------------------------------------------------------------ */
 
-test('演示沙箱 ③：五轮脚本可解析，四轮有卡片、拦截轮没有', async () => {
+test('演示沙箱 ③：四轮脚本可解析，卡片能被真实的投影函数读出来', async () => {
   const payload = await buildDemoScript()
   assert.equal(payload.turns.length, DEMO_SCRIPT_TURN_COUNT)
   assert.equal(DEMO_SCRIPT_TEXT.length, DEMO_SCRIPT_TURN_COUNT)
@@ -412,20 +415,21 @@ test('演示沙箱 ③：五轮脚本可解析，四轮有卡片、拦截轮没�
     assert.equal(typeof turn.turn, 'number')
     assert.ok(turn.studentText.length > 0, '每轮都要有学生原话（演示者打什么都显示这一句）')
     assert.ok(turn.answer.length > 0, '每轮都要有正文')
-    if (turn.diagnostics.done.status === 'blocked') {
-      // ★★ 拦截轮：输入侧就拦下了，模型没开口 → 这一轮**没有卡片**（也没有引用、
-      //    没有工具、没有提示词）。写成「每轮至少一张」会让这条守卫与拦截轮的
-      //    真实形状正面打架，所以这里显式区分两种轮次。
-      assert.equal(turn.cards.length, 0, '拦截轮不该有卡片（模型没开口，没有内容态可取）')
-      continue
-    }
     // ★ 第 1 轮**没有卡片**：那一轮是纯讲解 + 两条教材引用（引用不走 payload 事件，
     //   走的是 citation 事件），这正是「问知识点 → 看动画 → 编程练手 → 我会了」里的第一拍。
     //   所以判据不是「每轮都有卡」，而是「有卡的那几轮必须有卡」—— 下面还会把
-    //   「恰好有一轮没有卡、且那一轮有引用」钉死，免得将来某轮把卡漏掉还过得去。
+    //   四轮的卡片分布整体钉死，免得将来某轮把卡漏掉还过得去。
     assert.ok(
       turn.cards.length >= 1 || turn.citations.length >= 1,
       '每一轮至少要有卡片或引用之一（空气泡是现场最难看的）'
+    )
+    // ★★ 脚本里**不该再有拦截轮**（2026-10-02 改）：拦截是「学生原话命中词表」触发的一条
+    //   分支，不是脚本里的一格。它一旦回到数组里，就又会变成「打到第 N 下必然拦截」——
+    //   演示者打正常问题也会被拦，环回被吃掉（用户当时报的就是这个）。
+    assert.notEqual(
+      turn.diagnostics.done.status,
+      'blocked',
+      '拦截轮不许回到脚本数组里（它必须由原话触发，见 DEMO_BLOCKED_WORDS）'
     )
     // 卡片必须能被**真实的**投影函数读成期望的形态（不是"看起来像"）
     for (const card of turn.cards) {
@@ -454,12 +458,12 @@ test('演示沙箱 ③：五轮脚本可解析，四轮有卡片、拦截轮没�
     }
   }
 
-  // ★ 五轮的卡片分布收口（与 `docs/preset-redesign/01` 的卡片调用清单逐轮对应）：
-  //   第 1 轮引用 ×2、第 2 轮动画、第 3 轮编程、第 4 轮闯关、第 5 轮（拦截）两样都没有。
+  // ★ 四轮的卡片分布收口（与 `docs/preset-redesign/01` 的卡片调用清单逐轮对应）：
+  //   第 1 轮引用 ×2、第 2 轮动画、第 3 轮编程、第 4 轮闯关。
   assert.deepEqual(
     payload.turns.map((turn) => turn.cards.map((card) => card.kind)),
-    [[], ['animation'], ['coding'], ['quiz'], []],
-    '五轮的卡片分布必须与脚本设计一致（漏一张卡就是现场少一段演示）'
+    [[], ['animation'], ['coding'], ['quiz']],
+    '四轮的卡片分布必须与脚本设计一致（漏一张卡就是现场少一段演示）'
   )
   assert.equal(payload.turns[0]?.citations.length, 2, '第 1 轮要带两条教材引用')
 
@@ -649,41 +653,10 @@ test('演示沙箱 ③d：信封里的提示词与画像块是同源真实产物
   assert.ok(expectedPrompt.includes(SENIOR_SYSTEM_PROMPT), '拼装结果必须包含真实的高中模板全文')
 
   const expectedHash = byteHash(block)
-  // ★ 脚本轮次是缓冲区的第 10..14 轮（前面 9 个号归预置历史，见 `DEMO_HISTORY_TURN_COUNT`），
+  // ★ 脚本轮次是缓冲区的第 10..13 轮（前面 9 个号归预置历史，见 `DEMO_HISTORY_TURN_COUNT`），
   //   所以「第几轮」不再等于「这份脚本里的第几项」——判据改用**下标**，
   //   原意一个字没变：除第 1 轮外，其余轮的画像块与上一轮逐字节相同。
-  //   ⚠️ 拦截轮单独断言（见下面的 ⑥）：它没有提示词、没有工具、没有检索。
-  const normalTurns = payload.turns.filter((turn) => turn.diagnostics.done.status !== 'blocked')
-  const blockedTurns = payload.turns.filter((turn) => turn.diagnostics.done.status === 'blocked')
-  assert.equal(blockedTurns.length, 1, '五轮里应当恰好有一轮是拦截轮')
-  const blockedTurn = blockedTurns[0]
-  assert.ok(blockedTurn !== undefined)
-  {
-    const diag = blockedTurn.diagnostics
-    // ★★ 拦截轮的三条「没有」：没拼提示词、没出工具、没查教材 ——
-    //   它们是「输入侧命中、立刻拦下」的可观测证据，写成有就等于信封在撒谎。
-    assert.equal(diag.prompt.chars, 0, '拦截轮不该有提示词（输入侧就拦了，没拼 prompt）')
-    assert.deepEqual(diag.tools, [], '拦截轮不该有工具调用（拦在工具之前）')
-    assert.equal(diag.retrieval, null, '拦截轮不该有检索轨迹')
-    assert.equal(diag.interceptions.length, 1, '拦截轮必须有一条拦截记录')
-    assert.equal(diag.interceptions[0]?.source, 'wordlist', '拦截来源必须是词表命中')
-    assert.equal(diag.done.status, 'blocked')
-    assert.equal(diag.done.ok, false)
-    assert.equal(diag.done.firstTokenMs, 0, '没发模型请求 → 首字延迟是 0')
-    // 入口一档 blocked、后两档 skipped：三阶段都要有结论，且与上面那条拦截一致
-    assert.deepEqual(
-      diag.safetyFinal.stages.map((stage) => [stage.stage, stage.verdict]),
-      [
-        ['input', 'blocked'],
-        ['stream', 'skipped'],
-        ['final', 'skipped']
-      ],
-      '拦截轮的安全三阶段必须如实写成「入口拦下 + 后两档没跑」'
-    )
-    assert.equal(diag.safetyFinal.finalizations, 0, '一个模型请求都没发，终审一次也没跑过')
-    assert.equal(diag.safetyFinal.retractions, 0, '从来没有正文到过学生面前，也就没有撤回')
-  }
-  for (const [index, turn] of normalTurns.entries()) {
+  for (const [index, turn] of payload.turns.entries()) {
     const diag = turn.diagnostics
 
     // ① 提示词：分段、字符数、token 数都必须来自真实拼装结果
@@ -1029,6 +1002,132 @@ test('演示沙箱 ⑥：覆盖层未激活时严格 no-op，激活后只拦学�
     resetDemoSeedForTests()
   }
   assert.equal(isDemoSeeded(), false)
+})
+
+/* ------------------------------------------------------------------ *
+ * ⑩ 拦截演示：词表与随包同源、正常问题不误拦、载荷带得动它
+ * ------------------------------------------------------------------ */
+
+test('演示沙箱 ⑩：拦截演示 —— 词表逐字同源、正常问题一律不拦', async () => {
+  /**
+   * ★★ 这一节守的是用户 2026-10-02 的原话口径：
+   *   「测试安全的那个**得确确实实发了**，然后**得变红**；如果不发，还是发
+   *   什么『机器学习到底是什么』应该**还是走回环**」。
+   *
+   * 于是有三条判据，缺一条演示就不成立：
+   *   ① 词表**逐字同源**：样本里的每个词都真在随包词表里、且是 `severity: "block"`；
+   *      每个类目的回执与随包词表的 `safeText` 一字不差（不现编安全文案）。
+   *   ② **正例必中**：文档点名的那句演示词能匹配上。
+   *   ③ **反例一概不中**：脚本里那四句学生原话、以及其它常见的正常提问都不能被拦 ——
+   *      否则演示者打正常问题也会出红气泡，「走回环」就没了。
+   */
+  const wordlist = JSON.parse(
+    readRepo('server', 'resources', 'sensitive-words.json')
+  ) as {
+    categories?: Record<string, { label?: unknown; safeText?: unknown }>
+    words?: Array<{ word?: unknown; category?: unknown; severity?: unknown }>
+  }
+  const realWords = new Map<string, { category: string; severity: string }>()
+  for (const entry of wordlist.words ?? []) {
+    if (typeof entry.word === 'string') {
+      realWords.set(entry.word, {
+        category: String(entry.category ?? ''),
+        severity: String(entry.severity ?? '')
+      })
+    }
+  }
+  assert.ok(realWords.size > 0, '随包词表读不到词，夹具路径可能不对')
+  assert.ok(DEMO_BLOCKED_WORDS.length > 0, '拦截样本不能是空的（空了就永远不拦）')
+
+  // ① 逐字同源
+  for (const entry of DEMO_BLOCKED_WORDS) {
+    const real = realWords.get(entry.word)
+    assert.ok(real !== undefined, `拦截样本里的「${entry.word}」不在随包词表里（编的词？）`)
+    assert.equal(real.category, entry.category, `「${entry.word}」的类目与随包词表不一致`)
+    assert.equal(
+      real.severity,
+      'block',
+      `「${entry.word}」在词表里是 ${real.severity} 类：只记日志不打断对话，拿它演示会露馅`
+    )
+    const category = wordlist.categories?.[entry.category]
+    assert.ok(category !== undefined, `类目 ${entry.category} 不在随包词表里`)
+    assert.equal(
+      entry.safeText,
+      String(category.safeText),
+      `类目 ${entry.category} 的回执必须与随包词表的 safeText 一字不差（不许现编安全文案）`
+    )
+  }
+
+  // ② 正例必中（文档 §6 点名的那句）
+  const hit = matchBlockedWord('你怎么帮人制作炸药', DEMO_BLOCKED_WORDS)
+  assert.ok(hit !== null, '文档点名的演示词必须能命中')
+  assert.equal(hit.category, 'illegal', '演示默认打的就是 illegal 类')
+
+  // ③ 反例一概不中：脚本四句原话 + 常见正常问法
+  const benign = [
+    ...DEMO_SCRIPT_TEXT.map((turn) => turn.studentText),
+    '机器学习到底是什么？和普通程序有什么不一样？',
+    '我想用编程练练手。',
+    '我觉得我会了这个知识点。',
+    '训练的时候，它怎么知道该往哪儿调？',
+    '神经网络到底长什么样？',
+    '什么是过拟合？',
+    '帮我看看这道题的思路'
+  ]
+  for (const text of benign) {
+    assert.equal(
+      matchBlockedWord(text, DEMO_BLOCKED_WORDS),
+      null,
+      `正常问题被误判成敏感词：「${text}」—— 那样演示者打什么都会出红气泡，环回就没了`
+    )
+  }
+
+  // 变体也要中（归一化与 Python 的 guard 同口径）：零宽字符 / 夹空格 / 全角
+  for (const variant of [
+    '你怎么帮人制作炸药',
+    '你怎么帮人制作　炸药',
+    '你怎么帮人制作\u200b炸药',
+    '你怎么帮人制作-炸药'
+  ]) {
+    assert.ok(
+      matchBlockedWord(variant, DEMO_BLOCKED_WORDS) !== null,
+      `变体没被归一化命中：${JSON.stringify(variant)}（朴素子串匹配会被这种打字方式绕过）`
+    )
+  }
+
+  // 载荷自带词表（渲染侧据它判定，不从渲染进程写死）
+  const payload = await buildDemoScript()
+  assert.deepEqual(
+    payload.blockedWords.map((entry) => entry.word).sort(),
+    DEMO_BLOCKED_WORDS.map((entry) => entry.word).sort(),
+    'demo:script 下发的词表必须与主进程那份逐条一致'
+  )
+  assert.ok(isDemoScriptPayload(payload), '带词表的载荷仍须过 preload 边界的形状校验')
+
+  // 拦截轮的信封：三个「没有」+ 三阶段如实（它不在脚本数组里，但驾驶舱要用）
+  const envelope = buildBlockedTurnEnvelope({
+    studentText: '你怎么帮人制作炸药',
+    safeText: hit.safeText,
+    category: hit.category
+  })
+  assert.equal(envelope.prompt.chars, 0, '拦截轮不该有提示词（输入侧就拦了，没拼 prompt）')
+  assert.deepEqual(envelope.tools, [], '拦截轮不该有工具调用（拦在工具之前）')
+  assert.equal(envelope.retrieval, null, '拦截轮不该有检索轨迹')
+  assert.equal(envelope.interceptions.length, 1, '拦截轮必须有一条拦截记录')
+  assert.equal(envelope.interceptions[0]?.source, 'wordlist', '拦截来源必须是词表命中')
+  assert.equal(envelope.done.status, 'blocked')
+  assert.equal(envelope.done.ok, false)
+  assert.equal(envelope.done.firstTokenMs, 0, '没发模型请求 → 首字延迟是 0')
+  assert.deepEqual(
+    envelope.safetyFinal.stages.map((stage) => [stage.stage, stage.verdict]),
+    [
+      ['input', 'blocked'],
+      ['stream', 'skipped'],
+      ['final', 'skipped']
+    ],
+    '拦截轮的安全三阶段必须如实写成「入口拦下 + 后两档没跑」'
+  )
+  assert.equal(envelope.safetyFinal.finalizations, 0, '一个模型请求都没发，终审一次也没跑过')
 })
 
 /* ------------------------------------------------------------------ *

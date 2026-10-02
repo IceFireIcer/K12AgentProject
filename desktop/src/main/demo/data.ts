@@ -619,9 +619,10 @@ const DEMO_GRADE_CONFIDENCE = 0.91
  *   ⑥ 第 27 轮 **复核判定为高中**：本次演示的现状（`toLevel` = `DEMO_GRADE_LEVEL`）。
  *   ★ 相邻两次自动调整都隔 ≥5 轮（`COOLDOWN_TURNS`），所以第 3 / 8 / 13 / 18 / 23 / 27 轮各动一次；
  *     基线那行（`fromLevel` 为空）**不参与冷却**，所以第 3 轮动得起来。
- *   ★ 最后一次在第 27 轮、当前是第 32 轮 → 与 `demoGradeStateBody()` 的
- *     `lastTurn: 32` / `lastChangeTurn: 27` / `cooldownRemainingTurns: 0` 一一对应
- *     （32 − 27 = 5，正好走完自动冷却窗口）。
+ *   ★ 最后一次在第 27 轮、当前是第 31 轮 → 与 `demoGradeStateBody()` 的
+ *     `lastTurn: 31` / `lastChangeTurn: 27` / `cooldownRemainingTurns: 0` 一一对应
+ *     （31 − 27 = 4，已走完自动冷却窗口 `COOLDOWN_TURNS` = 5 —— 冷却按「距锚点的
+ *     真实交互轮数」算，锚点之前的轮次不计）。
  * ★ 置信度只升不降（0 / 0.75 / 0.75 / 0.85 / 0.85 / 0.85 / 0.91）：规则层两次都是
  *   「三轮同向、强度各 0.5」，按 `min(0.9, 0.5 × 1.5)` 得 0.75；
  *   13 / 18 / 23 三轮复核自报 0.85；末轮复核自报 0.91（= `DEMO_GRADE_CONFIDENCE`）。
@@ -1437,11 +1438,14 @@ export function demoSavedAnimationItemBody(
  *   → 文案「AI 引擎判定」；`decidedBy === 'rules' || source === 'inferred'` → 「本地规则判定」）。
  *   `source` 仍是 `inferred`：写入方依然是**系统**而不是学生手选 ——
  *   「谁写的」（source）与「哪一层判的」（decidedBy）是两个轴，别混成一条。
- * ★ `cumulativeTurns` / `lastTurn` 都是 32（跨会话连续）：早已越过
+ * ★ `cumulativeTurns` / `lastTurn` 都是 31（跨会话连续）：早已越过
  *   `LLM_DECIDES_FROM_TURN`（第 5 轮）那条「请 AI 复核」的水位线。
  * ★ `lastChangeTurn: 27`：最后一次改判发生在第 27 轮（见 `DEMO_GRADE_HISTORY` 的最后一条），
- *   之后已经稳稳过了 5 轮 —— 自动冷却窗口（5 轮）正好走完，所以
+ *   之后过了 4 轮 —— 已经走完自动冷却窗口（`COOLDOWN_TURNS` = 5），所以
  *   `cooldownRemainingTurns` 是 0（没有手动设定，也就不存在 10 轮的手动冷却）。
+ * ★ 31 这个数**跟着脚本轮数走**：缓冲区末轮 = 预置历史 9 + 脚本 4 + 偏移 =
+ *   累计第 31 轮（偏移的来路见 `script.ts` 的 `DEMO_TURN_OFFSET`）。脚本轮数一改，
+ *   这里与偏移表达式要一起改 —— 两处对不上的表现是信箱里的「第几轮」与顶栏不一致。
  * ★ `streak: 2` / `direction: 1`：末尾 2 轮同向（都偏浅），但还不够 3 轮 →
  *   没有待生效的调整（`suggestedLevel` 为空，不是「被挡住」，是「证据还不够」）。
  *   ★ 与 `DEMO_GRADE_SIGNALS` 的那四条同源：词汇 / 深度两条各 +0.5 指向「讲浅了」。
@@ -1460,8 +1464,8 @@ export function demoGradeStateBody(): Record<string, unknown> {
     grade: DEMO_GRADE_LEVEL,
     source: 'inferred',
     decidedBy: 'llm',
-    cumulativeTurns: 32,
-    lastTurn: 32,
+    cumulativeTurns: 31,
+    lastTurn: 31,
     lastChangeTurn: 27,
     cooldownRemainingTurns: 0,
     streak: 2,
