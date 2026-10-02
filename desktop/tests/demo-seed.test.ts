@@ -1032,6 +1032,60 @@ test('演示沙箱 ⑥：覆盖层未激活时严格 no-op，激活后只拦学�
 })
 
 /* ------------------------------------------------------------------ *
+ * ⑦c 只读通道的学段：沙箱态必须回预置学段（2026-10-02 实测缺陷的回归）
+ * ------------------------------------------------------------------ */
+
+test('演示沙箱 ⑦c：沙箱态下「只读通道注入的学段」必须是预置学段', () => {
+  /**
+   * ★★ 这条守的是一个**只有现场才看得见**的缺陷（2026-10-02 用户报「个性化学习页题目取不到」）：
+   *
+   *   沙箱态下 `grade:get` 走自己那条分支、`ensureChatRuntime()` 一次都不跑，
+   *   于是 `runtime` 恒为 `null` → `currentGradeLevelForReads()` 回 `null` →
+   *   题库请求落到一个**写死的冷启动兜底**，带着另一个学段去取题。
+   *   高中那 57 个知识点在别的学段一个都不存在（实测：`ai-definition-sr` +
+   *   `grade_level=primary_high` → **404**），界面上就是「这关的题目没取到」，
+   *   而题库里一道题都没少。
+   *
+   * 判据落在源码上而不是行为上：那个函数在模块内部、要 `ipcMain` 才能跑到，
+   * 而**顺序**正是缺陷的全部内容（谁先返回，谁说了算）。
+   */
+  const source = stripComments(readSource('src', 'main', 'ipc', 'handlers.ts'))
+  const at = source.indexOf('function currentGradeLevelForReads(')
+  assert.ok(at >= 0, '找不到 currentGradeLevelForReads()')
+  const body = source.slice(at, source.indexOf('\n}', at))
+
+  const demoAt = body.indexOf('isDemoSeeded()')
+  const runtimeAt = body.indexOf('runtime === null')
+  assert.ok(demoAt >= 0, 'currentGradeLevelForReads() 必须有沙箱分支（否则只读通道拿到的是别的学段）')
+  assert.ok(runtimeAt >= 0, '前提变了：这个函数本该先看 runtime')
+  assert.ok(
+    demoAt < runtimeAt,
+    '★ 沙箱分支必须排在最前：放到 runtime 检查之后，沙箱态永远走不到它（runtime 恒为 null）'
+  )
+  assert.match(
+    body.slice(demoAt, demoAt + 120),
+    /return DEMO_GRADE_LEVEL/,
+    '沙箱分支必须回**预置学段**（回别的值等于没修）'
+  )
+
+  // 兜底：题库那条通道不许再写死一个别的学段字面量
+  const dataSource = stripComments(readSource('src', 'main', 'ipc', 'handlers-data.ts'))
+  const bankAt = dataSource.indexOf('ipcMain.handle(IPC.quizBank')
+  assert.ok(bankAt >= 0, '找不到题库处理器')
+  const bankBody = dataSource.slice(bankAt, dataSource.indexOf('ipcMain.handle(', bankAt + 10))
+  assert.match(
+    bankBody,
+    /\?\? DEFAULT_GRADE_LEVEL/,
+    '★ 题库的冷启动兜底必须是真实的 DEFAULT_GRADE_LEVEL（手写别的学段 = 取不到题）'
+  )
+  assert.equal(
+    /'primary_high'|'primary_low'|'senior'/.test(bankBody),
+    false,
+    '题库处理器里不许出现写死的学段字面量（它会静默绕开「按当前学段取题」）'
+  )
+})
+
+/* ------------------------------------------------------------------ *
  * ⑦ 装配防护（源码级：沙箱分支必须早于 ensureChatRuntime）
  * ------------------------------------------------------------------ */
 

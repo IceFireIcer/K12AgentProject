@@ -1277,14 +1277,24 @@ export function registerIpcHandlers(sidecar: SidecarManager): void {
 }
 
 /**
- * 当前生效学段（供题库等**只读**通道注入）。
+ * 当前生效学段（供题库 / 代码模板 / 出题等**只读**通道注入）。
  *
  * ★ 只读快照，**不触发会话装配**：题库请求不该为了知道学段而把 Pi 会话拉起来
  *   （那是几秒级的重活，而这里只是选几道题）。
  * ★ 会话还没建或已销毁时回 `null` —— 调用方按冷启动默认值取题，
  *   那与「学生还没被判出学段」时该看到的东西一致。
+ *
+ * ★★ **沙箱态必须回预置学段**（2026-10-02 实测缺陷）：沙箱态下 `grade:get` 走的是
+ *   自己那条分支、`ensureChatRuntime()` 一次都不跑，于是 `runtime` 恒为 `null` ——
+ *   这个函数回 `null`，调用方落到冷启动默认值，题库请求就带着**另一个学段**去取题。
+ *   高中主线那 57 个知识点在别的学段全都不存在，后端直接 **404**，
+ *   个性化学习页因此显示「这关的题目没取到」（而题库本身一道题都没少）。
+ *   ⇒ 沙箱态自成一套学段口径（预置学段就是"当前学段"），这里如实回它；
+ *   真实态一个字节都没变。
  */
 function currentGradeLevelForReads(): string | null {
+  // ★ 放在最前：它不依赖装配、不依赖缓存，是沙箱态唯一可靠的真源。
+  if (isDemoSeeded()) return DEMO_GRADE_LEVEL
   if (runtime === null) return null
   try {
     return runtime.gradeLevel

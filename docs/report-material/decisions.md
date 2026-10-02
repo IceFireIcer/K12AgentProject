@@ -4524,3 +4524,37 @@ pydantic → OpenAPI → TS 契约链，且存量 `progress` 表里有这个值�
   `tests.test_animation_templates` **75/75**、`tests.test_code_templates` **45/45** 绿。
   文档：票 33 + 本文 + `docs/演示沙箱实施计划.md` §九。
 
+## D-141 ★★ 沙箱态的「当前学段」必须由只读通道自己回答：否则题库带着别的学段去取题（2026-10-02 用户报障）
+
+- **日期**：2026-10-02
+- **报障**：用户载入预置演示数据后打开「个性化学习」，页面报「**这关的题目没取到** ——
+  知识点 `ai-definition-sr` 还没有题目」，而左栏 57 关、右栏掌握度都正常显示。
+- **根因（一条链，四步）**：
+  1. 沙箱态下 `grade:get` 走自己的分支（**必须在 `ensureChatRuntime()` 之前**，见 D-096 第 3 条），
+     所以 **Pi 会话一次都不装配** → 主进程的 `runtime` 恒为 `null`；
+  2. 题库等**只读**通道的学段由 `currentGradeLevelForReads()` 注入，它读 `runtime.gradeLevel` ——
+     于是沙箱态恒回 `null`；
+  3. 题库处理器当时写的是 `?? 'primary_high'`（**一个与冷启动默认值无关的手写字面量**），
+     于是请求变成 `GET /api/quiz/bank/ai-definition-sr?grade_level=primary_high`；
+  4. 高中知识点在别的学段**一个都不存在**。实测（临时 sidecar）：
+     `grade_level=senior` → 200 / 3 道题；`grade_level=primary_high` → **404 空体**。
+     界面于是显示「还没有题目」——而题库里一道题都没少（ch01 有 72 道，含 `ai-definition-sr` 3 道）。
+  > ★ 冷启动默认值一直是 `DEFAULT_GRADE_LEVEL = 'junior'`（D-073），那个 `'primary_high'`
+  > 既不是默认值也不是当前学段，属于**写死的第三个数**。
+- **修复（两处，都不动契约、不动通道）**：
+  1. `handlers.ts` 的 `currentGradeLevelForReads()`：**沙箱态直接回 `DEMO_GRADE_LEVEL`**，
+     且这一判断排在最前（不依赖装配、不依赖缓存，是沙箱态唯一可靠的真源）。真实态一个字节没变；
+  2. `handlers-data.ts` 的题库处理器：兜底改成 `?? DEFAULT_GRADE_LEVEL`，**不再手写学段字面量**。
+  > 为什么不去写 `currentGrade` 缓存：那两条 handler 的注释明确要求沙箱分支不污染缓存
+  > （D-096 的实施记录），而在**读**这一侧回答沙箱态既更窄、又正好覆盖「缓存还没被写过」的时段。
+- **为什么只有现场才看得见**：这条链上每一环单看都合法（分支顺序有守卫、缓存不写有理由、
+  兜底有注释），坏的是**它们串起来之后**的取值 —— 没有断言，也没有日志。
+- **守卫（两层，都已验红）**：`tests/demo-seed.test.ts` 新增 **⑦c**（源码级：
+  沙箱分支必须排在 `runtime === null` **之前**且回 `DEMO_GRADE_LEVEL`；题库处理器里
+  不许出现写死的学段字面量、兜底必须是 `DEFAULT_GRADE_LEVEL`）+ `verify-guard-mutations.mjs`
+  新增变异 **126**（把沙箱分支挪到 runtime 检查之后 → 变红）。
+- **顺带核实（不是缺陷）**：左栏每章右侧那个 `13/13` 是**已掌握/总关数**，
+  沙箱预置的第 3 章正好 13 个知识点全掌握（6 个在 `mastered`、7 个在 `quizzed` 也算已作答）；
+  它是**章节进度**读数，不是当前关卡的读数。
+- **服务哪条评分**：教育适配性 20% —— 「个性化学习」是演示里唯一按画像出题的页面，
+  它空着等于这条功能在答辩里没做过。

@@ -1214,6 +1214,23 @@ const MUTATIONS = [
   },
 
   {
+    // 把「只读通道的学段」里的沙箱分支**挪到 runtime 检查之后** —— 沙箱态下 runtime 恒为 null，
+    // 于是这条分支永远走不到，题库会带着另一个学段去取题、后端 404，
+    // 界面上是「这关的题目没取到」（2026-10-02 实测缺陷）。
+    name: '126 演示沙箱：只读学段的沙箱分支挪到 runtime 检查之后',
+    file: 'src/main/ipc/handlers.ts',
+    find: [
+      '  if (isDemoSeeded()) return DEMO_GRADE_LEVEL',
+      '  if (runtime === null) return null'
+    ].join('\n'),
+    replace: [
+      '  if (runtime === null && !isDemoSeeded()) return null',
+      '  if (isDemoSeeded()) return DEMO_GRADE_LEVEL'
+    ].join('\n'),
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '只读通道注入的学段'
+  },
+  {
     // 沙箱分支挪到 ensureChatRuntime() 之后 —— 进沙箱会真的拉起 Pi 会话、
     // 往会话 JSONL 里写开场白，「一个字节都不落盘」当场作废。
     name: '122 演示沙箱：学段的沙箱分支挪到 ensureChatRuntime() 之后',

@@ -784,7 +784,11 @@ export function registerDataHandlers(options: {
     if (count === null) {
       return { ok: false, message: `取题失败：题目数量必须是 1–${QUIZ_BANK_MAX_COUNT} 的整数。` }
     }
-    const gradeLevel = readGradeLevel(options.currentGradeLevel?.()) ?? 'primary_high'
+    // ★ 兜底必须是**真实的冷启动默认值**（`agent/prompts/grade.ts` 的 `DEFAULT_GRADE_LEVEL`），
+    //   不能手写一个别的学段字面量：写错的表现与「沙箱态取不到题」一模一样 ——
+    //   题库按不存在的学段过滤，后端 404，界面上是「这关的题目没取到」，
+    //   而真正的默认学段一直就在那个常量里（D-073：冷启动默认初中）。
+    const gradeLevel = readGradeLevel(options.currentGradeLevel?.()) ?? DEFAULT_GRADE_LEVEL
     return await req.quizBank({ kpId }, gradeLevel, count)
   })
 

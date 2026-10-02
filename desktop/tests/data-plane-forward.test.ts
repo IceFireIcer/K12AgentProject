@@ -131,8 +131,17 @@ const bridge = await import(BRIDGE_STUB)
 /** 替身 `electron` 里的注册表入口（`ipcMain.handle` 装好的那些处理器）。 */
 const { testIpc } = await import(ELECTRON_STUB)
 
-/** 还没判出学段时的冷启动默认值（与 `handlers-data.ts` 里那个兜底字面量同值）。 */
-const COLD_START_GRADE = 'primary_high'
+/**
+ * 还没判出学段时的冷启动默认值。
+ *
+ * ★★ 它**不再是一个与源码里手写字面量对齐的副本**（2026-10-02 修 D-141 时改的）：
+ *   题库那条通道以前写的是 `?? 'primary_high'` —— 一个既不是默认值、也不是当前学段的
+ *   **第三个数**。后果是沙箱态下题库带着 `primary_high` 去取高中知识点，后端 404，
+ *   个性化学习页显示「这关的题目没取到」（而题库里一道题都没少）。
+ *   现在它引用 `DEFAULT_GRADE_LEVEL`（D-073：冷启动默认初中），下面那条断言也改成
+ *   **钉住"引用了那个常量"**，而不是钉一个可能再次漂移的字符串。
+ */
+const COLD_START_GRADE = 'junior'
 
 /** 出口替身的调用记录（`init.body` 是已经序列化的字符串）。 */
 interface WireCall {
@@ -408,11 +417,29 @@ test('学段-1 quizBank：学段取自 options.currentGradeLevel（渲染进程�
 })
 
 test('学段-2 quizBank：还没判出学段时按冷启动默认值取题（不把 null 拼进 URL）', async () => {
-  // 先把「冷启动默认值」这个字面量钉在源码里：它是**业务值**（不是随手写的兜底），
-  // 改了它就等于改了新学生的第一组题难度 —— 不该悄悄改掉。
+  // ★★ 「冷启动默认值」是**业务值**（改它等于改新学生的第一组题难度），所以要钉住 ——
+  //    但钉的应该是**那个常量本身**，不是一个抄过来的字符串（2026-10-02 / D-141：
+  //    这里原先钉 `?? 'primary_high'`，而真实的冷启动默认一直是 `junior`）。
+  const handlerSource = executableSource('src/main/ipc/handlers-data.ts')
+  const bankBody = handlerSource.slice(
+    handlerSource.indexOf('ipcMain.handle(IPC.quizBank'),
+    handlerSource.indexOf('ipcMain.handle(', handlerSource.indexOf('ipcMain.handle(IPC.quizBank') + 10)
+  )
+  assert.match(
+    bankBody,
+    /\?\? DEFAULT_GRADE_LEVEL/,
+    'handlers-data.ts 的题库兜底必须引用 DEFAULT_GRADE_LEVEL（手写字面量 = 会静默漂移）'
+  )
+  assert.equal(
+    /'primary_high'|'primary_low'|'senior'/.test(bankBody),
+    false,
+    '题库处理器里不许出现写死的学段字面量'
+  )
+  // 常量本身的值也要钉住（改它就等于改 D-073 的裁决）
+  const gradeSource = executableSource('src/main/agent/prompts/grade.ts')
   assert.ok(
-    executableSource('src/main/ipc/handlers-data.ts').includes(`?? '${COLD_START_GRADE}'`),
-    `handlers-data.ts 的冷启动学段不再是 ${COLD_START_GRADE}（改了就要同步改本用例）`
+    gradeSource.includes(`DEFAULT_GRADE_LEVEL: GradeLevel = '${COLD_START_GRADE}'`),
+    `冷启动默认学段不再是 ${COLD_START_GRADE}（改了就要同步改本用例与 D-073）`
   )
 
   bridge.testTransport.reset()
