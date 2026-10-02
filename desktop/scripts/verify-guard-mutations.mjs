@@ -1185,11 +1185,34 @@ const MUTATIONS = [
     // 往脚本正文里塞一句带禁词的话 —— 学生会当场读到「（演示）」。
     name: '121 演示沙箱：脚本正文里出现「演示」字样',
     file: 'src/main/demo/script.ts',
-    find: '    studentText: \'老师，列表里的数是怎么排好顺序的？\',',
-    replace: '    studentText: \'老师，列表里的数是怎么排好顺序的？（演示）\',',
+    find: '    studentText: \'机器学习到底是什么？和普通程序有什么不一样？\',',
+    replace: '    studentText: \'机器学习到底是什么？和普通程序有什么不一样？（演示）\',',
     testFile: 'tests/demo-seed.test.ts',
     expect: '预置文本不含技术词'
   },
+  {
+    // 把拦截轮那条拦截记录删掉 —— 信封会变成「说拦下了、却没有任何拦截记录」，
+    // 而拦截记录是演示里最强的证据（也是第 5 轮唯一要展示的东西）。
+    name: '125 演示沙箱：拦截轮丢了 interceptions（信封与安全三阶段打架）',
+    file: 'src/main/demo/script.ts',
+    // ⚠️ 锚点必须带上**那句 reason**：`interceptions: [` 在文件里有五处（前四轮都是空数组），
+    //    只锚这一行会改到第 1 轮那一处 —— 变异就变成了「没有效果的变异」（实测踩到过）。
+    find: [
+      '        interceptions: [',
+      '          {',
+      "            source: 'wordlist',",
+      "            reason: '命中内容安全规则：违法与危险品（制作炸药）'",
+      '          }',
+      '        ],'
+    ].join('\n'),
+    // ★ 替换成**单行空数组**（而不是再写一遍多行块）：多行替换会留下悬空的 `}` 与 `],`，
+    //   整份文件变成语法错 —— 那时测试红是因为**根本没加载起来**，不是断言拓到了它，
+    //   这条变异就白验了（实测踩到过：报的是 ERR_INVALID_TYPESCRIPT_SYNTAX）。
+    replace: '        interceptions: [],',
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '信封里的提示词与画像块是同源真实产物'
+  },
+
   {
     // 沙箱分支挪到 ensureChatRuntime() 之后 —— 进沙箱会真的拉起 Pi 会话、
     // 往会话 JSONL 里写开场白，「一个字节都不落盘」当场作废。

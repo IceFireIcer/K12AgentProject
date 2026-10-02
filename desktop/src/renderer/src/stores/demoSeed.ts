@@ -527,7 +527,7 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
    *   ≈70%     投卡片（不是讲完才投）
    *   推完     `done` 收尾，`playing` 落回 false
    */
-  function advance(): boolean {
+  function advance(typed?: string): boolean {
     if (!seeded.value || playing.value) return false
     const payload = script.value
     if (payload === null || payload.turns.length === 0) return false
@@ -546,8 +546,15 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
     const chat = chatStore()
     try {
       // ★ 学生打什么都会被「吃掉」，屏幕上出现的是脚本里那句（见 DemoScriptTurn.studentText）：
-      //   现场演示不可能每次都把三句话原样打对，而脚本必须稳定。
-      chat.beginScriptedTurn(requestId, turn.studentText)
+      //   现场演示不可能每次都把那几句话原样打对，而脚本必须稳定。
+      // ★★ 唯一例外是**拦截轮**（`studentTextFromInput`）：那一轮要让学生气泡显示
+      //   演示者真正打进去的敏感词（不让打码、不替换），所以取真输入；
+      //   真输入为空时回落到脚本里那句 —— 气泡永远不会是空的。
+      const studentText =
+        turn.studentTextFromInput === true && typeof typed === 'string' && typed.trim() !== ''
+          ? typed
+          : turn.studentText
+      chat.beginScriptedTurn(requestId, studentText)
     } catch (error) {
       warnWiring(
         'demoSeed.advance',
@@ -596,7 +603,12 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
     setSeeded,
     /** 开着就退出、关着就载入（那颗按钮的唯一动作）。 */
     toggle,
-    /** 放下一轮；`false` = 这次没放（未开沙箱 / 正在放 / 没脚本）。 */
+    /**
+     * 放下一轮；`false` = 这次没放（未开沙箱 / 正在放 / 没脚本）。
+     *
+     * `typed` = 演示者真正打进去的那句话：只有**拦截轮**用它当学生气泡的正文
+     * （见 `DemoScriptTurn.studentTextFromInput`），其余轮一律显示脚本里那句。
+     */
     advance,
     /** 取消回放（在飞的一轮立刻收尾，绝不留「正在回答」）。 */
     cancel,

@@ -4413,3 +4413,114 @@ pydantic → OpenAPI → TS 契约链，且存量 `progress` 表里有这个值�
 - **验证**：`vue-tsc` ✅ · `npm test` 全量 ✅ · `guards:mutation` 123/123 ✅。
 - 说明：`ProfileTags` 是共用组件（对话页右栏与学习档案右栏），本次是**布局修复**，
   两边同时受益；`visual-edges` / `student-view-discipline` / `ux-pages-regression` 全绿。
+
+## D-140 ★★ 演示沙箱预置数据整体重覆盖：高中 · 第3章机器学习（2026-10-02）
+
+- **日期**：2026-10-02
+- **背景**：上一版演示沙箱（D-096）是初中口径：学段 `junior`、章节「第8章 编程实践（补充）」、
+  主线知识点 `prog-list-jr` / `prog-loop-jr` / `prog-variable-jr`、动画模板 `sorting-bars`、
+  三轮脚本。答辩要讲的主线换成了**机器学习**，旧的预置数据从顶栏到章节到脚本整条故事都对不上：
+  同一场演示里既要讲清「机器学习的训练稳态 / 梯度下降」，又要保住沙箱两条硬口径
+  （零写入、内容态一律透传真资产）。设计与数据清单见 `docs/preset-redesign/`（9 份文档）。
+- **决策（学生态整表重覆盖，`desktop/src/main/demo/data.ts`）**：
+  1. **学段 `junior` → `senior`**；章节标题「第8章 编程实践（补充）」→「**第3章 核心技术分支**」；
+     `DEMO_CHAPTER_KP_IDS` / `DEMO_KP_NAME_BY_ID` 换成**高中 8 章 57 个 `-sr` 知识点**
+     （第 3 章 13 个）；57 由表求和得出，不写死字面量。
+  2. **三条历史会话改名并各扩到 3 轮**（`messageCount` 6）：`sess-ml-9c41`（神经网络）/
+     `sess-sup-7b25`（监督学习）/ `sess-gd-3e08`（梯度下降）；旧 id 是
+     `sess-loop-9c41` / `sess-code-7b25` / `sess-quiz-3e08`。另加别名
+     `DEMO_NEURAL_SESSION_ID = DEMO_LOOP_SESSION_ID` —— 旧名字在新语义下已经名不副实，
+     留别名只为不把引用它的调用点改散。
+  3. **掌握度 6 关 / 16 次作答 / 10 次答对**（`DEMO_QUIZ_TOTAL` / `DEMO_QUIZ_CORRECT` 由表求和）：
+     `machine-learning-sr` 6/4、`neural-network-sr` 4/3、`supervised-learning-sr` 3/2、
+     `unsupervised-learning-sr` 2/1、`reinforcement-learning-sr` 1/0、`deep-learning-sr` 0/0；
+     16 − 10 = 6，正是错题本三条的错次之和。
+  4. **第 3 章 13 关：掌握 6、测验 7**；四关完成度 **2/3、2/3、1/4、1/4**（合计 6/13）。
+  5. **7 天活动 25 条 / 16 次答题 / 10 次答对（错 6）**：`DEMO_DAILY_ACTIVITY` 7 天连成一片
+     （0..6，含今天），`streakDays = 7`；`totalActivities` 由 daily 求和，不写第二个真相。
+  6. **学段轨迹 7 条**（第 1 / 3 / 8 / 13 / 18 / 23 / **27** 轮各动一次，相邻两次都隔 ≥5 轮 =
+     自动冷却窗口）；末条第 27 轮 `toLevel = senior`、`confidence = 0.91`（LLM 复核层自报，
+     略高于规则层 0.9 的上限）。学段状态体 `cumulativeTurns = 32` / `lastTurn = 32` /
+     `lastChangeTurn = 27` / `cooldownRemainingTurns = 0`，与轨迹末条一一对应（32 − 27 = 5）。
+  7. **动画库 3 条**（`saved-anim-001` → `gradient-descent-v2`、`saved-anim-002` → 神经网络、
+     `saved-anim-003` → 排序）；**「智团团给我出过的题」2 道**。
+  8. **依赖图 78 条边，全部两端都在高中**（`-sr → -sr`，当前教材这一层都是 `related`、权重 0.6）：
+     与随包 `kb.sqlite` 的 `knowledge_dependencies` 逐条对齐；跨学段的边按
+     `/api/graph/overview/{grade}` 的**同一过滤口径**丢弃（单学段视图里它们没有落点）。
+     分层仍由边现算，不写死层号。
+  9. **新增 `DEMO_QUIZ_VARIANTS`（3 道预置变式题）+ `demoQuizVariantsBody()`**：
+     qid `gen-machine-learning-sr-demo-0/1/2`，与真实登记形态逐字段对齐（`gen-` 前缀、
+     对外只投影 `qid/type/stem/options`，`answer` / `rubric` 只在主进程内部）。
+- **决策（脚本与通道，`script.ts` / `handlers-data.ts`）**：
+  1. **五轮脚本**（`DEMO_SCRIPT_TURN_COUNT` 3 → 5）：① 问知识点（教材引用 ×2 + `rag_search`）
+     ② 问动画（动画卡 + `generate_animation`）③ 编程练手（`get_code_template` / `evaluate_code`）
+     ④ 我会了（闯关卡 + `get_student_profile` / `generate_quiz`）⑤ **安全拦截轮**。
+     `DEMO_HISTORY_TURN_COUNT = 9` 不变；三条历史会话的逐轮内容全部重写成
+     神经网络 / 监督学习 / 梯度下降。
+  2. **轮次偏移改成表达式**：`DEMO_TURN_OFFSET = 32 - (DEMO_HISTORY_TURN_COUNT + DEMO_SCRIPT_TURN_COUNT)`
+     = **18**（旧式 `18 - (9 + 3)` = 6）；脚本第 10..14 轮 + 18 = 累计第 **28..32** 轮，
+     **末轮正好落在第 32 轮**，与状态体 `lastTurn: 32` 对齐。表达式里的脚本轮数引常量，
+     不再写第二个裸的 3。
+  3. **第 5 轮（拦截轮）信封**：`prompt` 空、`tools: []`、`retrieval: null`、
+     `interceptions: [{ source: 'wordlist', reason: '命中内容安全规则：违法与危险品（制作炸药）' }]`、
+     `status: 'blocked'`、`ok: false`；同轮 `safetyFinal.stages` = `input: blocked` /
+     `stream: skipped` / `final: skipped`，`finalizations: 0`、`retractions: 0`
+     —— 与 `interceptions` 那条说的是同一件事（拦在入口），不会「一边说拦下、一边说入口放行」。
+  4. **`stores/demoSeed.ts` 的 `advance(typed?)`**：`chat.ts` 调用点把学生真打的字传进去；
+     `DemoScriptTurn` 新增可选 `studentTextFromInput` —— **拦截轮的学生气泡显示演示者真打的那句**
+     （不预置、不打码），其余轮一律显示脚本里那句。
+  5. **`runQuizGeneration` 在沙箱态放行**：`isDemoSeeded()` 分支放在 `demoBlocked()` **之前**，
+     回 `demoQuizVariantsBody()` 的预置变式题 —— 出题是「读一条预置清单」，不是写学生数据；
+     **判分（`quiz:grade`）仍旧被 `demoBlocked()` 拒**。两条通道在沙箱态一拒一放是刻意的：
+     演示视频里那一下必须立刻拿到题，而不是转圈或吞掉。
+- **决策（内容态两个资产）**：
+  1. 新增 `server/resources/templates/gradient-descent-v2.json`：9 相位、`duration_ms = 10655`、
+     `concept = "梯度下降"`、`kp_ids = ["machine-learning-sr", "supervised-learning-sr"]`、
+     `grade_levels = ["senior"]`。它是**手作 premium 模板，不带 `K12-ARCHETYPE` 标记**，
+     所以不受生成器那套相位/时长区间表约束（那套只查生成产物）。
+  2. 覆盖 `server/resources/code-templates/machine-learning-sr.json` 为「训练稳态判断：算每轮握持力的变化量」；
+     旧版「算平均值与最大值」备份在 `_archive/machine-learning-sr.平均最大值.json`。
+- **与 `docs/preset-redesign/` 文档的三处偏离（本案最要紧的三笔）**：
+  a. **变式题没住 `quiz-variants.json`**，住在 `data.ts` 的 `DEMO_QUIZ_VARIANTS` 常量。
+     理由：`handlers-data.ts`（读它的一侧）与 `tests/demo-seed.test.ts`（断言它的一侧）
+     都要能在**纯 node** 下加载，一个 `node:fs` 读盘会给这两处各加一条与功能无关的依赖；
+     预置数据住一处也更好审，一处就能看全。
+  b. **`duration_ms` 用 10655，不是文档/报告写的 8200**。实测
+     `server/resources/templates/_shared/runtime.js` 的 technical 皮肤 `holdMs = 740`
+     （不是报告以为的 380）；9 相位真实时长 = 1055 + 8 × (460 + 740) = **10655**。
+     卡片右上角那个秒数徽标读的就是 `duration_ms`：写 8200 会显示 8.2s 而小球实际滚 10.7s，
+     现场一眼可见。
+  c. **拦截字段用既有的 `DiagInterception` 形状（`source` / `reason` / `detail?`）**，
+     **没有**给类型加 `stage` / `category` / `label` —— 文档 02 给的 `stage` / `verdict` /
+     `category` / `label` 在这个类型里根本不存在；「拦在入口」由同轮 `safetyFinal.stages` 的
+     `{ stage: 'input', verdict: 'blocked' }` 如实承载。另外文档 02 把 `guard.py` 的语义**写反了**：
+     `reason` 是一句可读中文（`命中内容安全规则：…`），`source` 才是 `'wordlist'` 这个标记。
+- **被否决的方案**：① 只改脚本正文、不动学段与章节常量（顶栏还写「初中」、点开章节还是第 8 章，一眼假）；
+  ② 变式题按文档进 `quiz-variants.json` 由 `node:fs` 读（给两处纯 node 加载点各加一条与功能无关的依赖，
+  且预置数据分两处）；③ `duration_ms` 沿用文档的 **8200**（徽标 8.2s vs 实播 10.7s，答辩现场可被评委一眼看出）；
+  ④ 给 `DiagInterception` 加 `stage` / `category` / `label`（为演示扩类型就是动契约面，
+  与本案「契约零改动」冲突；而且「拦在入口」已经有 `safetyFinal.stages` 这个如实的载体）；
+  ⑤ 沙箱态连出题一起拒（演示者点「我想再练几道」当场转圈或被吞 —— 等于这条功能没做）。
+- **代价 / 风险**：预置数据是**整表重写**，任何一处改动都可能破坏自洽（daily 之和 = 活动数、
+  `total_wrong` = 答题数 − 答对数、`stage_counts` 之和 = 真实关卡数、轨迹末条 = 状态体
+  `lastChangeTurn`、会话 `messageCount` = 回看消息条数），这些全由 `tests/demo-seed.test.ts` 钉住；
+  手作模板 `gradient-descent-v2` **不在生成器区间表内**，将来重构生成器时那套守卫不会提醒它。
+- **已知缺口（`code-templates` 没有 `tests` 字段）**：`server/app/routes/code.py` 的
+  `CodeTemplateRecord` 只有 `kp_id / grade_level / title / scaffold / expected_behavior /
+  expected_output / hints / solution`，**没有 `tests`** —— 文档 04 里
+  `{ readings, expected }` 形状的多场景测试用例**无处安放**（写进 JSON 会被静默忽略）。
+  所以模板里只落了默认那一组 readings（写在 `scaffold` / `solution` 里）。
+  真要多场景判分得扩契约（`CodeTemplateRecord` + 判分端），而本案是**契约零改动**，故留作已知缺口。
+- **服务哪条评分**：教育适配性 20%（演示讲的是高中机器学习主线，而不是初中「编程实践（补充）」章节）
+  + 设计合理性 25%（预置数字全表自洽、内容态仍透传真资产、契约零改动）。
+- **实施记录（2026-10-02）**：`desktop/src/main/demo/data.ts` / `script.ts` 整表重覆盖；
+  `shared/demo-seed.ts`（`DEMO_SCRIPT_TURN_COUNT = 5`、`DemoScriptTurn.studentTextFromInput`）、
+  `stores/demoSeed.ts`（`advance(typed?)`）、`stores/chat.ts`（调用点传 `text`）、
+  `ipc/handlers-data.ts`（沙箱态放行出题）同步改完；内容态新增 / 覆盖上面两个资产。
+  变式题的**运行期真源**是 `data.ts` 的 `DEMO_QUIZ_VARIANTS`；工作区里还留着一份同内容的
+  `desktop/src/main/demo/quiz-variants.json`（不在任何加载路径上）与几处仍指向它的旧注释，
+  属落地残留，不在本案的文档范围内，留给代码侧清理。
+  守卫：`desktop/tests/demo-seed.test.ts` **16/16** 绿；server 侧
+  `tests.test_animation_templates` **75/75**、`tests.test_code_templates` **45/45** 绿。
+  文档：票 33 + 本文 + `docs/演示沙箱实施计划.md` §九。
+

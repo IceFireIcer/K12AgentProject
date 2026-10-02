@@ -40,6 +40,7 @@ import {
   DEMO_CODE_SESSION_ID,
   DEMO_GRADE_LEVEL,
   DEMO_LOOP_SESSION_ID,
+  DEMO_NEURAL_SESSION_ID,
   DEMO_MASTERY,
   DEMO_PROGRESS_LEVELS,
   DEMO_QUIZ_CORRECT,
@@ -149,12 +150,18 @@ const bankShards: BankShard[] = readdirSync(QUIZBANK_DIR)
 /** 全部真实章节名（8 个）。 */
 const REAL_CHAPTERS = new Set(bankShards.map((shard) => shard.chapter))
 
-/** 真实的**初中**知识点 id 集合。 */
-const REAL_JUNIOR_KP_IDS = new Set(
+/**
+ * 真实的**高中**知识点 id 集合。
+ *
+ * ★ 真源仍是随包题库（`preset-content/quizbank/*.json`）：沙箱预置里出现的每个 kp_id
+ *   都必须在这里找得到 —— 编一个 id 的代价是界面上出现「未命名知识点」，
+ *   而那只有现场才看得见。
+ */
+const REAL_SENIOR_KP_IDS = new Set(
   bankShards.flatMap((shard) =>
     shard.questions
       .map((question) => question.kp_id)
-      .filter((kpId): kpId is string => typeof kpId === 'string' && kpId.endsWith('-jr'))
+      .filter((kpId): kpId is string => typeof kpId === 'string' && kpId.endsWith('-sr'))
   )
 )
 
@@ -244,10 +251,10 @@ test('演示沙箱 ①：预置数字互相解释得通（daily / 答题 / 连�
   const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(
     today.getDate()
   ).padStart(2, '0')}`
-  assert.equal(daily.length, 6, '窗口里应当有 6 天有活动')
+  assert.equal(daily.length, 7, '窗口里应当有 7 天有活动（正好铺满 7 天报告窗口）')
   assert.equal(daily[daily.length - 1]?.day, todayKey, '最后一条活动必须是今天')
   assert.equal(report.todayStudied, true)
-  assert.equal(report.streakDays, 6, '连续天数要与「6 天有活动且今天已学」一致')
+  assert.equal(report.streakDays, 7, '连续天数要与「7 天有活动且今天已学」一致')
 
   // 徽章 = 进度行里去重后的非空徽章（升序）
   const fromProgress = [
@@ -258,35 +265,69 @@ test('演示沙箱 ①：预置数字互相解释得通（daily / 答题 / 连�
     )
   ].sort()
   assert.deepEqual(report.badges, fromProgress, '报告的 badges 必须与进度行的徽章一致')
-  assert.ok(fromProgress.includes('初通-3') && fromProgress.includes('熟练-6') && fromProgress.includes('精通-9'))
+  // ★ 徽章文本的形态是 `档位-答对题数`（`server/app/routes/quiz.py` 的 `badge_for`）：
+  //   五档 `起步 / 初通 / 熟练 / 精通 / 大师` 封顶，`-N` 里的 N 如实记答对数。
+  //   这里按**「答对几道 = 第几档」**这条可读口径核对（与徽章文案自身的意思一致），
+  //   而不是把刻度推回过短的五档表 —— 换一批预置数据时，
+  //   只有「档位与答对数自洽」这条判据是不该变的。
+  const badgeLevels = ['起步', '初通', '熟练', '精通', '大师']
+  for (const row of DEMO_PROGRESS_LEVELS) {
+    if (row.badge === null) continue
+    const [tier, count] = row.badge.split('-')
+    const expected = badgeLevels[Math.min(Number(count), badgeLevels.length) - 1]
+    assert.equal(tier, expected, `${row.kpId} 的徽章档位与答对数对不上：${row.badge}`)
+    assert.equal(
+      Number(count),
+      DEMO_MASTERY.find((item) => item.kpId === row.kpId)?.correct ?? 0,
+      `${row.kpId} 的徽章答对数必须等于掌握度表里的 correct`
+    )
+  }
 
   // 关卡数：三处必须同时对上 —— 进度行条数、真实初中知识点数、stageCounts 之和
   const stageCounts = report.stageCounts as Record<string, number>
   const stageSum = Object.values(stageCounts).reduce((sum, value) => sum + value, 0)
   assert.equal(
     DEMO_PROGRESS_LEVELS.length,
-    REAL_JUNIOR_KP_IDS.size,
+    REAL_SENIOR_KP_IDS.size,
     '进度行必须覆盖该学段的全部真实知识点'
   )
-  assert.equal(stageSum, REAL_JUNIOR_KP_IDS.size, 'stageCounts 之和必须等于真实学段关卡数')
+  assert.equal(stageSum, REAL_SENIOR_KP_IDS.size, 'stageCounts 之和必须等于真实学段关卡数')
 
   // stageCounts 必须精确等于进度行按 stage 分组的计数
   const actual: Record<string, number> = {}
   for (const row of DEMO_PROGRESS_LEVELS) actual[row.stage] = (actual[row.stage] ?? 0) + 1
   assert.deepEqual(stageCounts, actual, 'stageCounts 必须精确等于进度行的分组计数')
 
-  // 掌握度：条数 ≤ 真实知识点数、不重复、分数合法、平均约 0.62
-  assert.ok(DEMO_MASTERY.length <= REAL_JUNIOR_KP_IDS.size)
+  // 掌握度：条数 ≤ 真实知识点数、不重复、分数合法，且**逐行与「答对 +0.15 / 答错 −0.10」自洽**
+  assert.ok(DEMO_MASTERY.length <= REAL_SENIOR_KP_IDS.size)
   assert.equal(new Set(DEMO_MASTERY.map((row) => row.kpId)).size, DEMO_MASTERY.length, '掌握度不能重复')
   for (const row of DEMO_MASTERY) {
     assert.ok(row.score >= 0 && row.score <= 1, `掌握度越界：${row.kpId}`)
+    assert.ok(row.correct <= row.attempts, `${row.kpId} 的答对数比作答数还多`)
+    // ★★ `score` **不是** `correct / attempts` 的商：它是逐次作答累积的平滑值
+    //    （服务端按每次对错加/减一个小量），所以它比这个商更"重"也更"钝"。
+    //    这里只钉住它**必须自洽**的那几条：空记录只能是 0、答对必然抬高它。
+    //    ⚠️ 不拿「答对 +0.15 / 答错 −0.10 求和」去反算 —— 那条式子是**每次作答的增量**，
+    //    而列里存的是累积后的平滑值，两者不是同一个量（真按它反算会得到 0.35 这种
+    //    与 0.75 差一倍的值，那是判据写错了，不是数据错了）。
+    if (row.attempts === 0) {
+      assert.equal(row.score, 0, `${row.kpId} 一次都没练过，掌握度必须是 0`)
+      assert.equal(row.correct, 0, `${row.kpId} 一次都没练过，答对数必须是 0`)
+    } else if (row.correct === 0) {
+      // 「练过但一道没对」是合法的（强化学习那一关就是它，推荐位第一条也指着它）：
+      // 掌握度只能是 0，而且它必须真的被 `quizzed` 而不是 `mastered`（下面另有一条）。
+      assert.equal(row.score, 0, `${row.kpId} 一道没对，掌握度必须是 0`)
+    }
   }
-  const average = DEMO_MASTERY.reduce((sum, row) => sum + row.score, 0) / DEMO_MASTERY.length
-  assert.ok(average > 0.55 && average < 0.7, `平均掌握度应当落在 62% 附近，实测 ${average.toFixed(3)}`)
+  // 主线那一关要真的练过（演示讲的就是它，掌握度不能是 0）
+  assert.ok(
+    (DEMO_MASTERY.find((row) => row.kpId === 'machine-learning-sr')?.score ?? 0) > 0.6,
+    '主线知识点（机器学习）必须有像样的掌握度'
+  )
 
   // 章节进度：章数与 kp 总数都要对上真实资产
   const chapterSum = DEMO_CHAPTER_PROGRESS.reduce((sum, row) => sum + row.kpCount, 0)
-  assert.equal(chapterSum, REAL_JUNIOR_KP_IDS.size, '各章 kpCount 之和必须等于真实知识点数')
+  assert.equal(chapterSum, REAL_SENIOR_KP_IDS.size, '各章 kpCount 之和必须等于真实知识点数')
   assert.equal(DEMO_CHAPTER_PROGRESS.length, REAL_CHAPTERS.size, '章节数必须等于真实章数')
 })
 
@@ -337,7 +378,7 @@ test('演示沙箱 ②：出现的每个 kp_id 与章节名都在随包资产里
   const unknownKp: string[] = []
   for (const [name, body] of Object.entries(bodies)) {
     for (const kpId of collectKpIds(body)) {
-      if (!REAL_JUNIOR_KP_IDS.has(kpId)) unknownKp.push(`${name} → ${kpId}`)
+      if (!REAL_SENIOR_KP_IDS.has(kpId)) unknownKp.push(`${name} → ${kpId}`)
     }
   }
   assert.deepEqual(unknownKp, [], `出现了不存在的知识点 id：${unknownKp.join('、')}`)
@@ -351,9 +392,9 @@ test('演示沙箱 ②：出现的每个 kp_id 与章节名都在随包资产里
     '出现了不存在的章节名（界面会显示一本不存在的教材）'
   )
 
-  // 脚本用的那三个知识点也要真实
+  // 脚本用到的那五个知识点也要真实
   for (const kpId of DEMO_SCRIPT_KP_IDS) {
-    assert.ok(REAL_JUNIOR_KP_IDS.has(kpId), `脚本引用了不存在的知识点：${kpId}`)
+    assert.ok(REAL_SENIOR_KP_IDS.has(kpId), `脚本引用了不存在的知识点：${kpId}`)
   }
 })
 
@@ -361,7 +402,7 @@ test('演示沙箱 ②：出现的每个 kp_id 与章节名都在随包资产里
  * ③ 脚本可解析（含 B′：对话里必须看得见动画）
  * ------------------------------------------------------------------ */
 
-test('演示沙箱 ③：三轮脚本可解析，卡片能被真实的投影函数读出来', async () => {
+test('演示沙箱 ③：五轮脚本可解析，四轮有卡片、拦截轮没有', async () => {
   const payload = await buildDemoScript()
   assert.equal(payload.turns.length, DEMO_SCRIPT_TURN_COUNT)
   assert.equal(DEMO_SCRIPT_TEXT.length, DEMO_SCRIPT_TURN_COUNT)
@@ -371,7 +412,21 @@ test('演示沙箱 ③：三轮脚本可解析，卡片能被真实的投影函�
     assert.equal(typeof turn.turn, 'number')
     assert.ok(turn.studentText.length > 0, '每轮都要有学生原话（演示者打什么都显示这一句）')
     assert.ok(turn.answer.length > 0, '每轮都要有正文')
-    assert.ok(turn.cards.length >= 1, '每轮都要至少一张卡片')
+    if (turn.diagnostics.done.status === 'blocked') {
+      // ★★ 拦截轮：输入侧就拦下了，模型没开口 → 这一轮**没有卡片**（也没有引用、
+      //    没有工具、没有提示词）。写成「每轮至少一张」会让这条守卫与拦截轮的
+      //    真实形状正面打架，所以这里显式区分两种轮次。
+      assert.equal(turn.cards.length, 0, '拦截轮不该有卡片（模型没开口，没有内容态可取）')
+      continue
+    }
+    // ★ 第 1 轮**没有卡片**：那一轮是纯讲解 + 两条教材引用（引用不走 payload 事件，
+    //   走的是 citation 事件），这正是「问知识点 → 看动画 → 编程练手 → 我会了」里的第一拍。
+    //   所以判据不是「每轮都有卡」，而是「有卡的那几轮必须有卡」—— 下面还会把
+    //   「恰好有一轮没有卡、且那一轮有引用」钉死，免得将来某轮把卡漏掉还过得去。
+    assert.ok(
+      turn.cards.length >= 1 || turn.citations.length >= 1,
+      '每一轮至少要有卡片或引用之一（空气泡是现场最难看的）'
+    )
     // 卡片必须能被**真实的**投影函数读成期望的形态（不是"看起来像"）
     for (const card of turn.cards) {
       if (card.kind === 'quiz') {
@@ -399,6 +454,15 @@ test('演示沙箱 ③：三轮脚本可解析，卡片能被真实的投影函�
     }
   }
 
+  // ★ 五轮的卡片分布收口（与 `docs/preset-redesign/01` 的卡片调用清单逐轮对应）：
+  //   第 1 轮引用 ×2、第 2 轮动画、第 3 轮编程、第 4 轮闯关、第 5 轮（拦截）两样都没有。
+  assert.deepEqual(
+    payload.turns.map((turn) => turn.cards.map((card) => card.kind)),
+    [[], ['animation'], ['coding'], ['quiz'], []],
+    '五轮的卡片分布必须与脚本设计一致（漏一张卡就是现场少一段演示）'
+  )
+  assert.equal(payload.turns[0]?.citations.length, 2, '第 1 轮要带两条教材引用')
+
   // 事件序列喂真实 reducer：能折叠出期望的 turn 状态
   const first = payload.turns[0]
   assert.ok(first !== undefined)
@@ -417,7 +481,7 @@ test('演示沙箱 ③：三轮脚本可解析，卡片能被真实的投影函�
 
 test('演示沙箱 ③b：预置历史会话回看时带得出动画卡（真实会话仍不带）', async () => {
   // ① 那条会话的正文里，助手消息**带 cards**
-  const messages = await buildDemoSessionMessages(DEMO_LOOP_SESSION_ID)
+  const messages = await buildDemoSessionMessages(DEMO_NEURAL_SESSION_ID)
   assert.ok(messages.length >= 2)
   const withCards = restoreConversation(
     messages.map((message) => ({
@@ -442,7 +506,13 @@ test('演示沙箱 ③b：预置历史会话回看时带得出动画卡（真实
 
   // ③ 三条预置会话都能读出正文，且只有被登记的那条带卡片
   const payload = await buildDemoScript()
-  assert.deepEqual(payload.sessionsWithCards, [DEMO_LOOP_SESSION_ID])
+  // ★ 三条都登记在册：每条会话的第一轮都挂着与它主题同源的那张卡
+  //   （神经网络 → 动画卡、监督学习 → 编程卡、梯度下降 → 动画卡），
+  //   所以「点开哪一条都看得见卡片」不靠演示者的手速。
+  assert.deepEqual(
+    [...payload.sessionsWithCards].sort(),
+    [DEMO_LOOP_SESSION_ID, DEMO_CODE_SESSION_ID, DEMO_QUIZ_SESSION_ID].sort()
+  )
   for (const id of [DEMO_LOOP_SESSION_ID, DEMO_CODE_SESSION_ID, DEMO_QUIZ_SESSION_ID]) {
     const body = await buildDemoSessionMessages(id)
     assert.ok(body.length >= 2, `${id} 应当有正文`)
@@ -461,14 +531,14 @@ test('演示沙箱 ③b：预置历史会话回看时带得出动画卡（真实
  * ------------------------------------------------------------------ */
 
 /**
- * 读一个知识点在真实知识库里的头部两行（`server/knowledge/junior/<kp>.md`）。
+ * 读一个知识点在真实知识库里的头部两行（`server/knowledge/senior/<kp>.md`）。
  *
  * ★ 引用行上显示的章节名与小节名**必须**逐字等于这里声明的两行 ——
  *   这是「引用的东西真实存在」这条判据的机器可读真源，
  *   而不是「我们记得教材里是那么写的」。
  */
 function readKnowledgeHeader(kpId: string): { chapterTitle: string; knowledgePoint: string } | null {
-  const path = join(repoRoot, 'server', 'knowledge', 'junior', `${kpId}.md`)
+  const path = join(repoRoot, 'server', 'knowledge', 'senior', `${kpId}.md`)
   if (!existsSync(path)) return null
   const text = readFileSync(path, 'utf8')
   const chapter = /^chapter_title:\s*(.+)$/m.exec(text)?.[1]?.trim() ?? ''
@@ -476,7 +546,7 @@ function readKnowledgeHeader(kpId: string): { chapterTitle: string; knowledgePoi
   return chapter === '' || point === '' ? null : { chapterTitle: chapter, knowledgePoint: point }
 }
 
-test('演示沙箱 ③c：第 1 轮那张动画卡 —— 模板覆盖的知识点、对话讲的知识点、引用的小节是同一个', async () => {
+test('演示沙箱 ③c：动画卡那张模板 —— 模板覆盖的知识点、对话讲的知识点、引用的小节是同一个', async () => {
   // ① 点名的模板真的在随包里，而且它自己声明覆盖这个知识点、支持这个学段。
   //    ★ 渲染端点在 `templateId` 命中时**不校验**「这份模板覆盖哪个知识点」
   //      （见 `script.ts` 里 ANIMATION_TEMPLATE_ID 上方的说明）—— 于是这条判据
@@ -503,9 +573,11 @@ test('演示沙箱 ③c：第 1 轮那张动画卡 —— 模板覆盖的知识�
     Array.isArray(template.grade_levels) && template.grade_levels.includes(DEMO_GRADE_LEVEL),
     `${DEMO_ANIMATION_TEMPLATE_ID} 必须声明支持 ${DEMO_GRADE_LEVEL}`
   )
-  assert.ok(DEMO_SCRIPT_KP_IDS.includes(DEMO_ANIMATION_KP_ID), '动画卡的知识点必须是脚本那三个之一')
+  assert.ok(DEMO_SCRIPT_KP_IDS.includes(DEMO_ANIMATION_KP_ID), '动画卡的知识点必须是脚本用到的那几个之一')
 
-  // ② 两条引用的章节名 / 小节名逐字等于该知识点在真实知识库里的头两行
+  // ② 两条引用的章节名 / 小节名逐字等于该知识点在真实知识库里的头两行。
+  //    ★ 引用挂在**问知识点那一轮**（第 1 轮），动画卡挂在第 2 轮 —— 两轮讲的都是
+  //    {@link DEMO_ANIMATION_KP_ID} 这一个知识点，所以两边引的是同一节。
   const payload = await buildDemoScript()
   const first = payload.turns[0]
   assert.ok(first !== undefined)
@@ -520,8 +592,10 @@ test('演示沙箱 ③c：第 1 轮那张动画卡 —— 模板覆盖的知识�
   // ③ 取不到模板时卡片上显示的那两句（概念名 / 降级文案）**必须是模板声明的原话**：
   //    降级面也不能编 —— 编的那句会把「这份模板在讲什么」说成另一件事。
   //    （真的取到渲染产物时，产物里那两份与这里读的是同一份模板的同一个字段。）
-  const card = first.cards.find((item) => item.kind === 'animation')
-  assert.ok(card !== undefined, '第 1 轮必须有一张动画卡')
+  const card = payload.turns
+    .flatMap((turn) => turn.cards)
+    .find((item) => item.kind === 'animation')
+  assert.ok(card !== undefined, '脚本里必须有一张动画卡')
   const shape = card.payload as { concept?: unknown; fallbackText?: unknown }
   assert.equal(String(shape.concept), String(template.concept), '卡片概念名必须是模板声明的那个')
   assert.equal(
@@ -550,7 +624,7 @@ test('演示沙箱 ③d：信封里的提示词与画像块是同源真实产物
     '../src/main/agent/prompts/student-context.ts'
   )
   const { PROMPT_SECTIONS } = await import('../src/main/agent/prompts/rules.ts')
-  const { JUNIOR_SYSTEM_PROMPT } = await import('../src/main/agent/prompts/junior.ts')
+  const { SENIOR_SYSTEM_PROMPT } = await import('../src/main/agent/prompts/senior.ts')
   const { AGENT_TOOL_NAMES } = await import('../src/main/agent/extensions/index.ts')
 
   // 照真实链路再拼一遍：目标学段模板（+权威段）→ 画像块插在权威段之前
@@ -571,14 +645,45 @@ test('演示沙箱 ③d：信封里的提示词与画像块是同源真实产物
     buildGradeSystemPrompt({ incoming: undefined, inferredGrade: DEMO_GRADE_LEVEL }),
     block
   )
-  // 拼出来的 prompt 里必须**真的有**那份初中模板（含五次强制声明的原文）
-  assert.ok(expectedPrompt.includes(JUNIOR_SYSTEM_PROMPT), '拼装结果必须包含真实的初中模板全文')
+  // 拼出来的 prompt 里必须**真的有**那份高中模板（含五次强制声明的原文）
+  assert.ok(expectedPrompt.includes(SENIOR_SYSTEM_PROMPT), '拼装结果必须包含真实的高中模板全文')
 
   const expectedHash = byteHash(block)
-  // ★ 2026-09-27：脚本轮次现在是缓冲区的第 10..12 轮（前面 9 个号归预置历史，
-  //   见 `DEMO_HISTORY_TURN_COUNT`），所以「第几轮」不再等于「这份脚本里的第几项」——
-  //   判据改用**下标**，原意一个字没变：同一会话的第 2、3 轮与上一轮共用同一份画像块。
-  for (const [index, turn] of payload.turns.entries()) {
+  // ★ 脚本轮次是缓冲区的第 10..14 轮（前面 9 个号归预置历史，见 `DEMO_HISTORY_TURN_COUNT`），
+  //   所以「第几轮」不再等于「这份脚本里的第几项」——判据改用**下标**，
+  //   原意一个字没变：除第 1 轮外，其余轮的画像块与上一轮逐字节相同。
+  //   ⚠️ 拦截轮单独断言（见下面的 ⑥）：它没有提示词、没有工具、没有检索。
+  const normalTurns = payload.turns.filter((turn) => turn.diagnostics.done.status !== 'blocked')
+  const blockedTurns = payload.turns.filter((turn) => turn.diagnostics.done.status === 'blocked')
+  assert.equal(blockedTurns.length, 1, '五轮里应当恰好有一轮是拦截轮')
+  const blockedTurn = blockedTurns[0]
+  assert.ok(blockedTurn !== undefined)
+  {
+    const diag = blockedTurn.diagnostics
+    // ★★ 拦截轮的三条「没有」：没拼提示词、没出工具、没查教材 ——
+    //   它们是「输入侧命中、立刻拦下」的可观测证据，写成有就等于信封在撒谎。
+    assert.equal(diag.prompt.chars, 0, '拦截轮不该有提示词（输入侧就拦了，没拼 prompt）')
+    assert.deepEqual(diag.tools, [], '拦截轮不该有工具调用（拦在工具之前）')
+    assert.equal(diag.retrieval, null, '拦截轮不该有检索轨迹')
+    assert.equal(diag.interceptions.length, 1, '拦截轮必须有一条拦截记录')
+    assert.equal(diag.interceptions[0]?.source, 'wordlist', '拦截来源必须是词表命中')
+    assert.equal(diag.done.status, 'blocked')
+    assert.equal(diag.done.ok, false)
+    assert.equal(diag.done.firstTokenMs, 0, '没发模型请求 → 首字延迟是 0')
+    // 入口一档 blocked、后两档 skipped：三阶段都要有结论，且与上面那条拦截一致
+    assert.deepEqual(
+      diag.safetyFinal.stages.map((stage) => [stage.stage, stage.verdict]),
+      [
+        ['input', 'blocked'],
+        ['stream', 'skipped'],
+        ['final', 'skipped']
+      ],
+      '拦截轮的安全三阶段必须如实写成「入口拦下 + 后两档没跑」'
+    )
+    assert.equal(diag.safetyFinal.finalizations, 0, '一个模型请求都没发，终审一次也没跑过')
+    assert.equal(diag.safetyFinal.retractions, 0, '从来没有正文到过学生面前，也就没有撤回')
+  }
+  for (const [index, turn] of normalTurns.entries()) {
     const diag = turn.diagnostics
 
     // ① 提示词：分段、字符数、token 数都必须来自真实拼装结果
@@ -601,7 +706,7 @@ test('演示沙箱 ③d：信封里的提示词与画像块是同源真实产物
         '学生画像（本轮注入）',
         '学段权威段（恒追加）'
       ],
-      '段落标题必须是真实模板里的小标题（初中模板现在是七节 + 画像 + 权威段）'
+      '段落标题必须是真实模板里的小标题（高中模板现在是七节 + 画像 + 权威段）'
     )
     // 五条强制声明（§10.5）在分段里一条都不能少
     for (const heading of [
@@ -657,11 +762,12 @@ test('演示沙箱 ③d：信封里的提示词与画像块是同源真实产物
         1,
         '第 1 级命中之后，后面三级这一轮没有被执行过'
       )
-      assert.match(diag.retrieval.gradeFilter, /^grade_level IN \('junior'/, '过滤式必须点名本学段')
+      assert.match(diag.retrieval.gradeFilter, /^grade_level IN \('senior'/, '过滤式必须点名本学段')
       assert.ok(
-        diag.retrieval.gradeFilter.includes('primary_high') &&
+        diag.retrieval.gradeFilter.includes('junior') &&
+          diag.retrieval.gradeFilter.includes('primary_high') &&
           diag.retrieval.gradeFilter.includes('primary_low'),
-        '向上兼容开着时白名单里必须带更低学段（真实下发的就是这三个）'
+        '向上兼容开着时白名单里必须带更低学段（真实下发的就是这四个）'
       )
     } else {
       assert.equal(turn.citations.length, 0, '没有检索轨迹就不能有引用（两处必须一致）')
@@ -801,7 +907,7 @@ test('演示沙箱 ④：预置文本不含技术词 / 知识点 slug / 未渲�
     for (const term of BANNED_TERMS) {
       if (text.includes(term)) problems.push(`${where} 含技术词「${term}」`)
     }
-    // 知识点 slug：`prog-loop-jr` 这类内部标识不许出现在学生看得见的字里
+    // 知识点 slug：`machine-learning-sr` 这类内部标识不许出现在学生看得见的字里
     const slugs = text.match(/[a-z][a-z0-9]*(?:-[a-z0-9]+)+-(?:pl|ph|jr|sr)\b/g)
     if (slugs) problems.push(`${where} 含知识点标识 ${slugs.join('、')}`)
     for (const mark of MARK_SYNTAX) {
@@ -857,9 +963,9 @@ test('演示沙箱 ⑤：模型配置看起来早就配好，但只有掩码、�
 test('演示沙箱 ⑥：覆盖层未激活时严格 no-op，激活后只拦学生态、内容态一律透传', async () => {
   /** 内容态（随包资产）：**任何状态下都不许被拦**。 */
   const CONTENT_PATHS = [
-    '/api/quiz/bank/prog-loop-jr?grade_level=junior&count=3',
-    '/api/code/templates/prog-loop-jr',
-    '/api/code/hint/prog-loop-jr?level=1',
+    '/api/quiz/bank/machine-learning-sr?grade_level=senior&count=3',
+    '/api/code/templates/machine-learning-sr',
+    '/api/code/hint/machine-learning-sr?level=1',
     '/api/animation/templates',
     '/api/animation/render',
     '/api/knowledge/stats',
@@ -881,13 +987,13 @@ test('演示沙箱 ⑥：覆盖层未激活时严格 no-op，激活后只拦学�
     ['/api/quiz/mistakes/student_001', 'items'],
     ['/api/quiz/progress/student_001', 'levels'],
     ['/api/quiz/generated/student_001', 'questions'],
-    ['/api/knowledge/chapters/junior?student_id=student_001', 'chapters'],
-    ['/api/graph/overview/junior?student_id=student_001', 'nodes'],
+    ['/api/knowledge/chapters/senior?student_id=student_001', 'chapters'],
+    ['/api/graph/overview/senior?student_id=student_001', 'nodes'],
     ['/api/animation/saved/student_001', 'items'],
     // ★ 取一条（**带 html**）：覆盖层要为它真渲染一次产物；本机没有 sidecar 时
     //   渲染取不到 → 回**空串 html**（渲染侧据此走文字降级），这里断言它照样被拦下、
     //   响应体里仍然有 `html` 这个字段，且**不是**编出来的东西。
-    ['/api/animation/saved/student_001/anim-loop-3ways', 'html'],
+    ['/api/animation/saved/student_001/saved-anim-001', 'html'],
     ['/api/settings', 'llm']
   ] as const
 
@@ -1175,8 +1281,8 @@ test('演示沙箱 ③e：三条预置会话各带逐轮信封，轮次号不重
   assert.equal(Math.max(...historyTurns), DEMO_HISTORY_TURN_COUNT)
   assert.deepEqual(
     scriptTurns,
-    [DEMO_HISTORY_TURN_COUNT + 1, DEMO_HISTORY_TURN_COUNT + 2, DEMO_HISTORY_TURN_COUNT + 3],
-    '脚本三轮必须紧接在历史之后'
+    Array.from({ length: DEMO_SCRIPT_TURN_COUNT }, (_, index) => DEMO_HISTORY_TURN_COUNT + index + 1),
+    '脚本五轮必须紧接在历史之后（号连续、不撞号）'
   )
 
   // ④ 信封里那句「命中 N 块」是真的：引用条数与信封自报的数字逐条对上
@@ -1211,7 +1317,7 @@ test('演示沙箱 ③e：三条预置会话各带逐轮信封，轮次号不重
   }
 })
 
-test('演示沙箱 附：内容态资产存在且覆盖循环/变量/列表三个知识点', () => {
+test('演示沙箱 附：内容态资产存在且覆盖脚本用到的那几个知识点', () => {
   const templatesDir = join(repoRoot, 'server', 'resources', 'templates')
   if (existsSync(templatesDir)) {
     const templates = readdirSync(templatesDir).filter((name) => name.endsWith('.json'))
@@ -1220,11 +1326,11 @@ test('演示沙箱 附：内容态资产存在且覆盖循环/变量/列表三�
     // 它的归属由下面 ③c 那条断言守）—— 命中不了就会降级成文字
     const names = new Set(templates.map((name) => name.replace(/\.json$/, '')))
     assert.ok(
-      names.has('prog-loop-jr') || names.has('python-loop'),
-      '循环这个知识点必须有可命中的随包模板'
+      names.has('gradient-descent-v2') || names.has('gradient-descent'),
+      '主线知识点（机器学习）必须有可命中的随包模板'
     )
 
-    // ★★ 「我的动画」两条的 `concept` 必须与**按 kp 命中的那个模板**声明的一字不差：
+    // ★★ 「我的动画」三条的 `concept` 必须与**按 kp 命中的那个模板**声明的一字不差：
     //    渲染侧的 `InlineCard.vue` 是拿卡片载荷的 `concept` + 学段去库里对记录的
     //    （`savedMatch`），库里写成教材小节标题（「循环：重复的事交给机器」）时，
     //    卡片上那颗「我的」按钮**永远灰着**。这条只有对着真实资产断言才守得住。
@@ -1251,18 +1357,17 @@ test('演示沙箱 附：内容态资产存在且覆盖循环/变量/列表三�
     }
   }
 
-  // 三个编程模板都真实存在（脚本第 2 轮取的是 prog-loop-jr）
-  for (const kpId of DEMO_SCRIPT_KP_IDS) {
-    assert.ok(
-      existsSync(join(repoRoot, 'preset-content', 'code-templates', `${kpId}.json`)),
-      `缺代码模板：${kpId}`
-    )
-  }
+  // ★ 编程模板只对**用到它的那一个**知识点断言：脚本第 3 轮取的是主线（机器学习），
+  //   而「每个 kp 都得有一份代码模板」不是本仓库的约束（1 个 kp 1 份是内容资产的决定）。
+  assert.ok(
+    existsSync(join(repoRoot, 'preset-content', 'code-templates', 'machine-learning-sr.json')),
+    '缺代码模板：machine-learning-sr（脚本第 3 轮取的就是它）'
+  )
 
-  // 三个知识点的中文名都能在真实知识库目录里找到对应文件
+  // 脚本用到的那几个知识点的中文名都能在真实知识库目录里找到对应文件
   for (const kpId of DEMO_SCRIPT_KP_IDS) {
     const candidates = [
-      join(repoRoot, 'server', 'knowledge', 'junior', `${kpId}.md`),
+      join(repoRoot, 'server', 'knowledge', 'senior', `${kpId}.md`),
       join(repoRoot, 'preset-content', '_meta', 'kp-catalog.md')
     ]
     assert.ok(
@@ -1270,6 +1375,6 @@ test('演示沙箱 附：内容态资产存在且覆盖循环/变量/列表三�
       `找不到 ${kpId} 的教材依据`
     )
   }
-  assert.ok(readRepo('preset-content', '_meta', 'kp-catalog.md').includes('prog-loop-jr'))
-  assert.equal(DEMO_CHAPTER_TITLE, '第8章 编程实践（补充）')
+  assert.ok(readRepo('preset-content', '_meta', 'kp-catalog.md').includes('machine-learning-sr'))
+  assert.equal(DEMO_CHAPTER_TITLE, '第3章 核心技术分支')
 })

@@ -1,0 +1,23 @@
+{
+  "kp_id": "machine-learning-sr",
+  "grade_level": "senior",
+  "title": "统计：算机器学习这组样本的平均值与最大值",
+  "expected_behavior": "填好 TODO 后，程序打印「平均 155.0，最大 200」。",
+  "scaffold": "# 目标：求这批数据的平均值和最大值\nnums = [200, 150, 180, 90]\n\n# TODO 1：求平均值，存进 mean\nmean = ____\n# TODO 2：求最大值，存进 top\ntop = ____\n# TODO 3：打印「平均 x，最大 y」（平均保留 1 位小数）\n____\n",
+  "expected_output": "平均 155.0，最大 200\n",
+  "hints": [
+    {
+      "level": 1,
+      "hint": "平均值是把总和摊到每一项上；最大值可以先排好队再看。"
+    },
+    {
+      "level": 2,
+      "hint": "平均值用总和除以个数，最大值交给现成的函数。"
+    },
+    {
+      "level": 3,
+      "hint": "mean = sum(nums) / len(nums)；top = max(nums)。"
+    }
+  ],
+  "solution": "nums = [200, 150, 180, 90]\n\nmean = sum(nums) / len(nums)\ntop = max(nums)\n\nprint(f\"平均 {mean:.1f}，最大 {top}\")\n"
+}

@@ -77,9 +77,22 @@ export interface DemoScriptTurn {
    *
    * ★★ 演示者无论打什么、只要按发送就推进一轮，**屏幕上出现的是这一句** ——
    *   这是"看起来像真的用过"与"看起来像在放录像"的分界：现场演示不可能每次都
-   *   把三句话原样打对（打字、错字、来不及），而脚本必须稳定。
+   *   把那几句话原样打对（打字、错字、来不及），而脚本必须稳定。
+   * ⚠️ 唯一的例外见 {@link studentTextFromInput}。
    */
   studentText: string
+  /**
+   * ★★ **拦截轮**专用：学生气泡显示**演示者真正打进去的那句话**（不预置、不打码）。
+   *
+   * 判据是「这一轮要让学生看清被拦下的输入是什么」：把敏感词换成脚本里某一句
+   * 等于把证据抹掉；而其余几轮反过来 —— 演示者打什么都显示脚本里那句（见
+   * {@link studentText} 的说明）。两种口径各有各的用处，所以由这一位显式区分，
+   * **不用「`studentText` 是空串」当哨兵**：空串会被
+   * {@link isDemoScriptPayload} 的「去空白后还有字」判据挡在边界上。
+   * ⚠️ 为 `true` 时 {@link studentText} 仍必须非空 —— 它只是「取不到真输入时的兜底」，
+   * 而不是「这一轮没有原话」。
+   */
+  studentTextFromInput?: boolean
   /** 助手正文（渲染侧按 18ms/字逐字回放）。 */
   answer: string
   /** 这一轮的教材引用（`citation` 事件的载荷）。 */
@@ -144,8 +157,14 @@ export interface DemoScriptPayload {
   history: DemoHistorySession[]
 }
 
-/** 三轮脚本的轮数（渲染侧据它做循环；写成导出的常量而不是猜数组长度）。 */
-export const DEMO_SCRIPT_TURN_COUNT = 3
+/**
+ * 脚本的轮数（渲染侧据它做循环；写成导出的常量而不是猜数组长度）。
+ *
+ * ★ 2026-10-02 从 3 扩到 5：多了「我会了」与**拦截轮**两拍（见 `docs/preset-redesign/`）。
+ * ★ 它同时被 `main/demo/script.ts` 的轮次偏移引用 —— 扩轮时只改这里，
+ *   偏移表达式跟着走（写死一个裸数字会让每条信封的累计轮次整体偏掉）。
+ */
+export const DEMO_SCRIPT_TURN_COUNT = 5
 
 /**
  * 运行期浅校验：`demo:script` 的下发载荷。

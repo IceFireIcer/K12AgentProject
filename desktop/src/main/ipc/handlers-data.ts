@@ -25,6 +25,11 @@ import { DEFAULT_GRADE_LEVEL } from '../agent/prompts/grade.ts'
 import { STUDENT_ID_PATTERN } from '../agent/pi-paths.ts'
 // ★ 演示沙箱：写操作在**处理器层**一律拒绝（回一句可读中文，绝不让状态码上屏）。
 import { isDemoSeeded } from '../demo/state.ts'
+// ★★ 沙箱态「再练几道」的预置题：它**不是写操作**，所以走的是放行分支而不是回绝
+//    （见 `runQuizGeneration` 的文件头）。与判分不同，这一条在沙箱里必须给出题 ——
+//    演示要看到的是「动态出题真的能拿到题」，而不是一句「当前不可用」。
+//    ⚠️ 相对路径 + `.ts` 后缀：与上面那条同一条纪律（本文件要被 node 单测直接加载）。
+import { demoQuizVariantsBody } from '../demo/data.ts'
 // ⚠️ 相对路径 + `.ts` 后缀，**不用 `@shared/*` 别名**：本文件会被若干 node 单测直接加载
 //    （它们没有别名的解析钩子），写成别名会让那些用例当场 `Cannot find package`。
 import { DEMO_BLOCKED_MESSAGE } from '../../shared/demo-seed.ts'
@@ -1000,7 +1005,12 @@ export function registerDataHandlers(options: {
    *
    * ★★ 身份与学段**由主进程注入**（与 quizBank 同一条纪律）：载荷类型里根本没有
    *    studentId / gradeLevel 这两个字段，渲染进程递不了也改不了。
-   * ★ 沙箱演示态与判分同判据（demoBlocked）：出题要花真钱调模型，沙箱里一条都不出。
+   * ★★ 沙箱演示态的**例外**：这两条通道**放行**，回的是预置好的三道变式题
+   *   （`demo/data.ts` 的 `DEMO_QUIZ_VARIANTS`）。
+   *   判据是「这一条要演示的机制是动态出题本身」：回绝掉它就等于把这条功能在演示里
+   *   整个抹掉，而它恰恰是这次演示要展示的东西（见 `docs/preset-redesign/05`）。
+   *   ⚠️ 放行**只放行到预置数据**：模型通道一次都不会被调到（不花真钱、不落库），
+   *   学生的作答轨迹也不会被送出去 —— 载荷在沙箱态下不参与任何生成。
    * ★ 出参形态与 quizGeneratedList 一致（data = 投影后的载荷，结构上没有答案）。
    *   ok:true 但 data === null = 「这一批没有新题」（配额已满 / 当前没有可用模型）——
    *   渲染层据此静默不追加（自动路径）或给一句行内说明（按钮路径），
@@ -1019,6 +1029,10 @@ export function registerDataHandlers(options: {
     payload: unknown,
     mode: 'auto' | 'more'
   ): Promise<StudyCallResult> {
+    // ★★ 沙箱态：**直接回预置变式题**（不调模型、不读库、不写库）。
+    //   放在 `demoBlocked()` 之前是刻意的：这一条不是写操作，走的是「放行并给预置数据」
+    //   那条路 —— 与 `quizGrade`（真的会写掌握度）必须回绝的情形不是同一件事。
+    if (isDemoSeeded()) return { ok: true, data: demoQuizVariantsBody() }
     const blocked = demoBlocked()
     if (blocked !== null) return blocked
     const request = (payload ?? {}) as Partial<QuizGenerateRequest>

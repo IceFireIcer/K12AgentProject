@@ -31,7 +31,7 @@
  *   侧栏那三条会话点开就有正文，而原先**一条信封都没有** —— 运行透视的时间轴上
  *   只有脚本放过的轮次，看起来像这套机制只在当前那一段对话里跑过。
  *   现在三条会话各 3 轮，正文与信封由**同一张表**（{@link DemoHistoryTurn}）生成：
- *   同长度、同顺序、讲同一件事。轮次号在缓冲区里不重复（历史 1..9，脚本 10..12）。
+ *   同长度、同顺序、讲同一件事。轮次号在缓冲区里不重复（历史 1..9，脚本 10..14）。
  *
  * ⚠️ 本文件只在主进程加载（它经 `apiFetch` 取数）。**不碰任何落盘路径**：
  *    预置内容从不写盘，进程一退出就没了。
@@ -54,7 +54,12 @@ import {
   demoProfileBody,
   demoRecommendationBody
 } from './data.ts'
-import type { Citation, CitationDetail, Degraded, PayloadKind } from '@shared/ipc-events'
+import type { Citation, CitationDetail, Degraded, GradeLevel, PayloadKind } from '@shared/ipc-events'
+// ⚠️ 值 import 必须用**相对路径 + `.ts` 后缀**，不能用 `@shared/*` 别名：
+//   静态 import 的解析发生在模块链接期，而 `tests/demo-seed.test.ts` 的解析钩子
+//   在链接期之后才跑（那个文件头有同样的说明）——写成别名会让整份测试当场加载不起来。
+//   `stores/demoSeed.ts` 用同一条写法 import 同一个模块。
+import { DEMO_SCRIPT_TURN_COUNT } from '../../shared/demo-seed.ts'
 import type {
   DemoHistorySession,
   DemoScriptPayload,
@@ -114,57 +119,52 @@ async function loadDiagnostics(): Promise<DiagnosticsModule> {
 /* ------------------------------------------------------------------ *
  * 这一轮讲的是哪个知识点
  *
- * ★ 三个都是**真实存在**的初中知识点（`prog-loop-jr` 等来自随包知识库的
- *   第 8 章「编程实践（补充）」）。章节名与知识点名逐字取自真实资产 ——
+ * ★ 五个都是**真实存在**的高中知识点（`machine-learning-sr` 等来自随包知识库的
+ *   第 3 章「核心技术分支」）。章节名与知识点名逐字取自真实资产 ——
  *   界面上少一个「未命名知识点」，演示的可信度就少一分。
  * ------------------------------------------------------------------ */
 
-/** 循环（第 2、3 轮的落点：编程卡与闯关卡）。 */
-const KP_LOOP = 'prog-loop-jr'
-/** 变量（右栏「推荐下一步」与动画库用）。 */
-const KP_VARIABLE = 'prog-variable-jr'
-/** 列表与字典（第 1 轮那张动画卡讲的正是它；错题本第三题也是它）。 */
-const KP_LIST = 'prog-list-jr'
+/** 机器学习（**主线**：第 1 轮正文、动画卡、编程卡、闯关卡、错题本全落在它上面）。 */
+const KP_ML = 'machine-learning-sr'
+/** 神经网络（第 2 条预置历史的主线，动画库第二条也讲它）。 */
+const KP_NEURAL = 'neural-network-sr'
+/** 监督学习（第 3 条预置历史的主线）。 */
+const KP_SUPERVISED = 'supervised-learning-sr'
+/** 无监督学习（三类学习里的对照面，预置历史第 2 轮讲到它）。 */
+const KP_UNSUPERVISED = 'unsupervised-learning-sr'
+/** 强化学习（唯一「没掌握」的那一关，错题本第三条与推荐位第一条都引它）。 */
+const KP_REINFORCEMENT = 'reinforcement-learning-sr'
 
-/** 第 8 章的真实章名（`preset-content/quizbank/ch08.json` 的顶层 `chapter`）。 */
-const CHAPTER_PROGRAMMING = '第8章 编程实践（补充）'
+/** 第 3 章的真实章名（`preset-content/quizbank/ch03.json` 的顶层 `chapter`）。 */
+const CHAPTER_CORE = '第3章 核心技术分支'
 
 /**
- * 引用里的教材小节标题。
+ * 引用里的教材小节标题（四条都逐字取自 `server/knowledge/senior/*.md` 的
+ * `knowledge_point` 字段）。
  *
- * ★ 逐字取自 `server/knowledge-supplement/第八章.编程实践（补充）/8.3列表与字典.md`
- *   的**一级标题** —— 不写「列表」两个字的简称，是因为引用行上要显示的是教材里
- *   真实存在的那一行字。
+ * ★ 不写「机器学习」这样的简称：引用行上要显示的是教材里真实存在的那一行字。
  */
-const SECTION_LIST = '列表与字典：把一批数据放在一起'
+const SECTION_ML = '机器学习（ML）'
+const SECTION_NEURAL = '神经网络'
+const SECTION_SUPERVISED = '监督学习'
+const SECTION_UNSUPERVISED = '无监督学习'
 
 /**
- * 循环那一节的教材标题（逐字取自 `server/knowledge/junior/prog-loop-jr.md` 的
- * `knowledge_point`）。
- *
- * ★ 预置历史第 2 轮（「它每次都要从头看一遍吗」）的向量检索没命中，落到关键词那一档，
- *   命中的就是**这一节** —— 那一轮讲「一遍又一遍、什么时候停」，正是循环这一节的内容。
- */
-const SECTION_LOOP = '循环：重复的事交给机器'
-
-/**
- * 第 1 轮动画卡**点名**用的随包模板（`server/resources/templates/sorting-bars.json`）。
+ * 第 2 轮动画卡**点名**用的随包模板（`server/resources/templates/gradient-descent-v2.json`）。
  *
  * ★★ 为什么是显式给模板 id，而不是只给知识点（渲染端点两条路都支持）：
- *   这一轮的动画换成它是**把 8 份随包模板逐个渲染、在 800×480 的卡片尺寸下
- *   隔几秒各截一张、人眼比出来的**结果（配色最抓眼、柱子一动就看得见在比哪一对、
- *   信息密度与卡片尺寸相称），属于**有意选定的观感**，不是「按知识点自动命中的副产物」。
- *   只给知识点的话，将来随包里多出一份覆盖同一知识点的模板，
- *   `pick_template` 取的是 `exact[0]`（顺序跟着目录里文件名的排序走）——
- *   演示的观感会在没人察觉的时候变掉，而这一轮换模板的全部意义就是观感。
+ *   这一轮挂的就是**为这次演示新写的那一份**（散点云 + 切线追踪小球，9 相位）。
+ *   只给知识点的话，覆盖 `machine-learning-sr` 的模板不止一份（旧 `gradient-descent`
+ *   也在），`pick_template` 取的是 `exact[0]`（顺序跟着目录里文件名的排序走）——
+ *   演示的观感会在没人察觉的时候变掉，而这一轮讲动画的全部意义就是观感。
  *   钉住 id 之后，这份模板万一不在了，表现是**诚实的降级**（渲染 404 → 卡片落回
  *   文字要点 + 全屏入口），而不是换一份谁也没看过的动画接着播。
  * ★ 代价是「模板真的覆盖这个知识点」不再由服务端把关（`templateId` 命中时它不做归属校验），
  *   所以那条判据改由 `tests/demo-seed.test.ts` 对着随包资产断言：
- *   这份模板的 `kp_ids` 必须覆盖 {@link KP_LIST}、`grade_levels` 必须含初中。
+ *   这份模板的 `kp_ids` 必须覆盖 {@link KP_ML}、`grade_levels` 必须含高中。
  *   改这里就要连那条断言一起过。
  */
-const ANIMATION_TEMPLATE_ID = 'sorting-bars'
+const ANIMATION_TEMPLATE_ID = 'gradient-descent-v2'
 
 /** 三次请求的超时（本机回环，正常毫秒级；与 `wire/data.ts` 同量级）。 */
 const CONTENT_TIMEOUT_MS = 8_000
@@ -204,10 +204,10 @@ function text(value: unknown): string {
 }
 
 /**
- * 第 1 轮那张**动画卡**（真实模板产物）。
+ * 第 2 轮那张**动画卡**（真实模板产物）。
  *
  * ★ 渲染走 {@link renderDemoAnimation}（**唯一一处实现**：真实端点
- *   `POST /api/animation/render`）。这一轮讲的是列表（{@link KP_LIST}），
+ *   `POST /api/animation/render`）。这一轮讲的是梯度下降（{@link KP_ML}），
  *   模板**点名**用 {@link ANIMATION_TEMPLATE_ID}（为什么点名、代价是什么，见那个常量上方）。
  * ★ 拿不到时返回的载荷 `html` 为空、只带一句**真实的中文要点** ——
  *   渲染侧的既有降级路径会把它显示成「文字要点 + 一句提示」，绝不白屏。
@@ -215,8 +215,8 @@ function text(value: unknown): string {
  */
 async function buildAnimationCard(): Promise<DemoSeedCard> {
   if (animationCardCache !== null) return animationCardCache
-  const payloadId = `demo-${KP_LIST}`
-  const rendered = await renderDemoAnimation(KP_LIST, payloadId, ANIMATION_TEMPLATE_ID)
+  const payloadId = `demo-${KP_ML}`
+  const rendered = await renderDemoAnimation(KP_ML, payloadId, ANIMATION_TEMPLATE_ID)
   const card: DemoSeedCard = {
     kind: 'animation',
     payload: {
@@ -224,12 +224,12 @@ async function buildAnimationCard(): Promise<DemoSeedCard> {
       //   （`concept` / `fallback_text`），与 `data.ts` 里动画库条目取模板 `concept`
       //   是同一个做法：这里只放真实资产的原话，不另编一段描述。
       //   真的取到渲染产物时，以产物里那两份为准（它们是同一份模板的同一个字段）。
-      concept: rendered?.concept || '排序',
+      concept: rendered?.concept || '梯度下降',
       html: rendered?.html ?? '',
       durationMs: rendered?.durationMs || 6000,
       fallbackText:
         rendered?.fallbackText ||
-        '排序做的事，是反复比较相邻的两个数：如果左边的比右边的大，就把它们交换过来。一遍走完，最大的数就被推到了最后；再来一遍，第二大的也到了位置。重复「比较 + 交换」直到没有需要交换的，一整排数就排好了。',
+        '训练开始时，机器先随便给预测线一个位置，再看每个数据点离这条线有多远。所有距离加起来就是一个损失值，损失越小说明预测越接近这批数据。接下来每一步都沿着让损失下降最快的方向挪一点，学习率决定每一步挪多大。挪到损失不再明显下降时，参数就接近最合适的位置了。',
       // ★ 模板自带的兜底静态图（自包含 dataURL）照原样带出去：降级时看到的是真实产物那张图。
       fallbackImage: rendered?.fallbackImage ?? null,
       source: 'template',
@@ -245,16 +245,16 @@ async function buildAnimationCard(): Promise<DemoSeedCard> {
   return card
 }
 
-/** 第 2 轮那张**编程卡**（真实脚手架 + 真实要求）。 */
+/** 第 3 轮那张**编程卡**（真实脚手架 + 真实要求）。 */
 async function buildCodingCard(): Promise<DemoSeedCard> {
   if (codeCardCache !== null) return codeCardCache
-  const raw = await fetchJson(`/api/code/templates/${encodeURIComponent(KP_LOOP)}?grade_level=${DEMO_GRADE_LEVEL}`)
+  const raw = await fetchJson(`/api/code/templates/${encodeURIComponent(KP_ML)}?grade_level=${DEMO_GRADE_LEVEL}`)
   const record = (raw ?? {}) as Record<string, unknown>
   const scaffold = text(record.scaffold)
   const card: DemoSeedCard = {
     kind: 'coding',
     payload: {
-      kpId: text(record.kpId) || KP_LOOP,
+      kpId: text(record.kpId) || KP_ML,
       language: 'python',
       scaffold,
       expectedBehavior: text(record.expectedBehavior)
@@ -264,18 +264,18 @@ async function buildCodingCard(): Promise<DemoSeedCard> {
   return card
 }
 
-/** 第 3 轮那张**闯关卡**（真实题目的**对外形态**：结构上没有答案）。 */
+/** 第 4 轮那张**闯关卡**（真实题目的**对外形态**：结构上没有答案）。 */
 async function buildQuizCard(): Promise<DemoSeedCard> {
   if (quizCardCache !== null) return quizCardCache
   const raw = await fetchJson(
-    `/api/quiz/bank/${encodeURIComponent(KP_LOOP)}?grade_level=${DEMO_GRADE_LEVEL}&count=3`
+    `/api/quiz/bank/${encodeURIComponent(KP_ML)}?grade_level=${DEMO_GRADE_LEVEL}&count=3`
   )
   const record = (raw ?? {}) as Record<string, unknown>
   const questions = Array.isArray(record.questions) ? record.questions : []
   const card: DemoSeedCard = {
     kind: 'quiz',
     payload: {
-      kpId: text(record.kpId) || KP_LOOP,
+      kpId: text(record.kpId) || KP_ML,
       source: 'bank',
       questions
     }
@@ -315,14 +315,26 @@ function citationDetail(
   }
 }
 
-/** 一条引用（5 个字段，与 `contracts.py` 的 `Citation` 逐字对应）。 */
-function textbookCitation(chunkId: string, sectionTitle: string): Citation {
+/**
+ * 一条引用（5 个字段，与 `contracts.py` 的 `Citation` 逐字对应）。
+ *
+ * ★ `gradeLevel` / `compat` 由调用方给，**不写死**：第 3 条预置历史那一轮讲的是
+ *   「初中的梯度下降是向上兼容取用的」，那一轮的两条引用必须是
+ *   `gradeLevel: 'junior'` + `compat: true` —— 写死成"本学段 + 不兼容"的话，
+ *   界面上那条「向上兼容」标记永远不会出现，而它正是那一轮要演示的东西。
+ */
+function textbookCitation(
+  chunkId: string,
+  sectionTitle: string,
+  gradeLevel: GradeLevel = DEMO_GRADE_LEVEL,
+  compat = false
+): Citation {
   return {
     chunkId,
-    chapterTitle: CHAPTER_PROGRAMMING,
+    chapterTitle: CHAPTER_CORE,
     sectionTitle,
-    gradeLevel: DEMO_GRADE_LEVEL,
-    compat: false
+    gradeLevel,
+    compat
   }
 }
 
@@ -338,30 +350,65 @@ function citationPair(
   sectionTitle: string,
   body: string,
   score: number,
-  degraded: Degraded = 'vector'
+  degraded: Degraded = 'vector',
+  gradeLevel: GradeLevel = DEMO_GRADE_LEVEL,
+  compat = false
 ): { citation: Citation; detail: CitationDetail } {
   return {
-    citation: textbookCitation(chunkId, sectionTitle),
+    citation: textbookCitation(chunkId, sectionTitle, gradeLevel, compat),
     detail: citationDetail(chunkId, kpId, body, score, degraded)
   }
 }
 
-/** 第 1 轮的两条引用（列表那一节的前后两块）。 */
-function listCitations(): { citations: Citation[]; details: CitationDetail[] } {
+/**
+ * 第 1 轮的两条引用（机器学习那一节的前后两块）。
+ *
+ * ★ 两段正文都是**教材原文的节选**（逐字取自 `server/knowledge/senior/machine-learning-sr.md`
+ *   的摘要与正文），不是编的话术 —— 右栏「教材原文」抽屉里点开看到的就是它们。
+ * ★ 分数按向量检索的真实量级给（0.8 上下），两条一高一低 —— 命中两块且都在同一节，
+ *   与信封里那句「sqlite-vec KNN 命中 2 块，都落在「机器学习（ML）」这一节」对得上。
+ */
+function mlCitations(): { citations: Citation[]; details: CitationDetail[] } {
   const pairs = [
     citationPair(
-      'list-1',
-      KP_LIST,
-      SECTION_LIST,
-      '列表和字典是两种最基本的容器：它们把多个值聚成一个整体，可以用一个名字管理。列表是有序序列，靠位置取用。',
-      0.82
+      'ml-1',
+      KP_ML,
+      SECTION_ML,
+      '机器学习研究如何让计算机从数据中自动获得规律，并据此对未知样本作出预测，是人工智能的核心方法论。',
+      0.84
     ),
     citationPair(
-      'list-2',
-      KP_LIST,
-      SECTION_LIST,
-      '列表把一批数据按顺序排好，字典给每份数据配一个名字，方便按顺序取或按名字查。',
-      0.76
+      'ml-2',
+      KP_ML,
+      SECTION_ML,
+      '完整流程通常包括：数据准备与划分、模型选择、定义损失函数、参数优化与评估。按监督信号可分为监督学习、无监督学习与强化学习三类。',
+      0.77
+    )
+  ]
+  return { citations: pairs.map((pair) => pair.citation), details: pairs.map((pair) => pair.detail) }
+}
+
+/**
+ * 第 1 条预置历史的两条引用（神经网络那一节的前后两块）。
+ *
+ * ★ 正文逐字取自 `server/knowledge/senior/neural-network-sr.md` —— 与 `mlCitations()`
+ *   同一条纪律：引用抽屉里点开看到的必须是教材原文的节选。
+ */
+function neuralCitations(): { citations: Citation[]; details: CitationDetail[] } {
+  const pairs = [
+    citationPair(
+      'neural-1',
+      KP_NEURAL,
+      SECTION_NEURAL,
+      '神经网络由输入层、若干隐藏层与输出层组成，层与层之间的连接带权重，每个节点把上一层的输出加权求和后再过一次激活函数。',
+      0.86
+    ),
+    citationPair(
+      'neural-2',
+      KP_NEURAL,
+      SECTION_NEURAL,
+      '它是受生物神经元启发的简化模型：单元数量与连接方式都比真实大脑简单得多，训练调的就是那些连接的权重。',
+      0.78
     )
   ]
   return { citations: pairs.map((pair) => pair.citation), details: pairs.map((pair) => pair.detail) }
@@ -471,31 +518,30 @@ function buildEnvelope(diagnostics: DiagnosticsModule, input: EnvelopeInput): Tu
     input: { text: input.studentText, safetyInput: { verdict: 'pass' } },
     grade: {
       applied: DEMO_GRADE_LEVEL,
-      // ★ 缓冲区里的 12 轮（预置历史 9 轮 + 脚本 3 轮）统一写死 `llm`：这些轮的学段是
+      // ★ 缓冲区里的 14 轮（预置历史 9 轮 + 脚本 5 轮）统一写死 `llm`：这些轮的学段是
       //   **AI 引擎复核**判的，不是本地规则层的结论 —— 界面上的来源标签（顶栏那颗学段按钮 /
-      //   侧栏身份卡 / 运行透视）据此显示「AI 引擎判定」。它们的累计轮次都在第 7 轮之后，
+      //   侧栏身份卡 / 运行透视）据此显示「AI 引擎判定」。它们的累计轮次都在第 10 轮之后，
       //   早已越过复核门槛（`LLM_DECIDES_FROM_TURN` 第 5 轮），所以每一轮都由复核层定方向。
       decidedBy: 'llm',
       // 第二层（LLM 复核）这一窗口**真的跑过**：`used`（不再是 `not_due`）——
       // 它正是上面那条 `decidedBy: 'llm'` 的来路，两处必须一起改。
       layer2: 'used',
       pending: null,
-      // 与 `/api/grade/state` 同一口径：缓冲区里**最后一轮**（第 12 轮，= 脚本第 3 轮）
-      // 落在累计第 18 轮（= 状态体里的 `lastTurn`）。偏移的来路见 `DEMO_TURN_OFFSET`。
+      // 与 `/api/grade/state` 同一口径：缓冲区里**最后一轮**（第 14 轮，= 脚本第 5 轮）
+      // 落在累计第 32 轮（= 状态体里的 `lastTurn`）。偏移的来路见 `DEMO_TURN_OFFSET`。
       cumulativeTurns: input.turn + DEMO_TURN_OFFSET,
-      // ★ 三轮都是 0，与状态体的 `cooldownRemainingTurns: 0` 一致。
-      //   第三轮原先还挂着一条「学段 · 冷却窗口」的拦截（配套 `cooldownRemainingTurns: 4`），
-      //   **已随本次改动删除**：手动冷却的锚点必须是最近一条 `source: 'explicit'` 的轨迹行，
-      //   而那行会让来源显示成「手动选中」而不是「AI 引擎判定」，还会把状态体的冷却
-      //   变成 10 轮起步。留着它就会同时与状态体的 `source: 'inferred'` /
-      //   `decidedBy: 'llm'` / `cooldownRemainingTurns: 0` / `lastChangeTurn: 13` 四处打架
-      //   （自动冷却若还剩 4 轮，最近一次改判就该在一两轮之前，而不是第 13 轮）。
-      //   信封的全部意义是「这里每个数字都是运行时真的产生过的」，所以宁可少一条拦截
-      //   记录，也不要一条自相矛盾的证据。
+      // ★ 五轮都是 0，与状态体的 `cooldownRemainingTurns: 0` 一致：最近一次改判在第 27 轮
+      //   （= 脚本第 1 轮的前一轮），到缓冲区最后一轮正好过 5 轮，自动冷却窗口走完。
+      //   ⚠️ 这里**不挂**那条「学段 · 冷却窗口」拦截：手动冷却的锚点必须是最近一条
+      //   `source: 'explicit'` 的轨迹行，而那行会让来源显示成「手动选中」而不是
+      //   「AI 引擎判定」，还会把状态体的冷却变成 10 轮起步 —— 留着它就会同时与状态体的
+      //   `source: 'inferred'` / `decidedBy: 'llm'` / `cooldownRemainingTurns: 0` /
+      //   `lastChangeTurn: 27` 四处打架。信封的全部意义是「这里每个数字都是运行时
+      //   真的产生过的」，所以宁可少一条拦截记录，也不要一条自相矛盾的证据。
       cooldownRemainingTurns: 0,
       // 如实描述复核的结论（**不写破折号**：`tests/demo-seed.test.ts` 与
       // `student-view-discipline.test.ts` 都禁它）。
-      note: 'AI 引擎复核判定为初中：近几轮的用词、提问深度与练习表现合起来看，稳定落在初中。'
+      note: 'AI 引擎复核判定为高中：近几轮的用词、提问深度与练习表现合起来看，稳定落在高中。'
     },
     prompt: {
       // ★ 字符数与 token 数都按**真实拼装结果**现算（与 `notePrompt()` 同一口径：
@@ -542,31 +588,62 @@ function buildEnvelope(diagnostics: DiagnosticsModule, input: EnvelopeInput): Tu
     tools: input.tools,
     retrieval: input.retrieval,
     safetyFinal: {
-      // 三阶段**都要有结论**：入口预检放行 → 流式正文逐段过审 → 整段终审放行。
-      // 每一格的判词都由该阶段的结论与下面三个计数推得，不写与计数打架的话。
-      stages: [
-        {
-          stage: 'input',
-          verdict: 'pass',
-          reason: '入口预检放行：这一轮学生的输入没有命中任何安全规则，原话照常发给模型。'
-        },
-        {
-          stage: 'stream',
-          verdict: 'pass',
-          reason: '流式正文边生成边过生成侧审查，转发出去的每一段都没有命中规则。'
-        },
-        {
-          stage: 'final',
-          verdict: 'pass',
-          reason: '整段终审跑完就是下面这一次，回答全文放行，没有需要撤回的内容。'
-        }
-      ],
-      // 真实链路里 `finalizations` 是「这一轮的 done 到了之后跑的终审次数」（一轮一次）。
-      finalizations: 1,
-      // 演示里没有撤回（`retractions` 保持 0，与三阶段全 pass 一致）。
-      retractions: 0,
+      // ★★ 第 5 轮（拦截轮）与其余四轮**必须走两条不同的结论** —— 这是本信封最要紧的一处：
+      //   拦截轮是「入口命中 → 立刻拦下」，于是 `input: blocked`、后两阶段 `skipped`
+      //   （模型没开口，没有正文可审）、`retractions: 0` 且 `finalizations: 0`。
+      //   写得与其余四轮一样（三阶段全 pass）就会与 `interceptions` 那条**正面打架**：
+      //   一边说「我拦下了」，一边说「入口放行」。
+      ...(input.ok
+        ? {
+            // 正常轮：入口预检放行 → 流式正文逐段过审 → 整段终审放行。
+            stages: [
+              {
+                stage: 'input' as const,
+                verdict: 'pass' as const,
+                reason: '入口预检放行：这一轮学生的输入没有命中任何安全规则，原话照常发给模型。'
+              },
+              {
+                stage: 'stream' as const,
+                verdict: 'pass' as const,
+                reason: '流式正文边生成边过生成侧审查，转发出去的每一段都没有命中规则。'
+              },
+              {
+                stage: 'final' as const,
+                verdict: 'pass' as const,
+                reason: '整段终审跑完就是下面这一次，回答全文放行，没有需要撤回的内容。'
+              }
+            ],
+            // 真实链路里 `finalizations` 是「这一轮的 done 到了之后跑的终审次数」（一轮一次）。
+            finalizations: 1,
+            // 演示里没有撤回（`retractions` 保持 0，与三阶段全 pass 一致）。
+            retractions: 0
+          }
+        : {
+            stages: [
+              {
+                stage: 'input' as const,
+                verdict: 'blocked' as const,
+                reason: '入口预检拦下：这句话命中了安全词表，原话没有发给模型。'
+              },
+              {
+                stage: 'stream' as const,
+                verdict: 'skipped' as const,
+                reason: '没有生成过正文，这一阶段无从执行。'
+              },
+              {
+                stage: 'final' as const,
+                verdict: 'skipped' as const,
+                reason: '没有生成过正文，终审也无从执行。'
+              }
+            ],
+            // 一个模型请求都没发出去，所以终审一次也没跑过。
+            finalizations: 0,
+            // 正文从来没到过学生面前，也就没有「撤回」这回事。
+            retractions: 0
+          }),
       // 真实语义：终审下结论之前先攒着、还没放给学生的正文字数。这里取**本轮真正
-      // 放出去的正文长度**（`DEMO_SCRIPT_TEXT` 那一段，现算），三轮各不相同。
+      // 放出去的正文长度**（`DEMO_SCRIPT_TEXT` 那一段，现算，五轮各不相同）；
+      // 拦截轮那一句是预置的安全回执，同样按它的长度如实计。
       bufferedChars: input.answerChars
     },
     interceptions: input.interceptions,
@@ -582,17 +659,17 @@ function buildEnvelope(diagnostics: DiagnosticsModule, input: EnvelopeInput): Tu
 /**
  * 第 1 轮那次检索的完整轨迹（第 1 级命中）。
  *
- * ★ 命中的是**哪一节**要写出来，且必须与这一轮的引用（{@link listCitations} 的两条，
- *   都在 {@link SECTION_LIST} 这一节）说同一件事 —— 命中数由调用方按**引用条数**
+ * ★ 命中的是**哪一节**要写出来，且必须与这一轮的引用（{@link mlCitations} 的两条，
+ *   都在 {@link SECTION_ML} 这一节）说同一件事 —— 命中数由调用方按**引用条数**
  *   传进来，两处因此不可能各说一个数。
  */
-function listRetrieval(hits: number, compat: number): DiagRetrieval {
+function mlRetrieval(hits: number, compat: number): DiagRetrieval {
   return retrievalTrace({
-    query: '列表 按顺序排好 相邻比较',
+    query: '机器学习 从数据里总结规律 损失函数',
     degraded: 'vector',
     hits,
     compat,
-    section: SECTION_LIST
+    section: SECTION_ML
   })
 }
 
@@ -674,22 +751,24 @@ function retrievalTrace(input: RetrievalInput): DiagRetrieval {
 /**
  * 学段过滤条件**原文**（Python 按它真正下发的白名单生成）。
  *
- * ★ 白名单不是「只有初中」：检索的向上兼容开关默认开着，下发的是
- *   `compatible_grades('junior')` = 本学段 + **更低学段**（由高到低），
- *   即 `server/app/knowledge/library.py` 的 `['junior','primary_high','primary_low']`，
+ * ★ 白名单不是「只有高中」：检索的向上兼容开关默认开着，下发的是
+ *   `compatible_grades('senior')` = 本学段 + **更低学段**（由高到低），
+ *   即 `server/app/knowledge/library.py` 的 `['senior','junior','primary_high','primary_low']`，
  *   由 `fallback.grade_filter_sql()` 渲染成下面这一行 —— 与真实运行时下发的那一行为**同一个函数
  *   对同一份白名单**的产物（同源性由服务端 `test_rag.py` 的 trace 用例钉住）。
- * ★ 更低学段在**白名单里**、却不一定命中：这一轮两条引用都是初中内容，
+ * ★ 更低学段在**白名单里**、却不一定命中：主线那几轮两条引用都是高中内容，
  *   所以 `compatCount` 是 0（`compat` 标的是「命中了更低学段」这件事，不是「允许命中」）。
+ *   **唯一例外**是第 3 条预置历史第 1 轮 —— 那一轮讲「初中的梯度下降」，两条引用就是
+ *   初中内容，`compatCount` 因此是 2（演示向上兼容的显式标注）。
  * ★ 不放一个"看起来像 SQL"的假字符串：那正是「信封在撒谎」的另一种样子。
  */
-const GRADE_FILTER = "grade_level IN ('junior','primary_high','primary_low')"
+const GRADE_FILTER = "grade_level IN ('senior','junior','primary_high','primary_low')"
 
 /* ------------------------------------------------------------------ *
- * 三轮脚本
+ * 五轮脚本
  * ------------------------------------------------------------------ */
 
-/** 三轮的固定轮次号与请求号前缀（与 `stores/demoSeed.ts` 的约定一致）。 */
+/** 五轮的固定轮次号与请求号前缀（与 `stores/demoSeed.ts` 的约定一致）。 */
 export const DEMO_REQUEST_PREFIX = 'script-'
 
 /**
@@ -701,13 +780,13 @@ export const DEMO_REQUEST_PREFIX = 'script-'
  */
 export const DEMO_CURRENT_SESSION_ID = 'session-current'
 
-/** 三轮脚本的标题（侧栏那三条历史会话的标题，与脚本一一对应）。 */
+/** 三条历史会话的标题（侧栏点开哪一条就按它回放对应的预置正文）。 */
 export const DEMO_SESSION_TITLES = DEMO_SESSIONS.map((session) => session.title)
 
 /**
  * 预置历史三条会话占用的**轮次号个数**（各 3 轮，合计 9：缓冲区里的第 1..9 轮）。
  *
- * ★ 当前会话那三轮脚本的轮次号**接在它们后面**（第 10..12 轮）：时间轴上轮次号
+ * ★ 当前会话那五轮脚本的轮次号**接在它们后面**（第 10..14 轮）：时间轴上轮次号
  *   全局唯一、且按时间升序（历史在前、现在在后）—— 与真实链路同一口径
  *   （`agent/diagnostics.ts` 的 `DiagnosticsStore.beginTurn()` 是**跨会话单调**发号的）。
  * ★ 导出它是为了让「不撞号」这条断言有一处可引用的真源（见 `tests/demo-seed.test.ts`）。
@@ -715,31 +794,34 @@ export const DEMO_SESSION_TITLES = DEMO_SESSIONS.map((session) => session.title)
 export const DEMO_HISTORY_TURN_COUNT = 9
 
 /**
- * 轮次号的**偏移**：缓冲区里的第 N 轮 = 这个学生的累计第 `N + 6` 轮。
+ * 轮次号的**偏移**：缓冲区里的第 N 轮 = 这个学生的累计第 `N + DEMO_TURN_OFFSET` 轮。
  *
- * ★★ 为什么是 6：缓冲区里一共 12 轮（预置历史 9 + 脚本 3），而演示的学段状态体
- *   （`demo/data.ts` 的 `demoGradeStateBody()`）写着这个学生**累计第 18 轮** ——
- *   12 + 6 = 18，于是**最后一轮**（第 12 轮 = 脚本第 3 轮）正好落在累计第 18 轮，
- *   与状态体的 `lastTurn: 18` / `lastChangeTurn: 13` / `cooldownRemainingTurns: 0`
- *   一一对应（这条对应关系原先写在 `buildEnvelope()` 里，当时缓冲区只有三轮脚本、
- *   偏移是 15）。
- * ★ 偏移**全缓冲区统一**：预置历史的信封也用它，所以那些轮次的累计数（7..15）
- *   都排在「现在」（18）前面 —— 历史不会跑到当前会话的后面去。
+ * ★★ 为什么是这个数：缓冲区里一共 14 轮（预置历史 9 + 脚本 5），而演示的学段状态体
+ *   （`demo/data.ts` 的 `demoGradeStateBody()`）写着这个学生**累计第 32 轮** ——
+ *   32 − 14 = 18，于是**最后一轮**（第 14 轮 = 脚本第 5 轮）正好落在累计第 32 轮，
+ *   与状态体的 `lastTurn: 32` / `lastChangeTurn: 27` / `cooldownRemainingTurns: 0`
+ *   一一对应：改判发生在脚本之前（累计第 27 轮），到缓冲区末轮正好过了 5 轮，
+ *   自动冷却窗口（`COOLDOWN_TURNS`）刚好走完。
+ * ★ 偏移**全缓冲区统一**：预置历史的信封也用它，所以那些轮次的累计数（19..27）
+ *   都排在「现在」（32）前面 —— 历史不会跑到当前会话的后面去。
+ * ★★ 表达式里的脚本轮数**必须引 `DEMO_SCRIPT_TURN_COUNT`**，不能再写一个裸的 3：
+ *   脚本从三轮扩到五轮时，写死的那个数不会报错，只会让每一条信封的累计轮次整体偏 2
+ *   （而界面上「第几轮」与学段状态体的 `lastTurn` 就再也对不上了）。
  */
-const DEMO_TURN_OFFSET = 18 - (DEMO_HISTORY_TURN_COUNT + 3)
+const DEMO_TURN_OFFSET = 32 - (DEMO_HISTORY_TURN_COUNT + DEMO_SCRIPT_TURN_COUNT)
 
 /**
- * 三轮的**学生原话与助手正文**（纯常量，不依赖任何取数）。
+ * 五轮的**学生原话与助手正文**（纯常量，不依赖任何取数）。
  *
  * ★★ 为什么单独抽出来而不是写在 `buildDemoScript()` 里：
  *   这两段字是**学生看得见的**，必须过 `student-view-discipline.test.ts` 那三条同一口径的
  *   排版纪律（不写未渲染的 Markdown、不用破折号连接句子），而那三条是**源码级扫描**——
  *   抽成常量，单测就能直接扫它们（见 `tests/demo-seed.test.ts`）。
- *   ⚠️ 改这三段话之前先看那条守卫：`**` / 反引号 / `——` 一个都不许出现。
- * ★ 它们的 `turn` 是**缓冲区里的轮次号**（不是 1、2、3）：前面 9 个号被预置历史占了
+ *   ⚠️ 改这几段话之前先看那条守卫：`**` / 反引号 / `——` 一个都不许出现。
+ * ★ 它们的 `turn` 是**缓冲区里的轮次号**（不是 1..5）：前面 9 个号被预置历史占了
  *   （见 {@link DEMO_HISTORY_TURN_COUNT}），第一轮脚本接在第 10 轮上。
  *   这个号同时进 `requestId`（`script-10`）与时间轴上的「第 N 轮」，改它要一起想清楚。
- * ★ 脚本**循环播放**：放完第 3 轮回到第 1 轮。
+ * ★ 脚本**循环播放**：放完第 5 轮回到第 1 轮（第 5 轮是拦截轮，循环结点）。
  */
 export const DEMO_SCRIPT_TEXT: readonly {
   turn: number
@@ -748,29 +830,48 @@ export const DEMO_SCRIPT_TEXT: readonly {
 }[] = [
   {
     turn: DEMO_HISTORY_TURN_COUNT + 1,
-    studentText: '老师，列表里的数是怎么排好顺序的？',
+    studentText: '机器学习到底是什么？和普通程序有什么不一样？',
     answer:
-      '列表把一批数据按顺序放在一起，靠位置取用：第一个、第二个，数着位置就能找到。要让里面的一排数从小到大站好，机器用的办法很朴素，一次只看相邻的两个。\n\n先比头两个：左边比右边大，就把它俩换个位置；不大，就都不动。然后往右挪一格，再比下一对。像体育课排队，老师从左往右挨个看，谁比右边的人高就换过来。这样走一趟下来，最高的那个一定站到了排尾。\n\n一趟只安顿好一个，剩下的还得再走几趟。每多走一趟，末尾站定的人就多一个，要看的地方就少一对。走到没有需要换的，整排数就排好了。'
+      '机器学习，简单说就是：不再由人写死每一条规则，而是让机器从大量数据里自己总结规律，再用规律去判断没见过的新情况。\n\n普通程序是你告诉它「如果 A 就做 B」，分支都得人事先列出来；机器学习是给它一批「输入 + 答案」的样例，让它去拟合一个能解释这些样例的函数，下次来个新输入，它直接拿这个函数去预测。\n\n想真的拿下来，分三步走：第一步，先把三类学习分清楚，监督学习要带答案、无监督学习没答案、强化学习靠奖励；第二步，再看训练怎么调参数，核心是损失函数和梯度下降；第三步，最后动手算数据，机器能学，得先有数据可看。'
   },
   {
     turn: DEMO_HISTORY_TURN_COUNT + 2,
-    studentText: '那我们用代码试试？',
+    studentText: '训练的时候，它怎么知道该往哪儿调？',
     answer:
-      '好，我们从代码填空开始。骨架已经给好了，里面留了待填的地方。\n\n第一处是每轮要做的那件事，最后一处是打印每一轮的结果。你照着注释里的提示写，写完直接把代码跑起来，看看输出对不对。\n\n跑之前先猜一猜：如果让它数到 5，屏幕上会出现哪几个数？猜完再跑，对上了就说明你读懂了。'
+      '训练的时候，它知道该往哪儿调，靠两件事：\n\n一是损失函数，它把当前预测偏离真值多少算成一个数，方向就有了；\n二是梯度下降，它沿着损失下降最快的反方向，一步步挪参数。\n\n我让小球沿损失曲线滚给你看。每一步它算当前位置的切线斜率，也就是梯度，然后往反方向走一小步，步长由学习率控制。看小球怎么往谷底靠，就懂训练在干什么。'
   },
   {
     turn: DEMO_HISTORY_TURN_COUNT + 3,
-    studentText: '我想做几道题检验一下。',
+    studentText: '我想用编程练练手。',
     answer:
-      '给你出了三道，从「认得出」到「用得上」再到「想得清」，一道比一道难一点。\n\n做完之后我按判分结果告诉你是哪一步没走通。错的题不用急着看答案，先自己说一遍当时是怎么想的。多数时候卡住的地方就在那一步。\n\n刚才这类题你之前错过几次，这次做完了掌握度会往上走一格，右栏那条进度能看到。'
+      '学机器学习第一步不是写算法，是会看数据。给你一组训练轮次的握持力读数，请你算两件事：每轮比上一轮多了多少、最后一轮是否已经稳定，变化量在 0.5 以内就算稳了。\n\n这是机器学习里非常关键的一步，知道什么时候该停。'
+  },
+  {
+    turn: DEMO_HISTORY_TURN_COUNT + 4,
+    studentText: '我觉得我会了这个知识点。',
+    answer:
+      '嘿，能这么自信挺好的。机器学习这块挺绕的，你能这么利索地走完三步，说明三类学习的边界你已经分清了，这是大多数人会卡住的地方。\n\n不过嘴上说不算数，做三道题我看看。我按你的画像出了三题，第一题是基础对照，第二题是教育场景应用，第三题稍微难点，是过拟合的控制。都做对，这一关就算你过了。'
+  },
+  {
+    turn: DEMO_HISTORY_TURN_COUNT + 5,
+    studentText: '这类问题应该怎么理解？',
+    answer:
+      '这类内容我不能提供，也不能帮你查找。如果你是对相关新闻有疑问，我们可以聊聊「AI 在安全领域能做什么」。'
   }
 ]
 
 /**
- * 构建三轮脚本。
+ * 构建五轮脚本。
  *
  * ★ 每次调用都重新取内容态（三个资产各自记忆化，取到才缓存）——
  *   应用刚打开就点按钮时 sidecar 可能还没起来，那时**不该**把降级结果钉死一整次运行。
+ *
+ * ★★ 五轮的形状（与 `docs/preset-redesign/01-四轮脚本与学生原话.md` 逐轮对应）：
+ *   ① 问知识点（教材引用 ×2 + `rag_search`）
+ *   ② 问动画（动画卡 + `generate_animation`）
+ *   ③ 编程练手（编程卡 + `get_code_template` / `evaluate_code`）
+ *   ④ 我会了（闯关卡 + `get_student_profile` / `generate_quiz`）
+ *   ⑤ 拦截轮（无卡、无工具、无提示词 —— 输入侧就拦下了）
  */
 export async function buildDemoScript(): Promise<DemoScriptPayload> {
   const now = Date.now()
@@ -779,13 +880,13 @@ export async function buildDemoScript(): Promise<DemoScriptPayload> {
     buildCodingCard(),
     buildQuizCard()
   ])
-  const { citations, details } = listCitations()
+  const { citations, details } = mlCitations()
   // 诊断模块在这里装上（唯一一次）：下面用到的都是它导出的真实算法
   const diagnostics = await loadDiagnostics()
   /**
-   * ★★ 画像块与 system prompt **只拼一次，三轮共用**（同一个字符串）。
+   * ★★ 画像块与 system prompt **只拼一次，五轮共用**（同一个字符串）。
    *
-   * 这正是演示要的那条证据：`studentContext.byteHash` 三轮同值、第 2/3 轮
+   * 这正是演示要的那条证据：`studentContext.byteHash` 五轮同值、第 2 到第 5 轮
    * `sameAsPrev` 为真（「这一块逐字节没变，前缀缓存可以接着用」）。
    * 每轮重算一次的话，只要块里将来混进任何一个每轮都变的字节（时间、计数、键序），
    * 这条证据就会悄无声息地变成假的 —— 所以这里的写法本身就是一条纪律。
@@ -795,7 +896,7 @@ export async function buildDemoScript(): Promise<DemoScriptPayload> {
   /**
    * 画像块的字节指纹（`byteHash()`，真实算法）。
    *
-   * ★ 第 2、3 轮把它当「**上一轮的**指纹」传进信封：两轮的块与它逐字节相同，
+   * ★ 第 2 轮起把它当「**上一轮的**指纹」传进信封：那些轮的块与它逐字节相同，
    *   于是 `sameAsPrev` 为真 —— 这就是「前缀字节稳定、可被复用」的可观测证据。
    * ★ 第 1 轮传空串：真实链路里 `lastStudentContextHash` 的初值就是空串
    *   （`runtime.ts`），「没有上一轮」不该被算成「上一轮一样」。
@@ -814,16 +915,21 @@ export async function buildDemoScript(): Promise<DemoScriptPayload> {
     envelope: Omit<EnvelopeInput, 'prompt' | 'studentContext' | 'answerChars'>
   ): DemoScriptTurn => {
     const text = DEMO_SCRIPT_TEXT[index]
-    // `DEMO_SCRIPT_TEXT` 的长度就是轮数（3），索引不会越界；这里只是让 TS 看见。
+    // `DEMO_SCRIPT_TEXT` 的长度就是轮数（5），索引不会越界；这里只是让 TS 看见。
     if (text === undefined) throw new Error('脚本轮次缺失')
     return {
       ...text,
       ...extras,
       diagnostics: buildEnvelope(diagnostics, {
         ...envelope,
-        // 三轮共用的那两份（画像块 / prompt）与「本轮的正文长度」都在这里补上，
-        // 免得三个调用点各写一遍、迟早写岔。
-        prompt: systemPrompt,
+        // 五轮共用的那两份（画像块 / prompt）与「本轮的正文长度」都在这里补上，
+        // 免得五个调用点各写一遍、迟早写岔。
+        //
+        // ★★ 拦截轮是唯一的例外：输入侧命中就拦下了，**根本没有拼过 prompt** ——
+        //   信封里如实写空串（`prompt.chars` 因此是 0），与同轮 `interceptions` 那条
+        //   「wordlist 命中」说的是同一件事。照着其余四轮填一份 prompt 会当场自相矛盾：
+        //   一边说「我没发请求」，一边摆着一段发给模型的提示词。
+        prompt: envelope.ok ? systemPrompt : '',
         studentContext: studentContextBlock,
         answerChars: text.answer.length
       })
@@ -833,20 +939,20 @@ export async function buildDemoScript(): Promise<DemoScriptPayload> {
   const turns: DemoScriptTurn[] = [
     build(
       0,
-      { citations, details, degraded: 'vector', cards: [animationCard] },
+      { citations, details, degraded: 'vector', cards: [] },
       {
         turn: DEMO_HISTORY_TURN_COUNT + 1,
         requestId: `${DEMO_REQUEST_PREFIX}${DEMO_HISTORY_TURN_COUNT + 1}`,
         studentText: DEMO_SCRIPT_TEXT[0]?.studentText ?? '',
         at: now,
         previousContextHash: '',
-        tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 142, degraded: 'vector' }],
+        tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 280, degraded: 'vector' }],
         // ★ 检索词是「模型自己拟的」，所以它要与这一轮讲的东西同题 ——
-        //   讲列表却查「循环 重复执行」，信封第一行就自相矛盾了
-        //   （命中数与命中在哪一节也一并由 `listRetrieval()` 说清楚）。
-        retrieval: listRetrieval(citations.length, 0),
+        //   讲机器学习却查「循环 重复执行」，信封第一行就自相矛盾了
+        //   （命中数与命中在哪一节也一并由 `mlRetrieval()` 说清楚）。
+        retrieval: mlRetrieval(citations.length, 0),
         interceptions: [],
-        firstTokenMs: 640,
+        firstTokenMs: 210,
         totalMs: 4_180,
         status: 'done',
         ok: true
@@ -857,7 +963,7 @@ export async function buildDemoScript(): Promise<DemoScriptPayload> {
       // 这一轮没查教材（模型接着上一轮的材料讲）→ 不投引用事件。
       // ★ 与信封里 `retrieval: null` 一致：**有引用就必须有检索轨迹**，
       //   两处对不上的信封就是一份自相矛盾的证据。
-      { citations: [], cards: [codingCard] },
+      { citations: [], cards: [animationCard] },
       {
         turn: DEMO_HISTORY_TURN_COUNT + 2,
         requestId: `${DEMO_REQUEST_PREFIX}${DEMO_HISTORY_TURN_COUNT + 2}`,
@@ -865,64 +971,108 @@ export async function buildDemoScript(): Promise<DemoScriptPayload> {
         at: now + 60_000,
         // 与上一轮逐字节相同的那一份 → 信封里 `sameAsPrev` 为真
         previousContextHash: contextHash,
-        tools: [
-          // 名字逐个对过 `agent/extensions/index.ts` 的 `AGENT_TOOL_NAMES`（冻结词表）：
-          // 取代码骨架与评估代码是**两个** Tool，这里就是真的那两个名字。
-          { seq: 1, name: 'get_code_template', ok: true, latencyMs: 21 },
-          { seq: 2, name: 'evaluate_code', ok: true, latencyMs: 890 }
-        ],
+        tools: [{ seq: 1, name: 'generate_animation', ok: true, latencyMs: 640 }],
         retrieval: null,
         interceptions: [],
-        firstTokenMs: 520,
-        totalMs: 3_260,
+        firstTokenMs: 290,
+        totalMs: 3_460,
         status: 'done',
         ok: true
       }
     ),
     build(
       2,
-      { citations: [], cards: [quizCard] },
+      { citations: [], cards: [codingCard] },
       {
         turn: DEMO_HISTORY_TURN_COUNT + 3,
         requestId: `${DEMO_REQUEST_PREFIX}${DEMO_HISTORY_TURN_COUNT + 3}`,
         studentText: DEMO_SCRIPT_TEXT[2]?.studentText ?? '',
         at: now + 120_000,
-        // 同上：与上一轮逐字节相同（第 2、3 轮共用同一份块）
+        previousContextHash: contextHash,
+        tools: [
+          // 名字逐个对过 `agent/extensions/index.ts` 的 `AGENT_TOOL_NAMES`（冻结词表）：
+          // 取代码骨架与评估代码是**两个** Tool，这里就是真的那两个名字。
+          { seq: 1, name: 'get_code_template', ok: true, latencyMs: 240 },
+          { seq: 2, name: 'evaluate_code', ok: true, latencyMs: 280 }
+        ],
+        retrieval: null,
+        interceptions: [],
+        firstTokenMs: 140,
+        totalMs: 2_260,
+        status: 'done',
+        ok: true
+      }
+    ),
+    build(
+      3,
+      { citations: [], cards: [quizCard] },
+      {
+        turn: DEMO_HISTORY_TURN_COUNT + 4,
+        requestId: `${DEMO_REQUEST_PREFIX}${DEMO_HISTORY_TURN_COUNT + 4}`,
+        studentText: DEMO_SCRIPT_TEXT[3]?.studentText ?? '',
+        at: now + 180_000,
+        // 同上：与上一轮逐字节相同（五轮共用同一份块）
         previousContextHash: contextHash,
         // ★ 只有 `generate_quiz`：这一轮**没有真的判分**（沙箱态下 `quiz:grade` 被拒），
         //   所以绝不在信封里写一条 `submit_quiz` —— 那是「承诺超出实际行为」，
         //   而信封的全部意义就是「这里每一个数字都是运行时真的产生过的」。
-        tools: [{ seq: 1, name: 'generate_quiz', ok: true, latencyMs: 620 }],
+        tools: [{ seq: 1, name: 'generate_quiz', ok: true, latencyMs: 720 }],
         retrieval: null,
-        // ★ 这一轮**不再有**「学段 · 冷却窗口」那条拦截（原先有，2026-09-27 随学段口径
-        //   改成 AI 引擎判定一起删除）。它写的是「学生手动指定学段后仍在冷却期内，
-        //   还剩 4 轮不接受自动调整」—— 而手动冷却的锚点必须是最近一条 explicit 轨迹行，
-        //   那行会让来源显示成「手动选中」（而不是「AI 引擎判定」），冷却也会变成 10 轮起步。
-        //   两处不能并存：保留拦截就得放弃「AI 引擎判定」，而那是本次改动唯一的目标。
-        //   删除之后三处（三次信封 / 状态体 / 轨迹表）说的是同一件事：
-        //   最近一次改判是第 13 轮的 AI 引擎复核，之后 5 轮稳定、不在任何冷却里。
-        //
-        // ★★ 也不拿别的机制来「补一条」（这一条对**全部 12 轮**成立，预置历史那 9 轮
-        //   同样如实空着，见 `interceptions: []` 在 `buildDemoHistory()` 里那一行）：
-        //   全仓真实的拦截来源只有四处，逐一对过，每一处都会与本信封里已经写下的字段打架 ——
-        //     · 内容安全 · 入口预检 → 与本轮 `input.safetyInput.verdict: 'pass'` 冲突；
-        //     · 内容安全 · 生成侧终审 → 与 `safetyFinal.retractions: 0` / 三阶段全 pass 冲突；
-        //     · provider 边界 · 宿主路径断言 → 与 `prompt.hostPathClean: true` 冲突；
-        //     · 学段 · 冷却窗口 → 见上面那段（来源会显示成「手动选中」）。
-        //   拦截记录是演示里最强的证据，所以它必须**最严格**：一条对不上的「我拦下了什么」，
-        //   毁掉的是整屏数据的可信度。没有真实且自洽的一条时，这里就如实空着。
+        // ★ 也不拿别的机制来「补一条」（这一条对**全部 14 轮**成立，预置历史那 9 轮
+        //   同样如实空着）：全仓真实的拦截来源只有四处，逐一对过，每一处都会与
+        //   本信封里已经写下的字段打架。拦截记录是演示里最强的证据，所以它必须**最严格**：
+        //   没有真实且自洽的一条时，这里就如实空着（第 5 轮那条是真的，见下）。
         interceptions: [],
-        firstTokenMs: 700,
+        firstTokenMs: 180,
         totalMs: 4_640,
         status: 'done',
         ok: true
+      }
+    ),
+    build(
+      4,
+      // 这一轮**没有任何卡片**：输入侧就被拦下了，模型根本没开口，也就没有内容态可取。
+      { citations: [], cards: [] },
+      {
+        turn: DEMO_HISTORY_TURN_COUNT + 5,
+        requestId: `${DEMO_REQUEST_PREFIX}${DEMO_HISTORY_TURN_COUNT + 5}`,
+        // ★★ 第 5 轮是**拦截轮**：学生气泡显示演示者真正打进去的那句话
+        //   （不预置、不打码），助手气泡显示 `illegal` 类的 `safeText`。
+        //   `studentText` 在这里只是一句占位（信封的 `input.text` 会被覆盖成真打的字，
+        //   见 `stores/demoSeed.ts` 的 `advance(typed)`）——但**不能留空**，
+        //   因为 `isDemoScriptPayload` 的判据是「去空白后还有字」。
+        studentText: DEMO_SCRIPT_TEXT[4]?.studentText ?? '',
+        at: now + 240_000,
+        previousContextHash: contextHash,
+        // ★ 没工具：拦在工具调用之前。
+        tools: [],
+        // ★ 没查教材：输入侧就拦了，这一轮从没走到检索。
+        retrieval: null,
+        // ★★ 演示里**唯一**一条真实且自洽的拦截记录（见 `02-安全审查拦截演示.md`）：
+        //   `source: 'wordlist'` = 词表命中（与 `guard.py` 的 `source` 同源），
+        //   `reason` 那句与真实判定里拼出来的那句逐字同形。
+        //   ⚠️ 不往这里塞 `stage` / `category` / `label`：`DiagInterception` 只有
+        //   `source` / `reason` / `detail` 三个字段（见 `@shared/diagnostics`），
+        //   而「拦在入口」这件事由同轮 `safetyFinal.stages` 的 `{stage:'input', verdict:'blocked'}`
+        //   如实承载 —— 两处说的是同一件事，且都不越出既有类型。
+        interceptions: [
+          {
+            source: 'wordlist',
+            reason: '命中内容安全规则：违法与危险品（制作炸药）'
+          }
+        ],
+        // ★ 输入侧命中即拦，没发模型请求 —— 所以首字延迟是 0，总耗时也只有一个来回。
+        firstTokenMs: 0,
+        totalMs: 80,
+        status: 'blocked',
+        ok: false
       }
     )
   ]
 
   return {
     turns,
-    sessionsWithCards: [DEMO_LOOP_SESSION_ID],
+    sessionsWithCards: [DEMO_LOOP_SESSION_ID, DEMO_CODE_SESSION_ID, DEMO_QUIZ_SESSION_ID],
     history: await buildDemoHistory(diagnostics, studentContextBlock, systemPrompt, contextHash)
   }
 }
@@ -974,30 +1124,37 @@ interface DemoHistoryTurn {
 async function demoHistoryTurns(sessionId: string): Promise<DemoHistoryTurn[]> {
   if (sessionId === DEMO_LOOP_SESSION_ID) {
     const card = await buildAnimationCard()
-    const { citations, details } = listCitations()
-    // 第 2 轮落到关键词那一档，命中的是循环那一节（正文逐字取自真实知识库那一节的节选）。
-    const loop = citationPair(
-      'loop-1',
-      KP_LOOP,
-      SECTION_LOOP,
-      '循环用于重复执行一段代码。它解决的是「一批数据挨个处理」和「同一动作重复多次」这两类需求：给全班 40 个人的分数求平均，循环不会漏掉第 37 个。',
-      0.71,
+    const { citations, details } = neuralCitations()
+    // 第 2 轮落到关键词那一档，命中的是神经网络那一节（正文逐字取自真实知识库那一节的摘要）。
+    const neural = citationPair(
+      'neural-fts-1',
+      KP_NEURAL,
+      SECTION_NEURAL,
+      '神经网络由输入层、若干隐藏层与输出层组成，层与层之间的连接带权重；前向传播就是把上一层的输出按权重加权求和，再过一次激活函数。',
+      0.68,
       'fts'
     )
     return [
       {
         turn: 1,
-        // ★ 与脚本第 1 轮**同一句原话、同一段正文**（`DEMO_SCRIPT_TEXT[0]`）：
-        //   侧栏那条会话的预览句、点进去的第一句、脚本放的第一句，三处必须是同一句话
+        // ★ 与脚本第 2 轮**同一句原话、同一段正文**（`DEMO_SCRIPT_TEXT[1]`）：
+        //   侧栏那条会话的预览句、点进去的第一句、脚本放的那一句，三处必须是同一句话
         //   （预览句在 `demo/data.ts` 的 `DEMO_SESSION_PREVIEWS`，改这里要连它一起改）。
-        studentText: DEMO_SCRIPT_TEXT[0]?.studentText ?? '',
-        answer: DEMO_SCRIPT_TEXT[0]?.answer ?? '',
+        //   ⇒ 于是「点开这条历史必见动画卡」不靠演示者的手速。
+        studentText: DEMO_SCRIPT_TEXT[1]?.studentText ?? '',
+        answer: DEMO_SCRIPT_TEXT[1]?.answer ?? '',
         card,
         citations,
         details,
         // ★ 检索词是「模型自己拟的」，所以它要与这一轮讲的东西同题 ——
-        //   讲列表却查「循环 重复执行」，信封第一行就自相矛盾了。
-        retrieval: listRetrieval(citations.length, 0),
+        //   讲神经网络却查「循环 重复执行」，信封第一行就自相矛盾了。
+        retrieval: retrievalTrace({
+          query: '神经网络 分层 权重 前向',
+          degraded: 'vector',
+          hits: citations.length,
+          compat: 0,
+          section: SECTION_NEURAL
+        }),
         tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 138, degraded: 'vector' }],
         firstTokenMs: 880,
         totalMs: 5_240,
@@ -1005,20 +1162,20 @@ async function demoHistoryTurns(sessionId: string): Promise<DemoHistoryTurn[]> {
       },
       {
         turn: 2,
-        studentText: '那它每次都要把整排数从头看一遍吗？',
+        studentText: '那它和真的脑子是一回事吗？',
         answer:
-          '不用从头看两遍。一趟走下来，排尾已经站定了最大的那个，下一趟只需要看到它前面。\n\n所以每多走一趟，要看的地方就少一对：第一趟看全部，第二趟少看最后一对，再往下每趟再少一对。到某一趟一次都没换过，说明整排已经站好了，就可以停。\n\n这个「一遍又一遍，直到不用再换」就是循环：做一遍的事写一次，什么时候停写成条件，机器自己会重复。',
-        citations: [loop.citation],
-        details: [loop.detail],
+          '不是一回事，它只是从真脑子里借了一个很粗的想法：很多简单的小单元连在一起，每个连接有自己的强弱，合起来就能表示很复杂的关系。\n\n真脑子里的神经元比这复杂得多，数量也不在一个量级上，而且它会长、会变、会受情绪和睡眠影响。所以教材里说的是「受生物启发」，不是「照搬」。\n\n把它当成一张可以调的加权求和网就够了：能算、能改、能训。',
+        citations: [neural.citation],
+        details: [neural.detail],
         // ★ 第 2 轮是**降级**那一轮：本地向量没命中（换了几种说法，相似度都在阈值以下），
-        //   云端这一级本机没配（`mode = local_fastembed`），最后靠关键词兜底命中循环那一节。
+        //   云端这一级本机没配（`mode = local_fastembed`），最后靠关键词兜底命中神经网络那一节。
         //   四级链逐级都写了为什么 —— 这正是「降级不是失败，是换了条路」的可观测证据。
         retrieval: retrievalTrace({
-          query: '循环 重复执行 什么时候停',
+          query: '神经网络 和大脑 一样吗',
           degraded: 'fts',
           hits: 1,
           compat: 0,
-          section: SECTION_LOOP
+          section: SECTION_NEURAL
         }),
         tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 264, degraded: 'fts' }],
         firstTokenMs: 960,
@@ -1027,12 +1184,12 @@ async function demoHistoryTurns(sessionId: string): Promise<DemoHistoryTurn[]> {
       },
       {
         turn: 3,
-        studentText: '我好像懂了，那我怎么知道自己是不是真的会了？',
+        studentText: '我能上手画一个吗？',
         answer:
-          '两个小办法。先说一遍：合上这一页，用自己的话把刚才那两步讲给同桌听，讲得顺就说明思路已经在你脑子里了。\n\n再动手一遍：把刚才那排数换成更乱的一组，自己在纸上走一趟，看看能不能走到排好为止。\n\n这一类内容你练得还不多，右栏那条进度能看见它慢慢往上走。今天先不看分数，能讲出来就是真的会了。',
+          '可以，先从一层开始。画三个输入圈、两个输出圈，把每一对之间都连上线，线上写一个数当权重。\n\n算的时候记住两件事：每个输出圈收到的，是三条线上「输入乘权重」的和；这个和还要过一次激活函数，才变成它往外送的值。\n\n画完这一层，你就已经画出整张网里最核心的一步了。',
         citations: [],
         details: [],
-        // ★ 这一轮模型没查教材，而是**先看了画像**再回话（"这类内容你练得还不多"这句话的来路
+        // ★ 这一轮模型没查教材，而是**先看了画像**再回话（"先从一层开始"这句的来路
         //   就是那个工具）：所以 `retrieval: null`、引用为空 —— 有引用就必须有检索轨迹。
         retrieval: null,
         tools: [{ seq: 1, name: 'get_student_profile', ok: true, latencyMs: 96 }],
@@ -1045,138 +1202,173 @@ async function demoHistoryTurns(sessionId: string): Promise<DemoHistoryTurn[]> {
 
   if (sessionId === DEMO_CODE_SESSION_ID) {
     const card = await buildCodingCard()
+    const supervised = citationPair(
+      'sup-1',
+      KP_SUPERVISED,
+      SECTION_SUPERVISED,
+      '监督学习从标注数据学映射：每个样例都带正确答案，学习的目标是让预测尽量贴近这些答案，误差由损失函数度量。',
+      0.81
+    )
+    const unsupervised = citationPair(
+      'unsup-1',
+      KP_UNSUPERVISED,
+      SECTION_UNSUPERVISED,
+      '无监督学习从无标注数据发现结构：它没有答案可比，目标是找出数据内部的分布、分组或降维后的主要方向。',
+      0.74
+    )
+    const vision = citationPair(
+      'sup-2',
+      KP_SUPERVISED,
+      SECTION_SUPERVISED,
+      '教育场景：拍照识别题目属于监督学习中的分类任务；分析学生做题行为、聚类共性薄弱点属于无监督学习。',
+      0.7
+    )
     return [
       {
         turn: 4,
-        studentText: DEMO_SCRIPT_TEXT[1]?.studentText ?? '',
-        answer: DEMO_SCRIPT_TEXT[1]?.answer ?? '',
+        // ★ 与脚本第 4 轮同一句原话、同一段正文（这条会话必见编程卡）。
+        studentText: DEMO_SCRIPT_TEXT[3]?.studentText ?? '',
+        answer: DEMO_SCRIPT_TEXT[3]?.answer ?? '',
         card,
-        citations: [],
-        details: [],
-        retrieval: null,
-        tools: [{ seq: 1, name: 'get_code_template', ok: true, latencyMs: 23 }],
+        citations: [supervised.citation],
+        details: [supervised.detail],
+        retrieval: retrievalTrace({
+          query: '监督学习 为什么需要标签',
+          degraded: 'vector',
+          hits: 1,
+          compat: 0,
+          section: SECTION_SUPERVISED
+        }),
+        tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 152, degraded: 'vector' }],
         firstTokenMs: 610,
         totalMs: 3_480,
         gapMs: 0
       },
       {
         turn: 5,
-        studentText: '我跑了一下，屏幕上只出来一个数，后面就没有了。',
+        studentText: '那不带答案的呢？',
         answer:
-          '只出来一个，多半是那句打印被放在循环外面了：它只轮到一次，剩下的自然看不见。\n\n你回去看两处。一是要重复的那一行有没有缩进到循环里，缩进就是「这几行归循环管」的意思。二是范围有没有写全，只写一个数的时候，机器从 0 数到它前面一个就停，数出来的个数会比你想要的少一个。\n\n改好再跑一次。要是还不行，把屏幕上原样的报错发给我，我按报错给你提示。',
-        citations: [],
-        details: [],
-        retrieval: null,
-        // ★ 两个真实工具：先**跑一遍代码**看输出（`evaluate_code`），再按结果**逐级给提示**
-        //   （`get_coding_hint`）—— 这正是「报错归一 + 分级提示」那条链路的样子。
-        tools: [
-          { seq: 1, name: 'evaluate_code', ok: true, latencyMs: 1_180 },
-          { seq: 2, name: 'get_coding_hint', ok: true, latencyMs: 74 }
-        ],
-        firstTokenMs: 1_080,
-        totalMs: 6_120,
-        gapMs: 42_000
+          '不带答案的那一类叫无监督学习。它手里只有一堆数据，没有标准答案可比，所以它做的事不是「猜对」，而是「看出结构」。\n\n比如把一批学生的做题记录放在一起，看哪些人错的地方很像，这就是聚类；或者把很多维的数据压成两个方向，看整体分布，这是降维。\n\n一句话记住这两类的分别：监督学习在比答案，无监督学习在找形状。',
+        citations: [unsupervised.citation],
+        details: [unsupervised.detail],
+        retrieval: retrievalTrace({
+          query: '无监督学习 发现结构 聚类',
+          degraded: 'vector',
+          hits: 1,
+          compat: 0,
+          section: SECTION_UNSUPERVISED
+        }),
+        tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 174, degraded: 'vector' }],
+        firstTokenMs: 700,
+        totalMs: 3_940,
+        gapMs: 78_000
       },
       {
         turn: 6,
-        studentText: '再给我一道差不多的，我自己写。',
+        studentText: '拍照搜题属于哪类？',
         answer:
-          '好，这道比刚才那题多一步：让它把 1 到 10 里的偶数一个一个打印出来。\n\n思路还是那两步：先想清楚每个数轮到的时候要做什么，再想清楚什么时候轮到下一个。写完先自己数一遍该出现几个数，再跑起来对数。\n\n卡住了不用急着问，先把你写的那几行发我，我看你卡在哪一步。',
-        citations: [],
-        details: [],
-        retrieval: null,
-        tools: [{ seq: 1, name: 'generate_code_exercise', ok: true, latencyMs: 640 }],
-        firstTokenMs: 470,
-        totalMs: 2_960,
-        gapMs: 38_000
+          '拍照搜题属于监督学习里的分类任务。\n\n理由在数据上：训练它的时候，每一张题图都配好了「这是哪一类题」的标签，机器学的是从图片到类别的对应，这正是分类。\n\n有意思的是它后面那半步：把大家的做题记录聚在一起，看哪些知识点错得集中，那一步没有标签，属于无监督学习。所以一道搜题背后常常两类都用上了。',
+        citations: [vision.citation],
+        details: [vision.detail],
+        retrieval: retrievalTrace({
+          query: '拍照搜题 分类任务 教育场景',
+          degraded: 'vector',
+          hits: 1,
+          compat: 0,
+          section: SECTION_SUPERVISED
+        }),
+        tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 190, degraded: 'vector' }],
+        firstTokenMs: 560,
+        totalMs: 3_680,
+        gapMs: 62_000
       }
     ]
   }
 
   if (sessionId === DEMO_QUIZ_SESSION_ID) {
-    const card = await buildQuizCard()
-    const position = citationPair(
-      'list-3',
-      KP_LIST,
-      SECTION_LIST,
-      '列表是有序序列，靠位置取用。要注意下标从 0 开始：第一个元素在位置 0，最后一个可以用倒数第一表示。',
-      0.68
+    const card = await buildAnimationCard()
+    // ★★ 这一轮的引用是**初中内容** + `compat: true`：讲的就是「初中的梯度下降是向上兼容取用的」，
+    //   所以 `gradeLevel: 'junior'`、`compat: true`，信封里 `compatCount` 也是 2 ——
+    //   三处（引用两条 / 信封计数 / 正文那句话）说的是同一件事。
+    const juniorGd = citationPair(
+      'jr-gd-1',
+      KP_ML,
+      SECTION_ML,
+      '初中阶段只要求看懂梯度下降在做什么：沿着损失变小的方向一步步调整参数，不涉及偏导推导与学习率的选择。',
+      0.72,
+      'fts',
+      'junior',
+      true
     )
-    const outlineLoop = citationPair(
-      'outline-1',
-      KP_LOOP,
-      SECTION_LOOP,
-      // ★ 大纲兜底给的是**小节名的列表**（不是正文）：所以这两条的正文就是各节的摘要，
-      //   逐字取自那一节的 front matter（`summary`）。
-      '第8章的大纲条目：循环：重复的事交给机器。循环让同一段代码重复执行；写好「做一遍」和「什么时候停」，机器就能替你做很多遍。',
-      0.44,
-      'outline'
+    const juniorGd2 = citationPair(
+      'jr-gd-2',
+      KP_ML,
+      SECTION_ML,
+      '初中的梯度下降是高中内容的向上兼容取用：学段回看低一档，讲法更浅，但概念本身不超纲。',
+      0.66,
+      'fts',
+      'junior',
+      true
     )
-    const outlineList = citationPair(
-      'outline-2',
-      KP_LIST,
-      SECTION_LIST,
-      '第8章的大纲条目：列表与字典：把一批数据放在一起。列表把一批数据按顺序排好，字典给每份数据配一个名字，方便按顺序取或按名字查。',
-      0.41,
-      'outline'
+    const lossFn = citationPair(
+      'ml-loss-1',
+      KP_ML,
+      SECTION_ML,
+      '损失函数把当前预测偏离真值的程度算成一个数；参数优化就是在这个函数上沿着下降最快的方向迭代。',
+      0.79
     )
     return [
       {
         turn: 7,
-        studentText: DEMO_SCRIPT_TEXT[2]?.studentText ?? '',
-        answer: DEMO_SCRIPT_TEXT[2]?.answer ?? '',
+        // ★ 与脚本第 1 轮同一句原话、同一段正文（这条会话必见动画卡）。
+        studentText: DEMO_SCRIPT_TEXT[0]?.studentText ?? '',
+        answer: DEMO_SCRIPT_TEXT[0]?.answer ?? '',
         card,
-        citations: [],
-        details: [],
-        retrieval: null,
-        // ★ 这一轮**没有真的判分**：判分走的是另一条通道，那一条在沙箱态下是被回绝的，
-        //   所以这里只写 `generate_quiz`（出题），绝不写一条 `submit_quiz` ——
-        //   那是「承诺超出实际行为」，而信封的全部意义就是每个数字都真的产生过。
-        tools: [{ seq: 1, name: 'generate_quiz', ok: true, latencyMs: 620 }],
-        firstTokenMs: 700,
-        totalMs: 4_640,
+        citations: [juniorGd.citation, juniorGd2.citation],
+        details: [juniorGd.detail, juniorGd2.detail],
+        retrieval: retrievalTrace({
+          query: '梯度下降 初中 向上兼容',
+          degraded: 'fts',
+          hits: 2,
+          compat: 2,
+          section: SECTION_ML
+        }),
+        tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 210, degraded: 'fts' }],
+        firstTokenMs: 780,
+        totalMs: 4_520,
         gapMs: 0
       },
       {
         turn: 8,
-        studentText: '第二题我又错了，位置我还是数不对。',
+        studentText: '向上兼容是什么意思？',
         answer:
-          '位置这件事有个小台阶：它从 0 开始数，不是从 1 开始。所以第一个数在位置 0，第二个在位置 1，最后一个可以倒着数成倒数第一。\n\n你念的时候可以带上位置一起念：第 0 个是 3，第 1 个是 8。念两遍，手就不会比脑子快。\n\n刚才那道错题我换了个说法又出了两道，题干变了、考点没变，你再试试看。',
-        citations: [position.citation],
-        details: [position.detail],
-        // 这一轮讲的是「位置从 0 起」，所以模型查的就是列表那一节里讲下标的那一块。
-        retrieval: retrievalTrace({
-          query: '列表 位置 从 0 开始 取第几个',
-          degraded: 'vector',
-          hits: 1,
-          compat: 0,
-          section: SECTION_LIST
-        }),
-        tools: [{ seq: 1, name: 'generate_variants', ok: true, latencyMs: 720 }],
-        firstTokenMs: 660,
-        totalMs: 3_820,
-        gapMs: 46_000
+          '向上兼容说的是：学到更高学段时，可以回头取用更低学段已经讲过的内容，但取用的时候会把它标出来。\n\n这么做有两个好处。对你，是同一件事可以在更浅的说法里先站稳，不必一上来就啃偏导；对系统，是检索时会连低一档的教材一起找，找到就在来源上标一句「这是兼容取用」。\n\n所以你在高中看到一句初中的说法，不是你退步了，是它本来就在你的知识范围里。',
+        citations: [],
+        details: [],
+        retrieval: null,
+        tools: [{ seq: 1, name: 'get_student_profile', ok: true, latencyMs: 102 }],
+        firstTokenMs: 640,
+        totalMs: 3_760,
+        gapMs: 48_000
       },
       {
         turn: 9,
-        studentText: '有没有一张图能帮我把这些都记住？',
+        studentText: '那高中和初中讲的差别在哪？',
         answer:
-          '有。你上回见过那张排序的动画，一排柱子挨个比、挨个换，那就是列表最常做的事，翻回去再看一遍比背句子管用。\n\n这一章的教材我也替你翻出来了，给的是大纲，从循环到列表都在里面，想不起来的时候看小标题就行。\n\n记住两句就够用：位置从 0 起，重复靠循环。',
-        citations: [outlineLoop.citation, outlineList.citation],
-        details: [outlineLoop.detail, outlineList.detail],
-        // ★ 三档都没命中、落到**章节大纲**这一档：向量与关键词都按「这个词」找不着，
-        //   大纲就给回这一章的小节名（正文比问题宽一档）—— 四级链的最后一档长这样。
+          '差别在「讲到什么程度」，不在概念本身。\n\n初中的梯度下降只要求你看懂方向：损失往哪边小，参数就往哪边挪。到了高中，损失函数要写成式子，更新规则要看每一步挪多大、为什么这么选学习率，还要知道步长太大会震荡、太小会走得太慢。\n\n所以同一张图，初中看的是小球往谷底滚，高中看的是它每一步为什么这样滚。',
+        citations: [lossFn.citation],
+        details: [lossFn.detail],
         retrieval: retrievalTrace({
-          query: '列表 字典 小结 复习 记不住',
-          degraded: 'outline',
-          hits: 2,
+          query: '损失函数 学习率 高中 数学化',
+          degraded: 'vector',
+          hits: 1,
           compat: 0,
-          section: CHAPTER_PROGRAMMING
+          section: SECTION_ML
         }),
-        tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 305, degraded: 'outline' }],
-        firstTokenMs: 1_120,
-        totalMs: 5_760,
-        gapMs: 58_000
+        tools: [{ seq: 1, name: 'rag_search', ok: true, latencyMs: 186, degraded: 'vector' }],
+        firstTokenMs: 720,
+        totalMs: 4_180,
+        gapMs: 56_000
       }
     ]
   }
@@ -1347,29 +1539,39 @@ export async function buildDemoSessionMessages(sessionId: string): Promise<DemoS
 }
 
 /**
- * 演示里用到的三个知识点 id（**真实存在**，全部属于第 8 章「编程实践（补充）」）。
+ * 演示里用到的五个知识点 id（**真实存在**，全部属于第 3 章「核心技术分支」）。
  *
  * ★ 导出它们是为了让「脚本用的 kp 一定在真实资产里」这条断言有一处可引用的真源
  *   （`tests/demo-seed.test.ts` 拿它与随包知识库的 kp 清单对照）。
+ * ★ 五个都真的被用到：主线（机器学习）、第 1 条历史（神经网络）、
+ *   第 2 条历史（监督 / 无监督）、错题本与推荐位（强化学习）。
  */
-export const DEMO_SCRIPT_KP_IDS = [KP_LOOP, KP_VARIABLE, KP_LIST] as const
+export const DEMO_SCRIPT_KP_IDS = [
+  KP_ML,
+  KP_NEURAL,
+  KP_SUPERVISED,
+  KP_UNSUPERVISED,
+  KP_REINFORCEMENT
+] as const
 
 /**
- * 第 1 轮动画卡的**知识点**与**模板 id**（两个都导出，供断言引用）。
+ * 动画卡的**知识点**与**模板 id**（两个都导出，供断言引用）。
  *
  * ★ 为什么要导出这一对：模板是**点名**给的（见 {@link ANIMATION_TEMPLATE_ID}），
  *   服务端在 `templateId` 命中时不做「这份模板覆盖哪个知识点」的校验 ——
  *   于是「动画讲的知识点 == 对话与引用讲的知识点」这条判据只剩测试能守。
  *   `tests/demo-seed.test.ts` 拿这两个值去随包模板里核对 `kp_ids` / `grade_levels`。
  *   ⚠️ 只改其中一个（换了模板却没换知识点，或反过来）会让那条断言当场红 ——
- *   这正是它的用途：把「讲列表却播别的」拦在提交之前。
+ *   这正是它的用途：把「讲机器学习却播别的」拦在提交之前。
  */
-export const DEMO_ANIMATION_KP_ID = KP_LIST
+export const DEMO_ANIMATION_KP_ID = KP_ML
 export const DEMO_ANIMATION_TEMPLATE_ID = ANIMATION_TEMPLATE_ID
 
 /** 演示里用到的知识点名（组件要显示的是中文，不是 id）。 */
 export const DEMO_KP_NAMES = {
-  loop: '循环：重复的事交给机器',
-  variable: '变量：给数据起名字',
-  list: '列表与字典：把一批数据放在一起'
+  ml: '机器学习（ML）',
+  neural: '神经网络',
+  supervised: '监督学习',
+  unsupervised: '无监督学习',
+  reinforcement: '强化学习'
 } as const

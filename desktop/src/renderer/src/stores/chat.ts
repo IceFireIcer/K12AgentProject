@@ -1164,7 +1164,7 @@ export const useChatStore = defineStore('chat', () => {
     //       允许的安全做法 —— 顶层拿会落在两个模块求值的循环上。
     if (useDemoSeedStore().seeded) {
       // 返回 `false` = 这一轮脚本正在放（`advance()` 自己会拒绝重入），那就只吸收这次按键
-      useDemoSeedStore().advance()
+      useDemoSeedStore().advance(text)
       draft.value = ''
       return
     }

@@ -1,0 +1,545 @@
+<!--
+  梯度下降·视觉化（gradient-descent-v2）— 设计预览版 v3
+
+  按 gpt6.1 执行计划报告实现：
+  - 9 相位（4 引导 + 6 走步），总时长 8200ms
+  - 双面板单主线，左训练数据 + 右损失曲面
+  - 双层小球（光晕 r=16 + 主体 r=7 + 内核 r=2）
+  - 轨迹尾巴递减（最近 0.25 / 倒数第二 0.18 / 更早 0.12，最多 4 个）
+  - 数学轨迹按公式重算（loss(w)=0.8(w-3)^2+0.4，学习率 0.35）
+  - 拟合度为教学示意指标，不声称是统计拟合度
+  - 文案禁 markdown / 破折号 / 省略号
+  - 颜色只用 CSS 变量，零外链
+
+  用浏览器直接打开此文件即可看到动画效果。
+-->
+<!DOCTYPE html>
+<html lang="zh-CN" data-grade="senior" data-skin="technical">
+<head>
+  <meta charset="UTF-8">
+  <title>梯度下降·视觉化 — 设计预览 v3</title>
+  <link rel="stylesheet" href="../../server/resources/templates/_shared/base.css">
+  <link rel="stylesheet" href="../../server/resources/templates/_shared/skins.css">
+  <script src="../../server/resources/templates/_shared/anime.min.js"></script>
+  <script src="../../server/resources/templates/_shared/runtime.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 32px 24px;
+      background: var(--page);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .preview-shell { width: 100%; max-width: 880px; }
+    .preview-frame {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      overflow: hidden;
+      background: var(--surface);
+      box-shadow: 0 1px 3px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+    }
+    #stage { height: 520px; }
+    .preview-meta {
+      margin-top: 16px;
+      padding: 14px 18px;
+      background: var(--surface-2);
+      border-radius: 12px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.7;
+      font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+    }
+    .preview-meta strong { color: var(--ink); font-weight: 500; }
+  </style>
+</head>
+<body>
+  <div class="preview-shell">
+    <div class="preview-frame">
+      <div id="stage">
+        <h1 class="anim-title">梯度下降：让损失降下去</h1>
+        <p class="anim-caption" id="caption">准备开始</p>
+        <div class="anim-canvas"></div>
+        <p class="anim-caption"><span class="chip" id="status">第 0 步 / 共 4 步</span></p>
+      </div>
+    </div>
+    <div class="preview-meta">
+      <strong>预览说明</strong>　按 gpt6.1 报告实现：9 相位 8.2 秒，学习率 0.35，损失从 7.60 降到 0.40。改下方 STEPS / RATE 可调参。
+    </div>
+  </div>
+
+  <script>
+    "use strict";
+
+    /* =========================================================
+     * 参数（可调，按报告 §5.2）
+     * ========================================================= */
+    var STEPS = 6;
+    var RATE = 0.35;
+
+    /* =========================================================
+     * 损失函数（报告 §4.4）
+     *   L(w) = 0.8(w-3)^2 + 0.4
+     *   最低点 w=3, L(3)=0.4
+     * ========================================================= */
+    function loss(w) { return 0.8 * (w - 3) * (w - 3) + 0.4; }
+
+    /* 拟合度教学映射（报告 §5.3）：保证初始 0.42，谷底约 0.95 */
+    function fitOf(lossVal) {
+      return 0.42 + (0.95 - 0.42) * (7.6 - lossVal) / (7.6 - 0.4);
+    }
+
+    /* =========================================================
+     * 固定训练数据（报告 §5.1，原样保留 18 点）
+     * ========================================================= */
+    var TRIAL = [
+      [70, 178], [95, 192], [120, 205], [145, 215], [170, 225], [195, 238],
+      [220, 248], [245, 255], [270, 268], [295, 278], [320, 290], [100, 188],
+      [150, 218], [200, 240], [250, 260], [300, 285], [115, 200], [265, 270]
+    ];
+
+    /* =========================================================
+     * 坐标系统（报告 §4）
+     *   左面板 40,34,320,254   内边距 20,14,280,220
+     *   右面板 360,34,320,254  内边距 20,14,280,220
+     *   左绘图区 60,72,270,192
+     *   右绘图区 390,72,270,194
+     *   读数带   y=300, h=81 (readout 自动长高)
+     * ========================================================= */
+    var BOX_L = { x: 40,  y: 34, w: 320, h: 254 };
+    var BOX_R = { x: 360, y: 34, w: 320, h: 254 };
+    var LEFT_PLOT  = { x: 60,  y: 72, w: 270, h: 192 };
+    var RIGHT_PLOT = { x: 390, y: 72, w: 270, h: 194 };
+
+    /* 左面板数据→屏幕映射（报告 §4.3） */
+    function screenX(x) { return 60 + (x - 50) * 270 / 290; }
+    function screenY(y) { return 266 - (y - 100) * 188 / 260; }
+
+    /* 右面板 w/loss → 屏幕（报告 §4.4） */
+    function curveX(w) { return 390 + (w / 6) * 270; }
+    function curveY(lossVal) { return 72 + 194 - ((lossVal - 0.4) / 7.2) * 194; }
+
+    /* 拟合直线公式（报告 §4.3）：b(w) = 130 + (3-w)*8，斜率 0.6 */
+    function lineYData(x, w) { return 0.6 * x + 130 + (3 - w) * 8; }
+    function lineEndpoints(w) {
+      return {
+        x1: screenX(50),
+        y1: screenY(lineYData(50, w)),
+        x2: screenX(340),
+        y2: screenY(lineYData(340, w))
+      };
+    }
+
+    /* =========================================================
+     * 工具：建 SVG 元素
+     * ========================================================= */
+    var SVG_NS = Sandbox.SVG_NS;
+    function el(tag) { return document.createElementNS(SVG_NS, tag); }
+
+    var stage = Sandbox.stage();
+    var svg = stage.svg;
+
+    /* =========================================================
+     * 左面板：填充 + 边框 + 标题
+     * ========================================================= */
+    var panelLeft = el('g');
+    svg.appendChild(panelLeft);
+
+    var lFrame = el('rect');
+    lFrame.setAttribute('x', String(BOX_L.x));
+    lFrame.setAttribute('y', String(BOX_L.y));
+    lFrame.setAttribute('width', String(BOX_L.w));
+    lFrame.setAttribute('height', String(BOX_L.h));
+    lFrame.setAttribute('rx', '12');
+    lFrame.setAttribute('fill', 'var(--surface-2)');
+    lFrame.setAttribute('fill-opacity', '0.72');
+    lFrame.setAttribute('stroke', 'var(--line)');
+    lFrame.setAttribute('stroke-opacity', '0.9');
+    lFrame.setAttribute('stroke-width', '1');
+    panelLeft.appendChild(lFrame);
+
+    var lTitle = el('text');
+    lTitle.setAttribute('x', '60');
+    lTitle.setAttribute('y', '57');
+    lTitle.setAttribute('fill', 'var(--ink)');
+    lTitle.setAttribute('font-size', '13');
+    lTitle.setAttribute('font-weight', '500');
+    lTitle.textContent = '训练数据与预测';
+    panelLeft.appendChild(lTitle);
+
+    /* 左绘图区坐标轴 + 网格（报告 §4.3） */
+    var lAxis = el('g');
+    panelLeft.appendChild(lAxis);
+    /* x 轴 */
+    var lxAxis = el('line');
+    lxAxis.setAttribute('x1', '60'); lxAxis.setAttribute('y1', '266');
+    lxAxis.setAttribute('x2', '330'); lxAxis.setAttribute('y2', '266');
+    lxAxis.setAttribute('stroke', 'var(--line)');
+    lxAxis.setAttribute('stroke-opacity', '0.85');
+    lxAxis.setAttribute('stroke-width', '1');
+    lAxis.appendChild(lxAxis);
+    /* y 轴 */
+    var lyAxis = el('line');
+    lyAxis.setAttribute('x1', '60'); lyAxis.setAttribute('y1', '78');
+    lyAxis.setAttribute('x2', '60'); lyAxis.setAttribute('y2', '266');
+    lyAxis.setAttribute('stroke', 'var(--line)');
+    lyAxis.setAttribute('stroke-opacity', '0.85');
+    lyAxis.setAttribute('stroke-width', '1');
+    lAxis.appendChild(lyAxis);
+    /* x 标注 */
+    ['60', '195', '330'].forEach(function (sx) {
+      var t = el('text');
+      t.setAttribute('x', sx); t.setAttribute('y', '278');
+      t.setAttribute('fill', 'var(--muted)');
+      t.setAttribute('fill-opacity', '0.82');
+      t.setAttribute('font-size', '10');
+      t.setAttribute('text-anchor', 'middle');
+      t.textContent = sx;
+      lAxis.appendChild(t);
+    });
+
+    /* =========================================================
+     * 右面板：填充 + 边框 + 标题
+     * ========================================================= */
+    var panelRight = el('g');
+    svg.appendChild(panelRight);
+
+    var rFrame = el('rect');
+    rFrame.setAttribute('x', String(BOX_R.x));
+    rFrame.setAttribute('y', String(BOX_R.y));
+    rFrame.setAttribute('width', String(BOX_R.w));
+    rFrame.setAttribute('height', String(BOX_R.h));
+    rFrame.setAttribute('rx', '12');
+    rFrame.setAttribute('fill', 'var(--surface-2)');
+    rFrame.setAttribute('fill-opacity', '0.72');
+    rFrame.setAttribute('stroke', 'var(--line)');
+    rFrame.setAttribute('stroke-opacity', '0.9');
+    rFrame.setAttribute('stroke-width', '1');
+    panelRight.appendChild(rFrame);
+
+    var rTitle = el('text');
+    rTitle.setAttribute('x', '380');
+    rTitle.setAttribute('y', '57');
+    rTitle.setAttribute('fill', 'var(--ink)');
+    rTitle.setAttribute('font-size', '13');
+    rTitle.setAttribute('font-weight', '500');
+    rTitle.textContent = '损失曲面 L(w)';
+    panelRight.appendChild(rTitle);
+
+    /* =========================================================
+     * 右面板：损失曲线下方填充 + 曲线 + 最低点标记
+     * ========================================================= */
+    /* 曲线下方填充（单色低透明度，禁渐变） */
+    var fillPath = el('path');
+    var fillD = 'M ' + curveX(0) + ',' + (RIGHT_PLOT.y + RIGHT_PLOT.h) + ' L ';
+    for (var x = 0; x <= 6; x += 0.1) {
+      fillD += curveX(x) + ',' + curveY(loss(x)) + ' L ';
+    }
+    fillD += curveX(6) + ',' + (RIGHT_PLOT.y + RIGHT_PLOT.h) + ' Z';
+    fillPath.setAttribute('d', fillD);
+    fillPath.setAttribute('fill', 'var(--accent)');
+    fillPath.setAttribute('fill-opacity', '0.08');
+    panelRight.appendChild(fillPath);
+
+    /* 损失曲线 */
+    var lossCurve = el('path');
+    var curveD = 'M ';
+    for (var xx = 0; xx <= 6; xx += 0.1) {
+      curveD += curveX(xx) + ',' + curveY(loss(xx)) + (xx === 0 ? ' L ' : ' L ');
+    }
+    lossCurve.setAttribute('d', curveD);
+    lossCurve.setAttribute('fill', 'none');
+    lossCurve.setAttribute('stroke', 'var(--accent)');
+    lossCurve.setAttribute('stroke-width', '2.25');
+    lossCurve.setAttribute('stroke-linecap', 'round');
+    panelRight.appendChild(lossCurve);
+
+    /* 最低点虚线 + 标注（报告 §4.4） */
+    var optLine = el('line');
+    optLine.setAttribute('x1', '525'); optLine.setAttribute('y1', '72');
+    optLine.setAttribute('x2', '525'); optLine.setAttribute('y2', '266');
+    optLine.setAttribute('stroke', 'var(--muted)');
+    optLine.setAttribute('stroke-opacity', '0.55');
+    optLine.setAttribute('stroke-width', '1');
+    optLine.setAttribute('stroke-dasharray', '3 4');
+    panelRight.appendChild(optLine);
+
+    var optLabel = el('text');
+    optLabel.setAttribute('x', '533'); optLabel.setAttribute('y', '88');
+    optLabel.setAttribute('fill', 'var(--muted)');
+    optLabel.setAttribute('fill-opacity', '0.9');
+    optLabel.setAttribute('font-size', '10');
+    optLabel.textContent = '最优 w=3';
+    panelRight.appendChild(optLabel);
+
+    /* =========================================================
+     * 左面板：18 个散点（按报告 §4.5 精确坐标，stagger 35ms）
+     * ========================================================= */
+    var dots = [];
+    TRIAL.forEach(function (p) {
+      var c = el('circle');
+      c.setAttribute('cx', String(screenX(p[0])));
+      c.setAttribute('cy', String(screenY(p[1])));
+      c.setAttribute('r', '0');
+      c.setAttribute('fill', 'var(--accent)');
+      c.setAttribute('fill-opacity', '0.85');
+      panelLeft.appendChild(c);
+      dots.push(c);
+    });
+
+    /* =========================================================
+     * 拟合直线（初始 w=0，从左到右画出）
+     * ========================================================= */
+    var initEnds = lineEndpoints(0);
+    var fitLine = el('line');
+    fitLine.setAttribute('x1', String(initEnds.x1));
+    fitLine.setAttribute('y1', String(initEnds.y1));
+    fitLine.setAttribute('x2', String(initEnds.x1)); /* 起始 x2 = x1，相位 2 延伸 */
+    fitLine.setAttribute('y2', String(initEnds.y1));
+    fitLine.setAttribute('stroke', 'var(--warn)');
+    fitLine.setAttribute('stroke-width', '2.5');
+    fitLine.setAttribute('stroke-linecap', 'round');
+    fitLine.setAttribute('opacity', '0');
+    panelLeft.appendChild(fitLine);
+
+    /* =========================================================
+     * 偏差虚线组（每个散点垂直投到拟合直线）
+     * ========================================================= */
+    var devLines = TRIAL.map(function (p) {
+      var cx = screenX(p[0]);
+      var cy = screenY(p[1]);
+      var l = el('line');
+      l.setAttribute('x1', String(cx));
+      l.setAttribute('y1', String(cy));
+      l.setAttribute('x2', String(cx));
+      l.setAttribute('y2', String(cy));
+      l.setAttribute('stroke', 'var(--muted)');
+      l.setAttribute('stroke-width', '1');
+      l.setAttribute('stroke-dasharray', '2 3');
+      l.setAttribute('opacity', '0');
+      panelLeft.appendChild(l);
+      return l;
+    });
+
+    function redrawDeviations(w) {
+      devLines.forEach(function (l, i) {
+        var px = TRIAL[i][0];
+        var py = screenY(lineYData(px, w));
+        l.setAttribute('y2', String(py));
+      });
+    }
+
+    /* =========================================================
+     * 右面板：小球光晕 + 主体 + 内核（报告 §11 A 级 1）
+     * ========================================================= */
+    var ballHalo = el('circle');
+    ballHalo.setAttribute('cx', String(curveX(0)));
+    ballHalo.setAttribute('cy', String(curveY(7.6)));
+    ballHalo.setAttribute('r', '16');
+    ballHalo.setAttribute('fill', 'var(--warn)');
+    ballHalo.setAttribute('fill-opacity', '0.15');
+    panelRight.appendChild(ballHalo);
+
+    var ball = el('circle');
+    ball.setAttribute('cx', String(curveX(0)));
+    ball.setAttribute('cy', String(curveY(7.6)));
+    ball.setAttribute('r', '7');
+    ball.setAttribute('fill', 'var(--warn)');
+    panelRight.appendChild(ball);
+
+    var ballCore = el('circle');
+    ballCore.setAttribute('cx', String(curveX(0)));
+    ballCore.setAttribute('cy', String(curveY(7.6)));
+    ballCore.setAttribute('r', '2');
+    ballCore.setAttribute('fill', 'var(--surface)');
+    ballCore.setAttribute('fill-opacity', '0.9');
+    panelRight.appendChild(ballCore);
+
+    /* =========================================================
+     * 轨迹尾巴（最多 4 个，opacity 递减：0.25 / 0.18 / 0.12 / 0.12）
+     * ========================================================= */
+    var trailGroup = el('g');
+    panelRight.appendChild(trailGroup);
+    var trails = [];
+
+    function addTrail(w) {
+      if (trails.length >= 4) {
+        var old = trails.shift();
+        trailGroup.removeChild(old);
+      }
+      /* 调整已有尾点 opacity（最近 0.25 / 倒数第二 0.18 / 更早 0.12） */
+      trails.forEach(function (t, i) {
+        var op = i === trails.length - 1 ? 0.25 : (i === trails.length - 2 ? 0.18 : 0.12);
+        t.setAttribute('fill-opacity', String(op));
+      });
+      var t = el('circle');
+      t.setAttribute('cx', String(curveX(w)));
+      t.setAttribute('cy', String(curveY(loss(w))));
+      t.setAttribute('r', '4');
+      t.setAttribute('fill', 'var(--warn)');
+      t.setAttribute('fill-opacity', '0.25');
+      trailGroup.appendChild(t);
+      trails.push(t);
+    }
+
+    /* =========================================================
+     * 读数（报告 §4.6）
+     * ========================================================= */
+    var fitReadout = Sandbox.readout({
+      x: 40, y: 300, w: 320, h: 81,
+      label: '拟合度', value: '0.42', unit: ''
+    });
+    var lossReadout = Sandbox.readout({
+      x: 360, y: 300, w: 320, h: 81,
+      label: '当前损失', value: '7.60', unit: ''
+    });
+
+    /* =========================================================
+     * 梯度下降一步（报告 §5.2，按公式重算）
+     *   w_next = clamp(w - 0.35 * 1.6 * (w - 3), 0.05, 5.95)
+     * ========================================================= */
+    var w = 0;
+    function gradientStep() {
+      var next = w - RATE * 1.6 * (w - 3);
+      if (next < 0.05) next = 0.05;
+      if (next > 5.95) next = 5.95;
+      addTrail(w);
+      w = next;
+      redrawDeviations(w);
+      var ends = lineEndpoints(w);
+      var lossVal = loss(w);
+      return {
+        w: w,
+        ballX: curveX(w),
+        ballY: curveY(lossVal),
+        lineY1: ends.y1,
+        lineY2: ends.y2,
+        lossValue: lossVal.toFixed(2),
+        fitValue: fitOf(lossVal).toFixed(2)
+      };
+    }
+
+    /* =========================================================
+     * 9 相位时间线（报告 §6）
+     * ========================================================= */
+    var TOTAL = 9;
+
+    Sandbox.play(function () {
+      return Sandbox.timeline(TOTAL, function (tl, idx, h) {
+        /* 相位 1：散点 stagger 入场 */
+        if (idx === 0) {
+          h.caption('先看这一批训练数据');
+          h.step(1, 4);
+          return {
+            targets: dots,
+            r: [0, 5],
+            fillOpacity: [0, 0.85],
+            delay: anime.stagger(35),
+            duration: h.duration,
+            easing: h.easing
+          };
+        }
+
+        /* 相位 2：拟合直线从左到右画出 */
+        if (idx === 1) {
+          h.caption('先给参数 w 一个起点');
+          h.step(2, 4);
+          var ends0 = lineEndpoints(0);
+          return [
+            {
+              targets: fitLine,
+              x2: [ends0.x1, ends0.x2],
+              y2: [ends0.y1, ends0.y2],
+              opacity: [0, 1],
+              duration: h.duration,
+              easing: h.easing
+            },
+            {
+              targets: fitReadout,
+              duration: 1,
+              begin: function () { fitReadout.set('0.42'); }
+            }
+          ];
+        }
+
+        /* 相位 3：偏差虚线 + 初始损失 */
+        if (idx === 2) {
+          h.caption('算每个点的偏差，加起来就是损失');
+          h.step(3, 4);
+          redrawDeviations(0);
+          return [
+            {
+              targets: devLines,
+              opacity: [0, 0.5],
+              duration: h.duration,
+              easing: h.easing
+            },
+            {
+              targets: lossReadout,
+              duration: 1,
+              begin: function () { lossReadout.set('7.60'); }
+            }
+          ];
+        }
+
+        /* 相位 4-9：6 步梯度下降 */
+        var stepIdx = idx - 3; /* 0..5 */
+        var upd = gradientStep();
+        var isFirst = stepIdx === 0;
+        var isLast = stepIdx === STEPS - 1;
+
+        if (isFirst) h.caption('沿损失下降最快方向走第一步');
+        else if (stepIdx === 1 || stepIdx === 2) h.caption('继续往下走，损失越来越小');
+        else if (stepIdx === 3) h.caption('已经接近最低点，再走一小步');
+        else if (stepIdx === 4) h.caption('继续调整，直线已经很接近数据趋势');
+        else h.caption('到达谷底，损失暂时降到最低');
+        h.step(4, 4);
+
+        var anims = [
+          {
+            targets: [fitLine],
+            y1: [fitLine.getAttribute('y1'), String(upd.lineY1)],
+            y2: [fitLine.getAttribute('y2'), String(upd.lineY2)],
+            duration: h.duration,
+            easing: h.easing
+          },
+          {
+            targets: [ballHalo, ball, ballCore],
+            cx: [ball.getAttribute('cx'), String(upd.ballX)],
+            cy: [ball.getAttribute('cy'), String(upd.ballY)],
+            duration: h.duration,
+            easing: h.easing
+          },
+          {
+            targets: fitReadout,
+            duration: 1,
+            begin: function () { fitReadout.set(upd.fitValue); }
+          },
+          {
+            targets: lossReadout,
+            duration: 1,
+            begin: function () { lossReadout.set(upd.lossValue); }
+          }
+        ];
+
+        /* 终点确认（报告 §11 A 级 5）：相位 9 小球 scale [1, 1.08, 1] */
+        if (isLast) {
+          anims.push({
+            targets: [ball, ballHalo],
+            scale: [1, 1.08, 1],
+            duration: h.duration * 0.6,
+            easing: h.easing
+          });
+        }
+
+        return anims;
+      });
+    });
+
+    Sandbox.ready({ template: 'gradient-descent-v2', steps: STEPS });
+  </script>
+</body>
+</html>
