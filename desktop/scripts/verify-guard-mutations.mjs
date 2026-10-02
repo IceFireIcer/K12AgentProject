@@ -771,10 +771,23 @@ const MUTATIONS = [
     expect: '四处层次落点'
   },
   {
+    // ⚠️ 2026-10-02 换文件：那条底边从顶栏组件挪到了**外壳那一行**
+    //    （顶栏与窗控是同一条 chrome，两边各画一条会在 x 边界错开 1px）。
+    //    变异跟着挪，否则会静默失效（脚本会报"找不到锚点"，但只有跑的人看得见）。
     name: '73 顶栏分隔：把底边从 border-strong 改回 border',
-    file: 'src/renderer/src/components/AppTopbar.vue',
+    file: 'src/renderer/src/layouts/AppShell.vue',
     find: '  border-bottom: 1px solid var(--k12-border-strong);',
     replace: '  border-bottom: 1px solid var(--k12-border);',
+    testFile: 'tests/design-tokens.test.ts',
+    expect: '四处层次落点'
+  },
+  {
+    // 反向：顶栏组件**自己**再画一条下边线 → 与外壳那条各画各的，在 x 边界错开。
+    // 这正是用户截图点名的那条竖缝的成因，所以要有变异守着它。
+    name: '73b 顶栏分隔：顶栏组件又自己画了一条下边线（会与外壳那条错开）',
+    file: 'src/renderer/src/components/AppTopbar.vue',
+    find: '  background: transparent;',
+    replace: '  background: transparent;\n  border-bottom: 1px solid var(--k12-border-strong);',
     testFile: 'tests/design-tokens.test.ts',
     expect: '四处层次落点'
   },
@@ -1318,6 +1331,33 @@ const MUTATIONS = [
     find: '              --latest \\',
     replace: '              --prerelease \\',
     expect: 'G21-9'
+  },
+  {
+    // ★★ 2026-10-02：auto 路径的学生侧出口。把「失败写 autoError」去掉 ——
+    //   等于退回用户点名的那句「雷霆自己一个大出题还不告诉学生」。
+    name: '129 自动出题：拿走 auto 路径的失败出口（退回"静默"）',
+    file: 'src/renderer/src/stores/quiz.ts',
+    // ⚠️ **all: true 是必须的**：这个锚点在文件里有两处（`!result.ok` 分支 + `catch` 分支），
+    //   而脚本默认只替换第一处 —— 剩下那一处仍能被断言匹配上，于是变异"没生效"却报绿。
+    //   本仓对这件事有过记录（锚点必须是唯一片段），这里是它的第二种形态：
+    //   锚点不唯一 + 只换一处 = 断言看不出差别。
+    all: true,
+    find: 'else autoError.value = message',
+    replace: 'else void 0',
+    testFile: 'tests/quizgen.test.ts',
+    // ⚠️ expect 同时是 --test-name-pattern 的**过滤串**与"认红条"的判据：
+    //   写短了容易与别的测试名撞上（实测这次就没认出来），写全名最稳。
+    expect: '★★ auto 路径必须有学生侧出口'
+  },
+  {
+    // ★★ 分两段下发：把 stage 判据去掉 —— 第一段又会一次要完 17 道，
+    //   学生要对着空列表等两批串行（分段这件事就白做了）。
+    name: '130 自动出题：第一段又变成一次要完（分段失效）',
+    file: 'src/main/agent/quizgen/service.ts',
+    find: "request.stage === 'first'",
+    replace: 'false',
+    testFile: 'tests/quizgen.test.ts',
+    expect: 'stage=first 只要一段'
   }
 ]
 

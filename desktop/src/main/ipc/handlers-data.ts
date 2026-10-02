@@ -1047,6 +1047,9 @@ export function registerDataHandlers(options: {
     const run = {
       kpId,
       context: projectDecisionTraceContext(request.context),
+      // ★ 分段只认两个白名单值（2026-10-02）：认不出的**一律丢掉**、按"整段"处理 ——
+      //   与 context 的投影同一条纪律（渲染层递来的东西先过白名单，不认识的不要往下传）。
+      ...(request.stage === 'first' || request.stage === 'rest' ? { stage: request.stage } : {}),
       studentId: studentId(),
       // 学段取主进程当前生效的那一档（服务端推断出来的），再不行才是冷启动默认值 ——
       // 绝不用渲染层递来的值（那等于绕开「只出本学段的题」这条隔离）。

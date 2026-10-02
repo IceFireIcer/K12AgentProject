@@ -64,6 +64,8 @@ import { useQuizStore, type QuizAttempt } from '../stores/quiz'
 import { useQuizLayoutStore, type QuizLayout } from '../stores/quizLayout'
 import { useFloatPanel } from '../stores/floatPanel'
 import TeacherGate from '../components/TeacherGate.vue'
+// 「智团团正在出题」占位卡（2026-10-02）：自动追加此前是纯静默的，见组件头注释。
+import QuizWaitCard from '../cards/QuizWaitCard.vue'
 import { useKnowledgeStore } from '../stores/knowledge'
 import { QUIZ_TYPE_LABELS, SCORED_BY_LABELS, formatMasteryDelta } from '../labels'
 import { isBlankAnswer, optionLetter, type QuizQuestionType } from '../cards/quiz'
@@ -665,6 +667,49 @@ const canRequestMore = computed(
 const moreButtonLabel = computed(() => (quiz.moreError !== null ? '再试一次' : '还想再练练'))
 
 /**
+ * 要不要显示「智团团正在出题」占位卡（2026-10-02）。
+ *
+ * ★★ 四个条件，缺一不可（判据全部来自 store，本页不自己推断"在不在飞"）：
+ *   ① `autoStarted`：这件事**发生过**（第一段已派发）—— 没发生过就不摆卡，
+ *      否则空关卡、没做过题的关卡都会挂一张"正在出题"的假卡；
+ *   ② **配额还有余量**：内置 + 已有生成题 < 20。到顶了就不再是"还在出"，
+ *      该由「还想再练练」接手（它不受 20 约束）；
+ *   ③ 没点过「还想再练练」（`moreUnlocked`）—— 学生主动要更多之后，
+ *      这一屏的主行动是那个按钮，不该再压一张占位卡；
+ *   ④ **本关的题全部判分过** —— 还在做题的人不需要知道后台在出题。
+ * ★ 到了「没有新题 / 没出成」两态时 ②③④ 可能已经变了（例如配额满），
+ *   所以这两态**不受 ②③④ 约束**：只要那件事发生过、且有结论，就必须让学生看见。
+ */
+const showAutoCard = computed(() => {
+  if (!quiz.autoStarted) return false
+  if (quiz.autoError !== null || quiz.autoNotice !== null) return true
+  if (moreUnlocked.value) return false
+  const banked = quiz.bank?.questions?.length ?? 0
+  if (banked + generatedCount.value >= quiz.autoPhaseLimit) return false
+  return questions.value.length > 0 && canRequestMore.value
+})
+
+/**
+ * 新题到了就把学生**带回去接着做**（只在收尾卡上才动）。
+ *
+ * ★ 为什么需要它：单卡模式下学生走完最后一题会停在收尾卡上，而新题是**在后台**
+ *   追加到列表尾部的 —— 不迁回题流的话，他会一直盯着一张"这一关做完了"的卡，
+ *   而题其实已经在他下面了（这正是用户说的"学生蒙蔽"的另一种形态）。
+ * ★ 与 `requestMore` 的收尾逻辑同一条路（`goTo` 顺手复位 `finished`）：
+ *   两个入口、一个动作，不写第二份。
+ * ⚠️ 只在 `finished`（收尾卡）时动：学生正在做题时**不许**抢走他的位置。
+ */
+watch(
+  () => questions.value.length,
+  () => {
+    if (layout.value !== 'single' || !finished.value) return
+    const target = firstUnsettledIndex.value
+    if (target < 0) return
+    goTo(target)
+  }
+)
+
+/**
  * 点「还想再练练」：先解除 20 上限（学生主动要更多了），再交给 store 生成。
  *
  * ★ 生成中 / 失败 / 降级三种状态全部**读 store**（`moreGenerating` / `moreError` /
@@ -1179,6 +1224,10 @@ onMounted(() => {
 
         <p v-if="localHint" class="qlist__hint" data-testid="quiz-hint">{{ localHint }}</p>
 
+        <!-- ★★ 自动追加的占位卡（列表模式）：位置就是"新题将要出现的地方" ——
+             到了原地变成题，列表不跳。单卡模式见收尾卡里那一处。 -->
+        <QuizWaitCard v-if="layout === 'list' && showAutoCard" />
+
         <!-- 「还想再练练」：列表模式渲染在题目列表**之后** —— 题变长，按钮跟着列表末端
              走（DOM 顺序天然如此，没有任何定位 / 测量逻辑）。单卡模式见收尾卡的动作区。 -->
         <div v-if="layout === 'list' && canRequestMore" class="qmore" data-testid="quiz-more-list">
@@ -1200,6 +1249,38 @@ onMounted(() => {
             </p>
           </TeacherGate>
         </div>
+
+        <!-- ★★ 单卡模式：**还没走完最后一题**时的轻量提示（2026-10-02 补）。
+             ⚠️ 为什么需要它（实测踩到）：单卡模式走完最后一题前题流是不渲染的，
+             而上面那张占位卡挂在收尾卡里 —— 于是"做完最后一题之前"这条路上
+             一个字都没有，正好落回用户点名的「学生蒙蔽」。
+             这里只用一行字 + 一个转圈（不摆整张卡）：此刻的主对象仍是**眼前这道题**，
+             占位卡到收尾卡那一步才该占满一块。 -->
+        <p
+          v-if="layout === 'single' && !showFinish && showAutoCard"
+          class="qwait-inline"
+          data-testid="quiz-wait-inline"
+          role="status"
+        >
+          <span v-if="quiz.autoError === null && quiz.autoNotice === null" class="qwait-inline__spin" aria-hidden="true" />
+          <template v-if="quiz.autoError !== null">
+            <!-- ★★ 失败**也必须在这条路上看得见**：原先只有收尾卡里有失败卡，
+                 而学生停留在"最后一题已答、还没点下一题"时是看不见任何结论的 ——
+                 那段停留可能比之后看收尾卡还久。 -->
+            {{ quiz.autoError }}
+            <el-button
+              size="small"
+              :loading="quiz.autoGenerating"
+              :disabled="quiz.autoGenerating"
+              data-testid="quiz-wait-inline-retry"
+              @click="quiz.retryAuto()"
+            >
+              {{ quiz.autoGenerating ? '正在重试' : '再试一次' }}
+            </el-button>
+          </template>
+          <template v-else-if="quiz.autoNotice !== null">{{ quiz.autoNotice }}</template>
+          <template v-else>智团团正在照着你刚才的作答再出几道练习题</template>
+        </p>
 
         <!-- 卡脚：单卡模式的「上一题 / 下一题」。
              ★ 它们**不用** `.k12-cta`：一屏只允许一个主色填充（这一屏的主行动是「提交这题」），
@@ -1267,6 +1348,11 @@ onMounted(() => {
               {{ moreButtonLabel }}
             </el-button>
           </div>
+          <!-- ★★ 自动追加的占位卡（2026-10-02）：它在**题流尾部 / 收尾卡里**
+               说话，而不是弹一个模态 —— 学生此刻并没有被挡住（他在看小结），
+               而模态的语义是「我必须等你」。三态（正在出 / 没有新题 / 没出成）
+               全部由 store 判，见 cards/QuizWaitCard.vue 的文件头。 -->
+          <QuizWaitCard v-if="layout === 'single' && showAutoCard" />
           <p v-if="quiz.moreNotice" class="qmore__note">{{ quiz.moreNotice }}</p>
           <p v-if="quiz.moreError" class="qmore__error" role="alert">{{ quiz.moreError }}</p>
         </div>
@@ -1987,6 +2073,39 @@ onMounted(() => {
   gap: 8px;
 }
 /* 降级 / 失败的行内说明（不摆错误卡）：一句学生能读懂的话。 */
+/* 单卡模式的轻量"正在出题"提示（2026-10-02）：一行字 + 一个转圈，
+ * 不占整张卡 —— 此刻学生的主对象仍是眼前这道题。 */
+.qwait-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 失败态那一行会带一个「再试一次」按钮，所以要允许换行（窄窗下不挤成一团）。 */
+  flex-wrap: wrap;
+  margin: 0 0 var(--k12-sp-2);
+  font-size: var(--k12-fs-caption);
+  line-height: var(--k12-lh-ui);
+  color: var(--k12-fg-2);
+}
+.qwait-inline__spin {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: qwait-inline-spin 800ms linear infinite;
+}
+@keyframes qwait-inline-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .qwait-inline__spin {
+    animation-duration: 2400ms;
+  }
+}
+
 .qmore__note {
   font-size: var(--k12-fs-caption);
   line-height: var(--k12-lh-ui);

@@ -70,7 +70,7 @@ registerHooks({
   }
 })
 
-const { shouldAutoGenerate, useQuizStore, AUTO_PHASE_LIMIT, MORE_BATCH } = await import(
+const { shouldAutoGenerate, useQuizStore, AUTO_PHASE_LIMIT, MORE_BATCH, AUTO_FIRST_BATCH } = await import(
   '../src/renderer/src/stores/quiz.ts'
 )
 const { buildPersonalizedQuizPrompt } = await import('../src/main/agent/quizgen/prompt.ts')
@@ -510,6 +510,190 @@ test('服务流水：auto 配额 17 → 拆成 10 + 7 两批，题目合并下�
   assert.equal(result.ok, true)
   assert.deepEqual(prepareCounts, [MAX_QUIZ_QUESTIONS, 7], '单批 ≤ 契约上限 10，余下 7 道走第二批')
   assert.equal(result.payload?.questions.length, 17, '两批合并后 17 道')
+})
+
+/* ================================================================== *
+ * 3b. 分两段下发（2026-10-02 用户裁决：先给第一批，别让学生干等）
+ * ================================================================== */
+
+test('服务流水：stage=first 只要一段（≤ AUTO_FIRST_BATCH），不一次要完 17 道', async () => {
+  /**
+   * ★★ 为什么要有这一条：配额 17 时"一次要完"= 两批串行 + 每批最多 2 次重试，
+   *   学生要对着空列表等几十秒。分段之后第一段（10 道）一到手就能开始做。
+   */
+  const prepareCounts: number[] = []
+  const service = createQuizGenService({
+    readBank: async () => 3,
+    readExisting: async () => [],
+    prepare: makePrepare(prepareCounts),
+    register: makeRegister([], false),
+    complete: completer
+  })
+  const first = await service.generateAuto({ ...REQUEST, stage: 'first' })
+  assert.equal(first.ok, true)
+  assert.deepEqual(
+    prepareCounts,
+    [AUTO_FIRST_BATCH],
+    '第一段只发**一批**（等于契约单批上限）—— 多拆一段只是多一次串行往返，等待不会更短'
+  )
+  assert.equal(first.payload?.questions.length, AUTO_FIRST_BATCH, '第一段下发 10 道')
+})
+
+test('服务流水：stage=rest 在「第一段已登记」之后只剩 7 道要补', async () => {
+  /**
+   * ★ 这一条要**如实模拟第二阶段**：真实链路里第一次调用（stage=first）的 10 道
+   *   已经由 register 登记进这名学生的题库，所以第二次调用时 `readExisting` 会看到它们 ——
+   *   配额 `20 - existingTotal` 于是自然只剩 7。
+   * ⚠️ 用"空 readExisting"当夹具是不真实的（那样 existingTotal 只有内置 3，
+   *   服务会正确地再要 17 道）—— 我第一版就是这么写的，测试当场把这个夹具错误抓出来了。
+   */
+  const counts: number[] = []
+  const bankStems = ['内置一', '内置二', '内置三']
+  const firstBatch = Array.from({ length: AUTO_FIRST_BATCH }, (_, i) => `第一段第 ${i + 1} 题`)
+  const service = createQuizGenService({
+    readBank: async () => bankStems.length,
+    // 默认实现返回的"已有题干"**含内置题干**（两者等价，见 run() 里的 max 兜底）
+    readExisting: async () => [...bankStems, ...firstBatch],
+    prepare: makePrepare(counts),
+    register: makeRegister([], false),
+    complete: completer
+  })
+  const rest = await service.generateAuto({ ...REQUEST, stage: 'rest' })
+  assert.equal(rest.ok, true)
+  const remaining = AUTO_PHASE_LIMIT - bankStems.length - AUTO_FIRST_BATCH
+  assert.deepEqual(
+    counts,
+    [remaining],
+    `补余只发剩下的 ${remaining} 道（20 - 内置 3 - 第一段 10）—— 两段之和仍是补齐到 20`
+  )
+})
+
+test('服务流水：stage 缺省 = 整段（老调用方行为一字不变）', async () => {
+  const counts: number[] = []
+  const service = createQuizGenService({
+    readBank: async () => 3,
+    readExisting: async () => [],
+    prepare: makePrepare(counts),
+    register: makeRegister([], false),
+    complete: completer
+  })
+  await service.generateAuto(REQUEST)
+  assert.deepEqual(
+    counts,
+    [MAX_QUIZ_QUESTIONS, 7],
+    '不带 stage 时仍是一次补齐到 20（10 + 7）—— 分段是加法，不是替换'
+  )
+})
+
+test('契约与主进程：stage 是白名单（认不出的值一律丢掉，按整段处理）', () => {
+  const shared = readFile('src/shared/quiz-generate.ts')
+  assert.match(
+    shared,
+    /stage\?: 'first' \| 'rest'/,
+    'stage 的类型必须是两个字面量的联合 —— 它是白名单，不是自由字符串'
+  )
+  const handler = readFile('src/main/ipc/handlers-data.ts')
+  assert.match(
+    handler,
+    /request\.stage === 'first' \|\| request\.stage === 'rest'/,
+    '主进程必须**逐值校验**后才往下传（与 context 的投影同一条纪律：不认识的不要往下传）'
+  )
+})
+
+/* ================================================================== *
+ * 3c. 自动追加的失败出口（2026-10-02 用户裁决：不许静默）
+ * ================================================================== */
+
+test('★★ auto 路径必须有学生侧出口：失败写 autoError、降级/空回执写 autoNotice', () => {
+  /**
+   * ★★ 这一条守的是用户的原话：「雷霆自己一个大出题还不告诉学生，学生还蒙蔽」。
+   *   改之前：runGenerate 里只有 mode === 'more' 才写 moreError / moreNotice，
+   *   auto 分支失败时**一个出口都没有**（降级只有主进程一句 console.warn）——
+   *   学生等几十秒、什么都不知道，然后既没有新题也没有解释。
+   */
+  const store = readFile('src/renderer/src/stores/quiz.ts')
+  for (const [pattern, why] of [
+    [/else autoError\.value = message/, '失败必须写 autoError（三条失败路径：!ok / 异常都要）'],
+    [/else autoNotice\.value = view\.note \?\? MORE_UNAVAILABLE_TEXT/, '降级（无可用模型）必须写 autoNotice'],
+    [/else autoNotice\.value = view\.note \?\? MORE_EMPTY_TEXT/, '「一道都没加上」必须写 autoNotice']
+  ] as Array<[RegExp, string]>) {
+    assert.match(store, pattern, why)
+  }
+  // 反向：不许只在 more 那条路上写
+  assert.doesNotMatch(
+    store,
+    /if \(mode === 'more'\) moreError\.value = message\n\s*return failed\(message\)/,
+    'auto 路径不许退回「只有 more 有出口」的老样子'
+  )
+})
+
+test('★★ 占位卡存在，且三态齐全、判据全部读 store', () => {
+  const card = readFile('src/renderer/src/cards/QuizWaitCard.vue')
+  assert.match(card, /data-testid="quiz-wait-card"/, '占位卡要有稳定锚点（体检脚本按它取）')
+  assert.match(card, /data-testid="quiz-wait-title"/, '标题要有锚点')
+  assert.match(card, /:data-state="mode"/, '三态要能机器读出来')
+  assert.match(card, /quiz\.autoError/, '「没出成」态读 store 的 autoError')
+  assert.match(card, /quiz\.autoNotice/, '「没有新题」态读 store 的 autoNotice')
+  assert.match(card, /quiz\.autoGenerating/, '「正在出」态读 store 的 autoGenerating')
+  assert.match(card, /data-testid="quiz-wait-retry"/, '失败态必须有「再试一次」（不许让学生卡在那里）')
+  assert.match(card, /quiz\.retryAuto\(\)/, '重试按钮接到 store 的 retryAuto')
+  // ★ 不许做假进度条：后端不报进度（一次调用要么成要么不成），给百分比就是编数据。
+  //   ⚠️ 判据要**精确**：头一版写成 /progress|百分比|%/ 会把 CSS 里的 width: 10px、
+  //   border-radius: 50% 也抓进来（误报）。只认"进度语义"的那几种写法。
+  //   ⚠️ 判据要能只看"元素"，不能看词：卡自己的注释里就写着「没有百分比」，
+  //   判词的话会**被自己的说明抓走**（第二版就踩了这个）。
+  assert.doesNotMatch(
+    card,
+    /role="progressbar"|<progress|qwait__bar|qwait__progress/,
+    '占位卡不许出现进度元素（后端不报进度，画出来就是假的）'
+  )
+})
+
+test('★★ 占位卡接进了练习页的两处位置（题流尾部 + 收尾卡），且不是模态', () => {
+  const view = readFile('src/renderer/src/views/Quiz.vue')
+  assert.match(view, /import QuizWaitCard from '\.\.\/cards\/QuizWaitCard\.vue'/, '练习页要引入占位卡')
+  const uses = view.split('<QuizWaitCard').length - 1
+  assert.equal(
+    uses,
+    2,
+    '占位卡本体挂**两处**：列表模式的题流尾部 + 单卡模式的收尾卡 —— ' +
+      '单卡模式走完最后一题时题流是不渲染的，只挂一处等于那条路上什么都没有'
+  )
+  // ★★ 还有第三处：单卡模式**走完最后一题之前**的轻量一行。
+  //   实测踩到过：单卡模式下"最后一题已答、还没点下一题"这段停留里，
+  //   上面两处**都渲染不到**（题流不渲染、收尾卡还没出现）—— 正好落回
+  //   用户点名的「学生蒙蔽」。所以那一段也必须说话，而且失败时要带重试。
+  assert.match(
+    view,
+    /data-testid="quiz-wait-inline"/,
+    '单卡模式走完最后一题之前要有轻量提示（否则那段停留里一个字都没有）'
+  )
+  assert.match(
+    view,
+    /data-testid="quiz-wait-inline-retry"/,
+    '那条轻量提示也要有失败出口（失败在收尾卡之前就发生了，不能只等收尾卡）'
+  )
+  assert.match(view, /const showAutoCard = computed/, '显隐判据要收口成一个 computed')
+  // ★ 不许用模态：模态的语义是「我必须等你」，而学生此刻并没有被挡住（他在看小结）。
+  assert.doesNotMatch(
+    view,
+    /ElMessageBox|el-dialog[^>]*quiz-wait/,
+    '占位卡不许做成模态弹窗（见 cards/QuizWaitCard.vue 的文件头：非阻塞是刻意的）'
+  )
+})
+
+test('★★ 新题到了要把学生带回题流（只在他停在收尾卡时才动）', () => {
+  const view = readFile('src/renderer/src/views/Quiz.vue')
+  assert.match(
+    view,
+    /watch\(\s*\(\) => questions\.value\.length,/,
+    '要监听题数变化（新题是在后台追加的，不迁回题流的话学生一直盯着一张"做完了"的卡）'
+  )
+  assert.match(
+    view,
+    /if \(layout\.value !== 'single' \|\| !finished\.value\) return/,
+    '★ 只在收尾卡上才动：学生正在做题时**不许**抢走他的位置'
+  )
 })
 
 /* ================================================================== *

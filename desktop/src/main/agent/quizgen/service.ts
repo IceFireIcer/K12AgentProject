@@ -51,6 +51,17 @@ export const AUTO_PHASE_LIMIT = 20
 export const MORE_BATCH = 10
 
 /**
+ * 自动追加**第一段**的题数上限（2026-10-02 用户裁决）。
+ *
+ * ★ 为什么要分段：配额可能是 17（内置 3 + 17 = 20），而单批上限是 10 ——
+ *   一次要 17 得**两批串行 + 每批最多 2 次重试**，学生要对着空列表等几十秒。
+ *   分段之后第一段（10 道）一到手就能开始做，剩下的（7 道）在后台补。
+ * ★ 它等于契约单批上限，这不是巧合：**一段就是一批** ——
+ *   多拆一段就多一次串行往返，等待并不会更短。
+ */
+export const AUTO_FIRST_BATCH = 10
+
+/**
  * 下发载荷（= 投影后的出题载荷，结构上**没有** `answer` / `explanation`）。
  * 与 IPC / 渲染层共享的 `QuizPayloadView` 是同一个结构，两边可直接互赋。
  */
@@ -80,6 +91,8 @@ export interface QuizGenRunRequest {
   context: DecisionTrace[]
   studentId: string
   gradeLevel: string
+  /** 自动追加的分段（见 shared/quiz-generate.ts 的同名字段说明）。缺省 = 整段。 */
+  stage?: 'first' | 'rest'
 }
 
 /** 可注入依赖（生产用默认实现；单测注入假实现覆盖各分支）。 */
@@ -296,10 +309,16 @@ export function createQuizGenService(deps: QuizGenDeps = {}): QuizGenService {
     // 注入的假实现若只回生成题，bankCount 兜住内置那部分，不会少算。
     const existingTotal = Math.max(bankCount, existingStems.length)
 
+    // ★ 自动追加的分段口径（2026-10-02）：`first` 只要一段，`rest` 要剩下的全部。
+    //   两段的**和**仍是"补齐到 20" —— 分段只改"分几次给"，不改总量。
+    //   `undefined`（老调用方 / 未分段）按整段处理，行为与分段前一字不差。
+    const autoTarget = Math.max(0, AUTO_PHASE_LIMIT - existingTotal)
     const target =
       mode === 'more'
         ? Math.min(MORE_BATCH, MAX_QUIZ_QUESTIONS)
-        : Math.max(0, AUTO_PHASE_LIMIT - existingTotal)
+        : request.stage === 'first'
+          ? Math.min(AUTO_FIRST_BATCH, MAX_QUIZ_QUESTIONS, autoTarget)
+          : autoTarget
     // 配额已满：空成功（不是失败，也没什么可提示的）
     if (target <= 0) return { ok: true }
 

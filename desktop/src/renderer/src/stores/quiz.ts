@@ -68,6 +68,18 @@ export const AUTO_PHASE_LIMIT = 20
 /** 「还想再练练」每次追加的题量（题量本身由主进程定，这里是对外口径）。 */
 export const MORE_BATCH = 10
 
+/**
+ * 自动追加**第一段**的题数上限（= 契约单批上限 10）。
+ *
+ * ★★ 2026-10-02 用户裁决：自动追加**分两段**，先给第一段。
+ *   分段前：配额 17（内置 3 + 17 = 20）一次要完 → 两批串行 + 每批最多 2 次重试
+ *   → 学生对着空列表等几十秒。分段后：第一段到手就能开始做，剩下的后台补。
+ *   ⚠️ 这是**等待与展示**的取舍，不是总量变化：两段之和仍是「补齐到 20」。
+ *   ⚠️ 与主进程 AUTO_FIRST_BATCH（agent/quizgen/service.ts）必须同值 ——
+ *   真正出几道由那边定，这一份只用来算「还剩多少要补」。
+ */
+export const AUTO_FIRST_BATCH = 10
+
 /** 题干进决策记录时的截断长度（与后端记录作答时 question 列的口径一致）。 */
 const STEM_HEAD_LIMIT = 120
 
@@ -204,8 +216,37 @@ export const useQuizStore = defineStore('quiz', () => {
    */
   const autoFiredKp = ref('')
 
-  /** 自动追加是否在飞（失败静默；界面若要提示「正在出题…」可以读它）。 */
+  /**
+   * 自动追加是否在飞。
+   *
+   * ★★ 2026-10-02：它**不再是「没人看的死状态」** —— 练习页的占位卡就读它。
+   *   原注释写着「界面若要提示正在出题…可以读它」，而当时是**零个消费者**：
+   *   学生在「什么都没有」的状态下等几十秒，然后突然发现多了十几道题。
+   */
   const autoGenerating = ref(false)
+
+  /**
+   * 自动追加是否**已经派发过**（第一段已发出）。
+   *
+   * ★ 与 autoGenerating 分开：后者是「此刻在飞」，前者是「这件事发生过」。
+   *   失败后 autoGenerating 会落回 false，但卡片要留下来显示失败与重试。
+   */
+  const autoStarted = ref(false)
+
+  /** 自动追加还剩几段没回来。> 0 = 占位卡显示「正在出」而不是「失败」。 */
+  const autoPending = ref(0)
+
+  /**
+   * 自动追加的**失败说明**（学生面可读中文）。
+   *
+   * ★★ 2026-10-02 补的出口：此前这条路**一个出口都没有** ——
+   *   runGenerate 里只有 mode==="more" 才写 moreError / moreNotice，
+   *   auto 分支失败时连一句 console 都没有（降级只有主进程 warn）。
+   */
+  const autoError = ref<string | null>(null)
+
+  /** 自动追加的降级说明（无可用模型 → 主进程给的那句话）。 */
+  const autoNotice = ref<string | null>(null)
   /** 「还想再练练」是否在飞（按钮防连点的权威状态）。 */
   const moreGenerating = ref(false)
   /** 「还想再练练」失败时给学生的一句话（`null` = 没有失败）。 */
@@ -339,6 +380,11 @@ export const useQuizStore = defineStore('quiz', () => {
     //   旧请求迟到回来时序号已变，只会被丢弃，不会写进新关的列表（计划 §6）。
     autoFiredKp.value = ''
     autoGenerating.value = false
+    // ★ 分段那两个状态也要清：换关之后「上一关还在补余」不成立。
+    autoStarted.value = false
+    autoPending.value = 0
+    autoError.value = null
+    autoNotice.value = null
     moreGenerating.value = false
     moreError.value = null
     moreNotice.value = null
@@ -609,7 +655,11 @@ export const useQuizStore = defineStore('quiz', () => {
    *   ③ 只有拿到 payload 才追加（「先登记后下发」的渲染层一半）—— 没拿到就什么都不做。
    * ★ 身份与学段**不在请求里**：主进程按当前学生与学段自己注入（渲染层的类型里就没有这两个字段）。
    */
-  async function runGenerate(mode: 'auto' | 'more'): Promise<QuizGenerateOutcome> {
+  async function runGenerate(
+    mode: 'auto' | 'more',
+    /** auto 的分段（见 AUTO_FIRST_BATCH）；more 忽略。 */
+    stage?: 'first' | 'rest'
+  ): Promise<QuizGenerateOutcome> {
     const failed = (message: string | null): QuizGenerateOutcome => ({
       ok: false,
       added: 0,
@@ -619,7 +669,7 @@ export const useQuizStore = defineStore('quiz', () => {
     const kpId = activeKpId.value
     if (kpId.length === 0) return failed(mode === 'more' ? '还没有选关卡。' : null)
 
-    const key = `${mode}#${kpId}`
+    const key = `${mode}#${stage ?? '-'}#${kpId}`
     if (generateInFlight !== null && generateInFlight.key === key) {
       return await generateInFlight.promise
     }
@@ -636,7 +686,9 @@ export const useQuizStore = defineStore('quiz', () => {
       moreNotice.value = null
     }
 
-    const request: QuizGenerateRequest = { kpId, context: buildDecisionTraces() }
+    // ★ 分段只对 auto 有意义（more 忽略它）：see AUTO_FIRST_BATCH 的说明。
+    const request: QuizGenerateRequest =
+      stage === undefined ? { kpId, context: buildDecisionTraces() } : { kpId, context: buildDecisionTraces(), stage }
     const seq = (generateSeq += 1)
     setGenerating(mode, true)
     const promise = (async (): Promise<QuizGenerateOutcome> => {
@@ -649,13 +701,19 @@ export const useQuizStore = defineStore('quiz', () => {
         if (seq !== generateSeq || activeKpId.value !== kpId) return failed(null)
         if (!result.ok) {
           const message = toStudentFacingMessage(result.message, { topic: 'quiz' })
+          // ★★ 两条路都要有出口（2026-10-02）：auto 此前是静默吞掉，
+          //   学生看到的是「答完了，没有新题，也没人解释」。
           if (mode === 'more') moreError.value = message
+          else autoError.value = message
           return failed(message)
         }
         const view = readGenerateResponse(result.data)
         if (view.degraded) {
-          // 回执里**明说**降级（当前没有可用模型）：自动路径静默吞掉；按钮路径说一句人话
+          // ★★ 两条路都说一句人话（2026-10-02 改判）：
+          //   原口径是「自动路径静默吞掉」—— 但那等于学生等了几十秒、什么都没有，
+          //   也不知道是"没出题"还是"出了题没显示"。学生必然会察觉的事情不能静默。
           if (mode === 'more') moreNotice.value = view.note ?? MORE_UNAVAILABLE_TEXT
+          else autoNotice.value = view.note ?? MORE_UNAVAILABLE_TEXT
           return { ok: false, added: 0, degraded: true, message: view.note }
         }
         const added = appendGenerated(view.questions)
@@ -666,6 +724,7 @@ export const useQuizStore = defineStore('quiz', () => {
           //   题干重复，在这边就是同一个形状。自动路径静默（后台加分动作不该给「做完一关」
           //   添坏消息）；按钮路径给一句**不指向具体原因**的行内说明。
           if (mode === 'more') moreNotice.value = view.note ?? MORE_EMPTY_TEXT
+          else autoNotice.value = view.note ?? MORE_EMPTY_TEXT
           return { ok: false, added: 0, degraded: true, message: null }
         }
         return { ok: true, added, degraded: false, message: null }
@@ -673,6 +732,7 @@ export const useQuizStore = defineStore('quiz', () => {
         if (seq !== generateSeq) return failed(null)
         const message = describeClientError(thrown, { topic: 'quiz' })
         if (mode === 'more') moreError.value = message
+        else autoError.value = message
         return failed(message)
       } finally {
         // 只有仍然是「最后一次」的那次负责关掉自己的加载态（被顶掉的请求不许乱关）
@@ -688,12 +748,56 @@ export const useQuizStore = defineStore('quiz', () => {
   }
 
   /**
-   * 自动追加（由 {@link submit} 判分返回后触发）。
+   * 自动追加（由 {@link submit} 判分返回后触发，见 {@link maybeAutoGenerate}）。
    *
-   * ★ 失败**静默**：这是一次后台加分动作，不该给「做完一关」的收尾添一句坏消息。
+   * ★★ 2026-10-02 改判：**分两段，先给第一段**，失败**必须**说话。
+   *   原因见 AUTO_FIRST_BATCH 与 autoError 的说明（原口径是「静默」，
+   *   而它是学生在"什么都没有"的状态下等几十秒、失败还不知情的来源）。
    */
   async function generateAuto(): Promise<QuizGenerateOutcome> {
-    return await runGenerate('auto')
+    return await refreshAuto('first')
+  }
+
+  /**
+   * 自动追加的**重试入口**（失败卡片上的「再试一次」）。
+   *
+   * ★ 从**第一段**重来：失败可能发生在任一段，而只有第一段成功过才谈得上"补余"。
+   */
+  async function retryAuto(): Promise<QuizGenerateOutcome> {
+    autoError.value = null
+    autoNotice.value = null
+    return await refreshAuto('first')
+  }
+
+  /**
+   * 发一段自动追加，成功且还有配额就顺手把下一段挂上（**不 await**）。
+   *
+   * ★ 为什么"不 await 第二段"：学生此刻已经能做第一段的题了，
+   *   让第二段在后台补 —— 等他做完第一段（10 道），补余通常早回来了。
+   * ★ 为什么失败就不补：目标总量已经把失败的段算进去了，接着要只会拿到"配额已满"的
+   *   空成功，白跑一次模型调用。
+   */
+  async function refreshAuto(stage: 'first' | 'rest'): Promise<QuizGenerateOutcome> {
+    const before = generated.value.length
+    autoStarted.value = true
+    autoPending.value += 1
+    try {
+      const outcome = await runGenerate('auto', stage)
+      if (!outcome.ok) return outcome
+      // 还有没有余量要补：主进程按「20 - 已有」定，这里只判"够不够再发一段"
+      const remaining =
+        AUTO_PHASE_LIMIT - (bank.value?.questions?.length ?? 0) - generated.value.length
+      if (outcome.added > 0 && remaining > 0) {
+        // ★ 刻意不 await：补余在后台跑，学生不必等它。
+        void refreshAuto('rest')
+      } else if (outcome.added === 0 && before === generated.value.length) {
+        // 一道都没加（配额满 / 回来的题干全重复）：给一句说明，别让学生以为坏了。
+        autoNotice.value = autoNotice.value ?? MORE_EMPTY_TEXT
+      }
+      return outcome
+    } finally {
+      autoPending.value = Math.max(0, autoPending.value - 1)
+    }
   }
 
   /**
@@ -725,6 +829,9 @@ export const useQuizStore = defineStore('quiz', () => {
       return
     }
     autoFiredKp.value = kpId
+    // 新的一次派发：把上一次的失败/降级说明收起来（重试后不该还挂着旧结论）
+    autoError.value = null
+    autoNotice.value = null
     void generateAuto()
   }
 
@@ -737,6 +844,10 @@ export const useQuizStore = defineStore('quiz', () => {
     //   清掉的只是「还想再练练」上一次的失败 / 降级说明（新一轮重新开始说）。
     moreError.value = null
     moreNotice.value = null
+    // ★ 同上：auto 的说明也是「上一轮的结论」，重做这一关时收起来。
+    //   ⚠️ 但 autoFiredKp **仍然不重置**（做完了就是做完了，重做不该再白花一次生成）。
+    autoError.value = null
+    autoNotice.value = null
   }
 
   return {
@@ -760,6 +871,11 @@ export const useQuizStore = defineStore('quiz', () => {
     allQuestions,
     autoFiredKp,
     autoGenerating,
+    autoStarted,
+    autoPending,
+    autoError,
+    autoNotice,
+    retryAuto,
     moreGenerating,
     moreError,
     moreNotice,
