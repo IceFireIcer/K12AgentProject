@@ -17,6 +17,7 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
+import type { DemoSafetyRules } from './demo-safety-rules'
 import type { TurnDiagnostics } from './diagnostics'
 import type { Citation, CitationDetail, Degraded, PayloadKind } from './ipc-events'
 
@@ -42,31 +43,6 @@ export type DemoSeedState = 'inactive' | 'seeded'
  *    两处各写一句的话，两句话迟早不一样。
  */
 export const DEMO_BLOCKED_MESSAGE = '这一项在当前状态下暂不可用。'
-
-/**
- * 沙箱拦截演示用的一条**触发词**（词 + 类目）。
- *
- * ★★ 为什么沙箱要自带一份：真词表在 Python（`server/resources/sensitive-words.json`），
- *   判定也在 Python（`guard.check_input`）—— 而沙箱态**不保证 sidecar 在线**
- *   （断网演示是明确要支持的场景）。演示又必须能"打了才拦"，所以这一小份随脚本下发。
- *
- * ★★ 它**不是**安全判定的真源，只是演示触发用的样本：
- *   - 判定规则与 Python 的 `normalize_for_matching` 对齐（NFKC → 去零宽 → 吃掉 CJK 间的空白/标点），
- *     见 `src/renderer/src/stores/demo-safety.ts`；
- *   - **词表内容由守卫钉住**：`tests/demo-seed.test.ts` 会拿这里的每个词去
- *     `server/resources/sensitive-words.json` 里核对，并断言类目与 `safeText` 逐字一致 ——
- *     往这里塞一个真词表里没有的词，守卫当场变红。
- *   - 真实链路一个字都没改：沙箱态下学生的话**根本不进主进程**（由本机脚本接手），
- *     所以这份样本不会成为任何真实输入的判定依据。
- */
-export interface DemoBlockedWord {
-  /** 触发词（逐字取自随包词表）。 */
-  word: string
-  /** 类目 id（与词表的 `categories` 键同源）。 */
-  category: string
-  /** 该类目的面向学生的回执文案（逐字取自词表的 `safeText`）。 */
-  safeText: string
-}
 
 /**
  * 一张内联卡片的**预置载荷**。
@@ -167,13 +143,15 @@ export interface DemoHistorySession {
 export interface DemoScriptPayload {
   turns: DemoScriptTurn[]
   /**
-   * 拦截演示的**触发词样本**（见 {@link DemoBlockedWord}）。
+   * 拦截演示用的**安全规则**（随包词表的逐字镜像：词表 + 越狱正则 + 各类目回执）。
    *
    * ★ 渲染侧据它决定「这一条要不要放拦截回执」—— 打了才拦、没打就照常推进脚本。
-   *   空数组 = 这份载荷没带（老载荷 / 构建到一半），那就**一律不拦**（宁可少演一段，
-   *   也不要把正常输入误判成敏感词）。
+   * ★ 形状与 `shared/demo-safety-rules.ts` 的 `DEMO_SAFETY_RULES` **同一个类型**
+   *   （那里定义、这里转发：渲染侧与主进程各写一份的话，两处迟早不是同一套规则）。
+   *   `undefined` = 这份载荷没带（老载荷 / 构建到一半），那就**一律不拦**
+   *   （宁可少演一段，也不要把正常输入误判成敏感词）。
    */
-  blockedWords: DemoBlockedWord[]
+  safetyRules?: DemoSafetyRules
   /**
    * 预置历史会话的**会话 id**（侧栏点开哪一条能回看到卡片）。
    * 空数组 = 没有任何预置会话带卡片。
@@ -218,7 +196,7 @@ export function isDemoScriptPayload(value: unknown): value is DemoScriptPayload 
   if (typeof value !== 'object' || value === null) return false
   const record = value as {
     turns?: unknown
-    blockedWords?: unknown
+    safetyRules?: unknown
     sessionsWithCards?: unknown
     history?: unknown
   }
@@ -228,7 +206,7 @@ export function isDemoScriptPayload(value: unknown): value is DemoScriptPayload 
   // ★ 拦截词表是**可选地带的**那一段（老载荷没有它），但一旦在就必须条条完整：
   //   缺 `safeText` 的词会在界面上显示成一个空回执 —— 那比不拦还糟
   //   （学生看到一颗空的红气泡，不知道发生了什么）。
-  if (!isDemoBlockedWords(record.blockedWords)) return false
+  if (!isDemoSafetyRules(record.safetyRules)) return false
   return record.turns.every((turn) => {
     if (typeof turn !== 'object' || turn === null) return false
     const item = turn as { turn?: unknown; studentText?: unknown; answer?: unknown; cards?: unknown }
@@ -246,29 +224,48 @@ export function isDemoScriptPayload(value: unknown): value is DemoScriptPayload 
 }
 
 /**
- * 拦截词表那一段的形状检查（`undefined` = 这份载荷没带它，容忍；给了就必须条条完整）。
+ * 安全规则那一段的形状检查（`undefined` = 这份载荷没带它，容忍；给了就必须是完整形状）。
  *
- * ★ 判据是「三样都在且非空」：词、类目、回执文案。少任何一样，拦截演示要么不触发
- *   （词为空）、要么显示一个没有来路的类目、要么弹一颗空的红气泡。
+ * ★ 判据是「四样都在」：类目表（每类有 label + safeText）、词表、越狱正则、类目优先级。
+ *   少任何一样，拦截演示要么不触发、要么弹一颗没有来路（或空白）的红气泡。
  * ★ 语义上的**真伪**不在这里管（词是不是真在随包词表里、回执有没有抄错），
- *   那是 `tests/demo-seed.test.ts` 对着 `sensitive-words.json` 逐条核对的事 ——
+ *   那是 `tests/demo-seed.test.ts` 的 ⑩ 对着 `sensitive-words.json` 逐条核对的事 ——
  *   这里是运行期浅校验，只挡半截对象。
  */
-function isDemoBlockedWords(value: unknown): boolean {
+export function isDemoSafetyRules(value: unknown): boolean {
   if (value === undefined) return true
-  if (!Array.isArray(value)) return false
-  return value.every((entry) => {
+  if (typeof value !== 'object' || value === null) return false
+  const rules = value as {
+    categories?: unknown
+    words?: unknown
+    patterns?: unknown
+    categoryPriority?: unknown
+  }
+  if (!Array.isArray(rules.categoryPriority) || rules.categoryPriority.length === 0) return false
+  if (typeof rules.categories !== 'object' || rules.categories === null) return false
+  for (const entry of Object.values(rules.categories as Record<string, unknown>)) {
     if (typeof entry !== 'object' || entry === null) return false
-    const item = entry as { word?: unknown; category?: unknown; safeText?: unknown }
-    return (
-      typeof item.word === 'string' &&
-      item.word.trim() !== '' &&
-      typeof item.category === 'string' &&
-      item.category.trim() !== '' &&
-      typeof item.safeText === 'string' &&
-      item.safeText.trim() !== ''
-    )
-  })
+    const category = entry as { label?: unknown; safeText?: unknown }
+    if (typeof category.label !== 'string' || category.label.trim() === '') return false
+    if (typeof category.safeText !== 'string' || category.safeText.trim() === '') return false
+  }
+  if (!Array.isArray(rules.words)) return false
+  for (const entry of rules.words) {
+    if (typeof entry !== 'object' || entry === null) return false
+    const word = entry as { word?: unknown; category?: unknown; severity?: unknown }
+    if (typeof word.word !== 'string' || word.word.trim() === '') return false
+    if (typeof word.category !== 'string' || word.category.trim() === '') return false
+    if (typeof word.severity !== 'string' || word.severity.trim() === '') return false
+  }
+  if (!Array.isArray(rules.patterns)) return false
+  for (const entry of rules.patterns) {
+    if (typeof entry !== 'object' || entry === null) return false
+    const pattern = entry as { id?: unknown; pattern?: unknown; category?: unknown }
+    if (typeof pattern.id !== 'string' || pattern.id.trim() === '') return false
+    if (typeof pattern.pattern !== 'string' || pattern.pattern.trim() === '') return false
+    if (typeof pattern.category !== 'string' || pattern.category.trim() === '') return false
+  }
+  return true
 }
 
 /**

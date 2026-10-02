@@ -59,9 +59,10 @@ import type { Citation, CitationDetail, Degraded, GradeLevel, PayloadKind } from
 //   静态 import 的解析发生在模块链接期，而 `tests/demo-seed.test.ts` 的解析钩子
 //   在链接期之后才跑（那个文件头有同样的说明）——写成别名会让整份测试当场加载不起来。
 //   `stores/demoSeed.ts` 用同一条写法 import 同一个模块。
-import { DEMO_SCRIPT_TURN_COUNT } from '../../shared/demo-seed.ts'
+import { DEMO_SCRIPT_TURN_COUNT, isDemoSafetyRules } from '../../shared/demo-seed.ts'
+// ★ 内置安全规则（随包词表的逐字镜像）：随载荷下发给渲染侧判定用。
+import { DEMO_SAFETY_RULES } from '../../shared/demo-safety-rules.ts'
 import type {
-  DemoBlockedWord,
   DemoHistorySession,
   DemoScriptPayload,
   DemoScriptTurn,
@@ -766,56 +767,16 @@ function retrievalTrace(input: RetrievalInput): DiagRetrieval {
 const GRADE_FILTER = "grade_level IN ('senior','junior','primary_high','primary_low')"
 
 /* ------------------------------------------------------------------ *
- * 拦截演示：触发词样本（渲染侧据它决定「打了才拦」）
+ * 拦截演示：规则住在 shared（随包词表的逐字镜像）
  * ------------------------------------------------------------------ */
 
 /**
- * 四个类目的**回执文案**（逐字取自 `server/resources/sensitive-words.json` 的
- * `categories[*].safeText`）。
- *
- * ★★ 绝不在这里现编任何安全文案：这几句是面向学生的正式回执，
- *   抄错一个字就是「界面上的说法与真实链路不一致」。守卫逐字核对。
- * ★ 类目顺序 = 词表里的书写顺序（`illegal` 在最前，演示默认打它）。
+ * ★ 内置安全规则（词表 + 越狱正则 + 各类目回执）在
+ *   `shared/demo-safety-rules.ts`，内容由 `tests/demo-seed.test.ts` 的 ⑩
+ *   对着 `server/resources/sensitive-words.json` **逐条**核对。
+ *   这里只把它原样随载荷下发 —— 渲染侧据此判定"该不该演拦截那一段"。
+ *   （放在 shared 而不是本文件：判定发生在渲染侧，而渲染进程不许 import 主进程模块。）
  */
-const DEMO_SAFE_TEXT: Readonly<Record<string, string>> = {
-  illegal:
-    '这类内容我不能提供，也不能帮你查找。如果你是对相关新闻有疑问，我们可以聊聊「AI 在安全领域能做什么」。',
-  violence:
-    '这个话题我不能接着讲。如果你是因为看到或遇到了让人害怕的事，请一定告诉老师或爸爸妈妈，他们能真正帮上忙。我们可以换个问题，比如「AI 能不能帮忙发现危险」。',
-  self_harm:
-    '我很在意你刚刚说的这句话。这件事比今天的课更重要，请你现在就告诉身边信任的大人：爸爸妈妈、老师，或者拨打 12356 心理援助热线。你愿意说给我听的，我都在。',
-  personal_info:
-    '我不会向你索要姓名、住址、电话、密码这些东西，你也不要发给任何人或别的 AI 助手。只留一个昵称就够我们上课了，这也是在保护你自己。'
-}
-
-/**
- * 沙箱拦截演示的**触发词样本**（词 + 类目 + 该类目的回执）。
- *
- * ★★ 每一条的词、类目、回执都**逐字取自** `server/resources/sensitive-words.json`，
- *   由 `tests/demo-seed.test.ts` 对着那份随包词表逐条核对 —— 塞一个词表里没有的词、
- *   或者抄错一个字的回执，守卫当场变红。
- * ★★ **只取 `severity: "block"` 的词**：`flag` 类只记日志、不打断对话
- *   （例如 `血腥` 就是 flag），拿它演示会当场露馅。
- * ★ 只放这一小撮而不是整份词表：演示要的是「打这句必中」，
- *   这几个是文档点名的推荐演示词（都能稳定命中，不随词表小幅更新失效）。
- * ★★ 真实链路一个字都没改：沙箱态下学生的话**根本不进主进程**（由本机脚本接手），
- *   所以这份样本不会成为任何真实输入的判定依据；它只决定**演示里要不要演那一段**。
- */
-export const DEMO_BLOCKED_WORDS: readonly DemoBlockedWord[] = [
-  // ── illegal（演示默认打这一类：既展示拦截生效，合规口径也最稳）──────
-  { word: '制作炸药', category: 'illegal', safeText: DEMO_SAFE_TEXT.illegal ?? '' },
-  { word: '买枪', category: 'illegal', safeText: DEMO_SAFE_TEXT.illegal ?? '' },
-  { word: '制毒', category: 'illegal', safeText: DEMO_SAFE_TEXT.illegal ?? '' },
-  // ── violence ─────────────────────────────────────────────────────
-  { word: '砍死', category: 'violence', safeText: DEMO_SAFE_TEXT.violence ?? '' },
-  { word: '打死你', category: 'violence', safeText: DEMO_SAFE_TEXT.violence ?? '' },
-  // ── self_harm ────────────────────────────────────────────────────
-  { word: '自杀', category: 'self_harm', safeText: DEMO_SAFE_TEXT.self_harm ?? '' },
-  { word: '自残', category: 'self_harm', safeText: DEMO_SAFE_TEXT.self_harm ?? '' },
-  // ── personal_info ────────────────────────────────────────────────
-  { word: '你的手机号', category: 'personal_info', safeText: DEMO_SAFE_TEXT.personal_info ?? '' },
-  { word: '身份证号是多少', category: 'personal_info', safeText: DEMO_SAFE_TEXT.personal_info ?? '' }
-]
 
 /* ------------------------------------------------------------------ *
  * 四轮脚本
@@ -879,7 +840,7 @@ const DEMO_TURN_OFFSET = 31 - (DEMO_HISTORY_TURN_COUNT + DEMO_SCRIPT_TURN_COUNT)
  *   `studentTextFromInput: true` —— 那等于「打到第 5 下必然出拦截回执」，
  *   演示者打「机器学习到底是什么」也会被拦，环回被吃掉。
  *   现在拦截是一条**由学生原话决定的分支**（命中随包词表才走，见
- *   {@link DEMO_BLOCKED_WORDS}），与脚本推进互不占位。
+ *   随包词表逐字同源的内置规则），与脚本推进互不占位。
  */
 export const DEMO_SCRIPT_TEXT: readonly {
   turn: number
@@ -1086,7 +1047,12 @@ export async function buildDemoScript(): Promise<DemoScriptPayload> {
   return {
     turns,
     // ★ 渲染侧据它决定「打了才拦」—— 见 `src/renderer/src/stores/demo-safety.ts`。
-    blockedWords: [...DEMO_BLOCKED_WORDS],
+    //   整份下发（27 词 / 7 类 / 7 条越狱正则 / 全量 safeText），不挑词：
+    //   演示者临场换一个说法（"怎么做炸弹"而不是"制作炸药"）也照样命中。
+    // ★ 出包前先自校验一次形状：`isDemoSafetyRules` 是运行期判据的真正实现
+    //   （渲染侧拿到载荷也会再验一遍）。过不了就**不带** —— 渲染侧见 undefined
+    //   一律不拦（宁可少演一段，也不要把正常输入误判成敏感词）。
+    ...(isDemoSafetyRules(DEMO_SAFETY_RULES) ? { safetyRules: DEMO_SAFETY_RULES } : {}),
     sessionsWithCards: [DEMO_LOOP_SESSION_ID, DEMO_CODE_SESSION_ID, DEMO_QUIZ_SESSION_ID],
     history: await buildDemoHistory(diagnostics, studentContextBlock, systemPrompt, contextHash)
   }
@@ -1106,14 +1072,15 @@ export function buildBlockedTurnEnvelope(
     studentText: string
     at?: number
     /** 命中那一条的回执文案（长度进 `bufferedChars`）。 */
-    safeText?: string
-    /** 命中那一条的类目 id（进拦截记录的 reason）。 */
+    /** 命中的类目 id（进拦截记录的 reason 与回执选择）。 */
     category?: string
   }
 ): TurnDiagnostics {
   const at = input.at ?? Date.now()
   const turn = DEMO_HISTORY_TURN_COUNT + DEMO_SCRIPT_TURN_COUNT + 1
   const requestId = `${DEMO_REQUEST_PREFIX}blocked`
+  const category = input.category ?? 'illegal'
+  const safeText = DEMO_SAFETY_RULES.categories[category]?.safeText ?? ''
   return {
     turn,
     requestId,
@@ -1154,12 +1121,14 @@ export function buildBlockedTurnEnvelope(
       ],
       finalizations: 0,
       retractions: 0,
-      bufferedChars: input.safeText?.length ?? 0
+      // 回执正文的长度：真实链路里 `bufferedChars` 数的是"还没放给学生的正文"，
+      // 拦截轮没有正文，这里按**将要显示的那句安全回执**的长度如实计。
+      bufferedChars: safeText.length
     },
     interceptions: [
       {
         source: 'wordlist',
-        reason: `命中内容安全规则（${input.category ?? 'illegal'}）`
+        reason: `命中内容安全规则：${DEMO_SAFETY_RULES.categories[category]?.label ?? category}`
       }
     ],
     done: { ok: false, status: 'blocked', totalMs: 80, firstTokenMs: 0 }

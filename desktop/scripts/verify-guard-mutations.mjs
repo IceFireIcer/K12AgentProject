@@ -1199,7 +1199,7 @@ const MUTATIONS = [
       '    interceptions: [',
       '      {',
       "        source: 'wordlist',",
-      "        reason: `命中内容安全规则（${input.category ?? 'illegal'}）`",
+      "        reason: `命中内容安全规则：${DEMO_SAFETY_RULES.categories[category]?.label ?? category}`",
       '      }',
       '    ],'
     ].join('\n'),
@@ -1214,12 +1214,23 @@ const MUTATIONS = [
   },
 
   {
-    // 把沙箱的拦截判定改成**永远不命中** —— 等于回到「拦截只可能按轮次发生」的老样子，
+    // 把沙箱拦截的**词表命中**改成永不命中 —— 等于回到「拦截只可能按轮次发生」的老样子，
     // 而这次要修的就是它：打了敏感词必须变红（用户口径「得确确实实发了然后得变红」）。
-    name: '127 演示沙箱：拦截判定永远不命中（打了敏感词也不变红）',
+    name: '127 演示沙箱：词表命中永远不成立（打了敏感词也不变红）',
     file: 'src/renderer/src/stores/demo-safety.ts',
-    find: '    if (normalized.includes(entry.word) || text.includes(entry.word)) return entry',
-    replace: '    if (false && (normalized.includes(entry.word) || text.includes(entry.word))) return entry',
+    // ⚠️ 锚点要**独一无二**：同一段判据在 `matchBlockedWord` 里也有一份（少了长度守卫），
+    //    只写后半截会打到那一处 —— 而那一处不参与判定，变异就静默失效了（实测踩到过）。
+    find: 'entry.word.length > 0 && (normalized.includes(entry.word) || text.includes(entry.word))',
+    replace: 'entry.word.length > 0 && false && (normalized.includes(entry.word) || text.includes(entry.word))',
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '拦截演示'
+  },
+  {
+    // 同上，但打的是**越狱正则**那一条命中路径。
+    name: '128 演示沙箱：越狱正则命中永远不成立（越狱话术也不变红）',
+    file: 'src/renderer/src/stores/demo-safety.ts',
+    find: 're.test(normalized) || re.test(text)',
+    replace: 'false && (re.test(normalized) || re.test(text))',
     testFile: 'tests/demo-seed.test.ts',
     expect: '拦截演示'
   },

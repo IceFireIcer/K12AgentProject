@@ -45,7 +45,7 @@ import {
 } from '../../../shared/demo-seed'
 // ★ 拦截判定（归一化 + 子串匹配，与 Python 的 guard 同口径）住在自己那个模块里：
 //   它要能被单测直接加载，而本文件与 chat store 互相 import（进不了纯 node 的测试）。
-import { matchBlockedWord } from './demo-safety'
+import { checkDemoInput } from './demo-safety'
 import {
   DIAGNOSTICS_TURN_LIMIT,
   type RuntimeSpan,
@@ -585,7 +585,12 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
    *   不显示脚本原话的轮次，因为要被看见的正是"这就是被拦下的输入"。
    * ★ 它**不推进脚本游标**：拦截不是脚本里的一格，拦完接着从原来那一轮讲。
    */
-  function playBlockedTurn(requestId: string, typed: string, safeText: string): boolean {
+  function playBlockedTurn(
+    requestId: string,
+    typed: string,
+    safeText: string,
+    category: string
+  ): boolean {
     const chat = chatStore()
     try {
       chat.beginScriptedTurn(requestId, typed)
@@ -609,7 +614,7 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
       //   眼下这条演示要的是环回里那颗红气泡（真实渲染路径，不是编的）。
       turn: null,
       envelope: null,
-      blocked: { safeText, reason: '命中内容安全词表' }
+      blocked: { safeText, reason: `命中内容安全规则（${category}）` }
     }
     // 不逐字、不投卡片：立刻给回执（与真实链路里"输入侧命中即拦"同形）。
     later(0, () => finishPlayback())
@@ -633,14 +638,21 @@ export const useDemoSeedStore = defineStore('demoSeed', () => {
     const payload = script.value
     if (payload === null || payload.turns.length === 0) return false
 
-    // ★★ 拦截优先：学生真打的那句话命中词表 → 走拦截分支；否则照常推进脚本。
+    // ★★ 拦截优先：学生真打的那句话命中规则 → 走拦截分支；否则照常推进脚本。
     //   判据是**原话**，与第几轮无关 —— 打「机器学习到底是什么」永远不会被拦。
-    const hit = matchBlockedWord(typed ?? '', payload.blockedWords ?? [])
-    if (hit !== null) {
+    //   ⚠️ 用的是 `checkDemoInput`（与 guard 同口径：词表 + 越狱正则、按类目优先级挑回执、
+    //   只有 `block` 档才算拦）—— 不是"子串撞上就算"，所以 `血腥`/`笨蛋` 这类
+    //   `flag` 词不会弹出红气泡（与真实后端一致）。
+    const rules = payload.safetyRules
+    const verdict =
+      rules === undefined
+        ? { blocked: false, category: 'ok', safeText: '' }
+        : checkDemoInput(typed ?? '', rules)
+    if (verdict.blocked) {
       const requestId = `${DEMO_REQUEST_PREFIX}blocked${blockedPass === 0 ? '' : `.${blockedPass}`}`
       blockedPass += 1
       // ★ 拦截轮**不推进脚本游标**：它不是脚本里的一格，拦完接着从原来那一轮讲。
-      return playBlockedTurn(requestId, typed ?? '', hit.safeText)
+      return playBlockedTurn(requestId, typed ?? '', verdict.safeText, verdict.category)
     }
 
     const turn = payload.turns[cursor.value % payload.turns.length]
