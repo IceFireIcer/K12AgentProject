@@ -142,12 +142,18 @@ const modelTitle = computed(() => llmChipTitle(settings.snapshot?.llm, viewMode.
   align-items: center;
   gap: 16px;
   padding: 0 24px;
-  background: var(--k12-surface);
+  /* ★★ 2026-10-02：**透明** —— 顶栏这一条的玻璃与下边线由父层
+   *   `layouts/AppShell.vue` 的 `.shell__head` 统一刷。
+   *   原因（实测）：它原本自己刷一道 45% 白 + 14px 糊，而右边的窗控区
+   *   （`.shell__actions`）刷的是另一档 —— 同一条顶栏左右两半观感不一致，
+   *   接缝正好落在「我选年级」与窗控之间（用户截图点名处）。
+   *   半透明底**不能叠着刷**：两层 45% 叠出来不是 45%，是 70%。 */
+  background: transparent;
   /* chrome 与内容的分隔用**强边框**（优化报告 §2.1：顶栏加底部 border 增强分隔）。
    * ★ 2026-09-27（D-105）：再加一条**单侧投影**。顶栏是白纸面，而 `default` 档的
    *   桌面底色（page）也是白 —— 只靠 1px 线还不足以说清「chrome 到此为止」；
    *   投影是那三个信号里的第三个（底色差 / 线 / 单侧投影），补上它边界才立住。 */
-  border-bottom: 1px solid var(--k12-border-strong);
+  /* 下边线由父层统一画（见上）—— 这里再画一条会在 x 边界处与前一条错开 1px。 */
   /* ★★ 2026-10-01（D-126）：这里**不要**再画一遍单侧投影。
    *   外壳那一行（`layouts/AppShell.vue` 的 `.shell__head`，横跨顶栏 + 右侧动作带）
    *   已经画了同一条 `--k12-shadow-edge-bottom`；顶栏再画一次，它那条投影会向右

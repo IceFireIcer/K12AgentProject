@@ -966,7 +966,7 @@ watch(tab, () => {
 }
 .tag--bad {
   background: var(--k12-bad);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
 }
 
 .trace {

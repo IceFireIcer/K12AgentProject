@@ -853,7 +853,7 @@ const interruptNotice = computed(() => {
 .btn--primary {
   border-color: var(--k12-accent-ink);
   background: var(--k12-accent-ink);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
 }
 
 .out {

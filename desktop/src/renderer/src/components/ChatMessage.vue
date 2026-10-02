@@ -32,7 +32,7 @@
  *      点击链路（`emit('branch')` → 页面确认框）**一字未改**。
  */
 import { computed, ref } from 'vue'
-import { BookMarked, ChevronRight, Ellipsis, GitBranch, ShieldCheck, X } from 'lucide-vue-next'
+import { BookMarked, ChevronRight, GitBranch, ShieldCheck, X } from 'lucide-vue-next'
 import type { ChatTurn } from '../api/events'
 import type { CitationDetail } from '@shared/ipc-events'
 import {
@@ -44,7 +44,6 @@ import {
   showsStatusChip
 } from '../labels'
 import { DEFAULT_LOGO_URL } from '../brand-logo'
-import { useDismissable } from '../composables/useDismissable'
 import { useEscape } from '../composables/useEscape'
 import { useFocusReturn } from '../composables/useFocusReturn'
 import { useCardShine } from '../composables/useCardShine'
@@ -271,27 +270,14 @@ const sourceRows = computed(() =>
  */
 const hasCompat = computed(() => props.turn.citations.some((citation) => citation.compat))
 
-/* ── 分叉点：收进 `⋯` 小菜单 ───────────────────────────────────────────────
- * ★ 为什么不再是一条常显的链接：它挂在**每条回答**下面，学生划着读的时候
- *   很容易误点到（一点就会换一条会话线），而且「从这里重新问」读起来像 Git 的
- *   分支概念，不像一句人话。收进 `⋯` 之后：默认只有一个安静的小圆点菜单，
- *   展开才看到「换个思路再问」。
- * ★ 浮层必须有键盘出口与「点外部关掉」：用 `useDismissable`（全站唯一实现，
- *   见 `composables/useDismissable.ts` 里那段「为什么 Esc 与点外部要写在一起」）。
+/* ── 换个思路再问（2026-10-02：常显可点，不再藏在 `⋯` 后面）───────────────
+ * ★ 上一版是 `⋯` 菜单，为了"防误点"；用户明确否掉了那个取舍（入口要一眼看见）。
+ *   误点风险改用**形状**化解：这是一枚有边界、有底色、有字的安静胶囊，
+ *   不是一条像正文的链接。
+ * ★ 没有浮层了 → `useDismissable` / `branchBoxRef` / `branchMenuOpen` 一起删掉：
+ *   留着就是"没有浮层却仍在注册关闭监听"的死代码（Esc 会被它吃掉一次）。
  */
-const branchMenuOpen = ref(false)
-const branchBoxRef = ref<HTMLElement | null>(null)
-useDismissable({
-  panel: branchBoxRef,
-  open: () => branchMenuOpen.value,
-  close: () => {
-    branchMenuOpen.value = false
-  }
-})
-
-/** 点了菜单里的那一项：收起菜单，再把分叉点交给上层（**链路与从前完全一样**）。 */
 function pickBranch(): void {
-  branchMenuOpen.value = false
   emitBranch()
 }
 </script>
@@ -438,48 +424,35 @@ function pickBranch(): void {
         <BlockedNotice v-if="turn.blocked" :notice="turn.blocked" />
         <DegradedNotice v-if="turn.error" :notice="turn.error" />
 
-        <!-- ── 分叉点：换个思路再问 ────────────────────────────────────────
+        <!-- ── 换个思路再问（2026-10-02 用户要求：改成**常显可直接点**）─────────
              ★ 只在**这一轮已经结束**时出现：流式途中点它，学生拿到的是一段
                没写完的回答当分支点（他不会想要那个）。
              ★ 只在**真的有条目 id** 时出现（`branchable`）：老会话 / 认不出条目
                的历史消息没有分叉点 —— 宁可不给按钮，也不要给一个点了就报错的。
-             ★★ 呈现方式（2026-09-20 走查）：它原来是一条**常显的链接**，
-                挂在每条回答下面 —— 学生划着读时容易误点（一点就换会话线），
-                而且「从这里重新问」读起来像 Git 概念。现在收进 `⋯` 菜单：
-                默认只是一个安静的小圆点，展开才看到「换个思路再问」这句话。
-                ★★ `data-testid="branch-restart"` **留在那个常显的 `⋯` 触发器上**
-                   （不是菜单项）：`ux-audit.mjs` 的 D7/D9 是拿它**数 + 量**的 ——
-                   「每条有回答的轮次旁都有可点入口」，而挂在菜单项上的话，
-                   菜单没展开时它在 DOM 里根本不存在（D7 会假红）。
-                   真正的动作是菜单项（`branch-restart-action`），点击链路一字未改。 -->
-        <div v-if="branchable" ref="branchBoxRef" class="branch" data-testid="turn-branch">
+             ★★ 用户口径：「把这个按钮直接做到对话那个下面 不用每次点一下三个点
+                来触发 做成直接显示出来可以触发的」。
+                → 上一版（2026-09-20 走查）把它收进 `⋯` 菜单，理由是「防误点」；
+                  用户明确否掉了那个取舍：**入口要一眼看见**。
+                → **误点风险改用形状化解，而不是用一次点击化解**：这枚按钮是
+                  「有边界、有底色、有字」的安静胶囊（不是一条像正文的链接），
+                  要误触得先看见它、再对准它点两下 —— 而这正是"常显可点"的代价，
+                  用户已经知情并选择了它。
+             ★★ `data-testid="branch-restart"` 仍挂在**这个按钮**上：
+                `ux-audit.mjs` 的 D7/D9 拿它**数 + 量**（每条有回答的轮次旁都有
+                可点入口、触控高度 ≥28px）。现在它既是触发器也是动作本体，
+                两个 testid 合一（旧菜单项那个 `branch-restart-action` 随菜单一起删）。 -->
+        <div v-if="branchable" class="branch" data-testid="turn-branch">
           <button
             type="button"
-            class="branch__more"
+            class="branch__btn"
             data-testid="branch-restart"
-            :aria-expanded="branchMenuOpen"
-            aria-haspopup="menu"
-            aria-label="换个思路再问"
-            title="换个思路再问"
+            title="保留这段对话，另开一条从这里接着问（原来的不会被改动）"
             :disabled="branching"
-            @click="branchMenuOpen = !branchMenuOpen"
+            @click="pickBranch()"
           >
-            <Ellipsis :size="15" />
+            <GitBranch :size="13" aria-hidden="true" />
+            <span>换个思路再问</span>
           </button>
-          <div v-if="branchMenuOpen" class="branch__menu" role="menu">
-            <button
-              type="button"
-              class="branch__item"
-              role="menuitem"
-              data-testid="branch-restart-action"
-              title="保留这段对话，另开一条从这里接着问（原来的不会被改动）"
-              :disabled="branching"
-              @click="pickBranch()"
-            >
-              <GitBranch :size="13" />
-              <span>换个思路再问</span>
-            </button>
-          </div>
         </div>
       </div>
     </div>
@@ -690,7 +663,7 @@ function pickBranch(): void {
 .chip--safety {
   gap: 4px;
   border-radius: var(--k12-r-inset);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
 }
 .chip--safety--good {
   background: var(--k12-good);
@@ -995,76 +968,44 @@ function pickBranch(): void {
   color: var(--k12-accent-ink);
   word-break: break-all;
 }
-/* ── 分叉点（换个思路再问）─────────────────────────────────────────────────
- * 它是**每条回答的附属动作**，不是主干控件：常态只是一个安静的小圆点，
- * 悬停才明显 —— 免得整页回答下面挂一排按钮把阅读节奏打散，
- * 也免得学生划着读的时候**误点**（一点就会换一条会话线）。
- * ★ 尺寸走 28px 见方（UX 体检 C1 的触控下限）—— 它虽小，但学生真会点。 */
+/* ── 换个思路再问（2026-10-02：常显可点）────────────────────────────────────
+ * ★ 用户口径：「把这个按钮直接做到对话那个下面 不用每次点一下三个点来触发
+ *   做成直接显示出来可以触发的」。
+ * ★ 形状承担防误点（而不是藏起来）：一枚**有边界、有底色、有字的安静胶囊** ——
+ *   一眼看得出它可点（这是用户要的），但它不填充主色、不与正文同形，
+ *   所以不会读成"正文的一部分"而被划读时误触。
+ * ★ 触控高度 ≥28px（UX 体检 D9 量它）；`min-height` 写死而不是靠 padding 撑，
+ *   免得字号一档变化就掉到下限以下。 */
 .branch {
-  position: relative;
   display: flex;
-  margin-top: 6px;
+  margin-top: 8px;
 }
-.branch__more {
+.branch__btn {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 28px;
-  min-height: 28px;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--k12-r-control);
-  background: transparent;
-  color: var(--k12-muted);
-  cursor: pointer;
-}
-@media (hover: hover) and (pointer: fine) {
-  .branch__more:hover:not(:disabled) {
-    border-color: var(--k12-border-strong);
-    background: var(--k12-surface-2);
-    color: var(--k12-accent-ink);
-  }
-}
-.branch__more:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-/* 展开后的小菜单：**向左对齐触发器、向下展开**（它在阅读栏左缘，
- * 向右展开会伸进正文里把字压住）。 */
-.branch__menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 5;
-  min-width: 156px;
-  padding: 4px;
-  border: 1px solid var(--k12-border-strong);
-  border-radius: var(--k12-r-inset);
-  background: var(--k12-surface);
-  box-shadow: var(--k12-shadow-float);
-}
-.branch__item {
-  display: flex;
-  align-items: center;
   gap: 6px;
-  width: 100%;
-  min-height: 30px;
-  padding: 5px 9px;
-  border: none;
-  border-radius: var(--k12-r-inset);
-  background: transparent;
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid var(--k12-border);
+  border-radius: var(--k12-r-control);
+  background: var(--k12-surface-2);
   color: var(--k12-fg-2);
   font-family: inherit;
   font-size: var(--k12-fs-caption);
   font-weight: 600;
-  text-align: left;
+  white-space: nowrap;
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
-  .branch__item:hover:not(:disabled) {
+  .branch__btn:hover:not(:disabled) {
+    border-color: var(--k12-accent-ink);
     background: var(--k12-accent-soft);
     color: var(--k12-accent-ink);
   }
+}
+.branch__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .branch__item:disabled {
   opacity: 0.5;

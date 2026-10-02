@@ -289,7 +289,10 @@ useFocusReturn(cardRef, () => accounts.gateOpen, { trap: true })
 </template>
 
 <style scoped>
-/* 全屏遮罩：它是启动时的第一屏，不是盖在应用上的一层浮窗 —— 所以底色不透明 */
+/* 全屏遮罩：它是启动时的第一屏，不是盖在应用上的一层浮窗。
+ * ★ 2026-10-02：底色由 `--k12-page`（不透明）改为**透明** —— 用户口径是
+ *   「背景图是整个前端背景插入的」，第一屏也在"整个前端"里。
+ *   它上面压着的仍是 body 那层毛玻璃，所以卡片与文字的可读性不受影响。 */
 .gate {
   position: fixed;
   inset: 0;
@@ -298,7 +301,7 @@ useFocusReturn(cardRef, () => accounts.gateOpen, { trap: true })
   align-items: center;
   justify-content: center;
   padding: var(--k12-sp-6);
-  background: var(--k12-page);
+  background: transparent;
 }
 .gate__card {
   width: 100%;

@@ -410,7 +410,7 @@ async function choose(title: string): Promise<void> {
 }
 .chapter__option--active .chapter__check {
   background: var(--k12-accent-ink);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
 }
 .chapter__option--active .chapter__num {
   color: var(--k12-accent-ink);

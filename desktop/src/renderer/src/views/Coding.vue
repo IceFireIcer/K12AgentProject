@@ -1718,7 +1718,7 @@ watch(editorVisible, (visible) => {
  *   卡片感靠边框 + 卡片影撑，不需要靠不透明度（分档表见 base.css 的 `.k12-glass`）。 */
 @supports (backdrop-filter: blur(1px)) {
   .code__hint-note {
-    background: color-mix(in srgb, var(--k12-surface) 72%, transparent);
+    background: color-mix(in srgb, var(--k12-surface-solid) 72%, transparent);
     backdrop-filter: blur(12px) saturate(1.4);
   }
 }

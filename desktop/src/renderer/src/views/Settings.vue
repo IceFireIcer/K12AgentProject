@@ -2041,7 +2041,7 @@ onBeforeUnmount(() => {
 }
 .sat--on .sat__check {
   background: var(--k12-accent-ink);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
 }
 .sat__desc {
   font-size: var(--k12-fs-caption);

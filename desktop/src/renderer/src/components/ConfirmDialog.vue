@@ -142,7 +142,7 @@ useFocusReturn(panelRef, () => props.open, {
   .cd__box {
     /* 76%：背后是 `--k12-fg 30%` 的遮罩 + 整页（已经压暗过），所以比抽屉更透一档；
      * 决策文字仍落在浅底上，可读性不受影响（分档表见 base.css 的 `.k12-glass`）。 */
-    background: color-mix(in srgb, var(--k12-surface) 76%, transparent);
+    background: color-mix(in srgb, var(--k12-surface-solid) 76%, transparent);
     backdrop-filter: blur(12px) saturate(1.4);
   }
 }
@@ -202,12 +202,12 @@ useFocusReturn(panelRef, () => props.open, {
 .cd__btn--primary {
   background: var(--k12-accent-ink);
   border-color: var(--k12-accent-ink);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
 }
 @media (hover: hover) and (pointer: fine) {
   .cd__btn--primary:hover {
     filter: brightness(1.08);
-    color: var(--k12-surface);
+    color: var(--k12-on-fill);
   }
 }
 /* 破坏性操作的确认键：红底，与"普通确认"在视觉上分得开，

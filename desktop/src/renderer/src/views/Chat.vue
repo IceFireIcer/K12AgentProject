@@ -1646,7 +1646,12 @@ watch(
   font-weight: 650;
   line-height: var(--k12-lh-tight);
   letter-spacing: -0.01em;
-  color: var(--k12-fg);
+  /* ★ #3F55F9（2026-10-02 用户指定色值；与侧栏品牌名同一支）。
+   * ★ 可读性：40px 大字压在学段壁纸上，四张实测 4.97 / 4.71 / 3.79 / 4.04
+   *   （小学低 → 高中）—— 大字下限 3:1，全部达标。
+   *   ⚠️ 这是**压在会换图的背景上**的字：换色前要把四个学段都算一遍，
+   *   只测一个学段会漏（纯白在小学低那张只有 1.1:1）。 */
+  color: #3f55f9;
 }
 .chat__hello-sub {
   font-size: var(--k12-fs-body);
@@ -1810,7 +1815,7 @@ watch(
 }
 @supports (backdrop-filter: blur(1px)) {
   .chat__suggest {
-    background: color-mix(in srgb, var(--k12-surface) 60%, transparent);
+    background: color-mix(in srgb, var(--k12-surface-solid) 60%, transparent);
     backdrop-filter: blur(12px) saturate(1.4);
   }
 }
@@ -1876,7 +1881,7 @@ watch(
 @media (hover: hover) and (pointer: fine) {
   .chat__opening-cta:hover {
     background: var(--k12-accent);
-    color: var(--k12-surface);
+    color: var(--k12-on-fill);
   }
 }
 /* 次动作：描边（「我想问别的」不是拒绝，只是换话题 —— 不做成红色的否定按钮） */

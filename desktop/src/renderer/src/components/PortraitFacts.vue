@@ -150,7 +150,7 @@ const showSummaryRow = computed(() => summaryTitle.value !== '')
   font-size: var(--k12-fs-label);
   font-weight: 650;
   line-height: 1.35;
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
   background: var(--fact-c);
   border-radius: var(--k12-r-control);
   padding: 2px 4px;

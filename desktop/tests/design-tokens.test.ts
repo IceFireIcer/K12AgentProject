@@ -26,6 +26,12 @@ import { fileURLToPath } from 'node:url'
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const RENDERER = 'src/renderer/src'
 const BASE_CSS = `${RENDERER}/assets/base.css`
+function ruleBody(css: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^$()|[\]\\]/g, '\\$&')
+  const m = new RegExp(`(?:^|\\n)[ \\t]*${escaped}\\s*\\{([^}]*)\\}`).exec(css)
+  return m?.[1] ?? ''
+}
+
 const read = (...segments: string[]): string => readFileSync(join(desktopRoot, ...segments), 'utf8')
 
 /** 渲染进程里全部 .vue / .ts / .css 源码（相对路径 + 原文）。 */
@@ -166,7 +172,22 @@ test('★★ 四处层次落点正确：顶栏 body-lg+fg-2+强边 / 身份行 h
   // Chrome 层：顶栏页面名 18px + 次级色 + 与内容的分隔用强边框
   assert.match(topbar, /\.tb__title\s*\{[\s\S]{0,400}?font-size:\s*var\(--k12-fs-body-lg\)/, '顶栏页面名必须是 body-lg（18px）')
   assert.match(topbar, /\.tb__title\s*\{[\s\S]{0,600}?color:\s*var\(--k12-fg-2\)/, '顶栏页面名必须用 fg-2（次级层级，报告 §2.1）')
-  assert.match(topbar, /border-bottom:\s*1px\s+solid\s+var\(--k12-border-strong\)/, '顶栏与内容之间必须用强边框分隔')
+  // ★★ 2026-10-02 改落点：那条强边线从顶栏组件挪到了**外壳那一行**
+  //   （`layouts/AppShell.vue` 的 `.shell__head`）。原因：顶栏与右侧窗控区是
+  //   **同一条 chrome**，两边各画一条会在 x 边界处错开 1px（用户截图点名的竖缝）。
+  //   判据（"chrome 与内容之间有一条强线"）一个字没松，只是唯一来源换了一处。
+  const shell = read(RENDERER, 'layouts', 'AppShell.vue')
+  const head = ruleBody(shell, '.shell__head')
+  assert.match(
+    head,
+    /border-bottom:\s*1px\s+solid\s+var\(--k12-border-strong\)/,
+    '外壳那一行（顶栏 + 窗控，同一条 chrome）必须有强边框与内容分隔'
+  )
+  assert.doesNotMatch(
+    topbar,
+    /border-bottom:\s*1px/,
+    '顶栏组件自己不许再画一条下边线：与外壳那条会各画各的，在 x 边界错开'
+  )
 
   // Hero 层：页面身份行 32px
   assert.match(

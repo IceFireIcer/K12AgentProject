@@ -498,7 +498,7 @@ useFocusReturn(rootRef, () => floatPanel.open, { trap: false })
   /* ⚠️ 填充底用 accent-ink（压深版）而不是 accent：accent 是「被看」的图形色，
    * 白字压在上面在低龄档只有 ~2.6:1；accent-ink 与白底 ≥4.5:1（对比度脚本在校验）。 */
   background: var(--k12-accent-ink);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
   border-radius: var(--k12-r-flat);
   padding: 8px 11px;
   max-width: 88%;
@@ -584,7 +584,7 @@ useFocusReturn(rootRef, () => floatPanel.open, { trap: false })
      *   真机实测 88% 时背后的「第 4 段 / 流经」会透上来，与窗里的回答正文抢读
      *   （学生要读的是窗里的字）。模糊负责"透出背景的存在感"，
      *   不透明度的下限由**可读性**决定（分档表见 base.css 的 `.k12-glass`）。 */
-    background: color-mix(in srgb, var(--k12-surface) 90%, transparent);
+    background: color-mix(in srgb, var(--k12-surface-solid) 90%, transparent);
     backdrop-filter: blur(12px) saturate(1.4);
   }
   .fp__bar {

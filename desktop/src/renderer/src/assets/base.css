@@ -61,6 +61,116 @@
 @import '@fontsource-variable/jetbrains-mono/index.css';
 @import './tokens.generated.css';
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * 壁纸这一版的**覆盖层**：必须在上面那几条 @import **之后**
+ * ══════════════════════════════════════════════════════════════════════════
+ * ★★ 位置是硬约束（CSS 里没有 lint 会提醒）：`tokens.generated.css` 是 `@import`
+ *   进来的，它自己就有一整套 `:root…` 规则 —— 写在 @import 之前的同名覆盖会被它
+ *   按"同特异性、后者胜"（或**更高特异性**）顶掉，表现是"改了没反应"。
+ *
+ * ── 纸面 85% 透（用户口径：「所有界面设置一个透明度」，2026-10-02 定为 85%）────
+ * ★★ 选择器必须与生成文件**逐条对齐**（实测踩到两轮）：
+ *   生成文件里 `--k12-surface` 出现在 **28 条** `:root…` 规则里，其中
+ *   `:root[data-grade="junior"]:not([data-sat])` 的特异性是 **0,2,0** ——
+ *   只写一条 `:root`（0,1,0）**根本压不住它**，浏览器里读回仍是 `#FFFFFF`。
+ *   所以把同一组选择器照抄一遍（打平特异性），覆盖块又在 @import **之后** → 稳赢。
+ *
+ * 为什么覆盖而不是改 `tokens.source.json`：那是**生成物**（18 组配色 × 同一个 #FFFFFF），
+ *   改源要跑 `gen:tokens`，并连带 tokens-diff 守卫与 342 项对比度校验；
+ *   这一版改的是**呈现**（用户要的观感），不是配色本身。回退也只改这一处。
+ *
+ * ⚠️ 对比度：45% 白压在半透毛玻璃上，正文 `--k12-fg` 的比值仍在 7:1 以上（实测见下）
+ *   （AA 正文 4.5:1）。**再往下调（如 30%）要重新核一遍正文对比度。**
+ * ══════════════════════════════════════════════════════════════════════════ */
+:root,
+:root[data-grade='primary-low'][data-sat='vivid'],
+:root[data-grade='primary-low'][data-sat='soft'],
+:root[data-grade='primary-low'][data-sat='mono'],
+:root[data-grade='primary-high'][data-sat='vivid'],
+:root[data-grade='primary-high'][data-sat='soft'],
+:root[data-grade='primary-high'][data-sat='mono'],
+:root[data-grade='junior'][data-sat='vivid'],
+:root[data-grade='junior'][data-sat='soft'],
+:root[data-grade='junior'][data-sat='mono'],
+:root[data-grade='senior'][data-sat='vivid'],
+:root[data-grade='senior'][data-sat='soft'],
+:root[data-grade='senior'][data-sat='mono'],
+:root[data-grade='default'][data-sat='vivid'],
+:root[data-grade='default'][data-sat='soft'],
+:root[data-grade='default'][data-sat='mono'],
+:root[data-grade='brand'][data-sat='vivid'],
+:root[data-grade='brand'][data-sat='soft'],
+:root[data-grade='brand'][data-sat='mono'],
+:root[data-grade='primary-low']:not([data-sat]),
+:root[data-grade='primary-high']:not([data-sat]),
+:root[data-grade='junior']:not([data-sat]),
+:root[data-grade='senior']:not([data-sat]),
+:root[data-grade='default']:not([data-sat]),
+:root[data-grade='brand']:not([data-sat]),
+:root[data-sat='vivid']:not([data-grade]),
+:root[data-sat='soft']:not([data-grade]),
+:root[data-sat='mono']:not([data-grade]) {
+  --k12-surface: color-mix(in srgb, #FFFFFF 45%, transparent);
+}
+
+
+/* ── 通用面：半透明 + **各自一层毛玻璃** ───────────────────────────────────
+ * ★ 用户口径：「你可以把那些组件也改动一下增加背景透明度调整」——
+ *   所以不只调透明度，还让**每一个面本身**是玻璃（而不只是"被调淡的白纸"）。
+ *   一处覆盖所有 `var(--k12-surface)` 的消费者（卡片 / 对话气泡 / 回答块 / 选项 /
+ *   右栏面板 / 侧栏 / 顶栏 …），不必去 40 多个组件里逐个加 —— 逐个加一定会漏，
+ *   而漏掉的那个就是"一块不透明白斑"。
+ * ★ `backdrop-filter` 模糊的是**它背后的壁纸**：面因此读成"压在图上的一块玻璃"。
+ * ★ 分面线（`border-*`）与单侧投影**一个都没动** —— 三件套里另外两件照旧，
+ *   卡片边界仍然一眼可读（见 `visual-edges`）。
+ * ⚠️ 与上面那组 28 条选择器同源，靠**源码顺序**取胜。 */
+.k12-card,
+.k12-inset,
+.answer,
+.bubble,
+.option,
+.feedback,
+.rail__panel,
+.rail__tab,
+.portrait,
+.sb,
+.skip-link {
+  backdrop-filter: blur(var(--k12-glass-panel-blur)) saturate(1.04);
+  -webkit-backdrop-filter: blur(var(--k12-glass-panel-blur)) saturate(1.04);
+}
+/* ⚠️ 这份名单里**没有** `.tb`（顶栏）—— 它现在完全透明，玻璃由父层
+ *   `.shell__head` 统一刷。给它再挂一份 `backdrop-filter` 的后果实测过：
+ *   左半（`.tb`，14px 糊）与右半（窗控区，只有父层的 12px）**糊法不同**，
+ *   于是「我选年级」与窗控之间露出一条竖直的分界 —— 用户截图点名的那条。
+ *   透明层不需要自己的毛玻璃：`backdrop-filter` 模糊的是**它背后**的东西。 */
+
+/* ── 内容纸面：比外壳更实（用户 2026-10-02 走查）───────────────────────────
+ * ★ 用户原话：「对话里面的这种卡片消息的背景颜色应该稍微加点白色底，
+ *   要不然看不清字体了」。
+ * ★ 只覆盖**承载正文的那几类**，不碰外壳（侧栏 / 顶栏 / 右栏 / 窗控）——
+ *   外壳退到壁纸里是对的，正文卡片得让人读得下去。
+ * ★ 为什么这条能赢：它与上面那组 28 条选择器同源（都在 @import 之后），
+ *   而 `background` 是**同一特异性下的后者胜**；本块排在后面，所以覆盖生效。
+ *   ⚠️ 但组件里若把 `background` 写在更靠后的 scoped 样式里，仍会赢过本块 ——
+ *   所以这几类必须保持"底色来自令牌"的写法（不许在组件里写死 `background`）。 */
+/* ⚠️ `:root` 前缀不是装饰：组件用的是 **scoped 样式**，编译后会变成
+ *   `.answer[data-v-8a04a727]`（特异性 0,2,0），而单靠一个类名只有 0,1,0 ——
+ *   实测第一版这么写**完全没生效**（读回来还是 45%）。
+ *   加 `:root` 把本规则抬到同档 0,2,0；本块在源码里排在后面 → 稳赢。
+ *   （`:root` 永远匹配 <html>，加在这里不改变匹配范围，只补特异性。） */
+:root .answer,
+:root .bubble,
+:root .k12-card,
+:root .quiz,
+:root .option,
+:root .feedback,
+:root .turn__body,
+:root .doc-card,
+:root .doc-drawer {
+  background: var(--k12-surface-card);
+}
+
+
 :root {
   --k12-font-ui: 'Noto Sans SC Variable', -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
   /* 只给大字用；小字号请继续用 --k12-font-ui（见上面的取舍说明）。 */
@@ -298,8 +408,69 @@
   --k12-screen-key: color-mix(in srgb, #FFFFFF 58%, var(--k12-accent));
   --k12-screen-num: color-mix(in srgb, #FFFFFF 45%, var(--k12-warn));
 
+  /* ── 学段壁纸 / 毛玻璃 / 纸面透度（2026-10-02 用户口径）──────────────────
+   * 四张学段图 + 两层毛玻璃 + 纸面 45% 透。调浓淡只改这里几个数。
+   * ⚠️ 图在 `src/renderer/src/assets/wallpaper/`（打包器哈希复制）；
+   *   写进 `resources/` 会被 vite 与 electron-builder **各收一份**（守卫 G24-8 会红）。 */
+  --k12-wallpaper-primary-low: url('./wallpaper/primary_low.webp');
+  --k12-wallpaper-primary-high: url('./wallpaper/primary_high.webp');
+  --k12-wallpaper-junior: url('./wallpaper/junior.webp');
+  --k12-wallpaper-senior: url('./wallpaper/senior.webp');
+  /* 还没有学段时用初中那张（中间档，切图时跳变最小）。 */
+  --k12-wallpaper: var(--k12-wallpaper-junior);
+  /* 整窗毛玻璃：模糊壁纸、压柔它，让界面浮在上面。 */
+  --k12-glass-blur: 9px;
+  --k12-glass-tint: color-mix(in srgb, var(--k12-page) 4%, transparent);
+  /* 面（卡片 / 气泡 / 侧栏 / 顶栏 / 右栏）**自己那层**毛玻璃：比整窗那层更糊 ——
+   * 面是"挡在眼前的一块玻璃"，糊得明显才像玻璃；整窗那层只负责压柔壁纸。 */
+  --k12-glass-panel-blur: 14px;
+
+  /* ── **填色上的字**（不透明）────────────────────────────────────────────
+   * ★★ 为什么要单独一个令牌：`--k12-surface` 在这一版被改成 **45% 透白**
+   *   （壁纸要透出来），但它同时被 19 处当作"深色填色上的字色"用
+   *   （安全徽章 / 主按钮 / 弹窗确认键 / 窗控 / 模型选择 …）。那些地方一旦半透，
+   *   字就与底下的填色混在一起 —— 实测：安全徽章的「已通过安全审查」变成灰白，
+   *   透出绿底，像没渲染完。
+   * → 语义拆开：面用 `--k12-surface`（半透），**字用这个**（纯白）。
+   *   ⚠️ 不许再用 `--k12-surface` 当字色 —— 它现在是半透的。 */
+  --k12-on-fill: #FFFFFF;
+
+  /* ── **内容纸面**：比外壳更实（用户 2026-10-02 走查）──────────────────────
+   * 用户原话：「对话里面的这种卡片消息的背景颜色应该稍微加点白色底，要不然看不清字体了」。
+   * ★ 为什么分两档：外壳（侧栏 / 顶栏 / 右栏）是 **chrome**，退到壁纸里正合适；
+   *   而**承载正文的卡片**（回答块 / 学生气泡 / 练习卡 / 编练卡）是"要读的东西"，
+   *   45% 透时字压在图上读着累。两档一分开，层次反而更清楚：
+   *   外壳 = 45%（透）· 内容 = 85%（实）。
+   * ★ 85% 的实测底气（最坏情况 = 壁纸最暗处压在下面）：
+   *   正文 `--k12-fg` 对比度 12.4:1（AA 正文只要 4.5:1）。 */
+  --k12-surface-card: color-mix(in srgb, #FFFFFF 85%, transparent);
+
+  /* ── **纯白**（给"自己会算不透明度"的那些表面当原料）────────────────────
+   * ★★ 为什么必须有这一支（2026-10-02 踩到的连锁缺陷，用户报障）：
+   *   站内有一批表面**自己就在做** `color-mix(in srgb, var(--k12-surface) N%, transparent)`
+   *   —— 对话框 76%、悬浮追问窗 90%、吸顶 78%、动画卡 86%、编码卡 72%…
+   *   那些 N% 是 2026-09-30 逐档实测定下来的（见「毛玻璃」那一节的分档表）。
+   *   而 `--k12-surface` 被这一版改成 **45% 透白**之后，同一个 `color-mix` 算出来
+   *   从"N% 白"塌成了"0.45N 白"：对话框 76% → **34%**、追问窗 90% → **40%**。
+   *   表现就是用户截图里那样 —— 模型选择弹层背后的正文直接压住字，读不清。
+   *   ⚠️ 所以这不是"浮层要再白一点"的审美调整，是**改了一个别人依赖的色值**。
+   *   → 给这类表面一支**纯白**，让它们那套 N% 重新算对。
+   * ★ 与 `--k12-surface` 的分工：
+   *     `--k12-surface`        直接当底色用的"半透纸面"（内容卡片走它）
+   *     `--k12-surface-solid`  给"还要自己 mix 一次"的表面当原料（浮层/吸顶走它）
+   *   ⚠️ 新写浮层时按这个分工选，别再拿 `--k12-surface` 去 mix。 */
+  --k12-surface-solid: #ffffff;
+
   color-scheme: light;
 }
+
+/* ★★ 学段 → 壁纸（**独立规则**，不能塞进 `:root{}`：原生 CSS 不支持嵌套选择器）。
+ *   选择器与 `tokens.generated.css` 的 `data-grade` 逐字同源；属性值由
+ *   `stores/gradeTheme.ts` 写。 */
+:root[data-grade='primary-low'] { --k12-wallpaper: var(--k12-wallpaper-primary-low); }
+:root[data-grade='primary-high'] { --k12-wallpaper: var(--k12-wallpaper-primary-high); }
+:root[data-grade='junior'] { --k12-wallpaper: var(--k12-wallpaper-junior); }
+:root[data-grade='senior'] { --k12-wallpaper: var(--k12-wallpaper-senior); }
 
 * {
   box-sizing: border-box;
@@ -322,10 +493,43 @@ body {
   font-size: var(--k12-fs-body);
   line-height: var(--k12-lh-body);
   color: var(--k12-fg);
-  background: var(--k12-page);
+  /* ★★ 2026-10-02：body **不再刷页面底色** —— 整窗背景改由下面两个伪元素承担
+   * （壁纸 + 毛玻璃），界面一律透上去。少了这一条，壁纸会被实色盖住。 */
+  background: transparent;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   font-variant-numeric: tabular-nums;
+}
+
+/* ── 整窗壁纸层（固定，不随内容滚动）──────────────────────────────────────
+ * ★ 用伪元素而不是 <div>：它必须在**所有页面之外**（用户口径：「背景图是整个前端的背景」），
+ *   且不参与任何布局/滚动。`z-index:-1` + `pointer-events:none` → 压在一切之下、也不吞点击。 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--k12-wallpaper);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+/* ── 整窗毛玻璃层：界面就压在这一层上 ────────────────────────────────────
+ * ★ 用户口径（二次裁定）：「不要同色遮罩，要**透明的带毛玻璃效果**的遮罩」。
+ *   所以这里几乎无色（4% 学段淡色）+ `backdrop-filter` 模糊 —— 壁纸透过来是**糊的**。
+ * ★ 模糊的是**它背后的东西**（壁纸那一层）：这正是毛玻璃的语义。
+ *   换成 `filter` 会把这一层与后面的界面一起糊掉（错的）。 */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--k12-glass-tint);
+  backdrop-filter: blur(var(--k12-glass-blur)) saturate(1.08);
+  -webkit-backdrop-filter: blur(var(--k12-glass-blur)) saturate(1.08);
 }
 
 h1, h2, h3, h4, h5, h6, p, figure {
@@ -383,9 +587,26 @@ a {
   border: 1px solid color-mix(in srgb, var(--k12-border) 70%, transparent);
   border-radius: var(--k12-r-inset);
 }
-/* E4 浮层：对话框 / 菜单 / 悬浮窗。 */
+/* E4 浮层：对话框 / 菜单 / 悬浮窗。
+ *
+ * ★★ 2026-10-02（用户报障）：底色从 `--k12-surface` 改成 **`--k12-surface-solid`（纯白）**。
+ *   这一处是**所有浮层的底色来源**（模型选择 / 确认框 / 追问窗 / 诊断浮窗 / 账号菜单 /
+ *   门禁卡都挂 .k12-float），所以一处改动把六个浮层一起救回来了。
+ *
+ *   为什么必须改（不是审美，是**我改坏了别人依赖的色值**）：
+ *     · 本轮为了"让壁纸透出来"，把 `--k12-surface` 从 `#FFFFFF` 改成了 **45% 透白**
+ *       （内容卡片用，是对的）；
+ *     · 但浮层一直在**借它当底色** —— 于是模型弹层塌成 45% 透，
+ *       背后的正文直接压住选项文字（用户截图原话：「可读性太差」）；
+ *     · 更隐蔽的是：那些**自己还会再 mix 一次**的表面（对话框 76% / 追问窗 90%）
+ *       算出来从"N% 白"塌成"0.45N 白"（76% → 34%）。
+ *   两者现在都修好了：浮层底色用纯白，它们的 N% 也就重新算对了。
+ *
+ *   ⚠️ 浮层与内容卡片的分工，别混：
+ *      内容卡片 `--k12-surface`（半透，壁纸透过来）
+ *      浮层     `--k12-surface-solid`（不透明 —— 浮层背后是**两层字**，透了就都读不清） */
 .k12-float {
-  background: var(--k12-surface);
+  background: var(--k12-surface-solid);
   border: 1px solid var(--k12-border-strong);
   /* 浮层走最大档（报告 §1.3：模态/浮层 = xl 16）。 */
   border-radius: var(--k12-r-float);
@@ -625,7 +846,7 @@ a {
   --el-border-color-lighter: color-mix(in srgb, var(--k12-border) 60%, transparent);
   --el-border-color-extra-light: color-mix(in srgb, var(--k12-border) 40%, transparent);
 
-  --el-bg-color: var(--k12-surface);
+  --el-bg-color: var(--k12-on-fill);
   --el-bg-color-overlay: var(--k12-surface);
   --el-fill-color: var(--k12-surface-2);
   --el-fill-color-blank: var(--k12-surface);
@@ -804,7 +1025,7 @@ a {
   border: 1px solid var(--k12-accent-ink);
   border-radius: var(--k12-r-control);
   background: var(--k12-accent-ink);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
   font-size: var(--k12-fs-body-sm);
   font-weight: 650;
   cursor: pointer;
@@ -856,7 +1077,7 @@ a {
   width: 14px;
   height: 14px;
   border: 2px solid color-mix(in srgb, var(--k12-surface) 45%, transparent);
-  border-top-color: var(--k12-surface);
+  border-top-color: var(--k12-on-fill);
   border-radius: var(--k12-r-pill);
   animation: k12-spin 0.8s linear infinite;
 }
@@ -992,7 +1213,7 @@ a {
 }
 .el-segmented {
   --el-segmented-bg-color: var(--k12-surface-2);
-  --el-segmented-item-selected-bg-color: var(--k12-surface);
+  --el-segmented-item-selected-bg-color: var(--k12-on-fill);
   --el-segmented-item-selected-color: var(--k12-accent-ink);
   border-radius: var(--k12-r-control);
   padding: 3px;

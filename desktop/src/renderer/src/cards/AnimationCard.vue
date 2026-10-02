@@ -1034,7 +1034,7 @@ watch(iframeEl, (element) => {
 .btn--primary {
   border-color: var(--k12-accent-ink);
   background: var(--k12-accent-ink);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
 }
 
 /* 「全屏」是卡片头右上角的**次要**动作：与 `.btn` 同一支描边样式（无色底填充）。
@@ -1129,7 +1129,7 @@ watch(iframeEl, (element) => {
   font-size: var(--k12-fs-body-sm);
   color: var(--k12-muted);
   /* 半透明遮罩：压在 iframe 之上（与 views/Animation.vue 的 `.anim__veil` 同一手法） */
-  background: color-mix(in srgb, var(--k12-surface) 86%, transparent);
+  background: color-mix(in srgb, var(--k12-surface-solid) 86%, transparent);
   border-radius: var(--k12-r-inset);
   pointer-events: none;
 }

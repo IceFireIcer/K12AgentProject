@@ -241,7 +241,8 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: var(--k12-page);
+  /* ★ 2026-10-02：透上去（壁纸 + 毛玻璃在 body 的两个伪元素上）。 */
+  background: transparent;
 }
 
 /* 三步循环按钮：它是**导航**（不是内容），所以走描边样式而不是主色填充 ——

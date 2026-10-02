@@ -92,7 +92,16 @@ test('★ 徽章颜色只走令牌（无硬编码色值），且圆角是矩形�
   const block = source.slice(start, end)
   assert.match(block, /background:\s*var\(--k12-good\)/, '通过态底色用 --k12-good')
   assert.match(block, /background:\s*var\(--k12-bad\)/, '撤回态底色用 --k12-bad')
-  assert.match(block, /color:\s*var\(--k12-surface\)/, '白字来自 --k12-surface（与 .k12-cta 同源）')
+  // ★★ 2026-10-02 改判（原来是 `--k12-surface`）：那个令牌在这一版被改成 **45% 透白**
+  //   （壁纸要透出界面），**不再是不透明的白**。它当字色用的后果实测过一次：
+  //   徽章上的「已通过安全审查」变成灰白、透出绿底，像没渲染完 —— 正是本条要防的那类事。
+  //   所以字色改走 `--k12-on-fill`（语义就是"填色上的字"，恒定不透明）。
+  assert.match(block, /color:\s*var\(--k12-on-fill\)/, '白字来自 --k12-on-fill（不是已变半透的 --k12-surface）')
+  assert.doesNotMatch(
+    block,
+    /color:\s*var\(--k12-surface\)/,
+    '徽章字色不许再用 --k12-surface：它现在是半透的，字会与填色混在一起'
+  )
   assert.match(block, /border-radius:\s*var\(--k12-r-inset\)/, '圆角矩形用 r-inset 档（刻意不是胶囊）')
   assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(block), '徽章样式里不许出现硬编码色值')
 })

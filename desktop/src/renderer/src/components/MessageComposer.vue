@@ -343,7 +343,7 @@ defineExpose({ fill, focus })
   border: none;
   border-radius: var(--k12-r-control);
   background: var(--k12-accent);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
   cursor: pointer;
   display: inline-flex;
   align-items: center;

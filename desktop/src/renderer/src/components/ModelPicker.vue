@@ -502,7 +502,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
   padding: 1px 8px;
   border-radius: var(--k12-r-pill);
   background: var(--k12-accent-ink);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
   font-size: var(--k12-fs-caption);
   font-weight: 650;
   white-space: nowrap;
@@ -520,7 +520,7 @@ useFocusReturn(panelRef, () => model.pickerOpen, {
 }
 .mp__item--on .mp__check {
   background: var(--k12-accent-ink);
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
 }
 .mp__item-text {
   flex: 1;

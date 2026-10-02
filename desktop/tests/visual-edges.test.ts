@@ -146,17 +146,73 @@ test('18 组配色：桌面与嵌入块都对白纸 ≥1.04（防「白底白线
  * C. 用法：皮肤定义了必须真的被用上
  * ------------------------------------------------------------------ */
 
-test('内容区（桌面层）必须铺 --k12-page，不能铺白纸或透明', () => {
+test('桌面层：内容区与 body 必须透明（壁纸 + 毛玻璃才是那一层）', () => {
+  /**
+   * ★★ 2026-10-02 改判（同一篇用户口径，见 `base.css` 的壁纸一节）：
+   *   本条原先要求内容区与 body **铺 `--k12-page` 实色** —— 那时"桌面"就是一块颜色。
+   *   现在桌面是**学段壁纸 + 一层毛玻璃**（两个 `body` 伪元素），实色会把图整块盖掉
+   *   （表现是"图根本没显示"）。所以本条改成守**新的机制**，而它要防的那个故障
+   *   ——「白纸压白桌、层次塌陷」—— 一条都没放松：
+   *     · 纸面仍是 70% 白（见下面的断言），压在**带学段色相**的毛玻璃上；
+   *     · 毛玻璃那 4% 的淡色取自 `--k12-page`，所以"桌面带学段色"这件事仍然成立；
+   *     · 再加壁纸本身的明暗变化，卡片边界比纯色桌面时代**更容易**读出来。
+   */
   const shell = read(...`${R}/layouts/AppShell.vue`.split('/'))
   const content = ruleBody(shell, '.shell__content')
   assert.ok(content.length > 0, 'AppShell 里找不到 .shell__content 规则（内容区是桌面层的落点）')
   assert.match(
     content,
-    /background:\s*var\(--k12-page\)/,
-    '内容区必须铺页面底色（--k12-page）：它是「桌面」，白纸卡片要靠它分出边界'
+    /background:\s*transparent/,
+    '内容区必须透明：桌面层由 body 的壁纸伪元素 + 毛玻璃伪元素承担，实色会把壁纸盖掉'
   )
-  // body 也铺桌面色：它是「桌面」的最外层，漏了会在滚动回弹 / 换页间隙露出白底
-  assert.match(ruleBody(baseCss, 'body'), /background:\s*var\(--k12-page\)/, 'body 必须铺 --k12-page')
+  // body 同样：它上面压着壁纸与毛玻璃两层，自己刷任何底色都会把图盖住
+  assert.match(
+    ruleBody(baseCss, 'body'),
+    /background:\s*transparent/,
+    'body 必须透明（它下面就是壁纸层；漏了会在滚动回弹 / 换页间隙露出实色）'
+  )
+
+  // ── 反向对照：桌面层那两层**必须真的在** ────────────────────────────────
+  //   只断言"透明"是不够的 —— 把壁纸与毛玻璃两段一起删掉，上面两条照样绿，
+  //   而界面会退化成"纯透明底"，那比白底更糟（卡片直接飘在窗口背景上）。
+  const before = ruleBody(baseCss, 'body::before')
+  assert.match(before, /background-image:\s*var\(--k12-wallpaper\)/, 'body::before 必须真的铺壁纸')
+  const after = ruleBody(baseCss, 'body::after')
+  assert.match(after, /backdrop-filter:\s*blur\(/, 'body::after 必须是毛玻璃（backdrop-filter）')
+  assert.match(
+    after,
+    /background:\s*var\(--k12-glass-tint\)/,
+    'body::after 的淡色必须走 --k12-glass-tint（它是"桌面带学段色"的唯一残留）'
+  )
+
+  // ── 纸面仍是 70% 白：这一条是"边界读得出来"的最后一根立柱 ──────────────
+  //   ⚠️ 它在这里而不是在 contrast 校验里：那是**生成物**的色对校验，
+  //   而"纸面半透"是这一版的**呈现**覆盖（见 base.css 的覆盖块）。
+  //   ⚠️ 覆盖块是**一组**选择器（28 条，与 tokens.generated.css 逐条对齐 ——
+  //   只写 `:root` 压不住它的 `:not([data-sat])` 那条），所以这里在整个文件里找，
+  //   不盯某一条规则体。
+  assert.match(
+    baseCss,
+    /--k12-surface:\s*color-mix\(in srgb, #FFFFFF 45%, transparent\)/,
+    '纸面必须仍是 45% 白（压在半透毛玻璃上；再往下调要重新核正文对比度）'
+  )
+  // 而且它**必须**与生成文件那 28 条选择器对齐：只写 `:root` 会被更高特异性的
+  // `:root[data-grade=…]:not([data-sat])` 静默压掉（实测踩到两轮）。
+  //   ⚠️ 用两段 includes 而不是一条大正则：正则里那对 `[data-sat]` 方括号、
+  //   单引号与相邻的 `[\s\S]` 极易互相吃掉（实测写错过一次）。
+  const gradeOnly = ":root[data-grade='junior']:not([data-sat])"
+  const juniorAt = baseCss.indexOf(gradeOnly)
+  assert.ok(
+    juniorAt >= 0,
+    '纸面覆盖必须照抄生成文件的选择器组：少了 :not([data-sat]) 那一支，' +
+      '它会被生成文件里特异性更高的同名规则静默压掉（改了没反应）'
+  )
+  //   ⚠️ 距离上限给到 2000：这一组选择器有 28 行，中间还夹着大段说明注释
+  //   （第一版给 300，被注释顶掉，红得莫名其妙）。
+  assert.ok(
+    baseCss.indexOf('--k12-surface:', juniorAt) - juniorAt < 2000,
+    '那一组选择器里必须真的跟着 --k12-surface 的覆盖声明（声明，不是注释里提一句）'
+  )
 })
 
 test('嵌入块皮肤：.k12-inset 必须有底色 + 1px 细线（否则「浅底压浅底」分不开）', () => {
@@ -200,10 +256,20 @@ test('结构分面（侧栏 / 右栏 / 顶栏 / 档案画像栏）必须有强�
   assert.match(panel, /box-shadow:\s*var\(--k12-shadow-edge-left\)/, '右栏必须有 --k12-shadow-edge-left（单侧投影）')
 
   // 顶栏：下缘的线（chrome 与内容的分隔）
+  // ★★ 2026-10-02 改落点：从 `.tb` 挪到外壳那一行 `.shell__head`。
+  //   为什么必须挪：顶栏与右侧窗控区是**同一条 chrome**，两边各画一条下边线
+  //   会在 x 边界处错开 1px —— 用户截图点名的那条竖缝就是它。
+  //   判据（"chrome 与内容之间有一条强线"）没松，只是唯一来源换了一处。
+  const shellLayout = read(...`${R}/layouts/AppShell.vue`.split('/'))
   assert.match(
-    ruleBody(topbar, '.tb'),
+    ruleBody(shellLayout, '.shell__head'),
     /border-bottom:\s*1px\s+solid\s+var\(--k12-border-strong\)/,
-    '顶栏必须有 border-bottom（强线档）'
+    '外壳那一行（顶栏 + 窗控）必须有 border-bottom（强线档）'
+  )
+  assert.doesNotMatch(
+    ruleBody(topbar, '.tb'),
+    /border-bottom:\s*1px/,
+    '顶栏组件自己不许再画下边线：与外壳那条会各画各的，在 x 边界错开'
   )
 
   // 学习档案页的画像栏：左缘同理（它与左列内容区不是父子、是并列面）

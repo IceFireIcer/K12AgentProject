@@ -116,7 +116,9 @@ defineExpose({ scrollToTop: resetScroll })
   height: 100%;
   overflow: hidden;
   display: flex;
-  background: var(--k12-page);
+  /* ★ 2026-10-02：外壳这一层**不再刷桌面底色** —— 它是"压在全窗毛玻璃上的一层壳"，
+     自己保持透明，壁纸才从下面透得过来（用户口径：背景图是整个前端的背景）。 */
+  background: transparent;
 }
 
 /* 「跳到主内容」：整页 Tab 顺序的第 0 站。
@@ -171,12 +173,27 @@ defineExpose({ scrollToTop: resetScroll })
    *   同属一个绘制阶段，而 `.shell__content` 在文档流里排在它后面、又是不透明的
    *   桌面色 —— 不给层级，这 3px 的投影会被整条盖掉（实测确认）。 */
   box-shadow: var(--k12-shadow-edge-bottom);
+  /* ★ 下边线也收在这里：原先 `.tb` 与 `.shell__actions` 各画一条（x 边界处两条
+   *   首尾相接），现在由父层**一条画到底**，整条顶栏的分面线必然同宽同色。 */
+  border-bottom: 1px solid var(--k12-border-strong);
   /* ★ 2026-10-01（D-126）：这一行自己也要有底色。
    *   原先它是透明的（顶栏 `.tb` 与右侧动作条各自白底，左右拼起来看着是一整条），
    *   但两块在 x 边界上各自绘制 → 亚像素取整会留出**一条 1px 的发丝竖缝**
    *   （用户拿截图点名「那个分割线」）。给父层补上同一个底色，缝就没有了。
    *   ⚠️ 颜色必须与 `.tb` / `.shell__actions` 同为 `--k12-surface`，否则会换一种缝。 */
-  background: var(--k12-surface);
+  /* ★★ 2026-10-02（用户第三次走查「自己看问题」）：顶栏这一行是**唯一的一层玻璃**。
+   *
+   * 踩过的坑（实测）：这一块原本自己刷一道 `62%` 白，而它的两个子块
+   * （`.tb` 顶栏、`.shell__actions` 右侧按钮区）**又各自刷一遍** ——
+   * 而两边的刷法不同（`.tb` 是 45% 的 `--k12-surface`、动作条是另一档），
+   * 于是**同一条顶栏左右两半的观感不一样**，接缝在「我选年级」与窗控之间露出来。
+   * 半透明底不能叠着刷：两层 45% 叠出来的不是 45%，而是 70%。
+   *
+   * 现在的口径：**这一行刷一次，两个子块一律透明**（见它们的样式），
+   * 整条顶栏必然均匀，也不再有"哪一块压在哪一块上"的问题。 */
+  background: color-mix(in srgb, var(--k12-surface) 62%, transparent);
+  backdrop-filter: blur(12px) saturate(1.06);
+  -webkit-backdrop-filter: blur(12px) saturate(1.06);
   position: relative;
   z-index: 1;
   -webkit-app-region: drag;
@@ -202,7 +219,11 @@ defineExpose({ scrollToTop: resetScroll })
   flex: none;
   /* 右侧不留 padding-right：`WindowControls` 的三个键各自 44px 宽、贴到窗口右上角
    * （Windows 原生就是贴边的）。留白会让「关闭」离屏幕角差一截，看着像浮在中间。 */
-  background: var(--k12-surface);
+  /* ★★ 2026-10-02：**透明** —— 玻璃由父层 `.shell__head` 统一刷（见那里的说明）。
+   *   它原来自己也刷一道同色，与父层**叠起来**变成 62%+62% ≈ 86% 的白，
+   *   于是右半边比左半边实、壁纸在那里断掉。 */
+  background: transparent;
+  backdrop-filter: none;
   /* chrome 与内容的分隔用**结构分面线**（strong 档）：外壳这一行是整块结构的分面，
    * 它与左侧顶栏共用同一条下边线 —— 两边只有**同档**时才读成一条线（见 AppTopbar）。 */
   border-bottom: 1px solid var(--k12-border-strong);
@@ -214,17 +235,9 @@ defineExpose({ scrollToTop: resetScroll })
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  /* 内容区透出桌面底色：纸面卡片浮在它上面 */
-  background: var(--k12-page);
-  /* ★ 桌面从「纸的起点」往下略沉一点点：桌面是整块的一层，越往下越退，
-   *   读者才会觉得内容浮在**桌面上**，而不是贴在同一个平面上。
-   *   ⚠️ 加成 background-image（而不是改 background-color）：吸顶的 `PageActions`
-   *   与设置页的色板预览都直接读 `--k12-page`，底色一旦被换掉，那两处就跟着变。 */
-  background-image: linear-gradient(
-    180deg,
-    transparent 0%,
-    color-mix(in srgb, var(--k12-fg) 3%, transparent) 100%
-  );
+  /* ★ 2026-10-02：不再刷桌面底色，也不再画那道"越往下越沉"的渐变 ——
+     整块背景交给壁纸 + 毛玻璃；卡片自己是不透明的纸面，层级仍然分得开。 */
+  background: transparent;
 }
 
 /* 换页：瞬时切换，无过渡。

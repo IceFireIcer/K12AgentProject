@@ -184,7 +184,7 @@ async function close(): Promise<void> {
   /* ★ 亮玻璃上的**同色深墨**字形：底色一明亮，白字就不够了（白对亮绿只有 2 出头）。
    * 本色 55% 混前景色 —— 仍是同一支色相，只是压深，实测三条都 ≈7:1。 */
   /* ★ 白字（用户裁决）：纸色令牌即白，仍不写死色值。 */
-  color: var(--k12-surface);
+  color: var(--k12-on-fill);
   cursor: pointer;
   position: relative;
   /* ★ 玻璃的「厚度」：本色混白做一层浅深渐变（左上亮、右下实），比纯色更像一块料。 */
