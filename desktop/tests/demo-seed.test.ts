@@ -56,7 +56,10 @@ import {
   demoGraphBody,
   demoMistakesBody,
   demoOpeningBody,
+  DEMO_STUDENT_NICKNAME,
   demoProfileBody,
+  demoProfileSummaryText,
+  demoProfileTagsBody,
   demoQuizGeneratedBody,
   demoQuizProgressBody,
   demoRecommendationBody,
@@ -68,6 +71,9 @@ import {
   demoStudentBody
 } from '../src/main/demo/data.ts'
 import { demoResponseFor } from '../src/main/demo/overlay.ts'
+// ★ 标签白名单：预置画像里每个 key 都必须在这里面，否则会被 readProfileTagsPayload
+//   静默丢掉（那是纵深防御，不是可绕过的）—— 守卫要能自己判这件事。
+import { isLlmVisibleTag } from '../src/shared/profile-tags.ts'
 import {
   DEMO_ANIMATION_KP_ID,
   DEMO_ANIMATION_TEMPLATE_ID,
@@ -1642,3 +1648,179 @@ test('演示沙箱 附：内容态资产存在且覆盖脚本用到的那几个�
   assert.ok(readRepo('preset-content', '_meta', 'kp-catalog.md').includes('machine-learning-sr'))
   assert.equal(DEMO_CHAPTER_TITLE, '第3章 核心技术分支')
 })
+
+/* ------------------------------------------------------------------ *
+ * ⑪ 画像那一块在沙箱态必须**有数据**（2026-10-03 用户报障）
+ * ------------------------------------------------------------------ */
+
+test('演示沙箱 ⑪：预置画像的五行都有数据，且键都在白名单里', () => {
+  /**
+   * ★★ 用户原话：「载入演示数据时候 画像部分你是不是忘记作假了 完善一下」。
+   *   改之前：覆盖层**只拦了** `/api/profile/{id}`，而右栏画像读的是 `/tags` ——
+   *   于是它透传到真实后端，演示学生没有画像数据 ⇒ 四个字段全走空态兜底文案
+   *   （「还不知道你属于哪一种」「这个还没聊到」…），只有"类型/偏好"两行碰巧有真实数据，
+   *   一屏里一半空一半有，看着就像功能坏了。
+   *   小结那一行同理：主进程通道在沙箱态**故意回空串**，界面上摆的是
+   *   「我们再聊几次，我就给你写一段小结」。
+   *
+   * 这条守卫钉住三件事（缺一条，界面就会退回"半空"）：
+   *   ① 每个标签 key 都在 `LLM_VISIBLE_TAGS` 白名单里 —— 不在的会被
+   *      `readProfileTagsPayload` **静默丢掉**（那是纵深防御，不是可绕过的）；
+   *   ② 五行结构（行标题 / 行↔键映射 / 空态文案）**齐全** —— 渲染层一个字都不自己拼，
+   *      少一张表它就拼不出行标题（`portraitRowLabels[id] ?? ''` 会是空串）；
+   *   ③ 每一条内容行都**真有标签**（而不只是有表）—— 否则仍然是空态文案。
+   */
+  const payload = demoProfileTagsBody() as {
+    tags?: Array<{ key?: unknown; value?: unknown; dimension?: unknown }>
+    portraitRowLabels?: Record<string, unknown>
+    portraitRowKeys?: Record<string, string[]>
+    portraitEmptyNotes?: Record<string, unknown>
+    dimensionLabels?: Record<string, unknown>
+    parentConsent?: unknown
+    memorySwitch?: unknown
+  }
+
+  // ① 白名单
+  const tags = payload.tags ?? []
+  assert.ok(tags.length > 0, '预置画像必须带标签（空的话右栏五行全是空态文案）')
+  for (const tag of tags) {
+    const key = String(tag.key ?? '')
+    assert.ok(
+      isLlmVisibleTag(key),
+      `预置标签「${key}」不在 LLM_VISIBLE_TAGS 白名单里 —— readProfileTagsPayload 会把它静默丢掉`
+    )
+    assert.ok(String(tag.value ?? '').length > 0, `预置标签「${key}」的值不能是空串`)
+  }
+
+  // ② 五行结构齐全
+  assert.deepEqual(
+    Object.keys(payload.portraitRowLabels ?? {}).sort(),
+    ['interest', 'personality', 'preference', 'style', 'summary'],
+    '五行的行标题必须齐全（渲染层不自己拼任何中文）'
+  )
+  assert.deepEqual(
+    Object.keys(payload.portraitRowKeys ?? {}).sort(),
+    ['interest', 'personality', 'preference', 'style'],
+    '四条**内容行**的键映射必须齐全（summary 行的数据来自小结那条通道，不在本表）'
+  )
+  assert.equal(
+    Object.keys(payload.portraitEmptyNotes ?? {}).length,
+    5,
+    '五行各自的空态文案都要给（少一行时那一行会显示空白）'
+  )
+  assert.ok(
+    Object.keys(payload.dimensionLabels ?? {}).length >= 11,
+    '维度标题表要给全（画像卡按维度分组时用它起小标题）'
+  )
+
+  // ③ 内容行真的有标签（这一条才是"不是空态文案"的判据）
+  for (const [row, keys] of Object.entries(payload.portraitRowKeys ?? {})) {
+    const present = keys.filter((key) => tags.some((tag) => tag.key === key))
+    assert.ok(
+      present.length > 0,
+      `「${row}」这一行一个标签都没有 ⇒ 界面显示的是空态文案（这正是用户看到的那一幕）`
+    )
+  }
+
+  // 家长同意 / 记忆开关：预置态必须明说已同意，否则画像卡上会挂一条要家长处理的提示
+  assert.equal(payload.parentConsent, true, '预置态必须带 parentConsent: true')
+  assert.equal(payload.memorySwitch, true, '预置态必须带 memorySwitch: true')
+
+  // 小结那条通道：必须给**预置正文**（不是空串 —— 那就是用户看到的空态文案）
+  const summary = demoProfileSummaryText()
+  assert.ok(summary.length > 0, '预置小结不能是空串（空串 = 界面显示空态文案）')
+  assert.ok(
+    !/AI 引擎|画像|标签|端点/.test(summary),
+    '预置小结是**学生面**文案：不许出现实现语言（与 student-view-discipline 同口径）'
+  )
+  /**
+   * ★★ 光验「这个纯函数非空」是不够的（变异 133 实测抓到过这条假绿）：
+   *   把**处理器**那条沙箱分支改回 `text: ''`，上面两条断言照样绿 ——
+   *   因为它们量的是"函数能产出什么"，而不是"界面拿到的是什么"。
+   *   所以这里补一条**源码级**断言：沙箱分支必须真的引用它。
+   *   （同一条纪律见 quizgen 的「端到端那一遍」：要量运行时真正走的那条链路。）
+   */
+  const handlersSource = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'main', 'ipc', 'handlers-data.ts'),
+    'utf8'
+  )
+  assert.match(
+    handlersSource,
+    /isDemoSeeded\(\)\) return \{ ok: true, data: \{ text: demoProfileSummaryText\(\) \} \}/,
+    'profile:summary 的沙箱分支必须回预置正文 —— 回空串就是那句空态文案（用户报障的第二个缺口）'
+  )
+
+  /**
+   * 端到端那一遍：覆盖层**真的**把 /tags 拦下来了（而不是透传到真实后端）。
+   * ★ `demoResponseFor` 是 async 且接受路径字符串（签名见 overlay.ts）——
+   *   这里必须用 await，否则拿到的是一个 Promise（永远真值），断言就成了空转。
+   */
+  return (async () => {
+    setDemoSeeded('seeded')
+    try {
+      const viaOverlay = await demoResponseFor('/api/profile/student_001/tags')
+      assert.ok(
+        viaOverlay !== null,
+        '覆盖层必须拦 /api/profile/{id}/tags —— 漏了它就透传到真实后端（本次报障的真凶）'
+      )
+      const body = (await viaOverlay.json()) as { tags?: unknown[] }
+      assert.ok(Array.isArray(body.tags) && body.tags.length > 0, '拦下来之后响应体里必须真有标签')
+    } finally {
+      resetDemoSeedForTests()
+    }
+  })()
+})
+
+test('演示沙箱 ⑫：身份层回的是预置身份（不许把本机真实学生姓名上屏）', () => {
+  /**
+   * ★★ 用户报障：「你那个名字什么的也应该替换成预设的名字吧 你做戏要做全套啊」。
+   *   查出来比"名字不统一"严重：`/api/profile/{id}/identity` 既没有沙箱分支、
+   *   也不在覆盖层里 ⇒ 透传到真实后端 ⇒ 把 `identity_local.real_name`（**本机真名**）
+   *   回给渲染层做 `{{student_name}}` 本地替换。同一屏于是两个名字。
+   *
+   * 三条判据：
+   *   ① 覆盖层**真的拦**这条端点（漏了它就透传，本机真名上屏）；
+   *   ② `realName` 必须是**空串** —— 它的唯一用途是本地替换真名，
+   *      演示没有真名可替换；给一个编的名字等于伪造身份，给真名就是泄漏；
+   *   ③ `displayName` 与预置昵称**同一个来源**（否则"侧栏一个名字、画像另一个"）。
+   */
+  return (async () => {
+    setDemoSeeded('seeded')
+    try {
+      const response = await demoResponseFor('/api/profile/student_001/identity')
+      assert.ok(
+        response !== null,
+        '覆盖层必须拦 /api/profile/{id}/identity —— 漏了它就把本机真实学生姓名上屏'
+      )
+      const body = (await response.json()) as Record<string, unknown>
+      assert.equal(body.realName, '', 'realName 必须是空串（那是"本地替换真名"用的，演示没有真名）')
+      assert.equal(
+        body.displayName,
+        DEMO_STUDENT_NICKNAME,
+        'displayName 必须与预置昵称同源 —— 不同源就回到"一屏两个名字"'
+      )
+      assert.equal(body.parentConsent, true, '预置态必须明说已同意')
+      assert.equal(body.memorySwitch, true, '预置态必须明说记忆开着')
+      assert.equal(
+        body.onboardingState,
+        'done',
+        '预置画像是个用了两个月的老学生，引导早该问完（否则首屏会弹引导卡）'
+      )
+      // ⚠️ 不 import `DEMO_STUDENT_ID`：它是 data.ts 的内部常量（没导出）。
+      //   从 `demoStudentBody()` 取同一个值更好 —— 两处**同源**，谁都不会漂。
+      assert.equal(
+        body.anonStudentId,
+        demoStudentBody().studentId,
+        '匿名 id 必须与学生响应体里那位同源'
+      )
+      assert.equal(
+        body.displayName,
+        demoStudentBody().nickname,
+        '身份层的称呼与学生响应体的昵称必须同源（这条正是"一屏两个名字"的判据）'
+      )
+    } finally {
+      resetDemoSeedForTests()
+    }
+  })()
+})
+

@@ -47,7 +47,16 @@
 /** 高中（本沙箱使用的学段）。 */
 export const DEMO_GRADE_LEVEL = 'senior'
 
-/** 学生昵称（**唯一一处真相**：学生响应体、画像、报告都引它，不许两处各写一遍）。 */
+/**
+ * 学生昵称（**唯一一处真相**：学生响应体、画像、报告、身份层都引它，不许两处各写一遍）。
+ *
+ * ★★ 2026-10-03：它同时是**演示里学生对外的名字** —— 称呼/头像/问候语/画像全走它。
+ *   身份层（{@link demoIdentityBody} 的 `displayName`）也从这里取，
+ *   这样"侧栏说小同、画像说另一个人"这件事不会再发生。
+ * ★ 为什么不用真实感更强的姓名（如"范思远"）：那是**本机真实学生的名字**，
+ *   演示里出现真实姓名是泄漏（见 demoIdentityBody 的说明）。
+ *   「小同」与品牌「智团团」同源、一看就是预置身份，也避免了误认。
+ */
 export const DEMO_STUDENT_NICKNAME = '小同'
 
 /** 学生 id（白名单字符集，与 `student_id` 同形；不采集任何真实身份信息）。 */
@@ -1220,6 +1229,146 @@ export function demoStudentBody(): Record<string, unknown> {
     createdAt: now - 60 * DAY_MS,
     lastActiveAt: now,
     currentChapter: DEMO_CHAPTER_TITLE
+  }
+}
+
+/**
+ * `GET /api/profile/{id}/tags`（画像标签 + 五行结构）。
+ *
+ * ★★ 2026-10-03 补（用户报障：「载入演示数据时候 画像部分你是不是忘记作假了」）：
+ *   覆盖层此前**只拦了** `/api/profile/{id}`，而右栏画像那一块读的是**另外这个端点** ——
+ *   于是它透传到真实后端，而演示学生没有画像数据 ⇒ 四个字段全走空态兜底文案
+ *   （「还不知道你属于哪一种」「这个还没聊到」…）。用户看到的就是那份兜底。
+ *
+ * ★ 为什么连 `dimensionLabels` / `portraitRowKeys` / `portraitEmptyNotes` 一起给：
+ *   这三张表是**后端唯一来源**（`contracts.py` 的 `TAG_DIMENSION_LABELS` /
+ *   `PORTRAIT_ROW_KEYS` / `PORTRAIT_EMPTY_NOTES`），渲染层一个字都不自己拼 ——
+ *   只给 `tags` 而不给表，渲染层就拼不出行标题（`portraitRowLabels[id] ?? ''` 会是空串）。
+ *   表里的值**逐字对齐**后端，改后端那张表时这里要一起改。
+ *
+ * ⚠️ 每个 key 都必须在 `shared/profile-tags.ts` 的 `LLM_VISIBLE_TAGS` 白名单里 ——
+ *   不在的会被 `readProfileTagsPayload` 静默丢掉（那一道是纵深防御，不是可绕过的）。
+ */
+export function demoProfileTagsBody(): Record<string, unknown> {
+  const now = Date.now()
+  /** 一条标签（形状与 `ProfileTagView` 同：key/value/confidence/source/ts/dimension/label）。 */
+  const tag = (key: string, value: string, dimension: number, label: string): Record<string, unknown> => ({
+    key,
+    value,
+    confidence: 0.82,
+    // source 三档（declared / inferred / tag）：这些是引导问答里学生自己说的 → declared
+    source: 'declared',
+    ts: now - 2 * DAY_MS,
+    dimension,
+    label
+  })
+  return {
+    tags: [
+      // 维度 13「类型与性格」→ 五行里的 类型 / 性格
+      tag('learner_style', '钻题型', 13, '学习类型'),
+      tag('personality', '安静专注', 13, '性格'),
+      // 维度 7「怎么讲更好」+ 维度 10「互动偏好」→ 五行里的 偏好
+      tag('explain_style', '多打比方', 7, '讲解风格'),
+      tag('pace', '慢一点', 7, '节奏'),
+      tag('practice_type', '多做几道', 7, '练习方式'),
+      tag('challenge_level', '先保基础', 10, '挑战度'),
+      // 维度 8「兴趣与类比」+ 维度 11「场景与目标」→ 五行里的 兴趣
+      tag('interest_topic', '机器人', 8, '感兴趣的话题'),
+      tag('task_goal', '把机器学习的基础打牢', 11, '想达成什么')
+    ],
+    // 家长同意：预置态下**明说已同意**（否则画像卡上会出现一条要家长处理的提示）
+    parentConsent: true,
+    memorySwitch: true,
+    // 维度序号 → 中文名（字符串化的序号，与后端 `TAG_DIMENSION_LABELS` 逐字一致）
+    dimensionLabels: {
+      '1': '学段与身份',
+      '2': '在学什么',
+      '3': '知识掌握',
+      '4': '卡在哪里',
+      '7': '怎么讲更好',
+      '8': '兴趣与类比',
+      '9': '此刻的心情',
+      '10': '互动偏好',
+      '11': '场景与目标',
+      '12': '安全边界',
+      '13': '类型与性格'
+    },
+    // 五行：行标题（`PORTRAIT_ROW_LABELS`）
+    portraitRowLabels: {
+      style: '类型',
+      personality: '性格',
+      preference: '偏好',
+      interest: '兴趣',
+      summary: '小结'
+    },
+    // 五行：每行从哪些键取数（`PORTRAIT_ROW_KEYS`；顺序即展示顺序）
+    portraitRowKeys: {
+      style: ['learner_style'],
+      personality: ['personality'],
+      preference: [
+        'explain_style',
+        'output_length',
+        'pace',
+        'practice_type',
+        'tone',
+        'encouragement_freq',
+        'challenge_level'
+      ],
+      interest: ['interest_topic', 'scene', 'task_goal']
+    },
+    // 五行各自的空态文案（`PORTRAIT_EMPTY_NOTES`，逐字一致）
+    portraitEmptyNotes: {
+      style: '还不知道你属于哪一种，多练几道题我就看出来了。',
+      personality: '这个还没聊到，你愿意说的话我就记下来。',
+      preference: '还不知道你喜欢我怎么讲，告诉我一声？',
+      interest: '还没发现你喜欢什么，跟我说说你感兴趣的事吧。',
+      summary: '我们再聊几次，我就给你写一段小结。'
+    }
+  }
+}
+
+/**
+ * 画像小结（第五行）的**预置正文**。
+ *
+ * ★★ 2026-10-03 补：主进程那条通道原本在沙箱态**故意回空串**
+ *   （注释：「预置演示数据下没有真实画像变更，也就不会有小结」）——
+ *   于是界面上摆的是空态那句「我们再聊几次，我就给你写一段小结」，
+ *   而旁边四行都填着数据：**看着像"功能坏了"**。
+ *   演示数据既然连偏好/兴趣都预置了，小结就没有理由空着（用户报障的原话就是这里）。
+ *
+ * ★ 文案口径与 `demoRecommendationBody` 的 summary 同源：说"练过还没稳"那件事，
+ *   不用「AI 引擎」「画像」这类实现语言（学生面纪律）。
+ * ⚠️ 与合成器产出的那份不同：这里是**预置文本**，不经过模型，也不落盘。
+ */
+export function demoProfileSummaryText(): string {
+  return '这几轮聊下来，你偏好把过程画出来看，做题时愿意多想一步。已经练过 6 个知识点，其中 4 个还没完全稳住，下次可以从「强化学习」接着走。'
+}
+
+/**
+ * `GET /api/profile/{id}/identity`（身份层：称呼 + 两道闸 + 引导状态）。
+ *
+ * ★★ 2026-10-03 用户报障「你那个名字什么的也应该替换成预设的名字吧 你做戏要做全套啊」——
+ *   查出来的是**比"名字不统一"严重**的一件事：这条端点**既没有沙箱分支、也不在覆盖层里**，
+ *   于是它透传到真实后端，把**本机真实学生的姓名**（`identity_local.real_name`，
+ *   见 `server/app/store/learning.py`）回给了渲染层做本地替换。
+ *   表现就是同一屏两个名字：侧栏/问候语用预置昵称，**右栏画像却挂着本机真名**。
+ *   这既是"做戏没做全套"，也是**演示泄漏真实数据**。
+ *
+ * ★ `realName` 刻意留空：它的用途是「渲染层把 `{{student_name}}` 本地替换成真名」，
+ *   演示没有真名可替换 —— 留空就是**不注入任何真实身份**（比编一个更安全）。
+ * ★ `displayName` 与 {@link DEMO_STUDENT_NICKNAME} **同一个来源**：两处一旦漂，
+ *   就又回到"侧栏一个名字、画像另一个名字"。
+ * ★ `onboardingState: 'done'`：预置画像是个"用了两个月的老学生"，
+ *   引导五问早该问完（否则首屏会弹引导卡，与预置数据打架）。
+ */
+export function demoIdentityBody(): Record<string, unknown> {
+  return {
+    anonStudentId: DEMO_STUDENT_ID,
+    realName: '',
+    displayName: DEMO_STUDENT_NICKNAME,
+    parentConsent: true,
+    memorySwitch: true,
+    onboardingState: 'done'
   }
 }
 

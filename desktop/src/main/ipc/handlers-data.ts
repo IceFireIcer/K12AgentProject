@@ -29,7 +29,7 @@ import { isDemoSeeded } from '../demo/state.ts'
 //    （见 `runQuizGeneration` 的文件头）。与判分不同，这一条在沙箱里必须给出题 ——
 //    演示要看到的是「动态出题真的能拿到题」，而不是一句「当前不可用」。
 //    ⚠️ 相对路径 + `.ts` 后缀：与上面那条同一条纪律（本文件要被 node 单测直接加载）。
-import { demoQuizVariantsBody } from '../demo/data.ts'
+import { demoProfileSummaryText, demoQuizVariantsBody } from '../demo/data.ts'
 // ⚠️ 相对路径 + `.ts` 后缀，**不用 `@shared/*` 别名**：本文件会被若干 node 单测直接加载
 //    （它们没有别名的解析钩子），写成别名会让那些用例当场 `Cannot find package`。
 import { DEMO_BLOCKED_MESSAGE } from '../../shared/demo-seed.ts'
@@ -1519,9 +1519,11 @@ export function registerOnboardingHandlers(options: {
   ipcMain.handle(IPC.profileSummary, async (): Promise<ProfileSummaryCallResult> => {
     // ★★ 只读缓存、**不生成**（三期，2026-09-30）：小结在画像变更之后由主进程顺带写好
     //   （`profile-refresh` 的 refresh-apply 成功时），所以这里没有网络调用、也不依赖模型可用。
-    // ★ 沙箱态回空串：预置演示数据下没有真实画像变更，也就不会有小结 ——
-    //   直接回空，界面显示后端给的空态文案（与 onboardingState 的沙箱 fail-safe 同一条纪律）。
-    if (isDemoSeeded()) return { ok: true, data: { text: '' } }
+    // ★★ 2026-10-03 改判（用户报障）：「载入演示数据时候 画像部分你是不是忘记作假了」。
+    //   原来是回空串（理由：预置态没有真实画像变更，所以没有小结）—— 但界面上那一行
+    //   摆的是空态文案「我们再聊几次，我就给你写一段小结」，而**旁边四行都填着数据**，
+    //   看着就像功能坏了。演示数据既然连偏好/兴趣都预置了，小结没理由空着。
+    if (isDemoSeeded()) return { ok: true, data: { text: demoProfileSummaryText() } }
     // ★ 没注入读取回调（测试 / 精简装配）→ 回空串，而不是报错：小结是可选能力。
     if (options.readSummary === undefined) return { ok: true, data: { text: '' } }
     try {

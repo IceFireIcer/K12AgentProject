@@ -1358,6 +1358,62 @@ const MUTATIONS = [
     replace: 'false',
     testFile: 'tests/quizgen.test.ts',
     expect: 'stage=first 只要一段'
+  },
+  {
+    // ★★ 2026-10-03 用户报障真凶：覆盖层漏拦 /tags → 透传到真实后端 → 右栏画像四个字段
+    //   全走空态兜底文案。把它拿掉，守卫必须当场红。
+    name: '131 演示画像：覆盖层不再拦 /tags（画像退回空态文案）',
+    file: 'src/main/demo/overlay.ts',
+    find: "      case 'tags':\n        return jsonResponse(demoProfileTagsBody())",
+    replace: '      case \'tags\':\n        return null',
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '预置画像的五行都有数据'
+  },
+  {
+    // 「性格」那一行没有标签 → 界面显示空态文案（用户看到的正是"一半空一半有"）。
+    name: '132 演示画像：拿掉 personality 标签（性格那一行退回空态文案）',
+    file: 'src/main/demo/data.ts',
+    find: "      tag('personality', '安静专注', 13, '性格'),\n",
+    replace: '',
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '预置画像的五行都有数据'
+  },
+  {
+    // 小结通道退回空串 = 界面上摆「我们再聊几次，我就给你写一段小结」。
+    name: '133 演示画像：小结退回空串（界面显示空态文案）',
+    file: 'src/main/ipc/handlers-data.ts',
+    find: 'if (isDemoSeeded()) return { ok: true, data: { text: demoProfileSummaryText() } }',
+    replace: "if (isDemoSeeded()) return { ok: true, data: { text: '' } }",
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '预置画像的五行都有数据'
+  },
+  {
+    // ★★ 2026-10-03 用户报障真凶：覆盖层漏拦 /identity → 透传真实后端 →
+    //   把本机真实学生姓名（identity_local.real_name）上屏。
+    name: '134 演示身份：覆盖层不再拦 /identity（本机真名会上屏）',
+    file: 'src/main/demo/overlay.ts',
+    find: "      case 'identity':\n        return jsonResponse(demoIdentityBody())",
+    replace: "      case 'identity':\n        return null",
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '身份层回的是预置身份'
+  },
+  {
+    // 身份层的称呼与预置昵称不同源 = 又回到"侧栏一个名字、画像另一个名字"。
+    name: '135 演示身份：称呼改成另一个名字（一屏两个名字）',
+    file: 'src/main/demo/data.ts',
+    find: '    displayName: DEMO_STUDENT_NICKNAME,',
+    replace: "    displayName: '范思远',",
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '身份层回的是预置身份'
+  },
+  {
+    // realName 填上 = 伪造/泄漏真实身份（它的唯一用途是"本地替换真名"）。
+    name: '136 演示身份：realName 填上一个真名（不该注入真实身份）',
+    file: 'src/main/demo/data.ts',
+    find: "    realName: '',",
+    replace: "    realName: '范思远',",
+    testFile: 'tests/demo-seed.test.ts',
+    expect: '身份层回的是预置身份'
   }
 ]
 

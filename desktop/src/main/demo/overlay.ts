@@ -44,6 +44,8 @@ import {
   demoProfileBody,
   demoQuizGeneratedBody,
   demoQuizProgressBody,
+  demoIdentityBody,
+  demoProfileTagsBody,
   demoRecommendationBody,
   demoReportBody,
   demoSavedAnimationItemBody,
@@ -144,6 +146,14 @@ export async function demoResponseFor(path: string, init: RequestInit = {}): Pro
         return jsonResponse(demoProfileBody())
       case 'recommendation':
         return jsonResponse(demoRecommendationBody())
+      // ★ 2026-10-03 补：右栏画像那一块读的是 /tags（不是上面那个 /{id}）——
+      //   漏了它，四个字段就全走真实后端的空态兜底文案（用户报障）。
+      case 'tags':
+        return jsonResponse(demoProfileTagsBody())
+      // ★★ 2026-10-03：漏了它 = 演示把**本机真实学生姓名**上屏（见 demoIdentityBody）。
+      //   它与 /tags、/{id} 是**三条独立的读通道**，少拦一条就漏一处。
+      case 'identity':
+        return jsonResponse(demoIdentityBody())
       case 'opening':
         return jsonResponse(demoOpeningBody())
       case 'report':
