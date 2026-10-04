@@ -268,3 +268,111 @@ class TestStudentIdWhitelist(StudentsApiCase):
 
     def test_validate_student_id_accepts_what_the_server_generates(self) -> None:
         self.assertEqual(validate_student_id("student_001"), "student_001")
+# --------------------------------------------------------------------------- #
+# 称呼 → 昵称的同步与存量自愈（2026-10-04 用户报障）
+# --------------------------------------------------------------------------- #
+class TestDisplayNameReconcile(StudentsApiCase):
+    """库里**同一个人只许有一个名字**。
+
+    用户原话：「画像部分为什么切账号以后 画像部分的名字什么没有更新 你是不是忘记做
+    联动机制了」。查出来**不是没联动**，是库里有两个名字源且从不同步：
+      · student.nickname         ← 账号列表 / 侧栏身份卡 读它
+      · identity_local.real_name ← GET /profile/{id}/identity 的 displayName，
+                                   画像 / 问候语 读它
+    于是同一屏：侧栏「同学」、右栏真名。这一组盯住"修好了，且不许退化"。
+    """
+
+    def set_real_name(self, student_id: str, real_name: str) -> None:
+        """走**唯一**的称呼写入口（与渲染层同一条路：PUT identity/flags）。"""
+        response = self.client.put(
+            f"/api/profile/{student_id}/identity/flags", json={"realName": real_name}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def read_real_name(self, student_id: str) -> str:
+        response = self.client.get(f"/api/profile/{student_id}/identity")
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()["realName"]
+
+    def read_nickname(self, student_id: str) -> str:
+        """**直接读库**里的昵称 —— 不经过列表接口。
+
+        ★★ 为什么必须绕开列表：列表现在带**存量自愈**，而自愈判据是
+          「昵称还是回落值 → 用称呼补上」。如果在这里走列表，自愈会**替**同步把名字改对，
+          于是"写入时没同步"这个变异被自愈掩盖 —— 那条断言就不是在守同步了
+          （实测踩到：变异 144「设称呼时不再同步昵称」照样绿）。
+        """
+        store = open_learning_store(self.tmp, student_id)
+        try:
+            record = store.get_student(student_id)
+        finally:
+            store.close()
+        self.assertIsNotNone(record)
+        return record.nickname if record is not None else ""
+
+    def test_setting_real_name_syncs_nickname(self) -> None:
+        """★ 设称呼 = **写入当时**就把昵称定下来（源头同步）。
+
+        ⚠️ 学生**自己起过名**这个前提是刻意的：自愈只在"昵称还是回落值"时动手，
+          所以只有昵称非回落值时，这条断言才真的在量"写入时同步"而不动量自愈。
+        """
+        created = self.create_student("小海", "junior")
+        self.set_real_name(created["studentId"], "思远")
+
+        self.assertEqual(
+            self.read_nickname(created["studentId"]),
+            "思远",
+            "设过称呼之后昵称必须**在写入当时**同步 —— 否则同一屏两个名字",
+        )
+        self.assertEqual(self.read_real_name(created["studentId"]), "思远")
+
+    def test_blank_real_name_does_not_erase_the_nickname(self) -> None:
+        """★ 清空称呼**不许**把学生自己起的名字抹掉。"""
+        created = self.create_student("小海", "junior")
+        self.set_real_name(created["studentId"], "同学")  # 命中回落值 → 入库存空串
+        listed = {item["studentId"]: item for item in self.list_students()}
+        self.assertEqual(
+            listed[created["studentId"]]["nickname"],
+            "小海",
+            "称呼回落到「同学」时不许覆盖昵称 —— 那是学生自己在账号菜单里起的名字",
+        )
+
+    def test_list_heals_nickname_from_existing_real_name(self) -> None:
+        """★★ **存量自愈**：已经写坏的数据（昵称仍是「同学」+ 有称呼）要在列表时补上。
+
+        只修写入路径是不够的 —— 用户库里那份数据早就写坏了，
+        光改写入路径他还是看到两个名字（这正是报障当下的状态）。
+        """
+        created = self.create_student("同学", "junior")
+        # 直接摆出"写坏"的存量：有称呼、昵称还是回落值（绕过新写入路径）
+        store = open_learning_store(self.tmp, created["studentId"])
+        try:
+            store.set_real_name(created["studentId"], "范思远")
+        finally:
+            store.close()
+
+        listed = {item["studentId"]: item for item in self.list_students()}
+        self.assertEqual(
+            listed[created["studentId"]]["nickname"],
+            "范思远",
+            "存量自愈：昵称还是回落值而学生设过称呼时，列表要把它补上",
+        )
+        # 再列一次仍是同一个值（自愈是幂等的，不会来回抖）
+        again = {item["studentId"]: item for item in self.list_students()}
+        self.assertEqual(again[created["studentId"]]["nickname"], "范思远")
+
+    def test_heal_never_overwrites_a_student_chosen_nickname(self) -> None:
+        """★ 自愈的**反向**：学生自己起过名（昵称非回落值）时，称呼不许压过去。"""
+        created = self.create_student("小海", "junior")
+        store = open_learning_store(self.tmp, created["studentId"])
+        try:
+            store.set_real_name(created["studentId"], "范思远")
+        finally:
+            store.close()
+
+        listed = {item["studentId"]: item for item in self.list_students()}
+        self.assertEqual(
+            listed[created["studentId"]]["nickname"],
+            "小海",
+            "昵称不是回落值时，自愈**不许**动手 —— 那是学生自己起的名字",
+        )

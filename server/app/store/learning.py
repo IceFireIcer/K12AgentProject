@@ -788,6 +788,44 @@ class LearningStore:
         )
         self.conn.commit()
 
+    def set_nickname(self, student_id: str, nickname: str) -> None:
+        """写 ``student.nickname``（**只写这一列**的单条 UPDATE）。
+
+        ★★ 为什么必须存在这个原语（2026-10-04 用户报障）：「切账号以后画像部分的名字
+          没有更新」。查出来**不是没联动**，是库里**同一个人有两个名字**：
+          ``student.nickname``（账号列表读它）与 ``identity_local.real_name``
+          （`GET /identity` 的 displayName 读它）—— 两者此前**没有任何同步**，
+          于是侧栏显示「同学」、右栏画像显示真名。
+          修法是让两者在**写入源头**同一个值，而不是让界面读两次。
+
+        ★★ 为什么不用 ``upsert_student()``（与 :meth:`touch_last_active` 同一条纪律）：
+          那是**整行 upsert**，``ON CONFLICT`` 分支会把 ``grade_level`` 按调用方手里的
+          值一起写回 —— 而调用方（写称呼那条路）手里没有学段快照，写回等于把学段打回
+          旧值且不留 ``grade_history``。单列 UPDATE 没有「读取 → 改 → 写回」的窗口。
+
+        ★ 学生行不存在时**什么都不写**（UPDATE 影响 0 行，不静默建行）：
+          建行要一并决定学段与昵称，那是路由层冷启动的事（``upsert_student``）。
+        """
+        self.conn.execute(
+            "UPDATE student SET nickname = ? WHERE student_id = ?",
+            (nickname, student_id),
+        )
+        self.conn.commit()
+
+    def get_real_name(self, student_id: str) -> str:
+        """读本地真名（空串 = 学生没给称呼）。**只在本地用**，不进 prompt。
+
+        ★ 它是 ``set_real_name`` 的对称读口：写称呼那条路要拿它做同步判定
+          （见 ``routes/profile.py`` 的 ``update_identity_flags``）。
+        """
+        row = self.conn.execute(
+            "SELECT real_name FROM identity_local WHERE anon_student_id = ?",
+            (student_id,),
+        ).fetchone()
+        if row is None:
+            return ""
+        return str(row["real_name"] or "")
+
     def parent_consent(self, student_id: str) -> bool:
         """家长同意闸：False 时**不外发任何画像**（G-G，由路由层把 tags 出参清空）。"""
         return self.identity_or_default(student_id).parent_consent

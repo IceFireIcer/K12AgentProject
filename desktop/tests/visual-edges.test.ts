@@ -213,7 +213,50 @@ test('桌面层：内容区与 body 必须透明（壁纸 + 毛玻璃才是那�
     baseCss.indexOf('--k12-surface:', juniorAt) - juniorAt < 2000,
     '那一组选择器里必须真的跟着 --k12-surface 的覆盖声明（声明，不是注释里提一句）'
   )
+
+  /* ── 嵌入块（--k12-surface-2）的**呈现覆盖**（2026-10-04 用户报障）──────────
+   * ★★ 报障原话：「有的控件没有透明度或者没有替换纯色导致后面的背景图看不到」。
+   *   漏的就是这一层：18 组配色的 --k12-surface-2 是**不透明**浅色，
+   *   压在壁纸上就是一块块纯色斑（关卡清单 / 题目卡 / 路径按钮 / 吸顶条 / chip /
+   *   分段控件 / 侧栏条目）。
+   *
+   * ★ 这条守卫钉的是**对齐**，不是色值本身（色值会随观感调）：
+   *   两处覆盖共用**同一组选择器** —— 生成文件里 --k12-surface 与 --k12-surface-2
+   *   出现在完全相同的 25 条 :root 规则里。只给其中一处写选择器组，
+   *   另一处就会退回"只写 :root"，被 :not([data-sat]) 那支静默压掉（改了没反应）。
+   */
+  assert.match(
+    baseCss,
+    /--k12-surface-2:\s*color-mix\(in srgb, #FFFFFF 60%, transparent\)/,
+    '嵌入块必须半透（不透明的话它在壁纸上就是一块纯色斑 —— 用户报障的那一幕）'
+  )
+  const s2At = baseCss.indexOf('--k12-surface-2: color-mix')
+  assert.ok(
+    s2At >= 0 && s2At - juniorAt < 2000,
+    '嵌入块的覆盖必须写在**同一组选择器**里（与 --k12-surface 共享），' +
+      '否则它只压得住 :root，被生成文件里特异性更高的 :not([data-sat]) 静默压掉'
+  )
+  // 生成文件里两者选择器**完全同组**：这一条在生成物一变就红，提醒同步两组覆盖。
+  const genRules = generated.split('}')
+  const selsOf = (token: string): string[] => {
+    const out = new Set<string>()
+    for (const b of genRules) {
+      const i = b.indexOf('{')
+      if (i < 0) continue
+      const sel = b.slice(0, i).replace(/\s+/g, ' ').trim()
+      if (!sel.startsWith(':root')) continue
+      if (!b.slice(i + 1).includes(token + ':')) continue
+      for (const s of sel.split(',')) out.add(s.trim())
+    }
+    return [...out].sort()
+  }
+  assert.deepEqual(
+    selsOf('--k12-surface-2'),
+    selsOf('--k12-surface'),
+    '生成文件里两个令牌必须同组选择器 —— 不同组时，base.css 那**一组**覆盖就会漏掉一些档位'
+  )
 })
+
 
 test('嵌入块皮肤：.k12-inset 必须有底色 + 1px 细线（否则「浅底压浅底」分不开）', () => {
   const inset = ruleBody(baseCss, '.k12-inset')
@@ -334,5 +377,136 @@ test('★★ 学习档案页：左列内容 + 右列画像（25% 带上下限）
     study,
     /@media\s*\(max-width:\s*1023px\)/,
     '窄窗必须有 1023px 的堆叠规则（并排会把分页内容挤成一条竖井）'
+  )
+})
+
+
+/* ------------------------------------------------------------------ *
+ * 吸顶操作条（PageActions）必须半透 —— 2026-10-04 用户报障
+ * ------------------------------------------------------------------ */
+
+test('吸顶操作条：半透 + 毛玻璃（不许在壁纸上留一条实色横条）', () => {
+  /**
+   * ★★ 用户原话：「我只想把这个组件的背景颜色直接改成透明的 和其他的透明程度一样
+   *   可以看出来后面的背景图 显示的不那么突兀」。
+   *   它原来铺 `--k12-page`（**不透明**的学段桌面色），所以是全站唯一一条
+   *   "压在壁纸上却完全不透"的横条 —— 智码工坊与个性化学习两页都中。
+   *
+   * ★ 判据是「**半透**」而不是 "transparent"：这条是 sticky，滚动内容会从它下面
+   *   经过，全透时正文会与它自己的面包屑/按钮叠在一起（把"挡住了"换成"糊成一片"）。
+   *   ⇒ 三条一起判：① 不许再铺 --k12-page；② 要铺 45% 那层通用面（与卡片/气泡同值）；
+   *      ③ 要有毛玻璃（只靠 45% 白挡不住滚动正文的笔画）。
+   *
+   * ⚠️ 这一段**必须独立成一个 test**：变异验证用 `--test-name-pattern <expect>` 选测试，
+   *   把断言塞进上面那个"不塌陷"的 test 里时，expect 只能写那个 test 的名字 ——
+   *   于是"吸顶条退回实色"这种变异**照样是绿的**（实测踩到，变异 137/138 三条全没抓到）。
+   */
+  const pageActions = read('src', 'renderer', 'src', 'components', 'PageActions.vue')
+  assert.ok(
+    !/background:\s*var\(--k12-page\)/.test(pageActions),
+    '吸顶操作条不许铺 --k12-page（不透明学段桌面色 = 壁纸上的一条实色横条）'
+  )
+  /**
+   * ★★ 2026-10-04 用户**第二次**报障：「为什么我箭头指的这个白色背景框框还没去掉
+   *   想办法去掉 从智码工坊和个性化学习」。
+   *   第一版只把它从 --k12-page（不透明）改成 --k12-surface（45% 白）+ 毛玻璃 ——
+   *   那仍是「一块比周围白的横带」，在这两页的右栏上就是用户圈的那个白框框。
+   *   ⇒ 判据改成**彻底没有底色**。它与上面「不许铺 --k12-page」合起来看：
+   *     既不许不透明、也不许半透 —— 就是不许有那层白。
+   * ★ 它能全透而不糊：sticky 的父容器（.code__stage / .quiz__main）都有自己的内边距，
+   *   正常不滚动时栏里没有别的内容；右栏本来就有自己的分面线。
+   * ⚠️ 若日后发现「滚动时正文从栏下透出来」，**不要**退回铺实色（那正是用户两次要求
+   *   去掉的东西）—— 改用「给栏里内容加自己的底」或调内边距。
+   */
+  assert.match(
+    pageActions,
+    /background:\s*transparent/,
+    '吸顶操作条必须**完全透明** —— 半透白仍是用户圈的那个白框框（他两次要求去掉）'
+  )
+})
+/* ------------------------------------------------------------------ *
+ * 内容区不许被"两层白"冲成纯白 —— 2026-10-04 用户报障
+ * ------------------------------------------------------------------ */
+
+test('内容区：页面根容器不许套 85% 白卡片（两层白会把壁纸冲掉）', () => {
+  /**
+   * ★★ 用户原话：「你在个性化学习那一页完全理解错我的意思了 我想要的效果是背景图
+   *   可以看到 有个透明度 就和我第一个图片给你的效果一样 你个性化学习做的完全乱套了」。
+   *
+   * 根因**不是布局**，是两层白叠起来：`.quiz`（个性化学习的页面根容器）原先在这份
+   * "承载正文的卡片"名单里 → 整个内容区铺一层 85% 白；而它的子元素
+   * （`.quiz__nav` / `.qitem` / `.quiz__card`）**各自已有底色** → 两白一叠合成 #FFFFFF。
+   * 实测同一坐标（1500,400）：智码工坊 #BFE0EA（壁纸清晰可见）、
+   * 个性化学习 #F5FAFC→#FFFFFF（几乎纯白）。
+   *
+   * ★ 判据：**页面根容器**不许进这份名单 —— 它一进去就是"整页再糊一层白"。
+   *   要加白底的是**卡片**（.k12-card / .answer / .bubble / .option / .feedback），
+   *   不是页面骨架。
+   *
+   * ⚠️ 必须先**去掉注释**再判：这份名单里就写着 `.turn__body` 这些类名的说明，
+   *   不去注释的话，"死条目"那条断言会被自己的注释命中（实测踩到，第一次就是这么红的）。
+   */
+  const cardListMatch = /:root \.answer,[\s\S]*?\}/.exec(baseCss)
+  assert.ok(cardListMatch !== null, '找不到"承载正文的卡片"那份名单（base.css 的 :root .answer 那一组）')
+  const cardList = (cardListMatch?.[0] ?? '').replace(/\/\*[\s\S]*?\*\//g, '')
+
+  // ① 页面根容器不许在名单里
+  assert.ok(
+    !/:root\s+\.quiz\s*,/.test(cardList),
+    '页面根容器 .quiz 不许进"85% 白卡片"名单 —— 它一进去，整个内容区就被第二层白冲成纯白' +
+      '（子元素 .quiz__nav/.qitem 各自已有底色），壁纸彻底看不见（用户报障的那一幕）'
+  )
+  // ② 卡片本身仍要够实（正文可读，用户 2026-10-02 的口径）
+  assert.match(
+    cardList,
+    /background:\s*var\(--k12-surface-card\)/,
+    '承载正文的卡片仍要铺 --k12-surface-card（85% 白）—— 用户要的是"卡片读得下去"，不是全透'
+  )
+  // ③ 名单里不许再有零消费者的死条目：那种条目让"两层白"这类问题查起来绕远路
+  for (const dead of ['.turn__body', '.doc-card', '.doc-drawer']) {
+    assert.ok(
+      !cardList.includes(dead),
+      '卡片名单里有零消费者的死条目 ' + dead + ' —— 先确认它真的有消费者，再加进来'
+    )
+  }
+})
+/* ------------------------------------------------------------------ *
+ * 一个人一个名字：侧栏与右栏画像必须同源 —— 2026-10-04 用户报障
+ * ------------------------------------------------------------------ */
+
+test('显示名：侧栏身份卡与右栏画像必须读同一个来源', () => {
+  /**
+   * ★★ 用户原话：「画像部分为什么切账号以后 画像部分的名字什么没有更新 你是不是忘记
+   *   做联动机制了」。查出来**不是忘了联动** —— 是同一屏有**两个名字来源**：
+   *     · 侧栏身份卡 / 头像字 读 `student.nickname`（GET /api/students，默认「同学」）；
+   *     · 右栏画像 / 问候语 读 `identity.displayName`（GET /profile/{id}/identity，
+   *       来自学生在引导页设的称呼）。
+   *   实测同一台机器同一个人：侧栏「同学」、右栏真名。两条通道各自异步取数，
+   *   切号时谁先回来谁先变 —— 看起来就是"没联动"。
+   *
+   * 修法有两层，这条守**前端那层**（后端那层见 server/tests/test_students_api.py
+   * 的 TestDisplayNameReconcile：称呼与昵称在写入源头同步 + 存量自愈）：
+   *   侧栏必须与画像**同源**（`identity.displayName`），昵称只作回落。
+   *
+   * ⚠️ 判据是「侧栏模板/标题里出现 displayName 派生的那个计算属性」，
+   *   而不是「不许出现 student.nickname」—— 回落链 `displayName → nickname → 同学`
+   *   里 nickname 本来就该在。
+   */
+  const sidebar = read('src', 'renderer', 'src', 'components', 'AppSidebar.vue')
+  assert.match(
+    sidebar,
+    /profileCard\.identity\?\.displayName/,
+    '侧栏必须读 identity.displayName（与右栏画像同一个来源）—— 否则同一个人两个名字'
+  )
+  // 身份卡与头像字都要用那个统一后的名字，不许各自再拼一遍
+  assert.match(sidebar, /\{\{\s*studentName\s*\}\}/, '侧栏身份卡要显示统一后的 studentName')
+  assert.ok(
+    !/\{\{\s*student\.nickname\s*\}\}/.test(sidebar),
+    '侧栏身份卡不许直接渲染 student.nickname —— 那是另一个来源，会与右栏画像打架'
+  )
+  assert.match(
+    sidebar,
+    /studentName\.trim\(\)\.slice\(0,\s*1\)/,
+    '头像字要取自同一个 studentName（否则头像写一个名、旁边写另一个名）'
   )
 })

@@ -69,6 +69,7 @@ import type { PageName } from '../stores/ui'
 import { useViewModeStore } from '../stores/viewMode'
 import { useAccountsStore } from '../stores/accounts'
 import { useStudentStore } from '../stores/student'
+import { useProfileCardStore } from '../stores/profileCard'
 import { useThemeStore } from '../stores/theme'
 import { useChatStore } from '../stores/chat'
 import { PHASE_HINT, useSidecarStore } from '../stores/sidecar'
@@ -157,6 +158,31 @@ const brandLogo = computed(() => logoUrlFor(theme.displayGrade))
  */
 onMounted(() => void student.load())
 
+const profileCard = useProfileCardStore()
+
+/**
+ * 显示名：**侧栏与右栏画像必须用同一个**（2026-10-04 用户报障）。
+ *
+ * ★★ 用户原话：「画像部分为什么切账号以后 画像部分的名字什么没有更新 你是不是忘记做
+ *   联动机制了」。查出来的**不是"忘了联动"**，是**同一屏有两个名字来源**：
+ *     · 侧栏身份卡 / 头像字 / 账号菜单 读 `student.nickname`（GET /api/students，
+ *       默认「同学」，可在账号菜单里改名）；
+ *     · 右栏画像 / 问候语 读 `identity.displayName`（GET /profile/{id}/identity，
+ *       来自引导页设的称呼 `real_name`）。
+ *   实测同一台机器同一个人：侧栏「同学」、右栏「范思远」—— 两条通道各自异步取数，
+ *   切号时谁先回来谁先变，看起来就是"没联动"。
+ *
+ * ★ 统一到 `displayName`：它是**学生自己设的称呼**（引导页/设置页写入，且已被
+ *   `safe_display_name` 脱敏），也是画像与问候语**已经在用**的那个 —— 改成侧栏向它看齐，
+ *   而不是反过来让画像去读昵称（那会把学生设过的称呼丢掉）。
+ * ★ 回落链：`displayName` → `nickname` → 「同学」。identity 还没回来时先显示昵称，
+ *   不会出现空名字。
+ */
+const studentName = computed(() => {
+  const fromIdentity = profileCard.identity?.displayName?.trim() ?? ''
+  return fromIdentity !== '' ? fromIdentity : student.nickname
+})
+
 const gradeLine = computed(() =>
   theme.isRealGrade
     ? `${theme.displayGradeMeta.label} · ${gradeOriginLabel(chat.gradeOrigin)}`
@@ -166,7 +192,7 @@ const gradeLine = computed(() =>
 const studentTitle = computed(() => {
   // ⚠️ 后缀必须跟着点击行为走：这张卡现在打开账号菜单（换人 / 改名 / 导出），
   //    仍写「点击进入学习档案」就是一句会把人带错的提示 —— 学习记录改在菜单第一项。
-  const base = `${student.nickname} · ${gradeLine.value}（点击查看账号）`
+  const base = `${studentName.value} · ${gradeLine.value}（点击查看账号）`
   return student.error === null ? base : `${base} · ${student.error}`
 })
 
@@ -209,9 +235,10 @@ const statusTitle = computed(() => sidecar.errorText ?? PHASE_HINT[sidecar.phase
          ★ 学段仍由系统推断或学生手动指定，不在这张卡上改。 -->
     <div class="sb__student-wrap">
       <button type="button" class="sb__student" :title="studentTitle" @click="accounts.toggleMenu()">
-        <div class="sb__avatar">{{ student.avatarText }}</div>
+        <!-- ★ 头像字取自**同一个** studentName：否则出现「头像写同学、名字写范思远」 -->
+        <div class="sb__avatar">{{ studentName.trim().slice(0, 1) || '同' }}</div>
         <div class="sb__student-text">
-          <p class="sb__student-name">{{ student.nickname }}</p>
+          <p class="sb__student-name">{{ studentName }}</p>
           <p class="sb__student-grade">{{ gradeLine }}</p>
         </div>
       </button>

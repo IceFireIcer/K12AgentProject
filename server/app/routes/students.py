@@ -38,6 +38,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.contracts import (
     GradeLevel,
     Student,
+    STUDENT_FALLBACK_NAME,
     StudentCreateRequest,
     StudentDeleteResult,
     StudentUpdateRequest,
@@ -226,9 +227,44 @@ class LearningDbStudentStore:
         students: list[Student] = []
         for student_id in list_student_ids(self.data_dir):
             student = self.get_student(student_id)
-            if student is not None:
-                students.append(student)
+            if student is None:
+                continue
+            healed = self._reconcile_display_name(student_id, student)
+            students.append(healed if healed is not None else student)
         return students
+
+    def _reconcile_display_name(self, student_id: str, student: Student) -> Student | None:
+        """存量自愈：昵称还是回落值时，用学生自己设过的**称呼**补上。
+
+        为什么需要它（2026-10-04 用户报障「切账号以后画像部分的名字没有更新」）：
+          库里同一个人有两个名字 —— student.nickname（默认「同学」，账号列表/侧栏读它）
+          与 identity_local.real_name（GET /identity 的 displayName，画像/问候语读它），
+          此前**没有任何同步**。写入路径已在源头修好（routes/profile.py），
+          但**已经写坏的那份数据**不会被追溯修 —— 用户库里的现状正是
+          nickname=「同学」+ real_name=真名，光改写入路径他还是看到两个名字。
+
+        判据刻意保守（**只在"昵称还是回落值"时动手**）：
+          昵称非回落值 = 学生自己在账号菜单里起过名字，**绝不能**被称呼覆盖。
+          反过来，昵称仍等于「同学」说明他从没改过名 —— 那用他设过的称呼补上，
+          正是"让他看到自己说过的那句话"。
+
+        写失败**不上抛**（列表接口不该因为一次自愈失败就 500）：记一条 warning 照常返回。
+        """
+        if student.nickname.strip() != STUDENT_FALLBACK_NAME:
+            return None
+        store = LearningStore(student_learning_db_path(self.data_dir, student_id))
+        try:
+            real_name = store.get_real_name(student_id).strip()
+            if real_name == "" or real_name == STUDENT_FALLBACK_NAME:
+                return None
+            store.set_nickname(student_id, real_name)
+        except Exception:  # noqa: BLE001 —— 自愈是尽力而为，列表照常返回
+            logger.warning("昵称自愈失败（学生=%s），按原值返回", student_id, exc_info=True)
+            return None
+        finally:
+            store.close()
+        logger.info("昵称自愈：学生=%s（旧值=%s）已用称呼补上", student_id, student.nickname)
+        return self.get_student(student_id)
 
     def get_student(self, student_id: str) -> Student | None:
         validate_student_id(student_id)

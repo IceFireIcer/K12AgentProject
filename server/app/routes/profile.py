@@ -1781,9 +1781,22 @@ def update_identity_flags(
                 #   所以库里的 real_name 恒等于一个可安全展示的称呼；回落值存空串，
                 #   读取端把空串统一折算回回落值（只有一种「空」）。
                 safe = safe_display_name(body.real_name)
-                store.set_real_name(
-                    student_id, "" if safe == STUDENT_FALLBACK_NAME else safe
-                )
+                # ★★ 库里只存**安全值**；回落值存空串（读取端把空串统一折算回回落值）。
+                stored = "" if safe == STUDENT_FALLBACK_NAME else safe
+                store.set_real_name(student_id, stored)
+                # ★★ 称呼与昵称**在源头同步**（2026-10-04 用户报障：「画像部分为什么切账号
+                #   以后 画像部分的名字什么没有更新 你是不是忘记做联动机制了」）。
+                #   查出来**不是没联动**，是库里同一个人有两个名字：
+                #     student.nickname         ← 账号列表 / 侧栏身份卡 读它
+                #     identity_local.real_name ← GET /identity 的 displayName，画像/问候语 读它
+                #   两者此前没有任何同步 ⇒ 侧栏「同学」、右栏真名，看着就是"没联动"。
+                #   ⚠️ 只在**真的设了称呼**时同步（stored 非空）：学生把称呼清空 / 回落到
+                #      「同学」时**不覆盖**昵称 —— 那是他在账号菜单里自己起的名字，不该被抹掉。
+                #   ⚠️ 用单列 UPDATE（store.set_nickname），**不用** upsert_student：后者是
+                #      整行 upsert，会把 grade_level 按调用方手里的值写回（这里根本没有学段
+                #      快照），正是 touch_last_active 那条注释记过的故障形态。
+                if stored != "":
+                    store.set_nickname(student_id, stored)
         except sqlite3.Error as exc:
             logger.exception("身份闸写入失败：%s", student_id)
             raise HTTPException(

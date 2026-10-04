@@ -27,14 +27,15 @@ const TEST = 'tests/student-view-discipline.test.ts'
  *     `node --test --test-name-pattern <expect> tests/student-view-discipline.test.ts`；
  *   - `testFile`：换一个桌面测试文件（如 `tests/installer-config.test.ts`）；
  *   - `runner: 'server'`：`uv run python -m unittest tests.test_grade`
- *     （`expect` 用作子串匹配的红条名）。
+ *     （`expect` 用作子串匹配的红条名；`serverTest` 可换成别的模块，如 tests.test_students_api）。
  */
 function runExpect(mutation) {
   const isServer = mutation.runner === 'server'
   const testFile = mutation.testFile ?? TEST
   const command = isServer ? 'uv' : 'node'
+  // ★ 服务端默认 tests.test_grade，可用 `serverTest` 覆盖（后端守卫不止住在那一个文件里）。
   const args = isServer
-    ? ['run', 'python', '-m', 'unittest', 'tests.test_grade']
+    ? ['run', 'python', '-m', 'unittest', mutation.serverTest ?? 'tests.test_grade']
     : ['--test', '--test-name-pattern', mutation.expect, testFile]
   const cwd = isServer ? join(repoRoot, 'server') : desktopRoot
   let output = ''
@@ -1414,6 +1415,91 @@ const MUTATIONS = [
     replace: "    realName: '范思远',",
     testFile: 'tests/demo-seed.test.ts',
     expect: '身份层回的是预置身份'
+  },
+  {
+    // ★★ 2026-10-04 用户报障：吸顶操作条铺学段桌面色（不透明）= 壁纸上的实色横条。
+    name: '137 吸顶操作条：退回不透明的桌面色（壁纸上的实色横条）',
+    file: 'src/renderer/src/components/PageActions.vue',
+    find: '  background: transparent;',
+    replace: '  background: var(--k12-page);',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '吸顶操作条'
+  },
+  {
+    // 退回半透白 —— 第一版就是这么改的，用户第二次报障说白框框还没去掉。
+    name: '138 吸顶操作条：退回半透白（仍是用户圈的那个白框框）',
+    file: 'src/renderer/src/components/PageActions.vue',
+    find: '  background: transparent;',
+    replace: '  background: var(--k12-surface);',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '吸顶操作条'
+  },
+  {
+    // 嵌入块退回不透明 = 用户报障的那一幕（一块块纯色斑）。
+    name: '139 嵌入块：退回不透明（壁纸上看不到）',
+    file: 'src/renderer/src/assets/base.css',
+    find: '  --k12-surface-2: color-mix(in srgb, #FFFFFF 60%, transparent);',
+    replace: '  --k12-surface-2: #F4FAF9;',
+    testFile: 'tests/visual-edges.test.ts',
+    // ⚠️ expect 用作 --test-name-pattern —— 它选的是**测试名**，不是断言消息。
+    //   写成断言消息会选不到任何测试，输出里没有红条 ⇒ 表现成「变异没被抓到」（实测踩到）。
+    expect: '桌面层：内容区与 body 必须透明'
+  },
+  {
+    // ★★ 2026-10-04 用户报障：页面根容器套上 85% 白卡片 → 两层白把壁纸冲成纯白。
+    name: '140 内容区：页面根容器套上 85% 白卡片（两层白冲掉壁纸）',
+    file: 'src/renderer/src/assets/base.css',
+    find: ':root .k12-card,\n',
+    replace: ':root .k12-card,\n:root .quiz,\n',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '页面根容器不许套 85% 白卡片'
+  },
+  {
+    // 死条目回潮 —— 名单里放没人用的类名（正是它让"两层白"绕远路）。
+    name: '141 内容区：卡片名单里塞回零消费者条目',
+    file: 'src/renderer/src/assets/base.css',
+    find: ':root .feedback {',
+    replace: ':root .turn__body,\n:root .feedback {',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '页面根容器不许套 85% 白卡片'
+  },
+  {
+    // ★★ 2026-10-04 用户报障：侧栏退回读昵称 → 与右栏画像两个名字。
+    name: '142 显示名：侧栏退回读昵称（与画像两个名字）',
+    file: 'src/renderer/src/components/AppSidebar.vue',
+    find: '  const fromIdentity = profileCard.identity?.displayName?.trim() ?? \'\'',
+    replace: '  const fromIdentity = \'\'',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '显示名：侧栏身份卡与右栏画像必须读同一个来源'
+  },
+  {
+    // 身份卡直接渲染昵称（绕开统一后的 studentName）。
+    name: '143 显示名：身份卡直接渲染昵称',
+    file: 'src/renderer/src/components/AppSidebar.vue',
+    find: '<p class="sb__student-name">{{ studentName }}</p>',
+    replace: '<p class="sb__student-name">{{ student.nickname }}</p>',
+    testFile: 'tests/visual-edges.test.ts',
+    expect: '显示名：侧栏身份卡与右栏画像必须读同一个来源'
+  },
+  {
+    // ★★ 后端源头同步被拿掉 → 设过称呼之后账号列表还是旧昵称（存量自愈的单测变红）。
+    name: '144 显示名：设称呼时不再同步昵称',
+    file: '../server/app/routes/profile.py',
+    find: '                if stored != "":\n                    store.set_nickname(student_id, stored)',
+    replace: '                pass',
+    runner: 'server',
+    serverTest: 'tests.test_students_api',
+    expect: 'test_setting_real_name_syncs_nickname'
+  },
+  {
+    // ★★ 存量自愈被拿掉 → 已经被写坏的数据永远修不回来（用户库里的现状）。
+    name: '145 显示名：列表不再做存量自愈',
+    file: '../server/app/routes/students.py',
+    find: '            healed = self._reconcile_display_name(student_id, student)',
+    replace: '            healed = None',
+    runner: 'server',
+    serverTest: 'tests.test_students_api',
+    expect: 'test_list_heals_nickname_from_existing_real_name'
   }
 ]
 
