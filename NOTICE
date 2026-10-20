@@ -1,0 +1,23 @@
+智团团 (K12 Agent)
+Copyright 2026 IceFireIcer
+
+This product includes software developed as part of the 智团团 project
+(https://github.com/IceFireIcer/K12AgentProject).
+
+Third-party components bundled with this product remain under their own
+licenses. The main ones are:
+
+  - Electron, Vue, Element Plus, Monaco Editor, Anime.js, Pinia,
+    @earendil-works/pi-coding-agent: MIT
+  - lucide: ISC
+  - TypeScript: Apache-2.0
+  - Pyodide: MPL-2.0; Python standard library: PSF-2.0
+  - FastAPI, pydantic, onnxruntime: MIT
+  - uvicorn: BSD-3-Clause
+  - numpy: BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0
+  - fastembed: Apache-2.0
+  - Noto Sans SC, LXGW WenKai Screen, JetBrains Mono: SIL OFL 1.1
+    (license texts under desktop/resources/licenses/)
+
+The project name "智团团", its logo and mascot assets are not licensed
+under the Apache License, Version 2.0.

@@ -9,13 +9,14 @@
 一只抱着蜂窝的小熊「智团团」，7×24 在线当孩子们的 AI 老师。
 **教材与知识点只是他回答时的参考** —— 学生问什么就聊什么，不必沿着章节走（D-064）。
 
-学段自适应 · 多模态交互 · 个性化学习路径 · 数据全本地
+学段自适应 · 多模态交互 · 个性化学习路径 · 学习数据全本地
 
 [![Platform](https://img.shields.io/badge/平台-Windows%2010%2F11-0078D4?logo=windows&logoColor=white)](#快速开始)
 [![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](#技术栈)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs&logoColor=white)](#技术栈)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](#技术栈)
-[![Tests](https://img.shields.io/badge/回归测试-2215%20项%20全绿-2ea44f)](#测试与质量守卫)
+[![Tests](https://img.shields.io/badge/回归测试-2770%20项%20全绿-2ea44f)](#测试与质量守卫)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](#许可证)
 [![Local](https://img.shields.io/badge/数据-本地优先%20·%20一人一库-8957e5)](#设计与取舍)
 
 </div>
@@ -25,7 +26,8 @@
 ## 这是什么
 
 面向**小学低年级 / 小学高年级 / 初中 / 高中**四个学段的 AI 对话教学助手，
-以 Electron 桌面应用形态交付（本期只做 Windows `.exe`），**全程单机运行、不做服务器部署**。
+以 Electron 桌面应用形态交付（本期只做 Windows `.exe`），**不部署服务器，学习数据与检索库全在本机**；
+对话内容会发往你在设置里配置的模型服务。
 
 它能陪学生做四件事，也是产品的四条核心交互线：
 
@@ -33,15 +35,17 @@
 | --- | --- | --- |
 | **对话问答** | 用自己学段的语气讲知识、追问、举例 | System Prompt 按学段整份替换（童话拟人 ↔ 严谨推导） |
 | **动画讲解** | 概念被演出来：变量是盒子、梯度是下山 | 模板优先 + 自由生成，校验重试后仍失败则降级文字/静态图 |
-| **编程环境** | 改两行代码就跑，报错能看懂，卡住有分级提示 | Monaco 编辑器 + Pyodide（本地自托管，独立 Worker） |
-| **游戏化练习** | 闯关答题、拿掌握度、解锁下一关 | 客观题后端判分、主观题批改、错题进错题本 |
+| **智码工坊** | 改两行代码就跑，报错能看懂，卡住有分级提示 | Monaco 编辑器 + Pyodide（本地自托管，独立 Worker） |
+| **个性化学习** | 按教材章节成关、拿掌握度、错题进错题本 | 客观题后端判分、主观题模型打分、服务端定通过线 |
 
-围绕这四条线，再加上三件「让老师省心、让家长看得见」的事：
+围绕这四条线，再加上几件「让老师省心、让家长看得见」的事：
 
 - **教材检索（RAG）**：四学段教材（**57 个概念 × 四学段 = 228 个知识点 / 8 章 / 483 条依赖边**，
-  由根目录 `K12KnowledgeBase/` 导入，第 8 章「编程实践」为本项目自写的补充章）入 `kb.sqlite`，
-  检索严格按学段隔离（写在 SQL 层），回答带 `citation` 出处；模型不可用时走
-  **四级降级链 `vector → cloud → FTS5 → 依赖图/大纲`**，并如实告知「本次检索能力受限」。
+  由根目录 `K12KnowledgeBase/`（54 概念）导入，第 8 章「编程实践」是本项目自写的 3 概念补充章）
+  入 `kb.sqlite`（chunk / 向量 / FTS5 / 依赖图，只读内容资产）；题库独立随包（`resources/quizbank/`，
+  8 片共 684 题）。检索严格按学段隔离（写在 SQL 层，命中更低学段标 `compat`），回答带 `citation` 出处；
+  模型不可用时走**四级降级链 `vector → cloud → FTS5 → 依赖图/大纲`**（一次调用内走完，逐级可观测），
+  并如实告知「本次检索能力受限」。
 - **个性化闭环**：学生画像（掌握度 / 偏好 / 错题摘要）**每轮**进 Prompt；模型可主动记偏好；
   另有学习报告、错题本、章节进度、学习地图与历史会话回看组成的**学习档案**。
 - **主动发起对话**：新会话建立、学生还没开口时，助手先提一句「我们从哪里开始」——
@@ -51,32 +55,38 @@
   关掉应用再打开自动续上最近一条，上一段对话还在（数据一直存在 Pi 的会话树里）。
 - **学段与章节**：默认从对话里自动推断学段并生效，学生也可**手动指定**（手动后 10 轮冷却回归自动）；
   还可选定「当前在学哪一章教材」作为软偏好。
+- **内容安全**：输入先归一化（零宽字符、全角、分隔符拆写都绕不过）再过内置词库
+  （27 个词 / 7 类 / 7 条越狱正则）；流式输出照常，生成结束后整段终审，违规则撤回并替换为安全提示。
+  每条回答旁有一枚安全审查徽章（通过 / 未通过），判定原因只进教师门。
+- **演示与运行证据**：教师档的**运行透视**把一轮真实发生的事摊开（提示词分段、四级检索、安全三阶段、
+  工具与子代理 span）；**演示沙箱**可一键载入内存态预置学生数据，退出即还原，真实数据一个字节不动。
 
 ### 学生的一天（能力全景）
 
 > 完整的角色、需求条目与实现决策见 **[`docs/PRD-产品需求文档.md`](docs/PRD-产品需求文档.md)**（逆向生成：从代码读回来的产品视角总览）。
 
-1. **进来** —— 先选或新建一个**本地账号**（一人一份数据；无密码、不联网；删号前拦一道并要求先导出）。
-2. **五问冷启动** —— 助手在对话里一连问五个问题（年级 / 目标 / 偏好 / 基础 / 兴趣），
+1. **进来** —— 先选或新建一个**本地账号**（一人一份数据；无密码、不联网；删号前二次确认，并提示先导出学习档案）。
+   首次建号且本机还没配模型时，多走一步「把模型接上」：真连通过才能开始，旁边留「稍后配置」的逃生口。
+2. **五问冷启动** —— 助手在对话里一连问五个问题（年级 / 最近在学什么 / 讲解方式 / 节奏 / 兴趣），
    答完由模型概括成**画像标签**贴给学生看。**没有跳过入口**：跳过去，后面的个性化就都没有依据了。
-3. **学** —— 对话问答（带教材引用）· 动画讲解 · 智码工坊（真实编辑器 + 本地沙箱跑代码）三条线，
+3. **学** —— 对话问答（带教材引用与安全审查徽章）· 动画讲解 · 智码工坊（真实编辑器 + 本地沙箱跑代码）三条线，
    学段自动适配、可手动纠正；章节是软偏好，不是硬过滤。
 4. **练** —— **个性化学习**按教材章节成关：内置题做完后，系统**按这道题的作答轨迹现场再出几道**
-   （单关上限 20 题、编号连续；做完还能点「还想再练练」，每批 +10）。客观题走规则判分、
-   主观题由模型按评分要点批改；答错进错题本，掌握度与徽章随之变化。
-5. **看** —— **学习记录**六分页：报告 / 错题 / 章节 / 学习地图 / 学习历史 / 会话，可导出 Markdown。
+   （单关上限 20 题、编号连续：先给第一段你就能接着做，余下的在后台补，题流尾部有一张
+   「正在出题」非阻塞占位卡；没出成会明说并给「再试一次」，不静默）。做完还能点「还想再练练」，每批 +10。
+   客观题走规则判分、主观题由模型按评分要点打分、服务端定通过线；答错进错题本，掌握度与徽章随之变化。
+5. **看** —— **学习记录**六分页：概览 / 错题本 / 章节进度 / 学习地图 / 学习历史 / 历史会话；报告与错题本可导出 Markdown。
 6. **纠** —— 「我记住了什么」逐条标出**来源**（你告诉我的 / 我从你的学习里看到的）与把握度，
    推测出来的能一键撤回；家长侧另有一道**记忆开关**，关掉后标签与时间线读出口全空。
 
-界面分**八个学生可见页** + **一个仅教师页**（导航不引入 `vue-router` —— Electron 单窗口没有 URL / 后退 / 深链需求，
+界面共**九个页面：八个学生可见页 + 一个教师档页**（导航不引入 `vue-router` —— Electron 单窗口没有 URL / 后退 / 深链需求，
 唯一真相是 `stores/ui.ts` 的 `PAGES` 表，见 `decisions.md` 的 D-040）：
 
-| 分组 | 页面 |
-| --- | --- |
-| 跟团团聊 | **问问智团团**（对话主入口） |
-| 动手试试 | **动画讲解** · **智码工坊**（编程） · **个性化学习**（练习与闯关） |
-| 我的记录 | **学习记录** · **知识图谱** · **参考资料库** · **设置** |
-| 仅教师档 | **运行透视**（这一轮怎么跑出来的；学生侧栏里不出现） |
+| 分组 | 页面 | 可见性 |
+| --- | --- | --- |
+| 跟团团聊 | **问问智团团**（对话主入口） | 学生 |
+| 动手试试 | **动画讲解** · **智码工坊**（编程） · **个性化学习**（练习与闯关） | 学生 |
+| 我的记录 | **学习记录** · **知识图谱** · **参考资料库** · **设置** · **运行透视**（这一轮怎么跑出来的） | 运行透视限教师档及以上，学生侧栏里不出现 |
 
 ## 架构
 
@@ -90,10 +100,12 @@ flowchart TB
     R <-->|"IPC 事件流（6 词表 · preload 白名单）"| M
   end
   M -->|"HTTP 127.0.0.1（随机 token）"| S["Python sidecar · FastAPI<br/>数据 / 检索 / 嵌入 / 判分 / 学习记录"]
-  S --- KB[("kb.sqlite<br/>教材 · 向量 · 依赖图 · 题库")]
+  S --- KB[("kb.sqlite<br/>教材 · 向量 · FTS5 · 依赖图")]
   S --- LD[("learning.db<br/>一人一份：画像 · 掌握度 · 历史")]
+  S --- RS[("随包只读资源<br/>题库 · 动画/代码模板 · 词表")]
   M --- PJ[("Pi 会话树 JSONL<br/>一人一份")]
   M -->|HTTPS| LLM["大模型 API<br/>DeepSeek / 自定义供应商"]
+  S -.->|"仅连通性探测 / 云端嵌入兜底"| LLM
   R -.-> IF["sandboxed iframe<br/>动画运行时（无网络）"]
   R -.-> PY["Web Worker · Pyodide<br/>学生代码只在这里跑"]
 ```
@@ -103,9 +115,12 @@ flowchart TB
 | 边界 | 规则 |
 | --- | --- |
 | **数据域只在 Python** | SQLite 读写、检索降级链、嵌入、判分、学习记录全部在 `server/`；TS 侧不碰数据库、不自己拼 SQL、不算向量 |
-| **编排域只在 TypeScript** | 主 Agent 编排、Prompt、Tool 定义与注册、事件映射全在 `desktop/src/main/`；Python 侧不调用任何 LLM |
+| **编排域只在 TypeScript** | 主 Agent 编排、Prompt、Tool 定义与注册、事件映射全在 `desktop/src/main/`；Python 不做对话生成与编排（唯一外呼是设置页连通性探测与云端嵌入兜底） |
 | **契约面只走冻结契约** | `server/app/contracts.py`（pydantic）→ OpenAPI → 生成 TS 类型；`npm run check:api` 做字节比对，禁止手写兜底接口 |
 | **执行面只在渲染进程** | 学生代码只在 Pyodide Worker 里跑，**绝不在主进程**（Pi 扩展与 UI 同进程且拥有完整系统权限） |
+
+编排之外，主进程只有两个出网口（D-116）：`bridge/client.ts` 只打本机 sidecar（`X-Auth-Token` + `/api/*`），
+`bridge/llm-completions.ts` 只打用户配置的模型服务（Bearer Key + `/chat/completions`）；别处不出现 `fetch(`（守卫 G5 / G5b）。
 
 ## 快速开始
 
@@ -129,8 +144,11 @@ npm install
 npm run dev
 ```
 
-首次启动后进 **设置** 页填供应商与 API Key（供应商 / BaseURL / ModelID / Key 四项都可自填，
-也可从 Pi 内置的 40 个供应商预设里挑一个，端点与模型清单会带出来），保存时会真去调一次该地址做连通性探测。
+首次启动先过**账号门**：给自己起个名字即可（本地账号，无密码）。若这台机器还没配模型，
+下一步会请你**把模型接上**（供应商 / BaseURL / ModelID / Key 四项都可自填，也可从 Pi 内置的
+约 40 个供应商预设里挑，端点与模型清单会带出来；**真连通过**才能点「开始学习」），
+旁边留「稍后配置」的逃生口（演示机 / 断网时用）。之后随时可在 **设置** 页改，
+保存时同样会真去调一次该地址做连通性探测。
 
 ## 构建
 
@@ -139,11 +157,12 @@ npm run dev
 
 ```bash
 cd desktop
-npm run typecheck        # vue-tsc，契约漂移的第一道防线
-npm test                 # 1051 项 node --test + check:api + check:tool-schema + check:contrast
+npm run typecheck        # tsc（主进程/preload）+ vue-tsc（渲染进程）：契约漂移第一道防线
+npm test                 # 1448 项 node --test + check:api + check:tool-schema + check:contrast --strict + check:docs
 npm run build            # 先确保 sidecar 最新（过期内自动重打）→ 再编主/渲染进程
-npm run build:unpack     # 免安装目录（★ 验证 esbuild 原生依赖是否解包、Pi 能否加载、后端是否最新）
-npm run build:win        # 出 .exe（NSIS 安装包 + 绿色便携版）
+npm run build:portable   # ★ 本地唯一出包命令：dist/<name>-<ver>-portable.exe + 校验包里后端指纹
+npm run build:unpack     # 只出 win-unpacked（验 esbuild 原生依赖与资源布局；Pi 加载另跑 smoke:pi）
+# npm run build:win      # ⚠️ 会顺带出 NSIS 安装器，只给手动发版，本地不跑
 ```
 
 ### 为什么需要「联动」这一步
@@ -155,7 +174,7 @@ sidecar 是**独立打包的产物**（PyInstaller → `server/dist/k12-agent-se
 新端点回 404、源码里早修好的 bug 还活着，且**不报任何错**。
 
 这不是假设，是实测踩到的坑（`docs/report-material/pitfalls.md` 的 **P-072**）：包里的 sidecar
-是 9-17 05:01 的，而修复是 9-18 13:52 才进的源码；同一份过期产物也缺 9-18 新增的 4 个知识库端点。
+是 9-17 05:01 的，而修复是 9-18 13:52 才进的源码；同一份过期产物也缺 9-18 新增的 4 个知识库端点（现为 5 个）。
 
 所以现在由**构建链自己**保证，而不是靠「记得先跑」：
 
@@ -183,27 +202,43 @@ npm run check:server:packaged     # 查**已装进安装包**的那一份
 **按文件内容而非 git commit 判新旧**（否则「改了没提交直接打包」会被判新鲜）；
 **逃生舱会响**（`K12_SKIP_SERVER_BUILD=1` 打印警告后跳过——静默跳过正是这套机制要消灭的东西）。
 
+### 出包与发布（本地只做便携版）
+
+**2026-09-22 的裁决：日常一律 `npm run build:portable`，本地不跑 `build:win`**；安装器由 CI / nightly 出。
+便携版是**单文件自解压 exe**（运行在 `%TEMP%` 下），数据**不会**落在 exe 旁边，而是退回
+`%APPDATA%\k12-agent-desktop`；真要「数据跟着程序走」用 zip 形态或显式 `K12_DATA_DIR`。
+安装形态三种、同一份代码：`-setup.exe`（NSIS 安装）· `-win-x64.zip`（解压即用）· `-portable.exe`（单文件）。
+
+| 工作流 | 触发 | 做什么 | 产物 |
+| --- | --- | --- | --- |
+| `ci.yml` | push(master) / PR / 手动 | 建无向量 kb → 后端 unittest；桌面 `typecheck` + `npm test`；设计令牌 diff | 无（红/绿门禁） |
+| `nightly.yml` | 每天 UTC 18:00 · 手动 · 打包相关文件 push | 带向量 kb 全量构建，打包 `nsis zip portable`，校验包内后端 | **prerelease** `nightly-YYYYMMDD`；push 轮只留 1 天 artifact |
+| `release.yml` | **只有手动**（填 `1.0.0` 这类三段版本号） | 同一条构建链，版本号由人给（`K12_VERSION` 压过 run number） | **正式 Release** `v<版本>`，自动成为 Latest |
+
 ## 目录结构
 
 ```
 K12Agent/
 ├─ desktop/                 Electron + Vue 桌面端
-│  ├─ src/main/             主进程：sidecar 生命周期 / Pi Agent 编排 / IPC / 6 事件映射
+│  ├─ src/main/             主进程：sidecar 生命周期 / Pi Agent 编排 / IPC / 6 事件映射 / 演示沙箱
 │  ├─ src/preload/          IPC 白名单（渲染进程唯一的桥，token 永不进入渲染进程）
-│  ├─ src/renderer/         Vue 3 界面：八个学生页 + 一个教师页 + 内联卡片
-│  ├─ src/shared/           跨进程类型 · 品牌名（唯一来源）· 供应商目录
-│  ├─ scripts/              构建联动（build-server.mjs）· 契约生成 · 各类冒烟与证据脚本
-│  ├─ tests/                1051 项回归（含架构守卫 G1–G13 · G18–G23 组）
+│  ├─ src/renderer/         Vue 3 界面：八个学生页 + 一个教师页 + 内联卡片 + 学段壁纸
+│  ├─ src/shared/           跨进程类型 · 品牌名（唯一来源）· 供应商目录 · 诊断信封
+│  ├─ scripts/              构建联动（build-server.mjs）· 契约生成 · 设计令牌 · 各类冒烟与证据脚本
+│  ├─ tests/                1448 项回归（含架构守卫 G1–G13 · G18–G24 组）
 │  └─ build/ resources/     打包图标 · 学段 logo · Pyodide 运行时（本地自托管）
 ├─ server/                  Python sidecar
-│  ├─ app/                  FastAPI：contracts / routes / rag / safety / store / grade
+│  ├─ app/                  FastAPI：contracts / routes / rag / store / grade / safety / animation / knowledge
 │  ├─ knowledge/            四学段教材（228 知识点 · 8 章 · 483 依赖边，由 K12KnowledgeBase/ 导入）
 │  ├─ knowledge-supplement/ 第 8 章「编程实践」（本项目自写，3 概念 × 四学段）——与用户源库分开存放
-│  ├─ resources/            题库（`quizbank/`，按章分片 ch01–ch08）· 动画模板 · 代码模板 · 敏感词表
-│  ├─ scripts/              导入教材 / 建库 / 取模型 / 导出 OpenAPI / 打包+指纹 / 生成品牌图标
-│  └─ tests/                1164 项回归
+│  ├─ resources/            题库（`quizbank/`，按章分片 ch01–ch08，684 题）· 动画模板 · 代码模板 · 词表
+│  ├─ scripts/              导入教材 / 建库 / 取模型 / 导出 OpenAPI / 打包+指纹 / 生成动画皮肤
+│  └─ tests/                1322 项回归
 ├─ K12KnowledgeBase/        教材源库（用户提供，54 概念 × 四学段；本项目只读地用 import_knowledge.py 导入）
-├─ docs/                    设计文档 · 任务票 · 决策与踩坑素材 · 界面版式契约 · 对标材料
+├─ background/              四学段壁纸原图（2848×1600，20.4 MB；渲染层用压缩 webp，不入包）
+├─ preset-content/          内容资产总包：题库 / 动画模板与文案 / 代码模板 / 生成与 QA 脚本
+├─ .github/workflows/       CI 三分工：ci（门禁）· nightly（每日打包 prerelease）· release（手动正式发版）
+├─ docs/                    设计文档 · 任务票 · 决策与踩坑素材 · 界面版式契约 · 对标材料 · 演示手册
 ├─ logos/                   品牌原图（2048²，不入包）
 ├─ AGENTS.md                面向编码代理的工作区说明
 └─ 项目执行文档.md            唯一权威执行文档（范围 / 契约 / DDL / 排期 / 验收）
@@ -214,15 +249,15 @@ K12Agent/
 | 层 | 选型 |
 | --- | --- |
 | 桌面壳 | Electron 44 + electron-vite 5 + Vite 7 + Vue 3.5 + Pinia 4 + TypeScript 5.9（strict） |
-| 组件与样式 | Element Plus（按需引入）· lucide 图标 · 设计 token 由 `tokens.source.json` 生成（6 组配色 × 3 档饱和度 = 18 套，正文 16px 基准） |
-| Agent 编排 | Pi Agent SDK `@earendil-works/pi-coding-agent ^0.85.1`（主进程内嵌；6 个 Extension / 11 个 Tool） |
+| 组件与样式 | Element Plus（按需引入）· lucide 图标 · 设计 token 由 `tokens.source.json` 生成（6 组配色 × 3 档饱和度 = 18 套，正文 16px 基准）· 两套自托管字体（Noto Sans SC / 霞鹜文楷）· 整窗学段壁纸 + 毛玻璃 |
+| Agent 编排 | Pi Agent SDK `@earendil-works/pi-coding-agent ^0.85.1`（主进程内嵌；6 个业务扩展注册 11 个 Tool，另有 `rag_search`，共 12 个；运行时另挂检索 / 引导 / 轨迹三个基础设施注册项） |
 | 后端 | Python 3.12（uv 锁定）+ FastAPI + uvicorn + pydantic v2（契约唯一来源） |
-| 数据 | `kb.sqlite`（只读知识库：chunk / 向量 / FTS5 / 依赖图 / 题库）· `learning.db`（一人一份）· Pi JSONL 会话树（一人一份） |
+| 数据 | `kb.sqlite`（只读知识库：chunk / 向量 / FTS5 / 依赖图）· `learning.db`（一人一份）· Pi JSONL 会话树（一人一份）· `server/resources/`（题库 / 模板 / 词表，随包只读） |
 | 检索 | sqlite-vec 向量检索 → 云端嵌入兜底 → FTS5（trigram 分词）→ 依赖图/大纲，四级降级一次调用内走完 |
 | 嵌入 | fastembed `BAAI/bge-small-zh-v1.5`（512 维 ONNX，纯 CPU，**不依赖 Ollama / torch**） |
 | 多模态 | Anime.js v3（sandboxed iframe）· Monaco Editor · Pyodide（独立 Web Worker） |
 | 传输 | 渲染进程 ↔ 主进程：IPC 事件流，事件词表冻结为 `delta / citation / payload / blocked / done / error`；主进程 ↔ sidecar：`127.0.0.1` HTTP + 随机 token |
-| 打包 | electron-builder（NSIS + 绿色便携版）· PyInstaller `--onedir` · **构建联动 + 源码指纹校验**（见上） |
+| 打包 | electron-builder（NSIS 安装包 / zip 解压即用 / 单文件便携版）· PyInstaller `--onedir` · **构建联动 + 源码指纹校验**（见上） |
 
 ## 设计与取舍
 
@@ -231,20 +266,32 @@ K12Agent/
   代价（跨语言契约、双进程生命周期）**是用冻结契约 + 守卫测试换掉的**，这是主动权衡而非妥协。
 - **动画「模板优先 + 生成补充」**：自由生成不稳定，所以先查模板、再让模型生成，产物必须过校验，
   重试共享一个总预算，仍失败就降级成文字 + 静态图——**宁可朴素，不可白屏**。
-- **两条皮肤、十二个原型**：内置模板按学段走两套视觉语言（小学插画化 / 中学工程图），
-  由 12 个「机制型」原型批量生成，全部用真实时间轴而非淡入淡出；学段色板与 App 同源
-  （`tokens.source.json` 生成 `skins.css`，有漂移守卫）。
+- **边界是三件套，不是一条线**：学段色页面底 + 白纸卡片（主信号）、发丝线 / 强线（副信号）、
+  只给结构分面的单侧投影（副信号），任何一条都不能单独拿掉。2026-10-02 起桌面层是
+  **整窗学段壁纸 + 毛玻璃**，纸面与嵌入块半透，白底白线从结构上不会复发
+  （`tests/visual-edges.test.ts` 10 条 + `check:contrast --strict` 342 项）。
+- **两套皮肤、十四个原型**：内置模板按学段走两套视觉语言（小学插画化 / 中学工程图），
+  由 14 个「机制型」原型批量生成（现为 215 份内置模板），全部用真实时间轴而非淡入淡出；
+  学段色板与 App 同源（`tokens.source.json` 生成 `skins.css`，有漂移守卫）。
 - **按需生成 + 按学生存档**：现做的动画存进该学生的库，键是「知识点 + 学段 + 请求指纹」，
   同一个说法再要一次直接复播（0 次云端调用）；换学段就是另一份产物。
 - **零 CDN**：动画库内联进产物、Pyodide 与 Monaco 本地自托管，断网演示不翻车。
 - **一人一库、Pi 会话显式改道**：未成年人数据最小化采集，`learning.db` 与 Pi 会话树都按学生隔离，
   存储目录名与品牌名解耦（改品牌不会把学生的数据「改丢」）。
-- **内容安全的第二道是「先说完再撤」**：流式输出照常，生成结束后整段终审，违规则撤回并替换为安全提示；
-  输入侧的匹配会先做归一化（零宽字符、全角、分隔符拆分都无法绕过）。
+- **内容安全：词库内置、先说完再撤、回答带徽章**：输入先归一化再过词库（27 词 / 7 类 / 7 条越狱正则）；
+  流式输出照常，生成结束后整段终审，违规则撤回并替换为安全提示；每条回答旁有安全审查徽章
+  （通过 / 未通过），判定原因只进教师门。
+- **自动追题不许静默**（D-142）：一道内置题做完后现场生成的题**分两段**下发 —— 第一段到手就能做，
+  余下在后台补；题流尾部有非阻塞占位卡，明说「正在出 / 没有新题 / 没出成（可重试）」。
+  学生必然会察觉的事（题从 3 道变 20 道）不能靠沉默。
+- **演示沙箱不改真实数据**：设置页高级区可载入一份**内存态**预置学生数据（画像 / 掌握度 / 报告 /
+  会话 / 动画库），内容态（题库 / 模板 / 知识点）仍走真实资产；写操作一律拒绝，退出应用即还原。
+  界面里除那颗开关外没有任何「演示中」标注 —— 这是有意的无痕口径。
 - **把人记住改成机器检查**：构建链的顺序纪律（P-072）写进文档无效——文档没有退出码。
   凡是「靠人记得」的环节，都要有一个会失败的检查兜底（见上面的「构建」一节）。
 - **双视角不是装饰**：工具轨迹、降级档位、诊断串这类**技术证据一律进「教师门」**，学生面禁技术词与内部 id；
-  三档视角（学生 → 教师 → 调试）的判据只有一条 —— 当前档位 ≥ 该页要求的档位。
+  三档视角（学生 → 教师 → 调试）的判据只有一条 —— 当前档位 ≥ 该页要求的档位
+  （目前只有运行透视要求教师档；debug 是演示档标记，不额外解锁页面）。
 - **不做「跳过」入口**：冷启动五问没有跳过键（端点 / 通道 / 前端全链路都没有）——
   产品上宁可让学生少答一题，也不要他随手一跳之后对着一堆没有依据的内容。
 - **明确不做**：绘本生成、多模态教学资源推荐（已砍单）；语音（P2 后置）；不引入 `pi-subagents` 等第三方 SubAgent 包。
@@ -252,8 +299,8 @@ K12Agent/
 ## 测试与质量守卫
 
 ```bash
-cd server  && uv run python -m unittest discover -s tests   # 1164 项
-cd desktop && npm test                                      # 1051 项 + 契约漂移比对 + Tool schema 一致性 + 对比度 342 项 + 文档数字自检
+cd server  && uv run python -m unittest discover -s tests   # 1322 项
+cd desktop && npm test                                      # 1448 项 + 契约漂移比对 + Tool schema 一致性 + 对比度 342 项 + 文档数字自检
 ```
 
 回归里有相当一部分是**架构守卫**，写成正向断言而不是「禁止某历史实现」：
@@ -261,15 +308,17 @@ cd desktop && npm test                                      # 1051 项 + 契约�
 - 聊天事件流必须经 preload 白名单 IPC 通道送达；事件名必须是 6 词表之一。
 - 学生代码执行必须经 IPC 落到渲染进程的 Pyodide Worker。
 - Pi 会话文件必须落在 `students/<id>/` 内（跨学生混放是合规硬伤）。
-- 明文 API Key 只允许主进程取用：渲染进程既没有通道、preload 也没有方法。
+- 明文 API Key 渲染进程**只能写入、不能读回**：preload 没有读取方法；主进程转交 sidecar 落盘，自己只进内存（G13）。
 - 对话请求的字段集合被钉死为 `['text']`——学段、章节的手动修改只能走各自的独立通道。
 - **前端构建必须先确保 sidecar 最新**，出包命令必须在 electron-builder 之后校验包里那一份（G20 组）。
-- **本文档与 `architecture/index.html` 里登记的数字必须与磁盘一致**（`npm run check:docs`）——
-  逐处枚举「数字 + 关键词」，漏改任何一处都红，而不是「有一个对的就算过」。
+- **登记进 `check:docs` 锚点的数字必须与磁盘一致**：知识点数、依赖边、契约模型数、preload 通道 / 方法数
+  逐处枚举「数字 + 关键词」（漏改任何一处都红）；测试数默认只查「后端 + 桌面 = 合计」自洽，
+  真值用 `npm run check:docs:tests` 另跑。其余数字（供应商数、原型数、探针条数）仍需人工同步。
 
 守卫**验证过会红**：故意改坏 `build` 链路、把校验提到 electron-builder 之前、
 在 `extraResources` 里排除 `build-info.json`——G20-1 / G20-2 / G20-3 各自如实失败。
 同理，过期产物对着 `build_server.py --verify` 会直接判不通过，而不是给个警告放行。
+另有 **145 条变异**（`npm run guards:mutation`）：把每处修复改回坏写法，逐条确认对应守卫变红。
 
 ### UX 体检（真机交互，与单测是**两件事**）
 
@@ -288,13 +337,17 @@ cd desktop && npm test                                      # 1051 项 + 契约�
 ```bash
 cd desktop
 K12_DEBUG_PORT=9222 npm run dev   # 另一个终端
-npm run ux                        # 对话页体检 34 项（键盘/滚动/触控目标/破坏性操作）
-npm run ux:pages                  # 逐页体检 28 项（八个页面各查四项）
-npm run ux:layout                 # 版式体检 24 格（3 视口 × 8 页：裁切/错位/表格对齐）
-npm run ux:scroll                 # 滚动行为 7 项     npm run ux:busy / ux:attribute
+npm run ux:reload                  # ★ 先跑：HMR 不重跑 onMounted
+npm run ux                         # 对话页 38 条（键盘/滚动/触控目标/破坏性操作；6 条依赖运行态）
+npm run ux:pages                   # 二级页 6 页 × 4 条 + 闯关排版/练习卡/axe 专项（最多 29 条）
+npm run ux:layout                  # 版式 28 格（4 视口 × 7 页：裁切/错位/表格对齐）
+npm run ux:scroll                  # 滚动行为 7 条
 ```
 
-它抓到的每一条结论都会固化成**源码级守卫**（`tests/ux-*.test.ts`），
+另有 `ux:busy` / `ux:attribute` / `ux:student` / `ux:demo` / `ux:nonce` / `ux:stage` /
+`ux:motion` / `ux:perf` 八支专项探针（`ux:*` 共 13 个命令）。
+
+它抓到的每一条结论都会固化成**源码级守卫**（`tests/ux-*.test.ts` 与 probe / keyboard / interaction 等守卫），
 且**每条都做过变异验证** —— 把修复改回坏写法，确认断言真的变红。
 ⚠️ 跑探针前先 `npm run ux:reload`：HMR 改过 `onMounted` 后旧组件不会重跑它，
 量出来的现象是「改动完全没生效」，会把人带错方向。
@@ -308,21 +361,42 @@ npm run ux:scroll                 # 滚动行为 7 项     npm run ux:busy / ux:
 | [`docs/业务陷阱清单.md`](docs/业务陷阱清单.md) | 各模块领域陷阱与业务验收口径（动手前扫一眼） |
 | [`docs/tickets/`](docs/tickets/README.md) | 任务切片（一票一文件，按依赖顺序） |
 | [`docs/report-material/`](docs/report-material/README.md) | 决策记录（D-0xx）与踩坑复盘（P-0xx），项目报告的一手素材 |
-| [`docs/agents/`](docs/agents/domain.md) | 工程技能约定：tracker 路径、triage 标签、领域文档消费方式 |
-| [`docs/ui/`](docs/ui/版式契约.md) | 界面版式契约与原型说明（层次、间距、组件边界） |
+| [`docs/项目简介.md`](docs/项目简介.md) | 需求原文与评分标准（需求取舍以它为准） |
+| [`docs/演示模式.md`](docs/演示模式.md) | 答辩操作说明：运行透视、机制浮窗、轮次诊断信封 |
+| [`docs/preset-redesign/`](docs/preset-redesign/README.md) | 演示沙箱的预置数据设计（四轮脚本 / 拦截演示 / 动画卡 / 编题） |
+| [`docs/agents/`](docs/agents/issue-tracker.md) | 工程技能约定：tracker 路径 · [triage 词表](docs/agents/triage-labels.md) · [领域文档](docs/agents/domain.md) |
+| [`docs/ui/`](docs/ui/版式契约.md) | 界面版式契约（层次、间距、焦点、材质）· [减动效指南](docs/ui/减动效指南.md) |
 | [`docs/对标/`](docs/对标) | 赛题原文与两份对标调研材料 |
 | [`AGENTS.md`](AGENTS.md) | 面向后续编码代理的工作区说明（本仓库特有、代码里看不出来的信息） |
-| [`docs/tool-trace.mmd`](docs/tool-trace.mmd) | 工具调用轨迹图（Agent 自主路由的证据） |
+| [`docs/tool-trace.mmd`](docs/tool-trace.mmd) | 工具调用轨迹图（`npm run trace:export` 的产物；仓库内是空壳，跑过一轮对话后再导出） |
 
-> 另有一份**本地**的架构总览页 `architecture/index.html`（单文件、可离线打开，19 节 +
-> 21 条功能机制清单）—— 它是答辩用的探查产物，**不入库**（见 `.git/info/exclude`），
-> 里面的数字由上面的 `check:docs` 一并盯着。
+> 另有一份**本地**的架构总览页 `architecture/index.html`（单文件、可离线打开，含架构总览、
+> 功能机制清单与逐条运行说明）—— 它是答辩用的探查产物，**不入库**（见 `.git/info/exclude`），
+> 其中登记进 `check:docs` 锚点的数字仍会被核对。
 
 ## 备注
 
 - 本项目为**单人 · 15 天极限冲刺**下的赛题交付物，多处「砍单」是有意为之，取舍与代价都写在
   `docs/report-material/` 与执行文档里；已实现的边界同样如实标注，不粉饰。
-- 仓库内**不含**学生数据、API Key、嵌入模型（约 90MB）与 Pyodide 运行时（体积大，随包分发），
-  这些分别由 `.gitignore` 与各自的获取脚本管理。
+- 仓库内**不含**学生数据、API Key、嵌入模型（约 90MB）与 Pyodide 运行时：前两者由 `.gitignore` 挡住；
+  嵌入模型由 `server/scripts/fetch_embedding_model.py` 取；Pyodide 是本地自托管的静态资源
+  （无获取脚本，`.gitignore` 的 `**/resources/pyodide/`）。
+- `background/`（壁纸原图，20.4 MB）与 `preset-content/`（内容资产包）是**源资产**：入库，
+  但只有转码后的 webp 与导入 `server/resources/` 的部分进入安装包。
 - 构建产物（`server/dist/`、`desktop/dist/`、`out/`）不入库；安装包里的后端与前端**由构建链保证同源**
   ——每一份 sidecar 都带着 `build-info.json`（源码指纹 + commit + 构建时间），随时可被校验。
+
+## 许可证
+
+本项目以 **Apache License 2.0** 发布（SPDX：`Apache-2.0`）。全文见 [LICENSE](LICENSE)，
+版权与第三方组件声明见 [NOTICE](NOTICE)。
+
+- **你可以**：商用、修改、分发、私用、获得贡献者的专利授权（含闭源再分发）。
+- **你需要**：保留版权 / 许可证 / NOTICE；修改过的文件要标注；分发（含二进制）时附一份 Apache-2.0 全文。
+- **你不可以**：拿项目名称与品牌素材做背书或商标使用 —— 「智团团」名称、Logo、角色形象**不随代码授权**；
+  作者不提供担保（AS IS），也不承担使用后果。
+- **专利**：贡献者授予你专利许可；若你因专利起诉本项目，该许可终止。
+- **第三方**：随包依赖与资产各按原许可证（字体 OFL-1.1、Pyodide MPL-2.0、Python 标准库 PSF-2.0，
+  其余多为 MIT / Apache-2.0 / BSD-3-Clause / ISC）；字体许可证副本在 `desktop/resources/licenses/`。
+- 要做二次分发的商业产品：请改名、移除 `desktop/resources/brand/`、`logos/`、`background/` 中的品牌素材，
+  并保留 `LICENSE` / `NOTICE`。
