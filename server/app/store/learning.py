@@ -209,6 +209,38 @@ PERSONALITY_VALUES: tuple[str, ...] = (
 )
 PERSONALITY_VALUE_SET: frozenset[str] = frozenset(PERSONALITY_VALUES)
 
+#: ★ 学段内难度档（`zpd_level`，票 30）的**封闭词表** —— 与 TS 的
+#: `prompts/adaptation.ts` 的 `WORD_TIERS` 认得的那几个词同源。
+#:
+#: ★★ 为什么这个键以前**永远是空的**（本轮修的缺口）：
+#:   `prompts/adaptation.ts` 的 `resolveDifficultyTier()` 读 `zpd_level` 决定
+#:   「这一轮偏易 / 正常 / 偏难讲」，但全仓**没有任何生产方**写它 ——
+#:   五问概括与持续概括的 prompt 都没点名这个键，`sync_observed_tags` 也没投影它。
+#:   结果 `resolveDifficultyTier()` 恒回 `normal`、`renderDifficultySectionBody()`
+#:   恒返回空串：整套学段内微调**接好了但没通电**。
+#:
+#: ★ 为什么生产方是**规则投影**而不是让模型写：
+#:   `zpd_level` 是**客观量**（从掌握度算出来的最近发展区），与 `mastery` / `error_type`
+#:   同一类。禁做 #10 明确「客观量一律不许被推断写」，所以它**不在**
+#:   `INFERRED_ALLOWED_TAG_KEYS` 里；正确的生产方是「读该生已有的判分数据投影一次」，
+#:   与 `sync_learner_style` 完全同构（observed / origin=projection）。
+#:
+#: ★ 值是**中文显示值**（与 learner_style / error_type / safety_level 同一条纪律）：
+#:   它要进画像卡给学生看，库里存的就是给人看的那三个词。
+#:   ⚠️ TS 侧 `NUMERIC_TIERS`（1/2/3）保留为**读取侧的向后兼容**，生产方不再写数字。
+ZPD_LEVEL_VALUES: tuple[str, ...] = ("偏易", "正常", "偏难")
+ZPD_LEVEL_VALUE_SET: frozenset[str] = frozenset(ZPD_LEVEL_VALUES)
+
+#: 难度档投影的**最小样本门槛**（总 attempts 低于它不判定）。
+#: ★ 与 `LEARNER_STYLE_MIN_ATTEMPTS` 同一条理由：3 道题定不了「这个孩子该讲多细」，
+#:   宁可不写（画像上就没有这一条，讲法回到模板本来的正常难度），也不给一个撑不住的档。
+ZPD_MIN_ATTEMPTS = 6
+
+#: 正确率低于它 → 偏易（他正在吃力，讲法降一档：先给结论、术语密度降、例子更具体）。
+ZPD_EASIER_MAX_ACCURACY = 0.5
+#: 正确率高于它 → 偏难（他明显吃得下，例子抽象一层、先给推导）。
+ZPD_HARDER_MIN_ACCURACY = 0.85
+
 #: 学习类型规则投影的**最小样本门槛**（总 attempts 低于它不判定）。
 #: ★ 为什么必须有：3 道题里对了 3 道就判「天赋型」，那个标签不可信、家长一问就崩。
 #:   宁可不写（画像上就没有这一条），也不给一个撑不住的结论 ——
@@ -907,6 +939,12 @@ class LearningStore:
             raise ValueError(
                 f"personality 只认封闭词表 {PERSONALITY_VALUES}，收到：{value!r}"
             )
+        if key == "zpd_level" and text not in ZPD_LEVEL_VALUE_SET:
+            # ★ 与 learner_style / personality 同一道闸：这个值会进画像卡，也会决定
+            #   下一轮 prompt 的讲法，所以只认封闭词表里的三个中文词。
+            raise ValueError(
+                f"zpd_level 只认封闭词表 {ZPD_LEVEL_VALUES}，收到：{value!r}"
+            )
         if key == "intensity":
             try:
                 number = int(text)
@@ -1223,6 +1261,15 @@ class LearningStore:
         if style is not None:
             written["learner_style"] = style
 
+        # ── ⑥ 学段内难度档（票 30，2026-10-22）：`zpd_level` 的**唯一生产方** ──
+        #   ★ 与 ⑤ 完全同构、同一处收口：本函数就是「把该生已有数据投影成标签」的
+        #     **唯一入口**，多挂一处 = 多一个可能漏调的调用点。
+        #   ★ 此前这个键全仓无人写 → `prompts/adaptation.ts` 的难度微调恒为「正常」
+        #     （`renderDifficultySectionBody('normal')` 返回空串）。见 sync_zpd_level 的 docstring。
+        tier = self.sync_zpd_level(student_id, now=now_s)
+        if tier is not None:
+            written["zpd_level"] = tier
+
         return written
 
     def sync_learner_style(self, student_id: str, *, now: int | None = None) -> str | None:
@@ -1313,6 +1360,85 @@ class LearningStore:
             logger.warning("学习类型投影被拒（不影响其它）：%s", style)
             return None
         return style if written else None
+
+    def sync_zpd_level(self, student_id: str, *, now: int | None = None) -> str | None:
+        """把学习数据投影成 `zpd_level`（`observed` / `origin=projection`）—— 票 30 的生产方。
+
+        ★★ 这个函数修的是一个**整条链路接好了但没通电**的缺口：
+          `desktop/src/main/agent/prompts/adaptation.ts` 的 `resolveDifficultyTier()`
+          读 `zpd_level` 决定「这一轮偏易 / 正常 / 偏难讲」，`renderDifficultySectionBody()`
+          据此往 system prompt 里注入微调段。但此前**全仓没有任何生产方写这个键** ——
+          五问概括与持续概括的 prompt 都没点名它，本文件的 `sync_observed_tags` 也没投影它。
+          于是 `resolveDifficultyTier()` 恒回 `normal`、微调段恒为空串，
+          票 30 的整套机制**永远走不到**。
+
+        ★ 口径与 :meth:`sync_learner_style` **完全同构**（同一个数据源、同一条纪律）：
+          ① 只读该生**自己的**判分数据（禁做 #9）；
+          ② **样本不足就不写**（`ZPD_MIN_ATTEMPTS`）—— 不把「没看出来」冒充成「观察到了」；
+          ③ 走 :meth:`upsert_tag`，白名单 / `memory_switch` / 取值域三道闸一条不少；
+          ④ 显式声明 `origin=projection`（与概括的 `refresh` 分得开）。
+
+        ★ 为什么是 `observed` 而不是 `inferred`：这是**从判分结果算出来的客观量**
+          （和 `mastery` / `error_type` 同类），不是「模型从对话里猜的倾向」。
+          禁做 #10 把 `inferred` 限制在情绪/风格类，`zpd_level` **不在**那个集合里 ——
+          所以它只能由规则投影写，模型推不翻（分档矩阵天然仲裁）。
+
+        ★ 三档的判据（只用两个已有的客观量，不新增数据源）：
+          · 正确率 < `ZPD_EASIER_MAX_ACCURACY` → **偏易**（他正在吃力）；
+          · 正确率 ≥ `ZPD_HARDER_MIN_ACCURACY` 且样本够多 → **偏难**（他明显吃得下）；
+          · 其余 → **正常**。
+
+        ★★ 为什么中段也要**写出来**（而不是「不写 = 默认正常」）：
+          这一条是**有状态的**。只写两端的话，一个学生曾经偏易、后来追上来了，
+          库里那条「偏易」会**永远留着**（没人覆盖它）—— 他就被永久按偏易讲。
+          写「正常」是让档位能**回到中间**的唯一手段。
+          代价可接受：`renderDifficultySectionBody('normal')` 返回空串，
+          所以「正常」这一档**不往 prompt 里注入任何字**，零 token 成本。
+
+        :returns: 实际写入的档位（`None` = 没写：样本不足 / 被闸挡住）。
+        """
+        now_s = int(time.time() if now is None else now)
+
+        # ── 一次聚合读全量掌握度（与 sync_learner_style 同一条查询口径）──
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(attempts), 0) AS attempts, "
+            "COALESCE(SUM(correct), 0) AS correct "
+            "FROM mastery WHERE attempts > 0"
+        ).fetchone()
+        attempts = int(row["attempts"] or 0) if row is not None else 0
+        correct = int(row["correct"] or 0) if row is not None else 0
+
+        if attempts < ZPD_MIN_ATTEMPTS:
+            # ★ 样本不足：**不写**（不是写「正常」）—— 与 sync_learner_style 同一条纪律。
+            #   写「正常」会把「不知道」冒充成「观察到了」，而且它会进画像卡给学生看。
+            return None
+
+        accuracy = correct / attempts
+        if accuracy < ZPD_EASIER_MAX_ACCURACY:
+            tier = "偏易"
+        elif accuracy >= ZPD_HARDER_MIN_ACCURACY:
+            tier = "偏难"
+        else:
+            tier = "正常"
+
+        try:
+            written = self.upsert_tag(
+                student_id,
+                "zpd_level",
+                tier,
+                # 把握程度：样本越多越有把握（6 次 → 0.6，26 次及以上 → 0.8）。
+                confidence=min(0.8, 0.6 + attempts / 100.0),
+                source="observed",
+                ts=now_s,
+                # ★ 显式声明出处：这条是**行为投影**，不是持续迭代概括。
+                origin=TAG_ORIGIN_PROJECTION,
+            )
+        except ValueError:
+            # 取值域 / 白名单不合法（理论上不会：值来自本文件的封闭词表）：
+            # 丢这一条，不影响其它（与 sync_learner_style 同一条纪律）。
+            logger.warning("难度档投影被拒（不影响其它）：%s", tier)
+            return None
+        return tier if written else None
 
     def upsert_tag_from_summary(
         self,

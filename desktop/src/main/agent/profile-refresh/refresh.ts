@@ -98,6 +98,18 @@ export interface RefreshApplyOutcome {
   rejected: { key: string; reason: string }[]
   parentConsent: boolean
   memorySwitch: boolean
+  /**
+   * ★★ 后端在回执里回的**应用后的最新投影**（`RefreshApplyOut.tags`，与 GET /tags 同形）。
+   *
+   * ★ 为什么必须把它带出来（2026-10-22 修的一处缺陷）：
+   *   落库之后紧接着要生成「画像小结」，而小结的全部输入就是画像标签。
+   *   此前这里只保留了 `applied`（键名数组），于是调用方只能拿**落库之前**读到的
+   *   `knownFiltered` 去写小结 —— 那一份**不含本轮刚写入的新标签**，
+   *   小结永远滞后一个周期（注释还写着「此刻手里的已经是最新的一份」，与代码不符）。
+   *   而后端**本来就回了正确的那一份**，只是被这个类型丢掉了。
+   * ★ 空数组 = 后端没回（旧版后端 / 投影被 parent_consent 清空）→ 调用方自行回落。
+   */
+  tags: readonly RefreshKnownTag[]
 }
 
 /**
@@ -241,11 +253,19 @@ export async function runRefresh(studentId: string, deps: RefreshDeps): Promise<
         '｜两道闸 parentConsent=' + String(applied.parentConsent) + ' memorySwitch=' + String(applied.memorySwitch)
     )
     // ★★ 三期（2026-09-30）：画像刚落库 → **顺带**生成一段 AI 小结（fire-and-forget）。
-    //   为什么挂在这个位置：这是「画像刚变过」的**唯一时刻**，而小结的全部输入就是
-    //   画像标签 —— 此刻手里的 `knownFiltered` 已经是最新的一份，不必再发一次 HTTP。
+    //   为什么挂在这个位置：这是「画像刚变过」的**唯一时刻**，而小结的全部输入就是画像标签。
+    //
+    //   ★★ 2026-10-22 修正（此前用的是**落库之前**的快照）：
+    //     原先传的是 `knownFiltered` —— 那是本函数开头（步骤③）读到的**旧**画像，
+    //     本轮刚写入的新标签**不在里面**，于是小结永远滞后一个周期。
+    //     现在优先用后端回执里的 `applied.tags`（= 应用后的**最新投影**，后端本来就回了，
+    //     只是此前被 `RefreshApplyOutcome` 丢掉）；回执没带（旧后端 / 被闸清空）时
+    //     再回落到「旧画像 + 本轮实际写入的标签」的合并结果 —— 两条路都不会少这一轮。
     //   失败只是「小结还是旧的」，下一个周期画像再变时会重来（`summary-line.ts` 兜）。
     if (deps.userDataDir !== undefined && deps.userDataDir.trim() !== '') {
-      void generateSummaryLine(studentId, knownFiltered, {
+      const summaryTags =
+        applied.tags.length > 0 ? applied.tags : mergeAppliedTags(knownFiltered, tags, applied.applied)
+      void generateSummaryLine(studentId, summaryTags, {
         getConfig: deps.getConfig,
         userDataDir: deps.userDataDir,
         ...(deps.fetchResponse ? { fetchResponse: deps.fetchResponse } : {}),
@@ -265,6 +285,30 @@ export async function runRefresh(studentId: string, deps: RefreshDeps): Promise<
   markRefreshed(studentId)
   log('[profile-refresh] 持续概括走降级（两次尝试都失败）：' + lastReason, 'warn')
   return { ran: true, ok: false, proposed: 0, applied: 0, reason: lastReason }
+}
+
+/**
+ * 回执没带投影时的**回落合并**：旧画像 + 本轮实际写入的那几条。
+ *
+ * ★ 为什么需要它：`RefreshApplyOut.tags` 是「应用后的最新投影」，正常情况下一定有；
+ *   但旧版后端不回这个字段，而 `parent_consent=0` 时它会被**清空**（G-G：落库照常、
+ *   外发投影为空）。后者不能拿来当小结输入（那是空的），前者则压根没有。
+ * ★ 口径与「写库只写真的写进去的那几条」一致：`applied.applied` 是后端确认写入的键，
+ *   不在其中的（被分档拒 / 被闸挡）**不能**混进小结 —— 否则小结会说出画像里没有的东西。
+ * ★ 纯函数、按 key 覆盖（后写的赢，与 upsert 语义一致）。
+ */
+function mergeAppliedTags(
+  known: readonly RefreshKnownTag[],
+  proposed: readonly RefreshTagWrite[],
+  appliedKeys: readonly string[]
+): RefreshKnownTag[] {
+  const merged = new Map<string, string>()
+  for (const item of known) merged.set(item.key, item.value)
+  for (const item of proposed) {
+    if (!appliedKeys.includes(item.key)) continue
+    merged.set(item.key, item.value)
+  }
+  return [...merged.entries()].map(([key, value]) => ({ key, value }))
 }
 
 /** 本周期回看几轮（= 触发周期；`transcript-window` 的窗口可能更大，这里只取本周期）。 */
@@ -419,10 +463,28 @@ export async function applyRefreshTagsFromSidecar(
       reason: typeof record.reason === 'string' ? record.reason : 'rejected'
     })
   }
+  // ★★ 应用后的最新投影（`RefreshApplyOut.tags`）：落库之后画像的**真实样子**。
+  //   认不出的条目一律跳过（宽松读、严格校验，与其它回执解析同一纪律）——
+  //   小结拿到的宁可少一条，也不能拿到一条脏值。
+  const projectedRaw = Array.isArray(body?.tags) ? body.tags : []
+  const projected: RefreshKnownTag[] = []
+  for (const item of projectedRaw) {
+    if (!item || typeof item !== 'object') continue
+    const record = item as { key?: unknown; value?: unknown }
+    const key = typeof record.key === 'string' ? record.key : ''
+    if (!isLlmVisibleTag(key) || key === 'anon_student_id') continue
+    if (projected.some((own) => own.key === key)) continue
+    projected.push({
+      key,
+      value: typeof record.value === 'string' ? record.value : String(record.value ?? '')
+    })
+  }
+
   return {
     applied,
     rejected,
     parentConsent: body?.parentConsent === true,
-    memorySwitch: body?.memorySwitch !== false
+    memorySwitch: body?.memorySwitch !== false,
+    tags: projected
   }
 }

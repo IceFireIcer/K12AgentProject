@@ -120,6 +120,117 @@ class ObservedTagsCase(unittest.TestCase):
         # 取值域：emotion 必须落在有限枚举里（禁做 #12）
         self.assertIn(written["emotion"], ("happy", "calm", "confused", "frustrated", "angry"))
 
+    # ------------------------------------------------------ 学段内难度档 --
+    def seed_attempts(self, *, total: int, correct: int) -> None:
+        """铺一组掌握度，使「总 attempts / 总 correct」恰好等于给定值。
+
+        ★ 用**一个知识点**铺（不是多行均摊）：`sync_zpd_level` 只看总量，
+          这里要的是可数的总量，行数不该成为变量。
+        ★ 本类与 `test_profile_tags.py` 不同：这里 `self.store` 是**实例**（setUp 里已建好），
+          没有 `exec_sql` / `query` 辅助方法 —— 直接用 `self.store.conn`。
+        """
+        # ★ 先清空：setUp 已经为「判分链路」铺了 kp_frac 两行，
+        #   不清掉的话总量会被它们污染，档位就算不准（这是本组用例唯一的前置耦合）。
+        self.store.conn.execute("DELETE FROM mastery")
+        self.store.conn.execute(
+            "INSERT INTO mastery(kp_id, score, attempts, correct, last_seen_at) "
+            "VALUES(?,?,?,?,?)",
+            ("kp_zpd", round(correct / max(1, total), 4), total, correct, 1_700_000_000),
+        )
+        self.store.conn.commit()
+
+    def zpd_value(self) -> str | None:
+        row = self.store.conn.execute(
+            "SELECT value FROM profile_tags "
+            "WHERE anon_student_id = ? AND key = 'zpd_level'",
+            (self.student_id,),
+        ).fetchone()
+        return None if row is None else str(row["value"])
+
+    def test_zpd_level_is_projected_from_mastery(self) -> None:
+        """★★ 票 30 的**唯一生产方**：这个键以前全仓无人写，导致难度微调恒为「正常」。
+
+        三条判据各钉一档：低正确率 → 偏易、高正确率 → 偏难、中段 → 正常。
+        """
+        # 低正确率（2/10 = 0.2 < 0.5）→ 偏易
+        self.seed_attempts(total=10, correct=2)
+        written = self.store.sync_observed_tags(self.student_id)
+        self.assertEqual(written.get("zpd_level"), "偏易")
+        self.assertEqual(self.zpd_value(), "偏易")
+
+        # 高正确率（9/10 = 0.9 ≥ 0.85）→ 偏难
+        self.seed_attempts(total=10, correct=9)
+        written2 = self.store.sync_observed_tags(self.student_id)
+        self.assertEqual(written2.get("zpd_level"), "偏难")
+        self.assertEqual(self.zpd_value(), "偏难")
+
+        # ★ 中段（7/10 = 0.7）→ **也要写「正常」**：这一条是有状态的，
+        #   只写两端的话，曾经偏易的学生会永久被按偏易讲（没人覆盖那条旧值）。
+        self.seed_attempts(total=10, correct=7)
+        written3 = self.store.sync_observed_tags(self.student_id)
+        self.assertEqual(written3.get("zpd_level"), "正常")
+        self.assertEqual(self.zpd_value(), "正常", "中段必须能回到正常档，否则档位回不去")
+
+    def test_zpd_level_source_and_origin(self) -> None:
+        """★ 来源必须是 observed、出处必须是 projection（不是模型猜的 inferred）。"""
+        self.seed_attempts(total=10, correct=2)
+        self.store.sync_observed_tags(self.student_id)
+        rows = self.store.conn.execute(
+            "SELECT source FROM profile_tags WHERE anon_student_id = ? AND key = 'zpd_level'",
+            (self.student_id,),
+        ).fetchall()
+        self.assertEqual(str(rows[0]["source"]), "observed")
+        history = self.store.conn.execute(
+            "SELECT origin FROM profile_tag_history WHERE key = 'zpd_level' ORDER BY id DESC LIMIT 1"
+        ).fetchall()
+        self.assertEqual(str(history[0]["origin"]), "projection")
+
+    def test_zpd_level_insufficient_sample_writes_nothing(self) -> None:
+        """★ 样本不足就不写 —— 不把「不知道」冒充成「观察到了」。"""
+        self.seed_attempts(total=3, correct=1)  # 3 < ZPD_MIN_ATTEMPTS
+        written = self.store.sync_observed_tags(self.student_id)
+        self.assertNotIn("zpd_level", written)
+        self.assertIsNone(self.zpd_value())
+
+    def test_zpd_level_is_not_inferred_writable(self) -> None:
+        """★ 禁做 #10：客观量不许被模型推断写（zpd_level 不在 inferred 允许集里）。"""
+        from app.store.learning import INFERRED_ALLOWED_TAG_KEYS
+
+        self.assertNotIn("zpd_level", INFERRED_ALLOWED_TAG_KEYS)
+        with self.assertRaises(ValueError):
+            self.store.upsert_tag(self.student_id, "zpd_level", "偏难", source="inferred")
+
+    def test_zpd_level_rejects_out_of_vocabulary_values(self) -> None:
+        """★ 封闭词表闸：自由文本（「很难」「1」这类）一律拒绝。"""
+        for bad in ("很难", "1", "偏易一点", "harder"):
+            with self.assertRaises(ValueError, msg=f"zpd_level={bad!r} 必须被取值域拒绝"):
+                self.store.upsert_tag(self.student_id, "zpd_level", bad, source="observed")
+        # 词表内的三个词可写
+        for good in ("偏易", "正常", "偏难"):
+            self.assertTrue(
+                self.store.upsert_tag(self.student_id, "zpd_level", good, source="observed")
+            )
+
+    def test_zpd_level_does_not_cross_students(self) -> None:
+        """禁做 #9：A 的判分数据不许投影成 B 的难度档。"""
+        self.seed_attempts(total=10, correct=2)
+        other = "student_zpd_other"
+        path = student_learning_db_path(self.data_dir, other)
+        fresh = LearningStore(path)
+        try:
+            written = fresh.sync_observed_tags(other)
+            self.assertNotIn("zpd_level", written, "B 没有判分数据，不该有难度档")
+        finally:
+            fresh.close()
+
+    def test_zpd_level_respects_memory_switch(self) -> None:
+        """G-F 在存储层：记忆闸关闭时难度档也写不进去。"""
+        self.seed_attempts(total=10, correct=2)
+        self.store.set_identity_flags(self.student_id, memory_switch=False)
+        written = self.store.sync_observed_tags(self.student_id)
+        self.assertNotIn("zpd_level", written)
+        self.assertIsNone(self.zpd_value())
+
     def test_safety_level_records_a_grade_not_content(self) -> None:
         """★ 只记档位、不记内容：拦截了什么话一概不进画像。"""
         written = self.store.sync_observed_tags(self.student_id)

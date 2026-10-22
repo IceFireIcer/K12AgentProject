@@ -62,6 +62,7 @@ from app.store.learning import (  # noqa: E402
     LEARNER_STYLE_VALUES,
     LearningStore,
     PERSONALITY_VALUES,
+    ZPD_LEVEL_VALUES,
 )
 
 TOKEN = "test-token-profile-tags"
@@ -1011,6 +1012,29 @@ class TestLearnerStyleProjection(ProfileTagsCase):
             self.assertIsNotNone(match, f"TS 里找不到 {name}（真源被改名了？）")
             ts_values = tuple(re.findall(r"'([^']+)'", match.group(1)))
             self.assertEqual(ts_values, tuple(py_values), f"{name} 必须与 TS 真源逐字一致")
+
+    def test_zpd_values_are_readable_by_the_typescript_tier_resolver(self) -> None:
+        """★★ 跨语言：`zpd_level` 的**每个**生产值都必须被 TS 侧认得。
+
+        ★ 为什么必须有这一条：`sync_zpd_level` 写的是中文显示值，
+          而真正消费它的是 `desktop/src/main/agent/prompts/adaptation.ts` 的
+          `WORD_TIERS` 映射。两边各写一份、又没有任何东西钉住它们一致 ——
+          一旦后端改了一个词（比如把「偏难」写成「较难」），TS 侧认不出，
+          `resolveDifficultyTier()` 就**静默回落「正常」**，难度微调再次失效，
+          而且没有任何报错（这正是本键此前「接好了但没通电」的同一类故障）。
+        """
+        ts_path = ROOT.parent / "desktop" / "src" / "main" / "agent" / "prompts" / "adaptation.ts"
+        source = ts_path.read_text(encoding="utf-8")
+        match = re.search(r"const WORD_TIERS[^=]*=\s*\{([\s\S]*?)\n\}", source)
+        self.assertIsNotNone(match, "TS 里找不到 WORD_TIERS（难度档的中文词表被改名了？）")
+        known = set(re.findall(r"([^\s:,{}]+):\s*'(?:easier|normal|harder)'", match.group(1)))
+        for value in ZPD_LEVEL_VALUES:
+            self.assertIn(
+                value,
+                known,
+                f"后端会写 zpd_level={value!r}，但 TS 的 WORD_TIERS 认不出它 —— "
+                "那样难度微调会静默回落「正常」",
+            )
 
     def test_vocabulary_has_no_clinical_words(self) -> None:
         """★ 词表本身不得含临床词汇（红线移动那道闸的实质）。"""

@@ -1492,6 +1492,94 @@ const MUTATIONS = [
     expect: 'test_setting_real_name_syncs_nickname'
   },
   {
+    // ★★ 2026-10-22：`zpd_level` 的**唯一生产方**被拿掉 → 难度微调回到「永远正常」
+    //   （这正是本轮修的那个缺口：整套学段内微调接好了但没通电）。
+    name: '146 难度档：sync_observed_tags 不再投影 zpd_level',
+    file: '../server/app/store/learning.py',
+    find: '        tier = self.sync_zpd_level(student_id, now=now_s)\r\n        if tier is not None:\r\n            written["zpd_level"] = tier',
+    replace: '        pass',
+    runner: 'server',
+    serverTest: 'tests.test_observed_tags',
+    expect: 'test_zpd_level_is_projected_from_mastery'
+  },
+  {
+    // ★★ 中段不再写「正常」→ 曾经偏易的学生永远回不到中间档（档位单向锁死）。
+    name: '147 难度档：中段不写「正常」（档位回不去）',
+    file: '../server/app/store/learning.py',
+    find: '            tier = "正常"',
+    replace: '            return None',
+    runner: 'server',
+    serverTest: 'tests.test_observed_tags',
+    expect: 'test_zpd_level_is_projected_from_mastery'
+  },
+  {
+    // ★★ 小结的输入退回**落库前**的旧快照 → 本轮刚写入的标签进不了小结（滞后一周期）。
+    name: '148 画像小结：输入退回落库前的旧快照',
+    file: 'src/main/agent/profile-refresh/refresh.ts',
+    find: '        applied.tags.length > 0 ? applied.tags : mergeAppliedTags(knownFiltered, tags, applied.applied)',
+    replace: '        knownFiltered',
+    testFile: 'tests/profile-refresh.test.ts',
+    expect: '小结拿到的是'
+  },
+  {
+    // ★★ 回执没带投影时的**兜底合并**被拿掉 → 旧版后端下小结只剩旧画像，
+    //   本轮刚写进去的标签又一次丢掉（与 148 是两条不同的路，都要守）。
+    //   ⚠️ 锚点不能选 `tags: projected`：把它改成空数组会**落到兜底分支**，
+    //     而兜底本身是对的 —— 那样变异是绿的、但代码其实没坏（选错锚点，见 P-170 那类坑）。
+    name: '149 画像小结：兜底合并不再并入本轮写入的标签',
+    file: 'src/main/agent/profile-refresh/refresh.ts',
+    find: '    if (!appliedKeys.includes(item.key)) continue\n    merged.set(item.key, item.value)',
+    replace: '    continue',
+    testFile: 'tests/profile-refresh.test.ts',
+    expect: '回执没带投影时'
+  },
+  {
+    // ★★ 指纹复用被拿掉 → 画像没变也每次白打一次模型（这条守卫守的是「不白花钱」）。
+    name: '150 画像小结：指纹相同也重新调模型',
+    file: 'src/main/agent/profile-refresh/summary-line.ts',
+    find: '  if (cachedEntry !== null && cachedEntry.tagFingerprint === fingerprint) {',
+    replace: '  if (false) {',
+    testFile: 'tests/summary-line.test.ts',
+    expect: '指纹复用'
+  },
+  {
+    // ★★ 读缓存不再核对 studentId → 把别人的小结显示给这个学生（禁做 #9）。
+    name: '151 画像小结：读缓存不核对 studentId',
+    file: 'src/main/agent/profile-refresh/summary-line.ts',
+    find: '  const entry = (entries as Record<string, unknown>)[studentId]',
+    replace: '  const entry = Object.values(entries as Record<string, unknown>)[0]',
+    testFile: 'tests/summary-line.test.ts',
+    expect: '读缓存必须核对 studentId'
+  },
+  {
+    // ★★ 技术词过滤被拿掉 → 学生面出现「标签 / 系统」这类词（D-063 双视角）。
+    name: '152 画像小结：不再过滤技术词',
+    file: 'src/main/agent/profile-refresh/summary-line.ts',
+    find: '  for (const word of SUMMARY_LINE_TECH_WORDS) {',
+    replace: '  for (const word of [] as string[]) {',
+    testFile: 'tests/summary-line.test.ts',
+    expect: '技术词不上学生面'
+  },
+  {
+    // ★★ 能力评价词过滤被拿掉 → 给孩子贴「聪明」这类标签（禁做 #12 同一条防线）。
+    name: '153 画像小结：不再过滤禁词（能力评价 / 心理诊断）',
+    file: 'src/main/agent/profile-refresh/summary-line.ts',
+    find: '  for (const word of SUMMARY_LINE_FORBIDDEN_WORDS) {',
+    replace: '  for (const word of [] as string[]) {',
+    testFile: 'tests/summary-line.test.ts',
+    expect: '禁心理诊断'
+  },
+  {
+    // ★★ 后端词表闸被拿掉 → 自由文本（「很难」）也能写进 zpd_level，TS 侧认不出。
+    name: '154 难度档：写入侧不再校验封闭词表',
+    file: '../server/app/store/learning.py',
+    find: '        if key == "zpd_level" and text not in ZPD_LEVEL_VALUE_SET:',
+    replace: '        if False:',
+    runner: 'server',
+    serverTest: 'tests.test_observed_tags',
+    expect: 'test_zpd_level_rejects_out_of_vocabulary_values'
+  },
+    {
     // ★★ 存量自愈被拿掉 → 已经被写坏的数据永远修不回来（用户库里的现状）。
     name: '145 显示名：列表不再做存量自愈',
     file: '../server/app/routes/students.py',

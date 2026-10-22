@@ -315,6 +315,19 @@ export async function generateSummaryLine(
     return ''
   }
 
+  // ★★ 指纹的**唯一消费者**（2026-10-22 修的一处死代码）：
+  //   此前 `tagFingerprint` 只写进缓存、全仓没有一处读它做比较 ——
+  //   「画像变了就知道这条旧了」这个能力事实上是空的，而代价是每次画像刷新
+  //   都要白打一次模型（哪怕这一轮所有标签都被分档拒了、画像一个字没变）。
+  //   现在：指纹没变 = 画像没变 = 小结不必重写 → 直接复用缓存，一次模型调用都不发。
+  //   ⚠️ 只在**读得到缓存且指纹相同**时跳过；读不到（首次 / 文件坏了）照常生成。
+  const fingerprint = tagFingerprint(knownTags)
+  const cachedEntry = readSummaryLineCache(deps.userDataDir, studentId)
+  if (cachedEntry !== null && cachedEntry.tagFingerprint === fingerprint) {
+    log('[profile-summary] 画像没变（指纹相同），复用缓存的小结，不调模型')
+    return cachedEntry.text
+  }
+
   const payload = buildSummaryLinePayload({ knownTags })
   const fetchResponse = deps.fetchResponse ?? llmFetch
   for (let attempt = 1; attempt <= SUMMARY_LINE_MAX_ATTEMPTS; attempt += 1) {
@@ -324,7 +337,7 @@ export async function generateSummaryLine(
         studentId,
         text,
         generatedAt: Date.now(),
-        tagFingerprint: tagFingerprint(knownTags)
+        tagFingerprint: fingerprint
       })
       log('[profile-summary] 小结已更新（' + String(text.length) + ' 字）')
       return text

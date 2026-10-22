@@ -18,6 +18,9 @@
  */
 
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 import {
@@ -487,6 +490,8 @@ function fakeDeps(options: {
   modelReply?: string
   knownTags?: { key: string; value: string }[]
   applyResult?: { applied: string[]; rejected: { key: string; reason: string }[] }
+  /** 后端回执里的「应用后的最新投影」（缺省 = 已写入的那几条）。 */
+  projectedTags?: { key: string; value: string }[]
   failModel?: boolean
 }) {
   const seen = {
@@ -501,11 +506,19 @@ function fakeDeps(options: {
       readKnownTags: async () => options.knownTags ?? [],
       applyTags: async (_sid: string, tags: readonly { key: string; value: string; source: string }[]) => {
         seen.applied = tags.map((item) => ({ key: item.key, value: item.value, source: item.source }))
+        const appliedKeys = options.applyResult?.applied ?? tags.map((item) => item.key)
         return {
-          applied: options.applyResult?.applied ?? tags.map((item) => item.key),
+          applied: appliedKeys,
           rejected: options.applyResult?.rejected ?? [],
           parentConsent: true,
-          memorySwitch: true
+          memorySwitch: true,
+          // ★ 后端回执里的「应用后的最新投影」：默认按「已写入的那几条」造一份，
+          //   与真实后端（RefreshApplyOut.tags）同形。传 options.projectedTags 可覆盖。
+          tags:
+            options.projectedTags ??
+            tags
+              .filter((item) => appliedKeys.includes(item.key))
+              .map((item) => ({ key: item.key, value: item.value }))
         }
       },
       fetchResponse: async (_url: string, init: RequestInit) => {
@@ -640,3 +653,136 @@ test('runRefresh：按学生隔离 —— B 同学的触发不吃 A 同学的窗
   assert.equal(seen.calls, 0)
 })
 
+/* ------------------------------------------------------------------ *
+ * 三期：画像小结的输入必须是「落库之后」的画像（2026-10-22 修的缺陷）
+ * ------------------------------------------------------------------ */
+
+test('runRefresh：小结拿到的是**落库后**的投影（不是落库前的旧快照）', async () => {
+  const sid = freshStudent()
+  resetTurnClock(sid)
+  clearTranscriptWindow(sid)
+  for (let i = 1; i <= PROFILE_REFRESH_EVERY_TURNS; i += 1) {
+    const turn = noteTurn(sid, `第 ${i} 轮：我对太空很感兴趣`)
+    pushTurn(sid, `第 ${i} 轮：我对太空很感兴趣`, '好', turn)
+  }
+  // 落库**之前**的画像只有 subject（旧快照）
+  // 落库**之后**的投影多了一条 interest_topic（本轮刚写进去的）
+  const { deps } = fakeDeps({
+    modelReply: '{"tags":[{"key":"interest_topic","value":"太空","source":"observed","confidence":0.7}]}',
+    knownTags: [{ key: 'subject', value: '数学' }],
+    projectedTags: [
+      { key: 'subject', value: '数学' },
+      { key: 'interest_topic', value: '太空' }
+    ]
+  })
+
+  // 拦下小结的载荷：它必须包含本轮刚写入的 interest_topic
+  const bodies: string[] = []
+  const originalFetch = deps.fetchResponse
+  const withSummary = {
+    ...deps,
+    userDataDir: mkdtempSync(join(tmpdir(), 'k12-refresh-summary-')),
+    fetchResponse: async (url: string, init: RequestInit, span?: unknown) => {
+      const parsed = JSON.parse(String(init.body)) as { messages: { content: string }[] }
+      bodies.push(parsed.messages[1]?.content ?? '')
+      return (originalFetch as (u: string, i: RequestInit, s?: unknown) => Promise<Response>)(url, init, span)
+    }
+  }
+
+  try {
+    const result = await runRefresh(sid, withSummary)
+    assert.equal(result.ok, true)
+    // 两次模型调用：① 概括 ② 小结
+    const summaryBody = bodies.find((body) => body.includes('画像标签'))
+    assert.ok(summaryBody !== undefined, '画像落库后应当顺带生成一次小结（fire-and-forget 也会在 await 里跑完）')
+    assert.ok(
+      summaryBody.includes('interest_topic=太空'),
+      '★ 小结的输入必须是**落库之后**的画像：本轮刚写入的 interest_topic 必须在内（此前传的是旧快照，会缺这一条）'
+    )
+  } finally {
+    rmSync(withSummary.userDataDir, { recursive: true, force: true })
+  }
+})
+
+test('runRefresh：回执没带投影时，用「旧画像 + 本轮实际写入」合并兜底', async () => {
+  const sid = freshStudent()
+  resetTurnClock(sid)
+  clearTranscriptWindow(sid)
+  for (let i = 1; i <= PROFILE_REFRESH_EVERY_TURNS; i += 1) {
+    const turn = noteTurn(sid, `第 ${i} 轮内容`)
+    pushTurn(sid, `第 ${i} 轮内容`, '好', turn)
+  }
+  const { deps } = fakeDeps({
+    modelReply: '{"tags":[{"key":"interest_topic","value":"太空","source":"observed"}]}',
+    knownTags: [{ key: 'subject', value: '数学' }],
+    // ★ 旧版后端不回 tags → 空数组
+    projectedTags: [],
+    // 后端确认只写入了 interest_topic
+    applyResult: { applied: ['interest_topic'], rejected: [] }
+  })
+
+  const bodies: string[] = []
+  const originalFetch = deps.fetchResponse
+  const withSummary = {
+    ...deps,
+    userDataDir: mkdtempSync(join(tmpdir(), 'k12-refresh-merge-')),
+    fetchResponse: async (url: string, init: RequestInit, span?: unknown) => {
+      const parsed = JSON.parse(String(init.body)) as { messages: { content: string }[] }
+      bodies.push(parsed.messages[1]?.content ?? '')
+      return (originalFetch as (u: string, i: RequestInit, s?: unknown) => Promise<Response>)(url, init, span)
+    }
+  }
+
+  try {
+    await runRefresh(sid, withSummary)
+    const summaryBody = bodies.find((body) => body.includes('画像标签'))
+    assert.ok(summaryBody !== undefined, '应当生成小结')
+    assert.ok(summaryBody.includes('subject=数学'), '旧画像里的标签要保留')
+    assert.ok(summaryBody.includes('interest_topic=太空'), '本轮实际写入的标签要合并进来')
+  } finally {
+    rmSync(withSummary.userDataDir, { recursive: true, force: true })
+  }
+})
+
+test('runRefresh：被分档拒掉的条目**不进**小结（画像里没有的东西不能说）', async () => {
+  const sid = freshStudent()
+  resetTurnClock(sid)
+  clearTranscriptWindow(sid)
+  for (let i = 1; i <= PROFILE_REFRESH_EVERY_TURNS; i += 1) {
+    const turn = noteTurn(sid, `第 ${i} 轮内容`)
+    pushTurn(sid, `第 ${i} 轮内容`, '好', turn)
+  }
+  const { deps } = fakeDeps({
+    modelReply:
+      '{"tags":[{"key":"interest_topic","value":"太空","source":"observed"},{"key":"pace","value":"慢","source":"inferred"}]}',
+    knownTags: [],
+    projectedTags: [],
+    // pace 被分档拒（比如现有 declared 保护），只有 interest_topic 真写进去了
+    applyResult: { applied: ['interest_topic'], rejected: [{ key: 'pace', reason: 'declared-protected' }] }
+  })
+
+  const bodies: string[] = []
+  const originalFetch = deps.fetchResponse
+  const withSummary = {
+    ...deps,
+    userDataDir: mkdtempSync(join(tmpdir(), 'k12-refresh-reject-')),
+    fetchResponse: async (url: string, init: RequestInit, span?: unknown) => {
+      const parsed = JSON.parse(String(init.body)) as { messages: { content: string }[] }
+      bodies.push(parsed.messages[1]?.content ?? '')
+      return (originalFetch as (u: string, i: RequestInit, s?: unknown) => Promise<Response>)(url, init, span)
+    }
+  }
+
+  try {
+    await runRefresh(sid, withSummary)
+    const summaryBody = bodies.find((body) => body.includes('画像标签'))
+    assert.ok(summaryBody !== undefined, '应当生成小结')
+    assert.ok(summaryBody.includes('interest_topic=太空'), '真写进去的要进小结')
+    assert.ok(
+      !summaryBody.includes('pace=慢'),
+      '★ 被分档拒掉的条目绝不能进小结 —— 否则会说出画像里根本没有的偏好'
+    )
+  } finally {
+    rmSync(withSummary.userDataDir, { recursive: true, force: true })
+  }
+})
